@@ -1,0 +1,12 @@
+#!/bin/sh
+# prerm — stop + disable charterd before removal.
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        systemctl stop charterd.service || true
+        systemctl disable charterd.service || true
+        ;;
+esac
+
+exit 0

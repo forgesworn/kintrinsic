@@ -1,0 +1,58 @@
+{
+  "event": {
+    "id": "57edac979be2535bae6d1b1568de8aec3baf23111f72474586a4ac012b41f7fd",
+    "pubkey": "463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b",
+    "created_at": 1700000000,
+    "kind": 30063,
+    "tags": [
+      [
+        "d",
+        "charter-apk"
+      ],
+      [
+        "version",
+        "0.6.9"
+      ],
+      [
+        "version_code",
+        "40"
+      ],
+      [
+        "x",
+        "a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+      ],
+      [
+        "size",
+        "27693181"
+      ],
+      [
+        "cert",
+        "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42"
+      ],
+      [
+        "url",
+        "https://blossom.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+      ],
+      [
+        "url",
+        "https://mirror.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+      ]
+    ],
+    "content": "test release notes",
+    "sig": "4bc214731f53797e9e50f8ca32ccbac5d7722064ae2db5e2f13d1fcc6e43d4846f031c25335ceb320ac41e542d222e9fde782bdb83194209d5f5cdaa2c1772d7"
+  },
+  "release_pubkey": "463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b",
+  "expected": {
+    "channel": "charter-apk",
+    "versionName": "0.6.9",
+    "versionCode": 40,
+    "sha256": "a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c",
+    "sizeBytes": 27693181,
+    "certSha256": "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42",
+    "urls": [
+      "https://blossom.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c",
+      "https://mirror.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+    ]
+  },
+  "canonical": "[0,\"463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b\",1700000000,30063,[[\"d\",\"charter-apk\"],[\"version\",\"0.6.9\"],[\"version_code\",\"40\"],[\"x\",\"a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"],[\"size\",\"27693181\"],[\"cert\",\"d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42\"],[\"url\",\"https://blossom.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"],[\"url\",\"https://mirror.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"]],\"test release notes\"]"
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic Screen Time
+Comment=Set screen-time limits for this computer
+Exec=charter-settings-launch
+Icon=preferences-desktop-screensaver
+Terminal=false
+Categories=System;Settings;X-GNOME-Settings-Panel;
+Keywords=parental;screen time;limits;bedtime;charter;

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launch the Charter guardian-pairing dialog as root (it writes the root-owned
+# pairing store), passing the parent's X session through pkexec so the dialog can
+# draw. pkexec prompts for the parent's (admin) password; 49-charter.rules denies
+# the managed child.
+exec pkexec env \
+    DISPLAY="${DISPLAY:-:0}" \
+    XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}" \
+    /usr/sbin/charter-pair

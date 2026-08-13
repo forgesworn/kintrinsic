@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/charter-ipc",
+    "crates/charterd",
+    "crates/charter-cli",
+    "crates/charter-lock",
+    "crates/charter-tray",
+    "crates/xtask",
+]
+# The Tauri `src-tauri` crate needs WebKitGTK/GTK/libsoup (absent on the
+# headless gate host) so it is EXCLUDED from the workspace entirely — built
+# only on a provisioned runner. The web `ui/` is a Node/Vite project, not a
+# Cargo crate. Both are excluded so `cargo build/test --workspace` never tries
+# to compile them.
+default-members = [
+    "crates/charter-ipc",
+    "crates/charterd",
+    "crates/charter-cli",
+    "crates/charter-tray",
+    "crates/xtask",
+]
+exclude = ["apps/charter-gui/src-tauri", "apps/charter-gui/ui"]
+
+[workspace.package]
+edition = "2021"
+version = "0.7.8"
+license = "MIT"
+rust-version = "1.94"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+secp256k1 = { version = "0.30", default-features = false, features = ["std", "alloc"] }
+sha2 = "0.10"
+chacha20 = "0.9"
+hkdf = "0.12"
+hmac = "0.12"
+base64 = "0.22"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
+chrono-tz = { version = "0.10", default-features = false }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+# internal crates (shared decide/verify/crypto core hoisted to ../core — see
+# graphene/port-spec.md §1; the Linux lock stays byte-stable because path-dep
+# moves are invisible to it)
+charter-primitives = { path = "../core/crates/charter-primitives" }
+charter-crypto = { path = "../core/crates/charter-crypto" }
+charter-ipc = { path = "crates/charter-ipc", default-features = false }
+charter-sys = { path = "../core/crates/charter-sys", default-features = false }
+charter-testkit = { path = "../core/crates/charter-testkit" }
+charter-proto = { path = "../core/crates/charter-proto" }
+charter-verify = { path = "../core/crates/charter-verify", default-features = false }
+charter-transport = { path = "../core/crates/charter-transport", default-features = false }
+charter-schedule = { path = "../core/crates/charter-schedule" }
+charter-content = { path = "../core/crates/charter-content" }
+charter-spine = { path = "../core/crates/charter-spine", default-features = false }
+charter-webpolicy = { path = "../core/crates/charter-webpolicy" }
+charterd = { path = "crates/charterd" }

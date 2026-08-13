@@ -1,0 +1,27 @@
+[package]
+name = "charter-console"
+version = "0.5.0"
+edition = "2021"
+license = "MIT"
+description = "Kintrinsic — the on-device control panel (one app for setup, screen time, phone pairing, and recovery)"
+publish = false
+
+# EXCLUDED from the linux/ workspace (see linux/Cargo.toml `exclude`): it needs
+# WebKitGTK/GTK dev libs absent on the headless CI gate host, so `cargo
+# build/test --workspace` must never try to compile it. Built only in the deb
+# step (xtask), which has the webkit toolchain available.
+
+[[bin]]
+name = "charter-console"
+path = "src/main.rs"
+
+[dependencies]
+wry = "0.55"
+tao = "0.35"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true

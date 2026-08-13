@@ -1,0 +1,8 @@
+#!/bin/sh
+# Launch the Charter screen-time dialog as root (it writes /etc/charter), passing
+# the parent's X session through pkexec so the dialog can draw on their display.
+# pkexec prompts for the parent's (admin) password.
+exec pkexec env \
+    DISPLAY="${DISPLAY:-:0}" \
+    XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}" \
+    /usr/sbin/charter-settings

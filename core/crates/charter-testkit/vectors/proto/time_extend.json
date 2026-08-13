@@ -1,0 +1,9 @@
+{
+  "note": "Frozen time.extend wire shape: u16 minutes, MAX_EXTEND_MINUTES=1440, grant echoes limitHit.",
+  "request": { "minutesRequested": 30, "reason": "homework finished", "limitHit": "budget" },
+  "grant_full": { "minutesGranted": 30, "limitHit": "budget" },
+  "grant_less": { "minutesGranted": 15, "limitHit": "schedule" },
+  "grant_zero_noop": { "minutesGranted": 0, "limitHit": "budget" },
+  "invalid_request_zero": { "minutesRequested": 0, "limitHit": "budget" },
+  "invalid_grant_over_max": { "minutesGranted": 2000, "limitHit": "budget" }
+}

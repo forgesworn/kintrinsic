@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# charter-setup — provision account lockdown for the managed child.
+#
+# Run as root. With NO argument on a desktop it shows a graphical wizard (pick
+# the child's account); `charter-setup <username>` is the headless form. Both
+# are idempotent (safe to re-run). Guardian pairing is optional — device-only
+# screen-time limits work without it (set them in the Kintrinsic app (The rules)).
+set -euo pipefail
+
+GUI=0
+MANAGED_USER="${1:-}"
+
+# Show a graphical error in GUI mode, always log to stderr.
+fail() {
+    [ "$GUI" = 1 ] && zenity --error --title="Kintrinsic Setup" --text="$1" 2>/dev/null || true
+    echo "charter-setup: $1" >&2
+    exit 1
+}
+
+# No user named + a desktop available -> graphical wizard.
+if [ -z "$MANAGED_USER" ] && command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+    GUI=1
+    trap 'fail "setup did not finish — see the system log (journalctl -u charterd)."' ERR
+    HUMANS="$(getent passwd | awk -F: '$3>=1000 && $3<65000 && $7 !~ /(nologin|false|sync)$/ {print $1}')"
+    [ -z "$HUMANS" ] && fail "No ordinary user accounts were found to manage."
+    MANAGED_USER="$(printf '%s\n' "$HUMANS" | zenity --list \
+        --title="Kintrinsic Setup" --text="Which account does your child use?" \
+        --column="Account" 2>/dev/null)" || exit 0
+    [ -z "$MANAGED_USER" ] && exit 0
+    zenity --question --title="Kintrinsic Setup" --ok-label="Set up" --cancel-label="Cancel" \
+        --text="Set up Kintrinsic for \"$MANAGED_USER\"?\n\nThis removes that account from the admin group and starts enforcing screen-time limits. You'll set the actual limits next, in the Kintrinsic app (\"The rules\")." \
+        2>/dev/null || exit 0
+fi
+
+if [ -z "$MANAGED_USER" ]; then
+    echo "usage: charter-setup <managed-username>" >&2
+    exit 2
+fi
+id "$MANAGED_USER" >/dev/null 2>&1 || fail "user '$MANAGED_USER' does not exist"
+
+# Brick guard: never lock down the machine's ONLY administrator. charter-setup
+# strips the chosen account out of the admin groups, so doing that to the sole
+# admin would leave nobody able to run Recovery or undo Kintrinsic (Recovery itself
+# requires an admin). The graphical picker happily lists the parent's own
+# account, so catch the mistake here — for both the GUI and headless paths.
+target_is_admin=0
+if id -nG "$MANAGED_USER" 2>/dev/null | tr ' ' '\n' | grep -qxE 'sudo|wheel|admin'; then
+    target_is_admin=1
+fi
+other_admins="$(getent group sudo wheel admin 2>/dev/null \
+    | awk -F: '{print $4}' | tr ',' '\n' | sort -u \
+    | grep -vx "$MANAGED_USER" | grep -cv '^$' || true)"
+if [ "$target_is_admin" = 1 ] && [ "${other_admins:-0}" -eq 0 ]; then
+    fail "\"$MANAGED_USER\" is this computer's only administrator. Create a separate admin account for yourself first, then set up Kintrinsic for the child — otherwise stripping their admin rights would lock everyone out (Recovery needs an admin account)."
+fi
+
+echo "==> account lockdown for '$MANAGED_USER'"
+# Dedicated group that the polkit rules key off.
+getent group charter-managed >/dev/null || groupadd --system charter-managed
+usermod -aG charter-managed "$MANAGED_USER"
+# Out of the admin groups — the broker becomes the only privileged path.
+for g in sudo adm lpadmin; do
+    gpasswd -d "$MANAGED_USER" "$g" 2>/dev/null || true
+done
+
+echo "==> charter state dirs"
+install -d -m 0755 /var/lib/charter
+install -d -m 0700 /var/lib/charter/approved
+
+echo "==> host config (/etc/charter/charterd.env)"
+# The daemon resolves the active display + X authority LIVE (kernel active VT
+# -> the Xorg serving it) — do NOT pin CHARTER_DISPLAY/CHARTER_XAUTHORITY here:
+# a hardcoded :0 targets the wrong X under user switching (multiple X servers),
+# drawing the lock into another session's void. They remain available as
+# manual overrides for exotic hosts. Re-derived every run (idempotent).
+install -d -m 0755 /etc/charter
+MANAGED_UID="$(id -u "$MANAGED_USER")"
+cat > /etc/charter/charterd.env <<EOF
+CHARTER_MANAGED_UID=${MANAGED_UID}
+EOF
+chmod 0644 /etc/charter/charterd.env
+# Optional staged bring-up mode (observe / freeze-only); absent => full enforce.
+if [ -n "${CHARTER_ENFORCE:-}" ]; then
+    echo "CHARTER_ENFORCE=${CHARTER_ENFORCE}" >> /etc/charter/charterd.env
+    echo "charter-setup: enforce mode = ${CHARTER_ENFORCE} (written to charterd.env)"
+fi
+
+echo "==> default screen-time limits for '$MANAGED_USER' (per-child)"
+# Seed sensible defaults so the child is enforced immediately; the parent tunes
+# them in the Kintrinsic app (The rules). Each child has their own limits.d/<user>.json,
+# so multiple children get independent hours/curfews. Don't clobber an existing
+# file (a re-run keeps the parent's chosen limits).
+install -d -m 0755 /etc/charter/limits.d
+LIMITS_FILE="/etc/charter/limits.d/${MANAGED_USER}.json"
+TZ_NAME="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
+[ -z "$TZ_NAME" ] && TZ_NAME="UTC"
+if [ ! -f "$LIMITS_FILE" ]; then
+    cat > "$LIMITS_FILE" <<EOF
+{
+  "tz": "${TZ_NAME}",
+  "wake": "07:00",
+  "bedtime": "20:00",
+  "dailyMinutes": 120
+}
+EOF
+    chmod 0644 "$LIMITS_FILE"
+fi
+
+echo "==> enabling units"
+systemctl daemon-reload
+systemctl enable --now charterd.service
+# noexec tmpfs mounts (the fstab mounts for $HOME/media are applied per-host —
+# see /usr/share/charter/mounts/noexec.fstab.example).
+if [ "${CHARTER_SKIP_NOEXEC:-0}" = 1 ]; then
+    echo "charter-setup: CHARTER_SKIP_NOEXEC=1 — leaving /tmp + /dev/shm as-is (no noexec)."
+else
+    systemctl enable --now tmp.mount dev-shm.mount || \
+        echo "charter-setup: WARN could not enable noexec tmpfs mounts (tune on host)"
+fi
+
+if [ "$GUI" = 1 ]; then
+    zenity --info --title="Kintrinsic Setup" \
+        --text="Kintrinsic is set up for \"$MANAGED_USER\".\n\nNow open the Kintrinsic app (\"The rules\") to set the daily limits." \
+        2>/dev/null || true
+else
+    echo "==> guardian pairing is optional (device-only limits work without it)."
+    echo "==> done. Set limits in the Kintrinsic app (The rules), or run 'charter pair' to add a phone guardian."
+fi

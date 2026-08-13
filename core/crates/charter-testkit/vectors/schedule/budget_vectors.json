@@ -1,0 +1,36 @@
+{
+  "tz": "Europe/London",
+  "now_unix": 1782734400,
+  "vectors": [
+    {
+      "name": "daily_half_used",
+      "budget": { "v": 1, "tz": "Europe/London", "dailyMinutes": 120, "weekStart": "mon", "issuedAt": 1 },
+      "usedTodaySecs": 3600,
+      "expect": 3600
+    },
+    {
+      "name": "daily_at_limit_locks",
+      "budget": { "v": 1, "tz": "Europe/London", "dailyMinutes": 120, "weekStart": "mon", "issuedAt": 1 },
+      "usedTodaySecs": 7200,
+      "expect": 0
+    },
+    {
+      "name": "paused_is_zero",
+      "budget": { "v": 1, "tz": "Europe/London", "dailyMinutes": 120, "paused": true, "issuedAt": 1 },
+      "usedTodaySecs": 0,
+      "expect": 0
+    },
+    {
+      "name": "revoked_unbounded",
+      "budget": { "v": 1, "tz": "Europe/London", "dailyMinutes": 120, "revoked": true, "issuedAt": 1 },
+      "usedTodaySecs": 7200,
+      "expect": "unbounded"
+    },
+    {
+      "name": "no_caps_unbounded",
+      "budget": { "v": 1, "tz": "Europe/London", "issuedAt": 1 },
+      "usedTodaySecs": 99999,
+      "expect": "unbounded"
+    }
+  ]
+}

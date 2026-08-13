@@ -1,0 +1,56 @@
+[Unit]
+Description=Charter broker spine (org.forgesworn.charterd)
+Documentation=https://kintrinsic.app
+After=network-online.target dbus.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/charterd
+Restart=on-failure
+RestartSec=5
+# Lock-out safety: every stop (incl. crash, `systemctl stop`, prerm, the Recovery
+# "turn off" action) thaws every managed child's app.slice and re-enables VT
+# switching, so a stopped/removed Charter never leaves the box frozen.
+ExecStopPost=/usr/sbin/charter-recovery --thaw-all
+# Host config (managed uid + the lock screen's display/auth). Written by
+# `charter-setup`; optional (the `-` tolerates its absence).
+EnvironmentFile=-/etc/charter/charterd.env
+# charterd is the sole privileged enactor (cgroup freeze, polkit, fapolicyd,
+# system flatpak). It runs as root but drops the obvious ambient privileges it
+# does not need; tighten further during the VM hardening pass.
+User=root
+NoNewPrivileges=false
+ProtectSystem=full
+# ProtectSystem=full makes /etc read-only. That was harmless while only the
+# pkexec'd helpers wrote there, but scan-to-pair has the DAEMON bind the
+# guardian's subject into /etc/charter/limits.d — which failed with
+# "Read-only file system (os error 30)" on every offer, refusing a pairing
+# that was otherwise completely valid. Carve out our own directory ONLY; the
+# rest of /etc stays read-only.
+ReadWritePaths=/etc/charter
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=false
+# Enforcement is DELIBERATELY fail-open on stop (see ExecStopPost above), which
+# means the OOM killer choosing charterd hands the ward a thawed window per
+# crash cycle. Unreliable as an attack — the kernel picks the memory hog, which
+# is the child's browser long before it is a small daemon — but it is one line
+# to make charterd close to the last thing on the box to be killed, and the
+# alternative is a bypass that arrives by luck rather than by anyone deciding
+# it should (review 2026-08-07).
+OOMScoreAdjust=-900
+# Cheap sandboxing that costs this daemon nothing it uses. charterd freezes
+# cgroups, drives polkit/fapolicyd and installs system flatpaks — it does not
+# load kernel modules, and it has no business creating namespaces (which is
+# also the primitive behind the unprivileged-userns bind-mount exe-ownership
+# forgery, 0.7.5).
+PrivateTmp=true
+ProtectKernelModules=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+StateDirectory=charter
+RuntimeDirectory=charter
+
+[Install]
+WantedBy=multi-user.target

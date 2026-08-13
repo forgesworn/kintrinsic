@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/charter-primitives",
+    "crates/charter-crypto",
+    "crates/charter-sys",
+    "crates/charter-testkit",
+    "crates/charter-proto",
+    "crates/charter-verify",
+    "crates/charter-transport",
+    "crates/charter-schedule",
+    "crates/charter-content",
+    "crates/charter-webpolicy",
+    "crates/charter-spine",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+rust-version = "1.94"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+secp256k1 = { version = "0.30", default-features = false, features = ["std", "alloc"] }
+sha2 = "0.10"
+chacha20 = "0.9"
+hkdf = "0.12"
+hmac = "0.12"
+base64 = "0.22"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
+chrono-tz = { version = "0.10", default-features = false }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+# internal crates
+charter-primitives = { path = "crates/charter-primitives" }
+charter-crypto = { path = "crates/charter-crypto" }
+charter-sys = { path = "crates/charter-sys", default-features = false }
+charter-testkit = { path = "crates/charter-testkit" }
+charter-proto = { path = "crates/charter-proto" }
+charter-verify = { path = "crates/charter-verify", default-features = false }
+charter-transport = { path = "crates/charter-transport", default-features = false }
+charter-schedule = { path = "crates/charter-schedule" }
+charter-content = { path = "crates/charter-content" }
+charter-webpolicy = { path = "crates/charter-webpolicy" }
+charter-spine = { path = "crates/charter-spine", default-features = false }

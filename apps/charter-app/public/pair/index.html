@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Kintrinsic — pair a phone</title>
+<style>
+  body{margin:0;background:#0B1021;color:#B7C0E0;font-family:system-ui,sans-serif;
+       display:grid;place-items:center;min-height:100vh;text-align:center;padding:24px}
+  .card{max-width:26rem}
+  h1{color:#fff;font-size:1.4rem}
+  a{color:#7C89B8}
+  .check{display:none;margin:22px 0 0;padding:16px;border:1px solid #2C3A6E;border-radius:12px;
+         background:#121935;text-align:left}
+  .check h2{color:#fff;font-size:1rem;margin:0 0 8px}
+  .sas{color:#fff;font-size:2rem;font-weight:700;letter-spacing:.12em;
+       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;text-align:center;margin:10px 0}
+  .npub{display:block;color:#8E99C4;font-size:.72rem;word-break:break-all;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:10px}
+  .note{font-size:.85rem;margin:8px 0 0}
+  .go{display:none;margin:18px auto 0;padding:14px 22px;background:#2C3A6E;color:#fff;
+      border-radius:10px;text-decoration:none;font-weight:600}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Pair this phone with its guardian</h1>
+    <p id="msg">Scan the QR code with the <b>child's phone camera</b> — the
+       Kintrinsic app on that phone opens and asks to confirm the pairing.</p>
+
+    <!-- Shown only once we have a bunker:// fragment to describe. This says
+         WHOSE identity the phone is about to pin — the thing the page never
+         used to say (S6, review 2026-08-07). -->
+    <div class="check" id="check">
+      <h2>Check this with the grown-up first</h2>
+      <p class="note">Their Kintrinsic screen should be showing this same code
+         right now. If it isn't — or nobody is standing next to you — stop, and
+         don't tap the button.</p>
+      <div class="sas" id="sas">· · ·</div>
+      <p class="note">Guardian ID <code class="npub" id="npub"></code></p>
+    </div>
+
+    <a id="go" class="go" href="#">Open the Kintrinsic app</a>
+    <p><a href="/#/family">Back to Kintrinsic</a></p>
+  </div>
+  <script>
+    // Normally the Kintrinsic app intercepts this link before any page loads
+    // (verified App Link). If we ARE rendered — unverified link, or a scan
+    // that landed in the browser — bridge into the app via its bunker://
+    // scheme, carried in our #fragment. A user tap is the reliable way to
+    // launch a custom scheme from a browser.
+    //
+    // The fragment is ATTACKER-CONTROLLED. Anyone can send a ward this link on
+    // this real domain with their own guardian key in it, and the ward's phone
+    // would pin them. The prefix check below stops `javascript:` — it was
+    // never anything to do with pairing trust. What defends pairing trust is
+    // showing whose key this is, and asking for it to be compared out loud
+    // against the grown-up's own screen.
+    (function () {
+      var frag = location.hash.replace(/^#/, "");
+      if (frag.indexOf("bunker://") !== 0) return;
+
+      var go = document.getElementById("go");
+      go.href = frag;
+      go.style.display = "inline-block";
+      document.getElementById("msg").innerHTML =
+        "You're on the child's phone? Check the code below with the grown-up, " +
+        "then tap the button and the Kintrinsic app will open.";
+
+      // bunker://<64-hex pubkey>?relay=…&kind=charter&token=…
+      var pk = (frag.slice("bunker://".length).split("?")[0] || "").toLowerCase();
+      var token = (/[?&]token=([^&]*)/.exec(frag) || [])[1] || "";
+      if (!/^[0-9a-f]{64}$/.test(pk)) return;
+
+      document.getElementById("check").style.display = "block";
+      document.getElementById("npub").textContent = npubEncode(pk);
+      sasFrom(pk, token).then(function (code) {
+        document.getElementById("sas").textContent = code;
+      });
+
+      /*
+       * MUST STAY IDENTICAL to `src/domain/pairingSas.ts`. Two screens showing
+       * different codes for the same link is worse than showing none: it
+       * teaches a family that the check is broken and to ignore it. This file
+       * is static HTML with no bundler, so it cannot import the module — but
+       * `src/domain/pairingSas.test.ts` reads this function straight out of
+       * this file and runs it against the same vectors, so a one-sided edit
+       * fails the test suite instead of shipping.
+       */
+      function sasFrom(pubkeyHex, token) {
+        var input = "charter-pair-sas:v1:" + pubkeyHex.toLowerCase() + ":" + token;
+        return crypto.subtle
+          .digest("SHA-256", new TextEncoder().encode(input))
+          .then(function (buf) {
+            var d = new Uint8Array(buf);
+            var n = ((d[0] << 16) | (d[1] << 8) | d[2]) % 1000000;
+            var s = String(n);
+            while (s.length < 6) s = "0" + s;
+            return s.slice(0, 3) + " " + s.slice(3);
+          });
+      }
+
+      /* Minimal bech32 (BIP-173) for NIP-19 `npub…` — the same string
+       * the Kintrinsic app shows the parent, so the two can be compared character for
+       * character when the short code isn't enough. */
+      function npubEncode(hex) {
+        var CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        var bytes = [];
+        for (var i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+        // 8-bit → 5-bit regrouping.
+        var acc = 0, bits = 0, five = [];
+        for (var j = 0; j < bytes.length; j++) {
+          acc = (acc << 8) | bytes[j];
+          bits += 8;
+          while (bits >= 5) { bits -= 5; five.push((acc >> bits) & 31); }
+        }
+        if (bits > 0) five.push((acc << (5 - bits)) & 31);
+        var hrp = "npub";
+        var chk = createChecksum(hrp, five);
+        var out = hrp + "1";
+        var all = five.concat(chk);
+        for (var k = 0; k < all.length; k++) out += CHARSET.charAt(all[k]);
+        return out;
+
+        function polymod(values) {
+          var GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+          var c = 1;
+          for (var v = 0; v < values.length; v++) {
+            var top = c >>> 25;
+            c = ((c & 0x1ffffff) << 5) ^ values[v];
+            for (var b = 0; b < 5; b++) if ((top >>> b) & 1) c ^= GEN[b];
+          }
+          return c >>> 0;
+        }
+        function hrpExpand(s) {
+          var a = [], b = [];
+          for (var i2 = 0; i2 < s.length; i2++) {
+            a.push(s.charCodeAt(i2) >>> 5);
+            b.push(s.charCodeAt(i2) & 31);
+          }
+          return a.concat([0], b);
+        }
+        function createChecksum(h, data) {
+          var values = hrpExpand(h).concat(data).concat([0, 0, 0, 0, 0, 0]);
+          var mod = polymod(values) ^ 1;
+          var res = [];
+          for (var p = 0; p < 6; p++) res.push((mod >>> (5 * (5 - p))) & 31);
+          return res;
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

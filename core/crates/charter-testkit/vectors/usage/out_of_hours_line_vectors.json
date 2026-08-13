@@ -1,0 +1,17 @@
+{
+  "note": "Frozen cross-language vectors for outOfHoursLine (spec 2026-08-03, review fix I2 2026-08-04, wording revised in a later I2 fix same day). The whole point of this string is that the guardian's PWA and the ward's own device say IDENTICAL words about the same fact — there is no guardian-only variant of the FORMATTER (the two sides do feed it different, per-device numbers — see each formatter's own doc). Two independent implementations exist because TypeScript and Kotlin can't share code: apps/charter-app/src/insights/usageHistory.ts (outOfHoursLine, TS) and android/app/src/main/kotlin/org/forgesworn/charter/ui/GroupMirror.kt (outOfHoursLine, Kotlin). Both consume THIS file so a one-sided edit to either formatter shows up as a failing test, not a silently divergent sentence. Consumers: apps/charter-app/src/insights/usageHistory.test.ts, android/app/src/test/kotlin/org/forgesworn/charter/ui/GroupMirrorTest.kt. `expected: null` means the function returns null/None (nothing to say). 'so far this week' (not plain 'this week'): this line resets on a CALENDAR week while the adjacent weekly-total line is a ROLLING 7 days — without its own scope word the two would print the same phrase for two different windows, and a Monday reset would read as 'the night use stopped' rather than 'the counter rolled over'.",
+  "vectors": [
+    { "name": "nothing-to-say-both-zero", "nights": 0, "secs": 0, "expected": null },
+    { "name": "nothing-to-say-zero-nights", "nights": 0, "secs": 720, "expected": null },
+    { "name": "nothing-to-say-zero-seconds", "nights": 2, "secs": 0, "expected": null },
+    { "name": "single-night", "nights": 1, "secs": 720, "expected": "1 night so far this week · 12m" },
+    { "name": "plural-nights", "nights": 3, "secs": 2400, "expected": "3 nights so far this week · 40m" },
+    { "name": "multi-hour", "nights": 5, "secs": 8100, "expected": "5 nights so far this week · 2h 15m" },
+    { "name": "fifty-nine-minute-boundary", "nights": 2, "secs": 3540, "expected": "2 nights so far this week · 59m" },
+    { "name": "fifty-nine-thirty-rounds-up-to-a-whole-hour", "nights": 1, "secs": 3570, "expected": "1 night so far this week · 1h" },
+    { "name": "thirty-second-rounding-boundary-rounds-up", "nights": 1, "secs": 750, "expected": "1 night so far this week · 13m" },
+    { "name": "just-under-the-thirty-second-boundary-rounds-down", "nights": 1, "secs": 749, "expected": "1 night so far this week · 12m" },
+    { "name": "whole-hour-zero-remainder", "nights": 4, "secs": 7200, "expected": "4 nights so far this week · 2h" },
+    { "name": "large-multi-hour-value", "nights": 6, "secs": 30600, "expected": "6 nights so far this week · 8h 30m" }
+  ]
+}

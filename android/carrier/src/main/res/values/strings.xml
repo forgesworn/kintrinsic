@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Kintrinsic</string>
+    <string name="notif_channel_approvals">Ward requests</string>
+    <string name="notif_channel_service">Connection status</string>
+</resources>

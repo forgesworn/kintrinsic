@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Set up Kintrinsic — step by step</title>
+  <meta name="description" content="Set up Kintrinsic on your child's Linux computer in one evening, then connect your phone. A plain, step-by-step guide — no jargon, no account.">
+  <link rel="canonical" href="https://kintrinsic.app/setup.html">
+  <link rel="icon" type="image/svg+xml" href="/seal.svg">
+  <link rel="apple-touch-icon" href="/seal.svg">
+  <link rel="stylesheet" href="/styles.css">
+  <meta name="theme-color" content="#f9f8f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17140f" media="(prefers-color-scheme: dark)">
+  <meta property="og:title" content="Set up Kintrinsic — step by step">
+  <meta property="og:description" content="The plain version: your child's computer set up in one evening, then your phone connected whenever you're ready.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://kintrinsic.app/setup.html">
+  <meta property="og:image" content="https://kintrinsic.app/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="Kintrinsic">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <nav class="nav" aria-label="Main navigation">
+    <div class="container nav__inner">
+      <a href="/" class="nav__logo" aria-label="Kintrinsic home"><img src="/seal.svg" alt="" width="30" height="30"> <span class="nav__word">Kintrinsic</span></a>
+      <ul class="nav__links">
+        <li class="hide-m"><a href="/#does">What it does</a></li>
+        <li class="hide-m"><a href="/download.html">Download</a></li>
+        <li class="hide-m"><a href="/setup.html" aria-current="page">Setup</a></li>
+        <li class="hide-m"><a href="/roadmap.html">Roadmap</a></li>
+        <li class="hide-m"><a href="/faq.html">FAQ</a></li>
+        <li><a class="btn btn-wax nav__cta" href="/download.html">Get Kintrinsic</a></li>
+        <li>
+          <details class="nav__menu">
+            <summary>Menu</summary>
+            <ul class="nav__drawer">
+              <li><a href="/#does">What it does</a></li>
+              <li><a href="/#see">See it</a></li>
+              <li><a href="/download.html">Download</a></li>
+              <li><a href="/setup.html" aria-current="page">Setup</a></li>
+              <li><a href="/roadmap.html">Roadmap</a></li>
+              <li><a href="/faq.html">FAQ</a></li>
+            </ul>
+          </details>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <main id="main">
+
+  <header class="page-head">
+    <div class="container">
+      <p class="t-eyebrow">Setup guide</p>
+      <h1 class="t-display">Set up in one evening.</h1>
+      <p class="t-sub lede">By the end of this page, your child's computer will lock itself outside the
+        hours you chose, and give them a warning before their daily time runs out. That's a complete
+        setup. The phone is optional and can wait.</p>
+    </div>
+  </header>
+
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <h2 id="contents">What's on this page</h2>
+        <ol>
+          <li><a href="#before">Before you start</a> — the two accounts, and why</li>
+          <li><a href="#install">Install Kintrinsic</a></li>
+          <li><a href="#choose">Choose your child's account</a></li>
+          <li><a href="#limits">Set the limits</a> — you're done at this point</li>
+          <li><a href="#phone">Connect your phone</a> — optional, any time</li>
+          <li><a href="#wrong">If something goes wrong</a></li>
+        </ol>
+        <p>Managing a child's <strong>phone</strong> rather than a computer? That's a different and
+          longer job — it has <a href="/setup-phone.html">its own guide</a>.</p>
+
+        <h2 id="before">Before you start</h2>
+        <p>Kintrinsic keeps two roles apart, the same way your computer already does:</p>
+        <ul>
+          <li><strong>A standard account for your child</strong> — their everyday login, without admin rights.</li>
+          <li><strong>A separate admin account for you</strong> — where you install and manage Kintrinsic.</li>
+        </ul>
+        <p>This is the one part worth getting right. If your child can enter the admin password, Kintrinsic
+          becomes a suggestion rather than an agreement — they could simply turn it off. Most family
+          computers are already set up this way. If your child currently uses the admin account, make
+          them a standard one first (System Settings → Users); it takes a minute and it's good practice
+          regardless.</p>
+
+        <div class="callout">
+          <b>You'll need:</b> a Linux Mint 22.x (or other Ubuntu-based) computer, your admin password, and about
+          five minutes. No account to create, nothing to sign up for.
+        </div>
+
+        <h2 id="linux">On the computer</h2>
+
+        <h3 id="install">1 · Install Kintrinsic</h3>
+        <p>Download the installer and double-click it, or run it in a terminal:</p>
+        <p><code>sudo apt install ./the-downloaded-file.deb</code></p>
+        <p>Installing changes <em>nothing</em> yet — no limits apply until you set them. One package brings the
+          warden (the part that keeps the charter), the lock screen, and the <strong>Kintrinsic</strong> app where you
+          set up, adjust limits, connect a phone and recover access — all in one place.</p>
+        <p><a href="/download.html">Get the installer →</a></p>
+        <p style="color: var(--ink-3); font-size: 0.95rem;"><em>If that didn't work:</em> a “package is of bad
+          quality” message usually means the download was interrupted — fetch it again. If <code>apt</code>
+          reports unmet dependencies, run <code>sudo apt --fix-broken install</code> and try once more.</p>
+
+        <h3 id="choose">2 · Choose your child's account</h3>
+        <p>Open <strong>Kintrinsic</strong> from your applications menu — everything lives in this one app. On its
+          <strong>Home</strong> screen, choose your child's account and press <strong>Set up Kintrinsic</strong>. Gentle
+          default limits apply immediately — 7am to 8pm, two hours a day — so they're protected from the first
+          minute. You can loosen or tighten them next.</p>
+        <p style="color: var(--ink-3); font-size: 0.95rem;"><em>If their account isn't listed:</em> it's probably an
+          administrator account, which Kintrinsic won't govern. Demote it in System Settings → Users first.</p>
+
+        <h3 id="limits">3 · Set the limits</h3>
+        <p>In the same app, open <strong>The rules</strong> and set:</p>
+        <ul>
+          <li><strong>Allowed hours</strong> — the times of day the computer can be used. Set the whole week at
+            once, then split out a day only if it really is different.</li>
+          <li><strong>Daily time</strong> — a total per day, with 10-minute and 1-minute warnings before it's up.</li>
+          <li><strong>Websites, apps &amp; learning</strong> — optional: keep the web age-appropriate, block or
+            time-limit a game, and mark learning sites as free so homework never costs playtime.</li>
+        </ul>
+        <p><strong>That is a complete, working setup.</strong> No phone required — it enforces even with the
+          internet unplugged. Everything below is optional.</p>
+
+        <h2 id="phone">Connect your phone</h2>
+        <p>This is optional, and you can do it any time. It's what lets you change limits, see time used, and approve
+          “more time” asks from anywhere.</p>
+        <ol>
+          <li>On your phone, install the <a href="/download.html#android">Kintrinsic app</a> — no Google
+            Play needed, and it gives you reliable alerts even with the screen off.</li>
+          <li>Turn on parent approval, which creates your signing key on the phone.</li>
+          <li>On the child's computer, open <strong>Kintrinsic</strong> and go to <strong>Connect a
+            phone</strong> — it shows a QR code.</li>
+          <li>Point your phone's camera at it. That links your key to the computer. Done — you now manage it from the
+            sofa or the school run.</li>
+        </ol>
+        <p style="color: var(--ink-3); font-size: 0.95rem;"><em>If the scan doesn't take:</em> there's an offline
+          path — the Kintrinsic app's parent-approval card shows a pairing link you can type in by hand. No internet needed on
+          either device.</p>
+
+        <div class="callout">
+          <b>Back up your key.</b> Kintrinsic offers an encrypted backup of your signing key when you pair.
+          Save it somewhere safe — it's how you get back in if you ever lose your phone. This is the one
+          step people skip and later wish they hadn't.
+        </div>
+
+        <h2 id="wrong">If something goes wrong</h2>
+
+        <h3>You lose your phone, or your key</h3>
+        <p>Your child's limits keep working regardless — they live on the device. To manage again, restore your key
+          from the encrypted backup you saved, and reconnect. On the computer itself, open <strong>Kintrinsic</strong>
+          and go to <strong>Recovery</strong> — an admin-only way back in. This is exactly why the backup step
+          matters — do it once, keep it safe.</p>
+
+        <h3>You need everything off, right now</h3>
+        <p>Your admin account is never governed by Kintrinsic, so you always have a way in. Open <strong>Kintrinsic</strong>
+          and go to <strong>Recovery</strong> — it offers Pause, Resume and Turn off. If you'd rather do it from a terminal,
+          <code>sudo systemctl stop charterd.service</code> stops enforcement and unfreezes anything
+          currently frozen.</p>
+
+        <h3>Something looks wrong and you're not sure what</h3>
+        <p>Run <code>charter status</code> in a terminal — it prints what Kintrinsic thinks is going on: whether it's
+          paired, which account it's governing, and what the limits currently are.</p>
+
+        <div class="callout warn">
+          <b>Early access, honestly.</b> Hours, daily time, websites, learning apps and “ask for more time” are proven
+          on real family computers. Per-app limits, named allowances and app-approval are newly landed — see the
+          <a href="/roadmap.html">roadmap</a> for exactly what's shipped.
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <section class="pillars" aria-label="Other guides">
+    <div class="container">
+      <div class="section-head" style="margin-bottom: 1.2rem;">
+        <p class="t-eyebrow">Also</p>
+        <h2 class="t-heading">Other things you might be here for.</h2>
+      </div>
+      <div class="hub">
+        <a class="hub__card" href="/setup-phone.html" id="graphene">
+          <h3>Set up a child's phone <span class="chip chip-soon">preview</span></h3>
+          <p>Governing a de-Googled Android phone: factory reset, cable, and about twenty minutes. Longer and more involved than the computer.</p>
+          <span class="hub__meta">The harder path</span>
+        </a>
+        <a class="hub__card" href="/faq.html">
+          <h3>Questions parents ask</h3>
+          <p>Is it spyware? Can my child get around it? What happens if I lose my phone? The awkward ones, answered plainly.</p>
+          <span class="hub__meta">FAQ</span>
+        </a>
+        <a class="hub__card" href="/roadmap.html">
+          <h3>What's actually shipped</h3>
+          <p>An honest map of what's proven on real hardware, what's newly landed, and what's still only an intention.</p>
+          <span class="hub__meta">Roadmap</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-band" aria-label="Get started">
+    <div class="container narrow">
+      <p class="t-eyebrow">Ready</p>
+      <h2 class="t-heading">Start on the computer tonight.</h2>
+      <p>Free while in early access. Connect your phone whenever you like.</p>
+      <div class="cta-band__row">
+        <a class="btn btn-wax" href="/download.html">Get Kintrinsic</a>
+        <a class="btn btn-ghost" href="/faq.html">Read the FAQ</a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <footer class="footer" role="contentinfo">
+    <div class="container footer__inner">
+      <div>
+        <div class="footer__brand">Kintrinsic</div>
+        <div>Part of the <a href="https://signet.you">Signet</a> family · a ForgeSworn product</div>
+      </div>
+      <ul>
+        <li><a href="/#does">What it does</a></li>
+        <li><a href="/#see">See it</a></li>
+        <li><a href="/download.html">Download</a></li>
+        <li><a href="/setup.html">Setup</a></li>
+        <li><a href="/roadmap.html">Roadmap</a></li>
+        <li><a href="/faq.html">FAQ</a></li>
+        <li><a href="https://signet.you">signet.you</a></li>
+      </ul>
+    </div>
+  </footer>
+
+</body>
+</html>

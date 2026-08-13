@@ -1,0 +1,480 @@
+/* ============================================================
+   Kintrinsic — shared design system (candlelight / signed-charter skin)
+   One stylesheet for the whole site. No build step.
+   ============================================================ */
+
+:root {
+  color-scheme: light dark;
+
+  --paper:        #f9f8f4;
+  --paper-soft:   #f2f0e9;
+  --white:        #ffffff;
+  --ink:          #1d1a17;
+  --ink-2:        #4c463f;
+  /* #7a746b measured 4.35:1 on --paper and 4.06:1 on --paper-soft — both under
+     the 4.5:1 AA floor for the fine print, footer and inline code that use it. */
+  --ink-3:        #6b655c;
+  --line:         #e5e1d6;
+  --kin-ink:      #241b12;   /* the seal ground */
+  --kin-gold:     #e0a458;   /* the seal's flame */
+  --kin-accent:       #8a5c0c;   /* text-safe amber: links, eyebrows, accents, CTAs */
+  --kin-accent-deep:  #79510b;   /* ~12% darken, CTA hover */
+  --kin-accent-soft:  rgba(138, 92, 12, 0.07);
+  --kin-accent-glow:  rgba(138, 92, 12, 0.16);
+  --on-accent:    #ffffff;   /* text sitting ON the accent colour */
+  --leaf:         #38756a;   /* small positive marks only */
+  --amber:        #8a5c0c;   /* "in progress" marks */
+  --dark:         #211d1a;   /* privacy / dark panels */
+  --dark-text:    #ece7dd;
+  --dark-muted:   #b3aa9c;
+
+  /* surfaces that were literals and so could never follow the theme */
+  --nav-bg:       rgba(249, 248, 244, 0.88);
+  --chip-live-bg: rgba(60, 126, 112, 0.09);
+  --chip-soon-bg: rgba(138, 92, 12, 0.10);
+  --code-bg:      var(--paper-soft);
+  --shot-frame:   #ffffff;
+
+  --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --mono: "SF Mono", "Cascadia Code", "Fira Mono", "Roboto Mono", ui-monospace, monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --shadow-md: 0 4px 16px rgba(29, 26, 23, 0.06);
+  --shadow-lg: 0 10px 36px rgba(29, 26, 23, 0.09);
+  --container: 1140px;
+  --container-narrow: 780px;
+  --measure: 42rem;          /* ~68 characters at the body size */
+  --section-pad: clamp(3rem, 8vw, 6.5rem);
+  --transition: 200ms ease;
+}
+
+/* ============================================================
+   Dark theme. Same candlelight-on-paper idea after dark: the ground
+   goes to a warm near-black rather than a neutral one, so the accent
+   gold still reads as warmth and not as an alert colour.
+   ============================================================ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:        #17140f;
+    --paper-soft:   #1e1a14;
+    --white:        #211d18;   /* "raised card", now lighter than the ground */
+    --ink:          #efe9dd;
+    --ink-2:        #c2b9a9;
+    --ink-3:        #968b7c;
+    --line:         #332d25;
+    /* gold/ink stay: the seal ground and flame don't flip with the theme. */
+    --kin-accent:       #dcaa5c;   /* lightened for near-black; already AA-verified as --amber's dark value */
+    --kin-accent-deep:  #c29651;   /* ~12% darken, CTA hover */
+    --kin-accent-soft:  rgba(220, 170, 92, 0.12);
+    --kin-accent-glow:  rgba(220, 170, 92, 0.26);
+    /* the accent is now a light colour, so what sits on it has to flip too —
+       white on #dcaa5c is nowhere near AA */
+    --on-accent:    #2a1512;
+    --leaf:         #5fb3a1;
+    --amber:        #dcaa5c;
+    --dark:         #241f19;   /* the privacy band lifts instead of dropping */
+    --dark-text:    #f2ece1;
+    --dark-muted:   #b6ac9d;
+
+    --nav-bg:       rgba(23, 20, 15, 0.88);
+    --chip-live-bg: rgba(95, 179, 161, 0.14);
+    --chip-soon-bg: rgba(210, 155, 69, 0.14);
+    --shot-frame:   #0f0d0a;
+
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.34);
+    --shadow-lg: 0 10px 36px rgba(0, 0, 0, 0.46);
+  }
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  font-family: var(--sans);
+  font-size: 1.06rem;          /* ~17px — reading size for the guide and FAQ */
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+img, svg { max-width: 100%; display: block; }
+a { color: inherit; text-decoration: none; }
+::selection { background: var(--kin-accent-glow); }
+
+/* Keyboard users shouldn't have to tab the whole nav on every page. */
+.skip-link {
+  position: absolute; left: 0.6rem; top: -4rem; z-index: 60;
+  background: var(--kin-accent); color: var(--on-accent);
+  padding: 0.7rem 1.1rem; border-radius: var(--radius-md);
+  font-weight: 600; font-size: 0.95rem;
+  transition: top var(--transition);
+}
+.skip-link:focus { top: 0.6rem; }
+
+.container { max-width: var(--container); margin-inline: auto; padding-inline: clamp(1.1rem, 4vw, 2.5rem); }
+.container.narrow { max-width: var(--container-narrow); }
+
+/* ============ type scale ============ */
+.t-display {
+  font-family: var(--serif);
+  font-size: clamp(2.3rem, 5.6vw, 3.9rem);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.08;
+}
+.t-heading {
+  font-family: var(--serif);
+  font-size: clamp(1.7rem, 3.6vw, 2.5rem);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.t-sub { font-size: clamp(1.05rem, 1.9vw, 1.3rem); font-weight: 400; line-height: 1.55; color: var(--ink-2); }
+.t-eyebrow {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--kin-accent);
+  font-weight: 600;
+}
+
+/* ============ buttons ============ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem;
+  padding: 0.85rem 1.5rem;
+  border-radius: var(--radius-md);
+  font-weight: 600; font-size: 1rem;
+  transition: transform var(--transition), box-shadow var(--transition), background var(--transition), border-color var(--transition);
+  cursor: pointer; border: 0;
+}
+.btn-wax { background: var(--kin-accent); color: var(--on-accent); box-shadow: 0 2px 10px var(--kin-accent-glow); }
+.btn-wax:hover { background: var(--kin-accent-deep); transform: translateY(-1px); box-shadow: 0 6px 20px var(--kin-accent-glow); }
+.btn-ghost { background: transparent; color: var(--ink); border: 1.5px solid var(--line); }
+.btn-ghost:hover { border-color: var(--ink-3); transform: translateY(-1px); }
+.btn:focus-visible { outline: 3px solid var(--kin-accent-glow); outline-offset: 2px; }
+a:focus-visible { outline: 3px solid var(--kin-accent-glow); outline-offset: 3px; border-radius: 4px; }
+
+/* ============ nav ============ */
+.nav { position: sticky; top: 0; z-index: 40; background: var(--nav-bg); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.nav__inner { display: flex; align-items: center; justify-content: space-between; height: 68px; gap: 1rem; }
+.nav__logo { display: flex; align-items: center; gap: 0.6rem; font-family: var(--serif); font-weight: 700; font-size: 1.25rem; flex: 0 0 auto; }
+.nav__logo img { width: 30px; height: 30px; border-radius: 7px; }
+.nav__links { display: flex; align-items: center; gap: 1.5rem; list-style: none; font-size: 0.95rem; color: var(--ink-2); }
+/* The 24px gap already satisfies the WCAG 2.2 spacing exception, but a taller
+   hit area is kinder to imprecise pointers and costs nothing — the row is
+   flex-centred in a 68px bar, so this changes no layout. */
+.nav__links li.hide-m > a { display: inline-block; padding-block: 0.4rem; }
+.nav__links a:not(.btn):hover, .nav__links a[aria-current="page"] { color: var(--ink); }
+.nav__links a[aria-current="page"] { font-weight: 600; color: var(--kin-accent); }
+.nav__cta { padding: 0.5rem 1rem; font-size: 0.92rem; }
+
+/* The menu is a <details> so it needs no JavaScript; the whole site ships
+   zero script and this shouldn't be the thing that breaks that. */
+.nav__menu { display: none; position: relative; }
+.nav__menu > summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.55rem 0.8rem; border: 1.5px solid var(--line);
+  border-radius: var(--radius-md); font-size: 0.92rem; font-weight: 600;
+  color: var(--ink); min-height: 44px;
+}
+.nav__menu > summary::-webkit-details-marker { display: none; }
+.nav__menu > summary::after {
+  content: ""; width: 0.6em; height: 0.6em; flex: 0 0 auto;
+  border-right: 2px solid var(--ink-3); border-bottom: 2px solid var(--ink-3);
+  transform: translateY(-0.15em) rotate(45deg); transition: transform var(--transition);
+}
+.nav__menu[open] > summary::after { transform: translateY(0.1em) rotate(-135deg); }
+.nav__menu > summary:focus-visible { outline: 3px solid var(--kin-accent-glow); outline-offset: 2px; }
+.nav__drawer {
+  position: absolute; right: 0; top: calc(100% + 0.5rem);
+  min-width: 13.5rem; list-style: none;
+  background: var(--white); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  padding: 0.4rem; display: grid; gap: 0.1rem;
+}
+.nav__drawer a {
+  display: block; padding: 0.7rem 0.85rem; border-radius: var(--radius-sm);
+  font-size: 1rem; color: var(--ink-2);
+}
+.nav__drawer a:hover { background: var(--paper-soft); color: var(--ink); }
+.nav__drawer a[aria-current="page"] { color: var(--kin-accent); font-weight: 600; }
+
+@media (max-width: 820px) {
+  .nav__links li.hide-m { display: none; }
+  .nav__menu { display: block; }
+  /* Logo + CTA + Menu have to share ~355px on a small phone, so tighten the
+     row rather than let "Get Charter" wrap onto two lines. */
+  .nav__links { gap: 0.55rem; }
+  .nav__logo { font-size: 1.12rem; }
+  .nav__cta { padding: 0.55rem 0.8rem; }
+  .nav__menu > summary { padding: 0.55rem 0.75rem; }
+}
+/* Below ~360px the seal, the CTA and the menu can't all fit alongside the
+   wordmark. The seal alone still identifies the site, and the link keeps its
+   accessible name from aria-label. */
+@media (max-width: 400px) {
+  .nav__word { display: none; }
+}
+.nav__cta, .nav__menu > summary { white-space: nowrap; }
+
+/* ============ sections ============ */
+section { padding: var(--section-pad) 0; }
+.section-head { max-width: 660px; margin-bottom: clamp(1.8rem, 4vw, 3rem); }
+.section-head p { margin-top: 0.8rem; color: var(--ink-2); }
+
+/* ============ page header (sub-pages) ============ */
+.page-head { padding: clamp(2.6rem, 6vw, 4.5rem) 0 clamp(1.6rem, 4vw, 2.6rem); border-bottom: 1px solid var(--line); background: var(--white); }
+.page-head p.lede { margin-top: 1rem; max-width: 42rem; }
+
+/* ============ hero ============ */
+.hero { padding: calc(var(--section-pad) * 0.9) 0 var(--section-pad); }
+.hero__grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: clamp(2rem, 5vw, 4.5rem); align-items: center; }
+@media (max-width: 880px) { .hero__grid { grid-template-columns: 1fr; } }
+.hero p.lede { margin: 1.3rem 0 2rem; max-width: 34rem; }
+.hero__ctas { display: flex; flex-wrap: wrap; gap: 0.9rem; align-items: center; }
+.hero__fineprint { margin-top: 0.9rem; font-size: 0.85rem; color: var(--ink-3); }
+
+/* signature: signed clause card */
+.clause {
+  background: var(--white); border: 1px solid var(--line);
+  border-radius: var(--radius-xl); box-shadow: var(--shadow-lg);
+  padding: 1.8rem 1.9rem 1.6rem; position: relative;
+  max-width: 420px; margin-inline: auto; transform: rotate(0.6deg);
+}
+.clause__eyebrow { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3); }
+.clause__title { font-family: var(--serif); font-size: 1.45rem; font-weight: 700; margin: 0.35rem 0 1.1rem; }
+.clause__rows { display: grid; gap: 0.65rem; font-size: 0.97rem; }
+.clause__row { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 1px dashed var(--line); padding-bottom: 0.6rem; }
+.clause__row span:first-child { color: var(--ink-2); }
+.clause__row span:last-child { font-weight: 600; font-variant-numeric: tabular-nums; }
+.clause__ask { margin-top: 1.05rem; background: var(--kin-accent-soft); border-radius: var(--radius-md); padding: 0.75rem 0.95rem; font-size: 0.92rem; color: var(--ink-2); }
+.clause__ask b { color: var(--ink); }
+.clause__seal {
+  position: absolute; top: -22px; right: -18px; width: 64px; height: 64px; border-radius: 50%;
+  background: var(--kin-ink); color: var(--kin-gold); display: grid; place-items: center;
+  box-shadow: 0 6px 18px var(--kin-accent-glow), inset 0 0 0 3px rgba(0, 0, 0, 0.35); transform: rotate(8deg);
+}
+.clause__seal svg { width: 65%; height: 65%; }
+.clause__signed { margin-top: 1rem; display: flex; justify-content: space-between; align-items: baseline; font-size: 0.8rem; color: var(--ink-3); }
+.clause__signed em { font-family: var(--serif); font-size: 1.05rem; color: var(--ink-2); }
+
+/* The seal hangs off the card's top-right corner. On a narrow phone that
+   overhang lands outside the viewport and `overflow-x: hidden` on <body>
+   shears it in half, so pull it back inside once there's no room. */
+@media (max-width: 460px) {
+  .clause { margin-inline: 0.5rem 1.4rem; }
+  .clause__seal { top: -18px; right: -10px; width: 54px; height: 54px; }
+}
+
+/* ============ pillars ============ */
+.pillars { background: var(--white); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.pillars__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.1rem; }
+.pillar { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 1.5rem 1.4rem; transition: box-shadow var(--transition), transform var(--transition); }
+.pillar:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.pillar h3 { font-family: var(--serif); font-size: 1.22rem; margin-bottom: 0.55rem; }
+.pillar p { font-size: 0.95rem; color: var(--ink-2); }
+.pillar__mark { width: 38px; height: 38px; border-radius: 10px; background: var(--kin-accent-soft); color: var(--kin-accent); display: grid; place-items: center; margin-bottom: 0.9rem; font-size: 1.15rem; }
+
+/* ============ "clauses you can write" — capability grid ============ */
+.clauses__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 1rem; }
+.c-item { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 1.35rem 1.4rem; transition: box-shadow var(--transition), transform var(--transition); }
+.c-item:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.c-item__name { font-family: var(--serif); font-size: 1.16rem; font-weight: 700; display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem; }
+.c-item__name::before { content: "§"; color: var(--kin-accent); font-weight: 700; flex: 0 0 auto; }
+.c-item p { font-size: 0.94rem; color: var(--ink-2); }
+
+/* small state chips */
+.chip { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; border-radius: 100px; padding: 0.22em 0.62em; font-weight: 700; vertical-align: middle; white-space: nowrap; }
+.chip-new { color: var(--kin-accent); background: var(--kin-accent-soft); }
+.chip-live { color: var(--leaf); background: var(--chip-live-bg); }
+.chip-soon { color: var(--amber); background: var(--chip-soon-bg); }
+
+/* ============ how it works (numbered steps) ============ */
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.1rem; counter-reset: step; }
+.step { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 1.6rem 1.5rem; position: relative; }
+.step::before {
+  counter-increment: step; content: counter(step);
+  font-family: var(--serif); font-style: italic; font-size: 2.6rem; color: var(--kin-accent);
+  opacity: 0.85; line-height: 1; display: block; margin-bottom: 0.7rem;
+}
+.step h3 { font-family: var(--serif); font-size: 1.2rem; margin-bottom: 0.5rem; }
+.step p { font-size: 0.95rem; color: var(--ink-2); }
+.step code, .prose code, .download__meta code, .compare code { font-family: var(--mono); font-size: 0.85em; background: var(--code-bg); padding: 0.12em 0.42em; border-radius: 5px; }
+
+/* ============ privacy / dark panel ============ */
+.privacy { background: var(--dark); color: var(--dark-text); }
+.privacy .t-eyebrow { color: #dcaa5c; }
+.privacy .t-heading { color: #f4efe6; }
+.privacy__grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: clamp(2rem, 5vw, 4rem); align-items: start; }
+@media (max-width: 880px) { .privacy__grid { grid-template-columns: 1fr; } }
+.privacy__list { list-style: none; display: grid; gap: 0.9rem; margin-top: 0.4rem; }
+.privacy__list li { display: flex; gap: 0.8rem; align-items: baseline; color: var(--dark-muted); }
+.privacy__list li::before { content: "✕"; color: #dcaa5c; font-weight: 700; flex: 0 0 auto; }
+.privacy__list li b { color: var(--dark-text); font-weight: 600; }
+.privacy__how { background: rgba(255, 255, 255, 0.045); border: 1px solid rgba(255, 255, 255, 0.09); border-radius: var(--radius-lg); padding: 1.5rem; font-size: 0.95rem; color: var(--dark-muted); }
+.privacy__how b { color: var(--dark-text); }
+.privacy__how p + p { margin-top: 0.8rem; }
+
+/* ============ download ============ */
+.download__card {
+  background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md); padding: clamp(1.8rem, 4vw, 3rem);
+  display: grid; grid-template-columns: 1.2fr 1fr; gap: clamp(1.5rem, 4vw, 3rem); align-items: center;
+}
+@media (max-width: 880px) { .download__card { grid-template-columns: 1fr; } }
+.download__meta { font-size: 0.9rem; color: var(--ink-3); margin-top: 0.9rem; }
+.reqs { list-style: none; display: grid; gap: 0.7rem; font-size: 0.95rem; color: var(--ink-2); }
+.reqs li { display: flex; gap: 0.7rem; align-items: baseline; }
+.reqs li::before { content: "✓"; color: var(--leaf); font-weight: 700; flex: 0 0 auto; }
+
+/* ============ honesty note ============ */
+.honesty { border: 1px solid var(--line); border-left: 4px solid var(--kin-accent); background: var(--white); border-radius: var(--radius-md); padding: 1.1rem 1.3rem; font-size: 0.95rem; color: var(--ink-2); }
+.honesty b { color: var(--ink); }
+
+/* ============ lexicon ============ */
+.lexicon { background: var(--paper-soft); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.lexicon__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+.lex { padding: 1.1rem 1.2rem; }
+.lex dt { font-family: var(--serif); font-weight: 700; font-size: 1.1rem; }
+.lex dd { font-size: 0.92rem; color: var(--ink-2); margin-top: 0.3rem; }
+
+/* ============ prose (docs / setup / faq body) ============ */
+.prose { max-width: var(--measure); font-size: 1.06rem; }
+.prose h2 { font-family: var(--serif); font-size: clamp(1.4rem, 3vw, 1.9rem); margin: 2.4rem 0 0.8rem; letter-spacing: -0.01em; }
+.prose h3 { font-family: var(--serif); font-size: 1.22rem; margin: 1.6rem 0 0.5rem; }
+.prose p { color: var(--ink-2); margin: 0.7rem 0; }
+.prose ul, .prose ol { color: var(--ink-2); margin: 0.7rem 0 0.7rem 1.2rem; display: grid; gap: 0.4rem; }
+.prose a { color: var(--kin-accent); font-weight: 600; }
+.prose a:hover { text-decoration: underline; }
+/* A link that is the whole of its list item or paragraph is a control, not
+   prose, so it doesn't get the inline exception in WCAG 2.5.8 — give it
+   enough height to clear the 24px minimum. */
+.prose li > a:only-child, .prose p > a:only-child { display: inline-block; padding-block: 0.2rem; }
+.prose strong { color: var(--ink); }
+
+/* callout box */
+.callout { border: 1px solid var(--line); border-left: 4px solid var(--leaf); background: var(--white); border-radius: var(--radius-md); padding: 1rem 1.25rem; margin: 1.4rem 0; font-size: 0.96rem; color: var(--ink-2); }
+.callout.warn { border-left-color: var(--amber); }
+.callout b { color: var(--ink); }
+
+/* ============ FAQ (details/summary accordion) ============ */
+.faq { display: grid; gap: 0.7rem; max-width: var(--container-narrow); }
+.faq details { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
+.faq summary { list-style: none; cursor: pointer; padding: 1.1rem 1.3rem; font-family: var(--serif); font-size: 1.1rem; font-weight: 700; display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; color: var(--kin-accent); font-size: 1.4rem; font-weight: 400; flex: 0 0 auto; transition: transform var(--transition); }
+.faq details[open] summary::after { transform: rotate(45deg); }
+.faq summary:focus-visible { outline: 3px solid var(--kin-accent-glow); outline-offset: -3px; }
+.faq details > div { padding: 0 1.3rem 1.2rem; color: var(--ink-2); font-size: 0.98rem; }
+.faq details > div p + p { margin-top: 0.7rem; }
+.faq a { color: var(--kin-accent); font-weight: 600; }
+
+/* ============ roadmap timeline ============ */
+.roadmap { display: grid; gap: 1.6rem; max-width: 900px; }
+.rlane__head { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.9rem; }
+.rlane__head h2 { font-family: var(--serif); font-size: 1.4rem; }
+.rlane__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.8rem; }
+.ritem { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--white); padding: 1rem 1.15rem; }
+.ritem h3 { font-family: var(--serif); font-size: 1.05rem; margin-bottom: 0.3rem; }
+.ritem p { font-size: 0.9rem; color: var(--ink-2); }
+.ritem--soon { background: var(--paper); border-style: dashed; }
+
+/* ============ screenshots ============ */
+/* min() so the 300px track floor can't push the grid wider than a 320px phone */
+.shots__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 1.4rem 2rem; }
+/* Two up on wide screens. Four across turns a portrait phone shot into a
+   sliver and the landscape lock screen into a stamp; two keeps them
+   comparable, and 4 items fill 2x2 exactly. */
+@media (min-width: 900px) { .shots__grid { grid-template-columns: repeat(2, 1fr); } }
+.shot { margin: 0; }
+.shot img {
+  /* cap the height instead of the width: the set mixes portrait phone
+     captures with a landscape lock screen, and matching their heights is
+     what makes them read as one set */
+  width: auto; max-height: 520px; height: auto;
+  margin-inline: auto;
+  background: var(--shot-frame);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+.shot figcaption { margin-top: 0.75rem; font-size: 0.93rem; color: var(--ink-2); }
+.shot figcaption b { color: var(--ink); font-weight: 600; }
+.shot--wide { grid-column: 1 / -1; max-width: 900px; }
+
+/* Placeholder frame, shown only until a real capture is dropped in. Keeps the
+   layout honest (and obviously unfinished) rather than shipping a fake. */
+.shot--pending {
+  display: grid; place-items: center; text-align: center;
+  aspect-ratio: 16 / 10;
+  background: var(--paper-soft);
+  border: 1.5px dashed var(--line); border-radius: var(--radius-lg);
+  color: var(--ink-3); font-family: var(--mono); font-size: 0.8rem;
+  letter-spacing: 0.1em; text-transform: uppercase; padding: 1rem;
+}
+
+/* ============ comparison table ============ */
+.compare__scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--white); }
+.compare { border-collapse: collapse; width: 100%; min-width: 40rem; font-size: 0.95rem; }
+.compare th, .compare td { text-align: left; padding: 0.85rem 1rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.compare thead th { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; white-space: nowrap; }
+.compare thead th:first-child { color: var(--kin-accent); }
+.compare tbody th { font-weight: 600; color: var(--ink); white-space: nowrap; }
+.compare td { color: var(--ink-2); }
+.compare tbody tr:last-child th, .compare tbody tr:last-child td { border-bottom: 0; }
+.compare .col-us { background: var(--kin-accent-soft); }
+.compare__note { margin-top: 0.9rem; font-size: 0.88rem; color: var(--ink-3); max-width: var(--measure); }
+
+/* ============ FAQ deep links ============ */
+.faq details { scroll-margin-top: 5.5rem; }
+.faq__anchor {
+  font-family: var(--mono); font-size: 0.85rem; font-weight: 400;
+  color: var(--ink-3); opacity: 0; transition: opacity var(--transition);
+  margin-left: 0.15rem;
+  /* 24x24 minimum, per WCAG 2.2 target size (2.5.8) */
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; min-height: 26px;
+}
+.faq details:hover .faq__anchor, .faq__anchor:focus-visible { opacity: 1; }
+.faq__anchor:hover { color: var(--kin-accent); }
+@media (hover: none) { .faq__anchor { opacity: 1; } }
+
+/* ============ guide hub ============ */
+.hub { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+.hub__card { display: block; background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 1.4rem 1.45rem; transition: box-shadow var(--transition), transform var(--transition), border-color var(--transition); }
+.hub__card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); border-color: var(--ink-3); }
+.hub__card h3 { font-family: var(--serif); font-size: 1.18rem; margin-bottom: 0.4rem; display: flex; align-items: baseline; gap: 0.5rem; }
+.hub__card p { font-size: 0.94rem; color: var(--ink-2); }
+.hub__card .hub__meta { display: block; margin-top: 0.7rem; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+
+/* ============ CTA band ============ */
+.cta-band { background: var(--white); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: center; }
+.cta-band h2 { margin-bottom: 0.7rem; }
+.cta-band p { color: var(--ink-2); max-width: 42rem; margin: 0 auto 1.6rem; }
+.cta-band__row { display: flex; flex-wrap: wrap; gap: 0.9rem; justify-content: center; }
+
+/* ============ footer ============ */
+.footer { border-top: 1px solid var(--line); padding: 2.6rem 0 3rem; font-size: 0.92rem; color: var(--ink-3); }
+.footer__inner { display: flex; flex-wrap: wrap; gap: 1.4rem 3rem; justify-content: space-between; align-items: baseline; }
+.footer a { color: var(--ink-2); }
+.footer a:hover { color: var(--ink); }
+.footer__brand { font-family: var(--serif); font-weight: 700; color: var(--ink); font-size: 1.05rem; }
+/* Padding rather than pure gap, so each link clears the 24px minimum
+   target size in WCAG 2.2 (2.5.8) without the row growing. */
+.footer ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem 0.7rem; margin-top: -0.4rem; }
+.footer ul a { display: inline-block; padding: 0.4rem 0.35rem; }
+
+/* ============ subtle reveal ============ */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal { opacity: 0; transform: translateY(14px); animation: rise 0.6s ease forwards; }
+  .reveal-2 { animation-delay: 0.12s; }
+  .reveal-3 { animation-delay: 0.24s; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+}

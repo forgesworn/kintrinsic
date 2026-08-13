@@ -1,0 +1,37 @@
+{
+  "note": "Canonical tethering clause vectors — pins MyCharter (TS producer: tetheringToGrant) ↔ warden (Rust: GrantTethering parse + evaluate_tethering). Hotspot is default-blocked; a grant opens it raw (guests unfiltered) or filtered (Charter's own AP, guests filtered), optionally time-boxed via `until` (the allowance ends AT `until`). A blocked posture carries no `until`. issuedAt fixed for determinism.",
+  "vectors": [
+    {
+      "name": "blocked_default",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": "none" },
+      "expect": { "modeAt": { "now": 1782734400, "mode": "blocked" } },
+      "input": { "allow": "none" }
+    },
+    {
+      "name": "raw_time_boxed",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": "raw", "until": 1782738000 },
+      "expect": {
+        "modeAt": { "now": 1782734400, "mode": "raw" },
+        "modeAtExpiry": { "now": 1782738000, "mode": "blocked" }
+      },
+      "input": { "allow": "raw", "until": 1782738000 }
+    },
+    {
+      "name": "filtered_until_revoked",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": "filtered" },
+      "expect": { "modeAt": { "now": 1782734400, "mode": "filtered" } },
+      "input": { "allow": "filtered" }
+    },
+    {
+      "name": "none_drops_until",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": "none" },
+      "expect": { "modeAt": { "now": 1782734400, "mode": "blocked" } },
+      "input": { "allow": "none", "until": 1782738000 }
+    }
+  ],
+  "invalid": [
+    { "name": "unknown_allow", "payload": { "v": 1, "issuedAt": 1, "allow": "sometimes" } },
+    { "name": "missing_allow", "payload": { "v": 1, "issuedAt": 1 } },
+    { "name": "wrong_version_type", "payload": { "v": "1", "issuedAt": 1, "allow": "raw" } }
+  ]
+}

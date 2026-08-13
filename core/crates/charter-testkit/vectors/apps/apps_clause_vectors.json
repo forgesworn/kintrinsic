@@ -1,0 +1,146 @@
+{
+  "note": "Canonical apps (per-app D3) clause vectors — pins MyCharter (TS producer, appsToGrant) ↔ warden (Rust: GrantApps parse). `input` is the app AppsPolicy; `payload` is the wire GrantApps. issuedAt fixed for determinism.",
+  "vectors": [
+    {
+      "name": "blocklist_block_youtube",
+      "input": {
+        "enabled": true,
+        "posture": "blocklist",
+        "blocked": ["com.google.android.youtube", "app.meatchat.mobile"],
+        "allowed": []
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "issuedAt": 1782734400,
+        "blocked": ["com.google.android.youtube", "app.meatchat.mobile"]
+      }
+    },
+    {
+      "name": "allowlist_only_fenix",
+      "input": {
+        "enabled": true,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": ["org.mozilla.fenix"]
+      },
+      "payload": {
+        "v": 1,
+        "posture": "allowlist",
+        "issuedAt": 1782734400,
+        "allowed": ["org.mozilla.fenix"]
+      }
+    },
+    {
+      "name": "blocklist_with_a_live_hold",
+      "note": "decented's case: Vanadium stays ON the blocklist and is held open for an hour, so nothing is forgotten when the hour is up. `effectiveBlocked` is what the device must enforce at `effectiveAt`.",
+      "input": {
+        "enabled": true,
+        "posture": "blocklist",
+        "blocked": ["org.chromium.vanadium", "com.google.android.youtube"],
+        "allowed": [],
+        "holds": [
+          { "pkg": "org.chromium.vanadium", "state": "allowed", "untilUnix": 1782738000 }
+        ]
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "issuedAt": 1782734400,
+        "blocked": ["org.chromium.vanadium", "com.google.android.youtube"],
+        "holds": [
+          { "pkg": "org.chromium.vanadium", "state": "allowed", "untilUnix": 1782738000 }
+        ]
+      },
+      "effectiveAt": 1782734460,
+      "effectiveBlocked": ["com.google.android.youtube"],
+      "effectiveAllowed": []
+    },
+    {
+      "name": "hold_ends_at_its_instant",
+      "note": "Same clause, read one hour on. The app is back on the blocklist with nothing for the guardian to undo.",
+      "input": {
+        "enabled": true,
+        "posture": "blocklist",
+        "blocked": ["org.chromium.vanadium", "com.google.android.youtube"],
+        "allowed": [],
+        "holds": [
+          { "pkg": "org.chromium.vanadium", "state": "allowed", "untilUnix": 1782738000 }
+        ]
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "issuedAt": 1782734400,
+        "blocked": ["org.chromium.vanadium", "com.google.android.youtube"],
+        "holds": [
+          { "pkg": "org.chromium.vanadium", "state": "allowed", "untilUnix": 1782738000 }
+        ]
+      },
+      "effectiveAt": 1782738000,
+      "effectiveBlocked": ["org.chromium.vanadium", "com.google.android.youtube"],
+      "effectiveAllowed": []
+    },
+    {
+      "name": "allowlist_hold_opens_one_more_app",
+      "input": {
+        "enabled": true,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": ["org.mozilla.fenix"],
+        "holds": [
+          { "pkg": "com.mojang.minecraftpe", "state": "allowed", "untilUnix": 1782736200 }
+        ]
+      },
+      "payload": {
+        "v": 1,
+        "posture": "allowlist",
+        "issuedAt": 1782734400,
+        "allowed": ["org.mozilla.fenix"],
+        "holds": [
+          { "pkg": "com.mojang.minecraftpe", "state": "allowed", "untilUnix": 1782736200 }
+        ]
+      },
+      "effectiveAt": 1782734400,
+      "effectiveBlocked": [],
+      "effectiveAllowed": ["org.mozilla.fenix", "com.mojang.minecraftpe"]
+    },
+    {
+      "name": "expired_holds_never_reach_the_wire",
+      "note": "The producer prunes a hold that is already over at issue time — a dead hold on the wire is noise the device would drop anyway.",
+      "input": {
+        "enabled": true,
+        "posture": "blocklist",
+        "blocked": ["com.google.android.youtube"],
+        "allowed": [],
+        "holds": [
+          { "pkg": "com.google.android.youtube", "state": "allowed", "untilUnix": 1782734399 }
+        ]
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "issuedAt": 1782734400,
+        "blocked": ["com.google.android.youtube"]
+      },
+      "effectiveAt": 1782734400,
+      "effectiveBlocked": ["com.google.android.youtube"],
+      "effectiveAllowed": []
+    },
+    {
+      "name": "off_lifts_via_paused",
+      "input": {
+        "enabled": false,
+        "posture": "blocklist",
+        "blocked": ["com.google.android.youtube"],
+        "allowed": []
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "issuedAt": 1782734400,
+        "paused": true
+      }
+    }
+  ]
+}

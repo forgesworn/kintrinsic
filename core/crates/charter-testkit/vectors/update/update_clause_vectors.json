@@ -1,0 +1,66 @@
+{
+  "comment": "Golden cross-stack vectors for the `update` clause (#44). Producer: MyCharter updateToGrant (updateClauseVectors.test.ts). Consumer: charter-proto UpdateAppBody (update_clause_vectors.rs). `invalid` payloads must fail validation on the device.",
+  "vectors": [
+    {
+      "name": "plain self-update to versionCode 21",
+      "input": {
+        "manifest": {
+          "versionName": "0.21.0",
+          "versionCode": 21,
+          "apkSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "certSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sizeBytes": 52428800,
+          "builtAt": "2026-07-21T22:00:00Z"
+        },
+        "url": "https://charter.mysignet.app/charter-latest.apk"
+      },
+      "payload": {
+        "v": 1,
+        "packageName": "org.forgesworn.charter",
+        "versionCode": 21,
+        "versionName": "0.21.0",
+        "url": "https://charter.mysignet.app/charter-latest.apk",
+        "apkSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "signerCertSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "http url fails closed",
+      "payload": {
+        "v": 1,
+        "packageName": "org.forgesworn.charter",
+        "versionCode": 21,
+        "versionName": "0.21.0",
+        "url": "http://charter.mysignet.app/charter-latest.apk",
+        "apkSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "signerCertSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "zero versionCode fails closed",
+      "payload": {
+        "v": 1,
+        "packageName": "org.forgesworn.charter",
+        "versionCode": 0,
+        "versionName": "0.0.0",
+        "url": "https://charter.mysignet.app/charter-latest.apk",
+        "apkSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "signerCertSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "bad package name fails closed",
+      "payload": {
+        "v": 1,
+        "packageName": "not-a-package",
+        "versionCode": 21,
+        "versionName": "0.21.0",
+        "url": "https://charter.mysignet.app/charter-latest.apk",
+        "apkSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "signerCertSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  ]
+}

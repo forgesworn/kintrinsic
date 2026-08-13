@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- The relay transport (wss:// gift-wrap pull + STATUS heartbeat). Its
+         absence fails as a silent DNS error — caught on the first live round. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Full package visibility (Android 11+): the warden must see whether an
+         arbitrary staged app is already installed — both for the ward's
+         "✓ Installed" surface and for install idempotence in ApkInstallOps.
+         Legitimate for a Device Owner management app (never a Play listing). -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Spec D9 (communication lifeline): the lock screen's "Call your
+         guardian" places the call directly (ACTION_CALL), so the ward never
+         needs the dialer app inside the LockTask allowlist. DO self-grant. -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- The lock shade's in-call awareness + End-call bar (the 2026-07-24
+         trapped-call fix): both DO-self-granted at init. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
+    <!-- The lock shade's vital signs (clock/battery/signal): LockTask hides the
+         system status bar, so the shade draws its own. Normal permission —
+         install-time, no runtime grant. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Charter Hotspot: app-hosted local-only AP (fail-closed guest network). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Charter"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:directBootAware="true">
+
+        <receiver
+            android:name=".admin.CharterDeviceAdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:directBootAware="true"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <action android:name="android.app.action.PROFILE_PROVISIONING_COMPLETE" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".service.BootReceiver"
+            android:directBootAware="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".service.CharterService"
+            android:foregroundServiceType="specialUse"
+            android:directBootAware="true"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Screen-time enforcement for a supervised device" />
+        </service>
+
+        <service
+            android:name=".service.CharterVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:directBootAware="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".service.CharterHotspotService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Filtered guest hotspot for a supervised device" />
+        </service>
+
+        <activity
+            android:name=".ui.LockActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:showOnLockScreen="true"
+            android:theme="@style/Theme.Charter" />
+
+        <!-- The ward's at-a-glance time-left widget (spec D8). -->
+        <receiver
+            android:name=".ui.TimeLeftWidget"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_time_left_info" />
+        </receiver>
+
+        <!-- Ward-facing "ask for an app" surface, launched from MainActivity. -->
+        <activity
+            android:name=".ui.RequestAppsActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Charter" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- QR onboarding: the pairing QR shown in Kintrinsic is scanned
+                 with the SYSTEM camera (this app never asks for the camera).
+                 Either form lands here: the raw bunker:// URI, or the https
+                 App Link whose #fragment carries it. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="bunker" />
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="charter.mysignet.app"
+                    android:pathPrefix="/pair" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

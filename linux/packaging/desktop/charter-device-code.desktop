@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic — This Device's Code
+Comment=Show this computer's Kintrinsic pairing code (and QR) to add it from the Kintrinsic app on your phone
+Exec=charter-device-code
+Icon=view-barcode-qr
+Terminal=false
+Categories=System;Settings;
+Keywords=pairing;device;code;qr;charter;mycharter;phone;

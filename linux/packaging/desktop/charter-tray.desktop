@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic Tray
+Comment=Time left at a glance, and a way to ask for more
+Exec=charter-tray
+Icon=charter
+Categories=Utility;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

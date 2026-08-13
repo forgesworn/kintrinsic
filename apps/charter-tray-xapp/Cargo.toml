@@ -1,0 +1,37 @@
+[package]
+name = "charter-tray-xapp"
+version = "0.6.2"
+edition = "2021"
+license = "MIT"
+description = "Kintrinsic — the ward's tray on Linux Mint, drawn by Mint's own panel"
+publish = false
+
+# OUTSIDE the linux/ workspace, for the same reason charter-console is: it needs
+# GTK dev libs the headless CI gate host does not have ("The bare host lacks
+# WebKitGTK/GTK/libsoup" — linux/ci/linux-ci.yml). A workspace member pulling in
+# GTK would break `clippy --all-features` and the compile-only real build there.
+#
+# It borrows the BRAIN from the gated crate by path: the menu rows, the copy and
+# the thresholds stay under test inside the CI gate, and this crate only draws
+# them. libxapp itself is opened at RUNTIME (see xapp.rs), never linked, so the
+# .deb gains no new package dependency and still installs on plain Debian.
+
+[[bin]]
+name = "charter-tray-xapp"
+path = "src/main.rs"
+
+[dependencies]
+charter-tray = { path = "../../linux/crates/charter-tray", default-features = false }
+charter-ipc = { path = "../../linux/crates/charter-ipc", default-features = false, features = [
+    "real",
+] }
+gtk = "0.18"
+libloading = "0.8"
+async-channel = "2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+notify-rust = { version = "4", default-features = false, features = ["z"] }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true

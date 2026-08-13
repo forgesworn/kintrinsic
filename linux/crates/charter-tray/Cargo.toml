@@ -1,0 +1,40 @@
+[package]
+name = "charter-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The ward-facing tray: time left at a glance and "Ask for more time" BEFORE
+# the lock lands — the Linux sibling of the Android ward mirror. Until this
+# existed the only pre-lock ask was `charter ask-for-more` in a terminal, and
+# the only visible surface was the lock itself.
+#
+# The model (what the menu says, when asking is offered, which events become
+# notifications) is pure and tested over the mock IPC client; the `real` shell
+# renders it with ksni (StatusNotifierItem over zbus — pure Rust, headless-
+# buildable) and notify-rust's zbus backend.
+
+[features]
+default = ["mock"]
+mock = ["charter-ipc/mock"]
+real = ["charter-ipc/real", "dep:ksni", "dep:notify-rust"]
+
+[lib]
+name = "charter_tray"
+path = "src/lib.rs"
+
+[[bin]]
+name = "charter-tray"
+path = "src/main.rs"
+
+[dependencies]
+charter-ipc = { workspace = true, default-features = false }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+ksni = { version = "0.3", optional = true }
+notify-rust = { version = "4", default-features = false, features = ["z"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }

@@ -1,0 +1,50 @@
+[package]
+name = "charter-spine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The OS-agnostic broker spine (port-spec §1.3): the fail-closed lifecycle
+# reducer, the single-use-atomic broker, the enactor registry, the multi-child
+# enforcer, Signet-first child policy, status/lock-info projections. Extracted
+# from charterd so BOTH wardens (Linux charterd, Android charter-jni) run the
+# same security spine rather than forks of it. Generic over SystemLayer /
+# TransportFacade / Entropy — builds and tests with zero privilege against
+# mocks; contains no OS calls of its own.
+
+[features]
+default = ["mock"]
+mock = [
+    "charter-sys/mock",
+    "charter-verify/mock",
+    "charter-transport/mock",
+]
+real = [
+    "charter-sys/real",
+    "charter-verify/real",
+    "charter-transport/real",
+]
+
+[dependencies]
+charter-primitives = { workspace = true }
+charter-crypto = { workspace = true }
+charter-proto = { workspace = true }
+charter-schedule = { workspace = true }
+charter-content = { workspace = true }
+charter-verify = { workspace = true, default-features = false }
+charter-transport = { workspace = true, default-features = false }
+charter-sys = { workspace = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+charter-testkit = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+serde = { workspace = true }

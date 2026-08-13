@@ -1,0 +1,40 @@
+{
+  "event": {
+    "id": "220bbf309d4f72340a751a29179eed7d7a0d5b8b18b29ba49ce65be0a879ebcf",
+    "pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+    "created_at": 1700000000,
+    "kind": 31113,
+    "tags": [
+      [
+        "t",
+        "charter-device"
+      ],
+      [
+        "d",
+        "schedule"
+      ]
+    ],
+    "content": "{\"v\":1,\"kind\":\"schedule\",\"issuedAt\":1700000000,\"body\":{\"v\":1,\"tz\":\"Europe/London\",\"weekly\":{\"mon\":[{\"start\":\"16:00\",\"end\":\"20:00\"}]},\"issuedAt\":1700000000}}",
+    "sig": "ead540bee832366473b5b63b6ea5f2b83ffc86675a90f6876ea2b0291196776b3f75cad0d6a7fce1e3b922d79974dc440cff2a010234d97f91ceb02cd807fda7"
+  },
+  "guardian_pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+  "payload": {
+    "v": 1,
+    "kind": "schedule",
+    "issuedAt": 1700000000,
+    "body": {
+      "v": 1,
+      "tz": "Europe/London",
+      "weekly": {
+        "mon": [
+          {
+            "start": "16:00",
+            "end": "20:00"
+          }
+        ]
+      },
+      "issuedAt": 1700000000
+    }
+  },
+  "canonical": "[0,\"defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34\",1700000000,31113,[[\"t\",\"charter-device\"],[\"d\",\"schedule\"]],\"{\\\"v\\\":1,\\\"kind\\\":\\\"schedule\\\",\\\"issuedAt\\\":1700000000,\\\"body\\\":{\\\"v\\\":1,\\\"tz\\\":\\\"Europe/London\\\",\\\"weekly\\\":{\\\"mon\\\":[{\\\"start\\\":\\\"16:00\\\",\\\"end\\\":\\\"20:00\\\"}]},\\\"issuedAt\\\":1700000000}}\"]"
+}

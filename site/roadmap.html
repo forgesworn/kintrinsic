@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kintrinsic roadmap — what's shipped, what's coming</title>
+  <meta name="description" content="An honest map of Kintrinsic: what's proven on real hardware today, what's freshly landed for early-access families, and what's still ahead. No vapourware.">
+  <link rel="canonical" href="https://kintrinsic.app/roadmap.html">
+  <link rel="icon" type="image/svg+xml" href="/seal.svg">
+  <link rel="apple-touch-icon" href="/seal.svg">
+  <link rel="stylesheet" href="/styles.css">
+  <meta name="theme-color" content="#f9f8f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17140f" media="(prefers-color-scheme: dark)">
+  <meta property="og:title" content="Kintrinsic roadmap — what's shipped, what's coming">
+  <meta property="og:description" content="What's proven on real hardware, what's freshly landed, and what's still only an intention. No vapourware.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kintrinsic.app/roadmap.html">
+  <meta property="og:image" content="https://kintrinsic.app/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="Kintrinsic">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <nav class="nav" aria-label="Main navigation">
+    <div class="container nav__inner">
+      <a href="/" class="nav__logo" aria-label="Kintrinsic home"><img src="/seal.svg" alt="" width="30" height="30"> <span class="nav__word">Kintrinsic</span></a>
+      <ul class="nav__links">
+        <li class="hide-m"><a href="/#does">What it does</a></li>
+        <li class="hide-m"><a href="/download.html">Download</a></li>
+        <li class="hide-m"><a href="/setup.html">Setup</a></li>
+        <li class="hide-m"><a href="/roadmap.html" aria-current="page">Roadmap</a></li>
+        <li class="hide-m"><a href="/faq.html">FAQ</a></li>
+        <li><a class="btn btn-wax nav__cta" href="/download.html">Get Kintrinsic</a></li>
+        <li>
+          <details class="nav__menu">
+            <summary>Menu</summary>
+            <ul class="nav__drawer">
+              <li><a href="/#does">What it does</a></li>
+              <li><a href="/#see">See it</a></li>
+              <li><a href="/download.html">Download</a></li>
+              <li><a href="/setup.html">Setup</a></li>
+              <li><a href="/roadmap.html" aria-current="page">Roadmap</a></li>
+              <li><a href="/faq.html">FAQ</a></li>
+            </ul>
+          </details>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <main id="main">
+
+  <header class="page-head">
+    <div class="container">
+      <p class="t-eyebrow">Roadmap</p>
+      <h1 class="t-display">What's real, and what's next.</h1>
+      <p class="t-sub lede">Kintrinsic is early, and we'd rather tell you exactly where the line is than blur it. Here's
+        what's proven on real family hardware, what's freshly landed, and what's still ahead — no vapourware.</p>
+    </div>
+  </header>
+
+  <section>
+    <div class="container">
+      <div class="roadmap">
+
+        <!-- SHIPPED -->
+        <div>
+          <div class="rlane__head">
+            <span class="chip chip-live">live</span>
+            <h2>Shipped &amp; proven on hardware</h2>
+          </div>
+          <p style="color: var(--ink-2); font-size: 0.97rem; margin-bottom: 1rem; max-width: 46rem;">
+            Running on real family computers, every day. If you install Kintrinsic tonight, this is what you
+            get — and it's a complete setup on its own, with no phone and no internet required.</p>
+          <div class="rlane__grid">
+            <div class="ritem"><h3>Kintrinsic for Linux</h3><p>A one-package install for Mint and Ubuntu — the warden, lock screen, setup wizard and recovery app together. Double-click and it's on; nothing changes until you say so.</p></div>
+            <div class="ritem"><h3>Allowed hours</h3><p>When the computer can be used, set per day of the week, with one-off overrides for exam days and birthdays. Enforced on the device, offline included.</p></div>
+            <div class="ritem"><h3>Daily time &amp; warnings</h3><p>A daily total, counting only time actually spent at the machine — idle, asleep and locked time is free. Ten- and one-minute warnings before it's up.</p></div>
+            <div class="ritem"><h3>The lock screen</h3><p>A calm, undismissable lock that says why it's locked, when time comes back, and offers the ask. Open apps are frozen where they stand, not killed, so nothing is lost.</p></div>
+            <div class="ritem"><h3>Ask for more time</h3><p>Your child asks in their own words from the lock screen; you grant a few minutes with one tap, and Kintrinsic routes the ask to whichever limit is actually blocking.</p></div>
+            <div class="ritem"><h3>Website filtering</h3><p>Age-appropriate browsing by site, with SafeSearch and restricted YouTube enforced at the network layer. Proven on the family Linux computer.</p></div>
+            <div class="ritem"><h3>Learning is free</h3><p>Learning apps don't count against screen time, so homework never costs playtime.</p></div>
+            <div class="ritem"><h3>Phone pairing &amp; remote lock</h3><p>One-scan QR pairing, and remote lock and unlock — proven live on a real GrapheneOS Pixel, surviving reboots.</p></div>
+            <div class="ritem"><h3>Encrypted key backup</h3><p>Back up and restore your signing key, so losing your phone never locks you out for good.</p></div>
+          </div>
+        </div>
+
+        <!-- NEWLY LANDED -->
+        <div style="margin-top: 1.4rem;">
+          <div class="rlane__head">
+            <span class="chip chip-new">new</span>
+            <h2>Newly landed — early access</h2>
+          </div>
+          <p style="color: var(--ink-3); font-size: 0.95rem; margin-bottom: 0.9rem; max-width: 46rem;">
+            Built and merged, being verified on real devices now. Early-access families are the first
+            through — set on the computer, these work regardless.</p>
+          <div class="rlane__grid">
+            <div class="ritem"><h3>Per-app limits &amp; app holds</h3><p>Block a game, give it its own hours, or leave it installed but closed until they ask.</p></div>
+            <div class="ritem"><h3>Time in your own words</h3><p>Name what screen time is for — “Play” costs an hour a day, schoolwork costs nothing — daily or weekly.</p></div>
+            <div class="ritem"><h3>Approve new apps</h3><p>Your child asks to install something; you approve or decline from your phone.</p></div>
+            <div class="ritem"><h3>Learning sites as their own apps</h3><p>Khan Academy, Wikipedia, BBC Bitesize and Duolingo open locked to that one site, and cost nothing.</p></div>
+            <div class="ritem"><h3>Time in the corner of their screen</h3><p>A panel icon showing what's left, and a way to ask for more before it runs out.</p></div>
+            <div class="ritem"><h3>Give time, and finish now</h3><p>Add minutes without being asked, or call time with a minute's warning. Both clear overnight.</p></div>
+            <div class="ritem"><h3>One budget across devices</h3><p>Phone and computer share one daily total, counted honestly — an hour on both at once is an hour.</p></div>
+            <div class="ritem"><h3>The family's week</h3><p>One bar a day per device against the time you agreed. Going over is shown to talk about, not slammed.</p></div>
+            <div class="ritem"><h3>Unlock from your phone</h3><p>A short code lets them back in with no internet on either side.</p></div>
+            <div class="ritem"><h3>The lifeline</h3><p>A locked phone is still a phone: five people they can always reach, plus real emergency numbers.</p></div>
+            <div class="ritem"><h3>The emergency unlock</h3><p>A fire alarm, not a lock. They can always open their phone — and you're told the moment they do.</p></div>
+            <div class="ritem"><h3>Web filtering &amp; hotspot on the phone</h3><p>The same age-appropriate filtering carried onto the phone, and sharing the connection stays off unless you allow it.</p></div>
+          </div>
+        </div>
+
+        <!-- COMING NEXT -->
+        <div style="margin-top: 1.4rem;">
+          <div class="rlane__head">
+            <span class="chip chip-soon">planned</span>
+            <h2>Coming next</h2>
+          </div>
+          <div class="rlane__grid">
+            <div class="ritem ritem--soon"><h3>The new name, everywhere</h3><p>Kintrinsic is the new name for what launched as Charter. Everything you see installs as <em>Kintrinsic</em> — the apps, the Linux package and its menu entry. Only the under-the-hood command and daemon (<em>charter</em> / <em>charterd</em>) keep the original name, deliberately and permanently — an ordinary update never touches your keys or limits.</p></div>
+            <div class="ritem ritem--soon"><h3>A decentralised source home</h3><p>Kintrinsic is published under the <strong>MIT licence</strong> on GitHub, with checksums for every download; next it moves to a decentralised home that isn't Microsoft's.</p></div>
+            <div class="ritem ritem--soon"><h3>A ready-to-go phone</h3><p>A trusted, pre-set-up refurbished phone for families who'd rather not tinker — private and managed out of the box.</p></div>
+            <div class="ritem ritem--soon"><h3>More phones than Pixel</h3><p>Testing Kintrinsic on other Android 14+ phones (CalyxOS, LineageOS) so a wider range of devices can join.</p></div>
+            <div class="ritem ritem--soon"><h3>Recovery on the device</h3><p>Stronger ways back in from the computer itself, for the times the phone isn't to hand.</p></div>
+            <div class="ritem ritem--soon"><h3>Per-app polish</h3><p>Finishing touches on app and game rules as early-access families put them through their paces.</p></div>
+          </div>
+        </div>
+
+        <!-- EXPLORING -->
+        <div style="margin-top: 1.4rem;">
+          <div class="rlane__head">
+            <span class="chip chip-soon">exploring</span>
+            <h2>Exploring (not promised)</h2>
+          </div>
+          <div class="rlane__grid">
+            <div class="ritem ritem--soon"><h3>Kintrinsic on Linux phones</h3><p>Ubuntu Touch and postmarketOS could reuse the desktop warden — a genuinely open, Google-free handset.</p></div>
+            <div class="ritem ritem--soon"><h3>Fully-remote setup</h3><p>Signing everything from your phone with Signet, so even first setup needs no hands on the device.</p></div>
+          </div>
+        </div>
+
+      </div>
+
+      <p style="margin-top: 2rem; color: var(--ink-3); font-size: 0.9rem;">
+        Last updated August 2026 · “Coming” and “Exploring” are directions, not dates.
+      </p>
+    </div>
+  </section>
+
+  <section class="cta-band" aria-label="Get started">
+    <div class="container narrow">
+      <p class="t-eyebrow">Be an early family</p>
+      <h2 class="t-heading">Start with what's proven.</h2>
+      <p>The Linux essentials are solid today — set them up tonight, and grow into the rest as it lands.</p>
+      <div class="cta-band__row">
+        <a class="btn btn-wax" href="/download.html">Get Kintrinsic</a>
+        <a class="btn btn-ghost" href="/setup.html">Read the setup guide</a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <footer class="footer" role="contentinfo">
+    <div class="container footer__inner">
+      <div>
+        <div class="footer__brand">Kintrinsic</div>
+        <div>Part of the <a href="https://signet.you">Signet</a> family · a ForgeSworn product</div>
+      </div>
+      <ul>
+        <li><a href="/#does">What it does</a></li>
+        <li><a href="/#see">See it</a></li>
+        <li><a href="/download.html">Download</a></li>
+        <li><a href="/setup.html">Setup</a></li>
+        <li><a href="/roadmap.html">Roadmap</a></li>
+        <li><a href="/faq.html">FAQ</a></li>
+        <li><a href="https://signet.you">signet.you</a></li>
+      </ul>
+    </div>
+  </footer>
+
+</body>
+</html>

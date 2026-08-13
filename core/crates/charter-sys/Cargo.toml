@@ -1,0 +1,52 @@
+[package]
+name = "charter-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["mock"]
+# Deterministic in-memory impls (all headless tests).
+mock = []
+# Real impls, split by substrate (port-spec §1.1): the file-backed/crypto/parse
+# cores compile under either half; android/jni pulls real-relay only, keeping
+# the Linux shell-out effects out of the .so.
+# real-relay: live websocket relay IO (rustls-backed wss). The explicit rustls
+# dep exists ONLY to pin the `ring` crypto provider: tokio-tungstenite with
+# default-features=false leaves rustls with NO provider, which panics at the
+# first TLS connect ("Could not automatically determine the process-level
+# CryptoProvider") — caught live on the first Android relay round.
+real-relay = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls"]
+# real-os: Linux OS-effect IO (cgroup/fapolicyd/flatpak/systemctl/VT ioctl).
+real-os = ["dep:libc"]
+# Back-compat umbrella — everything the Linux warden ships with. The
+# OS-effect IO and live relay IO still finalize on the VM.
+real = ["real-relay", "real-os"]
+
+[dependencies]
+charter-primitives = { workspace = true }
+charter-crypto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# real-only websocket relay transport.
+tokio = { workspace = true, optional = true, features = ["net", "io-util"] }
+tokio-tungstenite = { version = "0.24", optional = true, default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+rustls = { version = "0.23", optional = true, default-features = false, features = [
+    "ring",
+] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "sink",
+] }
+# real-only: VT-switch lock ioctl for the lock-down.
+libc = { version = "0.2", optional = true }
+
+[dev-dependencies]
+charter-primitives = { workspace = true }

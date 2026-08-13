@@ -1,0 +1,16 @@
+#!/bin/sh
+# postrm — reload systemd after files are gone. State under /var/lib/charter is
+# left in place on remove; purge clears it.
+set -e
+
+case "$1" in
+    remove)
+        systemctl daemon-reload || true
+        ;;
+    purge)
+        rm -rf /var/lib/charter || true
+        systemctl daemon-reload || true
+        ;;
+esac
+
+exit 0

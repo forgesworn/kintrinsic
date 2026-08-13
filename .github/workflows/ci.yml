@@ -1,0 +1,53 @@
+name: CI
+# Private-repo minutes are paid: this gate covers ONLY the root TS SDK
+# (eslint src/, tsc, root vitest), so it runs only when that surface can
+# change. Site/docs/app/android/linux pushes don't burn it.
+on:
+  push:
+    branches: [main, dev, 'feat/**', 'fix/**', 'chore/**']
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'eslint.config.*'
+      - 'vitest.config.*'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'eslint.config.*'
+      - 'vitest.config.*'
+      - '.github/workflows/ci.yml'
+
+# A newer push supersedes the run in flight — never pay for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npx vitest run --coverage

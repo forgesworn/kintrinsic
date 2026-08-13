@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "org.forgesworn.charter",
+      "sha256_cert_fingerprints": [
+        "D9:C7:F3:DE:D3:86:E9:AD:36:BD:FF:31:D0:7B:31:C6:C6:BF:E2:37:9E:C3:3D:E7:A2:B6:F6:AC:68:0F:BB:42"
+      ]
+    }
+  }
+]

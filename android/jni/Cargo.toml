@@ -1,0 +1,77 @@
+[package]
+name = "charter-jni"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "charter_jni"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["real-relay"]
+# The live wss:// relay client (rustls + compiled-in webpki roots). On by
+# default; host tests build with --no-default-features and inject a mock.
+real-relay = ["charter-sys/real-relay"]
+# Test-only entry points + mock injection seams. NEVER in the shipped .so
+# (CI asserts the release feature graph carries no `mock`).
+mock = ["charter-sys/mock", "charter-verify/mock", "charter-transport/mock"]
+
+[dependencies]
+jni = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono-tz = { version = "0.10", default-features = false }
+# The broker's async port traits (SystemLayer effects, TransportFacade).
+async-trait = "0.1"
+# CLOCK_BOOTTIME for the monotonic clock (counts across doze/suspend).
+libc = "0.2"
+# OS RNG for NIP-59 wrap keys (bionic getrandom(2) on Android).
+getrandom = "0.2"
+# Wipe the machine secret on drop (S12) — a compiler-fence'd memset the
+# optimiser is not allowed to elide, unlike a hand-rolled loop over a buffer
+# nothing reads afterwards.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+# One current-thread runtime drives the blocking relay facade (§2.3).
+tokio = { version = "1", default-features = false, features = ["rt"] }
+
+# The shared decide/verify/crypto core (hoisted to ../../core — port-spec §1).
+# default-features = false everywhere: the shipped .so must never carry `mock`.
+charter-primitives = { path = "../../core/crates/charter-primitives" }
+charter-crypto = { path = "../../core/crates/charter-crypto" }
+charter-proto = { path = "../../core/crates/charter-proto" }
+charter-schedule = { path = "../../core/crates/charter-schedule" }
+charter-spine = { path = "../../core/crates/charter-spine", default-features = false }
+charter-verify = { path = "../../core/crates/charter-verify", default-features = false }
+charter-transport = { path = "../../core/crates/charter-transport", default-features = false }
+charter-sys = { path = "../../core/crates/charter-sys", default-features = false }
+charter-content = { path = "../../core/crates/charter-content" }
+charter-webpolicy = { path = "../../core/crates/charter-webpolicy" }
+
+[dev-dependencies]
+charter-testkit = { path = "../../core/crates/charter-testkit" }
+# Enables charter-verify::test_support (TestGuardian, ClauseBuilder) + the
+# in-memory MockRelayTransport in host tests only — feature unification keeps
+# `mock` OUT of the release .so.
+charter-verify = { path = "../../core/crates/charter-verify", features = ["mock"] }
+charter-sys = { path = "../../core/crates/charter-sys", features = ["mock"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# Standalone workspace while core/ stays a sibling; joins nothing.
+[workspace]
+
+[[example]]
+name = "live_guardian"
+required-features = ["mock"]
+
+[[example]]
+name = "relay_probe"
+required-features = ["mock"]
+
+[[example]]
+name = "unwrap_probe"
+required-features = ["mock"]
+
+[[example]]
+name = "fire_ask"
+required-features = ["mock"]

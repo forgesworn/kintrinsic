@@ -1,0 +1,227 @@
+{
+  "note": "Canonical learning clause vectors — pins MyCharter (TS producer) ↔ warden (Rust: GrantLearning parse). Learning apps are time-free: focused time credits the learning bucket, not the screen budget. Site apps carry a VERIFIED domain closure (resolver pin); native apps carry an executable identity. issuedAt fixed for determinism.",
+  "vectors": [
+    {
+      "name": "khan_site_uncapped",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "apps": [
+          {
+            "id": "khan-academy",
+            "label": "Khan Academy",
+            "kind": "site",
+            "url": "https://www.khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "paused": false,
+        "capMinutes": null,
+        "appCount": 1
+      },
+      "input": {
+        "enabled": true,
+        "apps": [
+          {
+            "id": "khan-academy",
+            "label": "Khan Academy",
+            "kind": "site",
+            "url": "https://www.khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_system_app",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "apps": [
+          {
+            "id": "gcompris",
+            "label": "GCompris",
+            "kind": "native",
+            "exec": "/usr/bin/gcompris-qt"
+          }
+        ]
+      },
+      "expect": {
+        "paused": false,
+        "capMinutes": null,
+        "appCount": 1
+      },
+      "input": {
+        "enabled": true,
+        "apps": [
+          {
+            "id": "gcompris",
+            "label": "GCompris",
+            "kind": "native",
+            "exec": "/usr/bin/gcompris-qt"
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_home_project_trusted",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "apps": [
+          {
+            "id": "examplegame",
+            "label": "ExampleGame",
+            "kind": "native",
+            "exec": "/home/child/projects/examplegame/run.sh",
+            "trusted": true
+          }
+        ]
+      },
+      "expect": {
+        "paused": false,
+        "capMinutes": null,
+        "appCount": 1
+      },
+      "input": {
+        "enabled": true,
+        "apps": [
+          {
+            "id": "examplegame",
+            "label": "ExampleGame",
+            "kind": "native",
+            "exec": "/home/child/projects/examplegame/run.sh",
+            "trusted": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "capped_two_hours",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "capMinutes": 120,
+        "apps": [
+          {
+            "id": "khan-academy",
+            "label": "Khan Academy",
+            "kind": "site",
+            "url": "https://www.khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "paused": false,
+        "capMinutes": 120,
+        "appCount": 1
+      },
+      "input": {
+        "enabled": true,
+        "capMinutes": 120,
+        "apps": [
+          {
+            "id": "khan-academy",
+            "label": "Khan Academy",
+            "kind": "site",
+            "url": "https://www.khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "paused_clause",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "paused": true,
+        "apps": []
+      },
+      "expect": {
+        "paused": true,
+        "capMinutes": null,
+        "appCount": 0
+      },
+      "input": {
+        "enabled": false,
+        "apps": []
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "bad_version",
+      "payload": {
+        "v": 2,
+        "issuedAt": 1782734400,
+        "apps": []
+      }
+    },
+    {
+      "name": "site_without_domains",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "apps": [
+          {
+            "id": "khan-academy",
+            "label": "Khan Academy",
+            "kind": "site",
+            "url": "https://www.khanacademy.org/"
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_without_url",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "apps": [
+          {
+            "id": "khan-academy",
+            "label": "Khan Academy",
+            "kind": "site",
+            "domains": [
+              "khanacademy.org"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_without_exec",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "apps": [
+          {
+            "id": "gcompris",
+            "label": "GCompris",
+            "kind": "native"
+          }
+        ]
+      }
+    }
+  ]
+}

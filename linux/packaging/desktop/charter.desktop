@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic
+GenericName=Screen Time & Family Limits
+Comment=Set up Kintrinsic, adjust screen time, connect your phone, and recover access — all in one place
+Exec=charter-console
+Icon=charter
+Terminal=false
+Categories=System;Settings;Security;
+Keywords=parental;screen time;limits;bedtime;family;wardship;charter;children;
+StartupWMClass=Kintrinsic
+StartupNotify=true

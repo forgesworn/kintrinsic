@@ -1,0 +1,26 @@
+[package]
+name = "charter-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["mock"]
+# Forward the system-layer mock/real choice (charter-verify only needs the
+# ConsumedIdStore trait, but test_support uses the mock SeedSigner).
+mock = ["charter-sys/mock"]
+real = ["charter-sys/real"]
+
+[dependencies]
+charter-primitives = { workspace = true }
+charter-crypto = { workspace = true }
+charter-proto = { workspace = true }
+charter-schedule = { workspace = true }
+charter-sys = { workspace = true, default-features = false }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+charter-testkit = { workspace = true }
+serde = { workspace = true }

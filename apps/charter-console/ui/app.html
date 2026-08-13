@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kintrinsic</title>
+<style>
+  :root {
+    --paper:#f4f2ec; --card:#ffffff; --card-2:#faf9f5;
+    --ink:#1d1a17; --ink-2:#4c463f; --ink-3:#847d72; --ink-4:#a9a297;
+    --line:#e6e1d6; --line-2:#efece4;
+    --wax:#8f2a24; --wax-deep:#732019; --wax-soft:rgba(143,42,36,.08); --wax-glow:rgba(143,42,36,.16);
+    --leaf:#3c7e70; --leaf-soft:rgba(60,126,112,.12);
+    --amber:#9a6516; --amber-soft:rgba(154,101,22,.12);
+    --sidebar:#211d1a; --sidebar-2:#2a2521; --sidebar-line:#38322c;
+    --sidebar-ink:#ece7dd; --sidebar-ink-2:#b3a99c; --sidebar-ink-3:#7d7469;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+    --mono:ui-monospace,"Cascadia Code","SF Mono",Menlo,Consolas,monospace;
+    --r-s:9px; --r-m:13px; --r-l:18px; --r-xl:24px;
+    --sh-1:0 1px 2px rgba(29,26,23,.05);
+    --sh-2:0 4px 18px rgba(29,26,23,.07);
+    --sh-3:0 14px 44px rgba(29,26,23,.12);
+    --ease:cubic-bezier(.2,.7,.2,1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#17140f; --card:#211d18; --card-2:#26221c;
+      --ink:#efe9dd; --ink-2:#c2b9a9; --ink-3:#8d8375; --ink-4:#6b6357;
+      --line:#332d25; --line-2:#2b261f;
+      --wax:#c9564a; --wax-deep:#b0453b; --wax-soft:rgba(201,86,74,.13); --wax-glow:rgba(201,86,74,.22);
+      --leaf:#5fb3a1; --leaf-soft:rgba(95,179,161,.15);
+      --amber:#d29b45; --amber-soft:rgba(210,155,69,.15);
+      --sidebar:#0f0d0a; --sidebar-2:#1a1612; --sidebar-line:#2a241d;
+      --sidebar-ink:#efe9dd; --sidebar-ink-2:#b3a99c; --sidebar-ink-3:#6b6357;
+      --sh-1:0 1px 2px rgba(0,0,0,.3); --sh-2:0 4px 18px rgba(0,0,0,.4); --sh-3:0 14px 44px rgba(0,0,0,.55);
+    }
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body {
+    font-family:var(--sans); background:var(--paper); color:var(--ink);
+    font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;
+    overflow:hidden; user-select:none;
+  }
+  @media (prefers-reduced-motion:reduce){ *{ animation:none!important; transition:none!important; } }
+  ::selection{ background:var(--wax-glow); }
+  button { font:inherit; color:inherit; cursor:pointer; border:0; background:none; }
+  input { font:inherit; }
+  :focus-visible { outline:2.5px solid var(--wax); outline-offset:2px; border-radius:6px; }
+
+  .app { display:grid; grid-template-columns:236px 1fr; height:100vh; }
+
+  /* ---------------- sidebar ---------------- */
+  .side { background:var(--sidebar); color:var(--sidebar-ink); display:flex; flex-direction:column; border-right:1px solid var(--sidebar-line); }
+  .brand { display:flex; align-items:center; gap:11px; padding:20px 20px 18px; }
+  .brand .seal { width:34px; height:34px; flex:0 0 auto; filter:drop-shadow(0 2px 6px rgba(0,0,0,.35)); }
+  .brand h1 { font-family:var(--serif); font-size:1.32rem; font-weight:600; letter-spacing:-.01em; }
+  .brand .tag { font-size:.66rem; letter-spacing:.16em; text-transform:uppercase; color:var(--sidebar-ink-3); font-family:var(--mono); margin-top:1px; }
+  .nav { padding:8px 12px; display:flex; flex-direction:column; gap:2px; flex:1; }
+  .nav .lbl { font-family:var(--mono); font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--sidebar-ink-3); padding:14px 12px 6px; }
+  .nav button.item {
+    display:flex; align-items:center; gap:12px; width:100%; text-align:left;
+    padding:10px 12px; border-radius:var(--r-m); color:var(--sidebar-ink-2);
+    font-size:.94rem; font-weight:500; transition:background .16s var(--ease), color .16s var(--ease);
+  }
+  .nav button.item:hover { background:var(--sidebar-2); color:var(--sidebar-ink); }
+  .nav button.item.active { background:var(--sidebar-2); color:var(--sidebar-ink); box-shadow:inset 3px 0 0 var(--wax); }
+  .nav button.item .ic { width:19px; height:19px; flex:0 0 auto; opacity:.9; }
+  .nav button.item .dot { margin-left:auto; width:7px; height:7px; border-radius:50%; }
+  .dot.ok{ background:var(--leaf); } .dot.warn{ background:var(--amber); } .dot.off{ background:var(--ink-4); }
+  .side .foot { padding:14px 20px 18px; border-top:1px solid var(--sidebar-line); font-size:.74rem; color:var(--sidebar-ink-3); line-height:1.5; }
+  .side .foot b { color:var(--sidebar-ink-2); font-weight:600; }
+
+  /* ---------------- main ---------------- */
+  .main { overflow-y:auto; position:relative; }
+  .main::-webkit-scrollbar{ width:11px; } .main::-webkit-scrollbar-thumb{ background:var(--line); border-radius:8px; border:3px solid var(--paper); }
+  .view { max-width:760px; margin:0 auto; padding:40px 44px 80px; animation:fade .34s var(--ease); }
+  @keyframes fade{ from{ opacity:0; transform:translateY(8px);} to{ opacity:1; transform:none;} }
+  .eyebrow { font-family:var(--mono); font-size:.68rem; letter-spacing:.18em; text-transform:uppercase; color:var(--wax); font-weight:600; }
+  h2.title { font-family:var(--serif); font-size:2rem; font-weight:600; letter-spacing:-.015em; line-height:1.1; margin:8px 0 6px; }
+  .lede { color:var(--ink-2); font-size:1.02rem; max-width:52ch; }
+
+  .card { background:var(--card); border:1px solid var(--line); border-radius:var(--r-l); box-shadow:var(--sh-1); padding:22px 24px; }
+  .card + .card { margin-top:16px; }
+  .card.pad-lg { padding:26px 28px; }
+  .stack { display:flex; flex-direction:column; gap:16px; margin-top:26px; }
+  .row { display:flex; align-items:center; gap:14px; }
+  .row-between { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+  .grow { flex:1; min-width:0; }
+  .muted { color:var(--ink-3); font-size:.9rem; }
+  .card-title { font-family:var(--serif); font-size:1.22rem; font-weight:600; }
+
+  /* status hero */
+  .shield { display:flex; align-items:center; gap:18px; }
+  .shield .glyph { width:58px; height:58px; border-radius:16px; display:grid; place-items:center; flex:0 0 auto; }
+  .shield .glyph.ok { background:var(--leaf-soft); color:var(--leaf); }
+  .shield .glyph.off { background:var(--amber-soft); color:var(--amber); }
+  .shield h3 { font-family:var(--serif); font-size:1.5rem; font-weight:600; line-height:1.15; }
+  .shield p { color:var(--ink-2); font-size:.96rem; margin-top:2px; }
+
+  .pill { display:inline-flex; align-items:center; gap:6px; font-size:.76rem; font-weight:600; padding:3px 10px; border-radius:100px; font-family:var(--mono); letter-spacing:.02em; }
+  .pill.ok{ background:var(--leaf-soft); color:var(--leaf); } .pill.warn{ background:var(--amber-soft); color:var(--amber); } .pill.off{ background:var(--line); color:var(--ink-3); }
+  .pill .d{ width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+  /* child card */
+  .child { display:flex; align-items:center; gap:16px; }
+  .child .av { width:46px; height:46px; border-radius:13px; background:var(--wax-soft); color:var(--wax); display:grid; place-items:center; font-family:var(--serif); font-weight:700; font-size:1.3rem; flex:0 0 auto; }
+  .child .meta { flex:1; min-width:0; }
+  .child .name { font-weight:600; font-size:1.05rem; }
+  .child .sub { color:var(--ink-3); font-size:.86rem; margin-top:1px; }
+  .facts { display:grid; grid-template-columns:1fr 1fr; gap:10px 20px; margin-top:16px; padding-top:16px; border-top:1px solid var(--line-2); }
+  .fact .k { font-size:.72rem; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-3); font-family:var(--mono); }
+  .fact .v { font-weight:600; font-size:1.02rem; margin-top:1px; font-variant-numeric:tabular-nums; }
+
+  /* buttons */
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:11px 18px; border-radius:var(--r-m); font-weight:600; font-size:.95rem; transition:transform .14s var(--ease), box-shadow .18s var(--ease), background .16s; }
+  .btn:active { transform:translateY(1px); }
+  .btn-wax { background:var(--wax); color:#fff; box-shadow:0 2px 10px var(--wax-glow); }
+  .btn-wax:hover { background:var(--wax-deep); box-shadow:0 6px 18px var(--wax-glow); }
+  .btn-ghost { background:transparent; color:var(--ink); border:1.5px solid var(--line); }
+  .btn-ghost:hover { border-color:var(--ink-3); }
+  .btn-soft { background:var(--wax-soft); color:var(--wax); }
+  .btn-soft:hover { background:var(--wax-glow); }
+  .btn-block { width:100%; }
+  .btn:disabled { opacity:.5; cursor:default; transform:none; box-shadow:none; }
+  .btn-lg { padding:13px 22px; font-size:1rem; }
+
+  /* form controls */
+  .field { display:block; }
+  .field .flabel { font-weight:600; font-size:.9rem; margin-bottom:7px; display:block; }
+  .field .fhint { color:var(--ink-3); font-size:.82rem; margin-top:6px; }
+  .input, select.input { width:100%; padding:11px 13px; border:1.5px solid var(--line); border-radius:var(--r-m); background:var(--card-2); color:var(--ink); transition:border-color .15s; }
+  .input:focus { outline:none; border-color:var(--wax); }
+  textarea.input { resize:vertical; min-height:70px; font-family:var(--mono); font-size:.86rem; line-height:1.5; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+  /* time pickers */
+  .timegrid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .stepper { display:flex; align-items:center; gap:0; border:1.5px solid var(--line); border-radius:var(--r-m); overflow:hidden; background:var(--card-2); }
+  .stepper button { width:44px; height:46px; font-size:1.3rem; color:var(--ink-2); transition:background .14s; }
+  .stepper button:hover { background:var(--wax-soft); color:var(--wax); }
+  .stepper .val { flex:1; text-align:center; font-weight:600; font-size:1.05rem; font-variant-numeric:tabular-nums; }
+
+  /* QR / connect */
+  .qr-wrap { display:flex; gap:26px; align-items:flex-start; }
+  @media (max-width:640px){ .qr-wrap{ flex-direction:column; align-items:center; } }
+  .qr { background:#fff; padding:14px; border-radius:var(--r-l); box-shadow:var(--sh-2); width:230px; height:230px; flex:0 0 auto; display:grid; place-items:center; }
+  .qr svg { width:100%; height:100%; }
+  .qr.empty { display:grid; place-items:center; color:var(--ink-4); text-align:center; font-size:.8rem; background:var(--card-2); border:1px dashed var(--line); }
+  .steps { counter-reset:s; display:flex; flex-direction:column; gap:14px; }
+  .steps li { list-style:none; display:flex; gap:12px; }
+  .steps li::before { counter-increment:s; content:counter(s); flex:0 0 auto; width:24px; height:24px; border-radius:50%; background:var(--wax-soft); color:var(--wax); font-family:var(--serif); font-weight:700; font-size:.86rem; display:grid; place-items:center; margin-top:1px; }
+  .steps li .txt { font-size:.94rem; color:var(--ink-2); }
+  .steps li .txt b { color:var(--ink); }
+  .code-chip { font-family:var(--mono); font-size:.8rem; background:var(--card-2); border:1px solid var(--line); border-radius:8px; padding:9px 11px; word-break:break-all; color:var(--ink-2); margin-top:6px; }
+
+  /* recovery */
+  .rec-opt { display:flex; align-items:center; gap:14px; padding:16px 18px; border:1px solid var(--line); border-radius:var(--r-m); }
+  .rec-opt + .rec-opt { margin-top:10px; }
+  .rec-opt .ic { width:22px; height:22px; flex:0 0 auto; color:var(--ink-3); }
+
+  .banner { display:flex; gap:11px; align-items:flex-start; padding:13px 15px; border-radius:var(--r-m); font-size:.9rem; }
+  .banner.info { background:var(--wax-soft); color:var(--ink-2); }
+  .banner.ok { background:var(--leaf-soft); color:var(--ink-2); }
+  .banner.warn { background:var(--amber-soft); color:var(--ink-2); }
+  .banner .bi { flex:0 0 auto; margin-top:1px; }
+
+  /* ---------------- today ---------------- */
+  .clock { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .clock .big { font-family:var(--serif); font-size:3.4rem; font-weight:600; line-height:1; letter-spacing:-.025em; font-variant-numeric:tabular-nums; }
+  .clock .big.locked { color:var(--wax); }
+  .clock .big.free { color:var(--leaf); }
+  .clock .unit { font-size:1.05rem; color:var(--ink-3); font-weight:500; }
+  .why { color:var(--ink-2); margin-top:10px; font-size:.98rem; }
+  .why b { color:var(--ink); }
+
+  .meter { margin-top:18px; }
+  .meter .bar { height:10px; border-radius:100px; background:var(--line); overflow:hidden; }
+  .meter .bar i { display:block; height:100%; border-radius:100px; background:var(--leaf); transition:width .4s var(--ease); }
+  .meter .bar i.tight { background:var(--amber); }
+  .meter .bar i.gone { background:var(--wax); }
+  .meter .ends { display:flex; justify-content:space-between; margin-top:7px; font-size:.82rem; color:var(--ink-3); font-variant-numeric:tabular-nums; }
+
+  .buckets { display:flex; flex-direction:column; gap:15px; margin-top:4px; }
+  .bkt .top { display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
+  .bkt .nm { font-weight:600; font-size:.97rem; }
+  .bkt .amt { font-size:.85rem; color:var(--ink-3); font-variant-numeric:tabular-nums; }
+  .bkt .bar { height:7px; border-radius:100px; background:var(--line); overflow:hidden; margin-top:7px; }
+  .bkt .bar i { display:block; height:100%; border-radius:100px; background:var(--leaf); }
+  .bkt .bar i.tight { background:var(--amber); } .bkt .bar i.gone { background:var(--wax); }
+  .bkt.spent .nm { color:var(--wax); }
+
+  /* amount chooser */
+  .chips { display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { padding:8px 15px; border-radius:100px; border:1.5px solid var(--line); font-weight:600; font-size:.9rem; font-variant-numeric:tabular-nums; transition:border-color .14s, background .14s, color .14s; }
+  .chip:hover { border-color:var(--ink-3); }
+  .chip.on { background:var(--wax); border-color:var(--wax); color:#fff; }
+  .give-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:16px; }
+  .btn-leaf { background:var(--leaf); color:#fff; }
+  .btn-leaf:hover { filter:brightness(.94); }
+
+  .stale { font-size:.82rem; color:var(--amber); font-weight:600; }
+
+  /* ---------------- popup (the tray's click target) ---------------- */
+  /* One tall column, no sidebar: it opens beside a panel, where there is far
+     more vertical room than horizontal. */
+  body.popup .app { grid-template-columns:1fr; }
+  body.popup .side { display:none; }
+  body.popup .view { max-width:none; padding:20px 18px 28px; }
+  body.popup .card { padding:16px 17px; border-radius:var(--r-m); }
+  body.popup .card.pad-lg { padding:18px 18px; }
+  body.popup .card + .card, body.popup .card[style*="margin-top"] { margin-top:11px!important; }
+  body.popup h2.title { font-size:1.34rem; margin:2px 0 4px; }
+  body.popup .lede { font-size:.92rem; }
+  body.popup .clock .big { font-size:2.7rem; }
+  body.popup .why { font-size:.9rem; margin-top:7px; }
+  body.popup .card-title { font-size:1.05rem; }
+  body.popup .give-row { grid-template-columns:1fr; gap:9px; }
+
+  /* the shape of the time left: one row per wall that is actually set */
+  .shape { display:flex; flex-direction:column; gap:9px; margin-top:14px;
+           padding-top:14px; border-top:1px solid var(--line-2); }
+  .shape .r { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+  .shape .k { color:var(--ink-3); font-size:.88rem; }
+  .shape .v { font-weight:600; font-variant-numeric:tabular-nums; }
+  .shape .r.binds .v { color:var(--wax); }
+  .shape .r.binds .k::after { content:" · runs out first"; color:var(--ink-4); font-size:.8rem; }
+
+  /* ask: quick amounts, then a slider for anything else */
+  .quick { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin-top:12px; }
+  .quick button { padding:13px 6px; border-radius:var(--r-m); border:1.5px solid var(--line);
+                  font-weight:700; font-size:1rem; background:var(--card-2);
+                  font-variant-numeric:tabular-nums; transition:border-color .14s, background .14s; }
+  .quick button:hover { border-color:var(--wax); background:var(--wax-soft); color:var(--wax); }
+  .quick button small { display:block; font-weight:500; font-size:.7rem; color:var(--ink-3); margin-top:1px; }
+  .quick button:hover small { color:var(--wax); }
+  .slider-wrap { margin-top:16px; padding-top:15px; border-top:1px solid var(--line-2); }
+  .slider-head { display:flex; align-items:baseline; justify-content:space-between; }
+  .slider-head .amt { font-family:var(--serif); font-size:1.5rem; font-weight:600;
+                      font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; margin:12px 0 4px; accent-color:var(--wax); height:22px; }
+  .ticks { display:flex; justify-content:space-between; font-size:.72rem; color:var(--ink-4);
+           font-family:var(--mono); }
+  .kvs { display:grid; grid-template-columns:auto 1fr; gap:7px 18px; margin-top:14px; padding-top:14px; border-top:1px solid var(--line-2); font-size:.9rem; }
+  .kvs dt { color:var(--ink-3); } .kvs dd { font-variant-numeric:tabular-nums; }
+
+  /* toast */
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:var(--sidebar); color:var(--sidebar-ink); padding:12px 20px; border-radius:100px; box-shadow:var(--sh-3); font-size:.9rem; font-weight:500; opacity:0; transition:opacity .25s, transform .25s var(--ease); pointer-events:none; display:flex; align-items:center; gap:9px; z-index:50; }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  .toast .d { width:8px; height:8px; border-radius:50%; background:var(--leaf); }
+  .toast.err .d{ background:var(--wax); }
+
+  .spinner { width:16px; height:16px; border:2.5px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
+  @keyframes spin{ to{ transform:rotate(360deg);} }
+  .hidden{ display:none!important; }
+  .sep { height:1px; background:var(--line-2); margin:22px 0; }
+  a.link { color:var(--wax); font-weight:600; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <svg class="seal" viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="112" fill="#241b12"/><svg x="96" y="96" width="320" height="320" viewBox="0 0 48 48"><g transform="translate(-17.698,-9.223) scale(1.7447)"><g transform="translate(-2.5,1)"><path fill="#e0a458" fill-rule="evenodd" d="M24 6c5 6.5 8 10.5 8 15.5a8 8 0 0 1-16 0C16 16.5 19 12.5 24 6Z M24 13c2.8 3.7 4.5 5.9 4.5 8.7a4.5 4.5 0 0 1-9 0c0-2.8 1.7-5.1 4.5-8.7Z"/></g><g transform="translate(31.5,14) rotate(22) scale(0.4) translate(-24,-17.75)"><path fill="#e0a458" fill-rule="evenodd" d="M24 6c5 6.5 8 10.5 8 15.5a8 8 0 0 1-16 0C16 16.5 19 12.5 24 6Z M24 13c2.8 3.7 4.5 5.9 4.5 8.7a4.5 4.5 0 0 1-9 0c0-2.8 1.7-5.1 4.5-8.7Z"/></g></g></svg></svg>
+      <div><h1>Kintrinsic</h1><div class="tag">This computer</div></div>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="lbl">Manage</div>
+      <button class="item active" data-view="today"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Today<span class="dot off" id="dot-today"></span></button>
+      <button class="item" data-view="home"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20h14V9.5"/><path d="M9.5 20v-5.5h5V20"/></svg>Home<span class="dot off" id="dot-home"></span></button>
+      <button class="item" data-view="time"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="17" cy="18" r="2.4"/></svg>The rules</button>
+      <button class="item" data-view="connect"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3M20 14v.01M14 20v.01M20 20v.01M17 20h.01M20 17h.01"/></svg>Connect a phone<span class="dot off" id="dot-connect"></span></button>
+      <div class="lbl">Safety</div>
+      <button class="item" data-view="recovery"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M21 3v6h-6"/><path d="M12 8v4l3 2"/></svg>Recovery</button>
+    </nav>
+    <div class="foot">Your admin account is never limited.<br><b>Private by design</b> — no cloud account, no tracking.</div>
+  </aside>
+
+  <main class="main" id="main"><div class="view" id="view"></div></main>
+</div>
+<div class="toast" id="toast"><span class="d"></span><span id="toast-msg"></span></div>
+
+<script>
+"use strict";
+// ------- bridge to the Rust host -------
+function send(obj){ if(window.ipc&&window.ipc.postMessage){ window.ipc.postMessage(JSON.stringify(obj)); } }
+let S = { configured:false, children:[], candidates:[], deviceCode:null, qr:null, paired:false, busy:false, viewer:{user:null,isWard:false} };
+// Popup mode (the tray's click target) is one tall column showing only Today.
+// The host sets this before any script runs, so the first paint is already the
+// right shape.
+// `?popup=1` is honoured too, so the popup layout can be opened and checked in
+// an ordinary browser — the host sets the flag, but a mode that can only ever
+// be seen by launching the real binary is a mode that goes unreviewed.
+const POPUP = !!window.__charterPopup || /[?&]popup=1/.test(location.search);
+let route = "today";
+let draft = {}; // per-child edit drafts keyed by user
+let adjustMins = 15; // the amount the give/take buttons will move
+let askMins = 20;    // the slider's amount, in 5-minute steps
+// A spent group's own "ask for more" is a single fixed nudge, not a second
+// slider — mirrors charter-tray's BUCKET_ASK_MINUTES exactly.
+const BUCKET_ASK_MINUTES = 15;
+
+// Host pushes status here.
+window.__charter = function(data){
+  // The Rust host pushes an OBJECT (window.__charter({...})); the demo
+  // fallback pushes a STRING (JSON.stringify(SAMPLE)). Accept both — the
+  // old JSON.parse-only path threw on the host's object and silently
+  // swallowed EVERY real status, so the app was permanently stuck on the
+  // "not configured" screen even with a valid child on disk (found on-metal
+  // 2026-07-24, once the paint fix made the screen visible).
+  try { S = Object.assign(S, typeof data === "string" ? JSON.parse(data) : data); } catch(e){}
+  // Remember that a code was shown at least once, so "expired" is
+  // distinguishable from "never asked" — they need different words.
+  if (S.invited) S.invitedOnce = true;
+  S.busy = false;
+  render();
+};
+window.__toast = function(msg, kind){ showToast(msg, kind||"ok"); };
+window.__busy = function(on){ S.busy = !!on; render(); };
+
+function showToast(msg, kind){
+  const t=document.getElementById("toast"); document.getElementById("toast-msg").textContent=msg;
+  t.className="toast show"+(kind==="err"?" err":""); clearTimeout(t._h);
+  t._h=setTimeout(()=>{ t.className="toast"; }, 2600);
+}
+
+// ------- helpers -------
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function cap(s){ return s? s.charAt(0).toUpperCase()+s.slice(1):""; }
+function hmToMin(hm){ const [h,m]=hm.split(":").map(Number); return h*60+m; }
+function fmtWindow(w,b){ return w+" – "+b; }
+function fmtDaily(m){ if(m%60===0) return (m/60)+(m/60===1?" hour":" hours"); const h=Math.floor(m/60),mm=m%60; return h? h+"h "+mm+"m" : mm+" min"; }
+
+// ------- views -------
+function render(){
+  if(POPUP){ document.body.classList.add("popup"); route = "today"; }
+  document.querySelectorAll("#nav .item").forEach(b=>b.classList.toggle("active", b.dataset.view===route));
+  document.getElementById("dot-home").className = "dot "+(S.configured?"ok":"warn");
+  document.getElementById("dot-connect").className = "dot "+(S.paired?"ok":(S.configured?"warn":"off"));
+  const lv = live(currentChild());
+  document.getElementById("dot-today").className = "dot "+(!lv?"off":(lv.locked?"warn":"ok"));
+  // A ward can read every page but authorise nothing, so the pages that exist
+  // only to hand out a pairing code or unfreeze the machine are noise to them
+  // — and offering a button that always refuses is the bug being fixed here.
+  const ward = isWard();
+  document.querySelectorAll("#nav .item").forEach(b=>{
+    const adminOnly = b.dataset.view==="connect" || b.dataset.view==="recovery";
+    b.classList.toggle("hidden", ward && adminOnly);
+  });
+  document.querySelector(".side .foot").innerHTML = ward
+    ? `This is <b>your</b> Kintrinsic.<br>You can see everything here. Changes need a grown-up.`
+    : `Your admin account is never limited.<br><b>Private by design</b> — no cloud account, no tracking.`;
+  const v=document.getElementById("view");
+  const main=document.getElementById("main");
+  // A same-page render is a REFRESH (the Today tick, an answer landing) — it
+  // must not steal the reader's place mid-scroll (Robin's laptop,
+  // 2026-08-03: the page jumped to the top every 5s). Only a real
+  // NAVIGATION starts at the top.
+  const navigated = render._route !== route;
+  render._route = route;
+  const keep = navigated ? 0 : main.scrollTop;
+  v.innerHTML = ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery}[route]||vToday)();
+  wire();
+  main.scrollTop = keep;
+}
+
+function isWard(){ return !!(S.viewer && S.viewer.isWard); }
+function live(c){ return (c && c.live) || null; }
+
+// ------- Today -------
+// The screen BOTH the ward and the guardian land on. Same numbers for each —
+// a device that hides its own limits from the person living under them is the
+// thing Kintrinsic exists to replace — and a different set of verbs: the ward can
+// ask for more, the guardian can give or take it back.
+function vToday(){
+  if(!S.configured) return notReady("Set up Kintrinsic first","Choose your child's account on the Home screen to start keeping limits.");
+  const c = currentChild();
+  const lv = live(c);
+  const ward = isWard();
+  const who = ward ? "Today" : cap(c.user)+" today";
+  const picker = (!ward && S.children.length>1) ? `
+    <label class="field" style="margin-bottom:20px"><span class="flabel">Whose day?</span>
+      <select class="input" id="child-select">${S.children.map(k=>`<option value="${esc(k.user)}" ${k.user===c.user?"selected":""}>${esc(cap(k.user))}</option>`).join("")}</select></label>`:"";
+
+  if(!lv){
+    return `
+      <p class="eyebrow">${esc(ward?"Your day":"Live")}</p>
+      <h2 class="title">${esc(who)}</h2>
+      ${picker}
+      <div class="card pad-lg" style="margin-top:24px">
+        <div class="banner warn"><span>Kintrinsic isn't reporting from this computer yet. If it was just installed or restarted, this fills in within a few seconds.</span></div>
+        <p class="muted" style="margin-top:14px">The agreed limits are still in force — this panel just hasn't heard the live figures. See <b>The rules</b> for what is set.</p>
+      </div>`;
+  }
+
+  return `
+    <p class="eyebrow">${esc(ward?"Your day":"Live")}</p>
+    <h2 class="title">${esc(who)}</h2>
+    ${picker}
+    ${heroCard(lv, ward)}
+    ${dayMeter(lv)}
+    ${bucketsCard(lv, ward)}
+    ${ward ? askToOpenCard(lv) : ""}
+    ${ward ? askCard(lv) : giveCard(c, lv)}
+  `;
+}
+
+// The SHAPE of the time left: one row per wall that is actually set, with the
+// binding one called out. "40 minutes left" alone can't say whether that is
+// the day's allowance running out or the evening closing — and those need
+// different plans. Rows only appear for caps that exist, so a ward on a plain
+// daily limit sees one line, not a table of "not set".
+function timeShape(lv){
+  const rows = [];
+  const day = lv.budgetDaySeconds, week = lv.budgetWeekSeconds, sched = lv.scheduleSeconds;
+  // Which one actually stops them first — among the caps that are set.
+  const live = [["day",day],["week",week],["sched",sched]].filter(([,v])=>v>=0);
+  const binds = live.length ? live.reduce((a,b)=>b[1]<a[1]?b:a)[0] : null;
+  if(day>=0)   rows.push(["day",  "Left today",           fmtClock(day)]);
+  if(week>=0)  rows.push(["week", "Left this week",       fmtClock(week)]);
+  if(sched>=0) rows.push(["sched","Until the day's hours end", fmtClock(sched)]);
+  if(rows.length<2) return ""; // one wall needs no breakdown; the hero said it
+  return `<div class="shape">${rows.map(([k,label,val])=>
+    `<div class="r ${k===binds?"binds":""}"><span class="k">${esc(label)}</span><span class="v">${esc(val)}</span></div>`
+  ).join("")}</div>`;
+}
+
+function heroCard(lv, ward){
+  const s = lv.effectiveSeconds;
+  const unbounded = s < 0;
+  const cls = lv.locked ? "locked" : (unbounded ? "free" : "");
+  const big = lv.locked ? "Locked" : (unbounded ? "No limit" : fmtClock(s));
+  const unit = (lv.locked||unbounded) ? "" : `<span class="unit">left${lv.buckets&&lv.buckets.length?" of screen time":""}</span>`;
+  const adj = lv.__adjust|0;
+  return `
+    <div class="card pad-lg" style="margin-top:22px">
+      <div class="clock"><span class="big ${cls}">${esc(big)}</span>${unit}</div>
+      <p class="why">${whySentence(lv, ward)}</p>
+      ${timeShape(lv)}
+      ${adj?`<p class="muted" style="margin-top:8px">${adj>0?"+":""}${adj} minutes ${adj>0?"given":"taken off"} at this computer today.</p>`:""}
+      ${lv.__stale?`<p class="stale" style="margin-top:10px">These figures are ${esc(lv.__stale)} old — Kintrinsic may have stopped.</p>`:""}
+    </div>`;
+}
+
+// Why the number is what it is. A lock that cannot explain itself is the
+// product being opaque at the worst possible moment, so every branch names
+// both the wall and the way out.
+function whySentence(lv, ward){
+  const you = ward ? "you" : "they";
+  const your = ward ? "your" : "their";
+  if(lv.locked){
+    switch(lv.reason){
+      case "schedule": return lv.nextOpen
+        ? `Outside ${your} agreed hours. Back on at <b>${esc(fmtAt(lv.nextOpen))}</b>.`
+        : `Outside ${your} agreed hours.`;
+      case "budget":   return `${cap(your)} time for today is used up. It starts again tomorrow.`;
+      case "standdown":return `A grown-up called time. It stays locked until they lift it.`;
+      case "malformed":return `Kintrinsic couldn't read the agreed limits, so it has locked to be safe. Check <b>The rules</b>.`;
+      default:         return `Locked. Kintrinsic can't say why just now, so it has erred on the safe side.`;
+    }
+  }
+  const bits = [];
+  if(lv.scheduleSeconds >= 0) bits.push(`the day's hours end in <b>${esc(fmtClock(lv.scheduleSeconds))}</b>`);
+  if(lv.budgetSeconds >= 0)   bits.push(`there's <b>${esc(fmtClock(lv.budgetSeconds))}</b> of screen time left`);
+  if(!bits.length) return `No screen-time limits are set on this computer${ward?"":" for them"} — only whatever else has been agreed.`;
+  const binding = (lv.scheduleSeconds>=0 && lv.budgetSeconds>=0)
+    ? (lv.scheduleSeconds < lv.budgetSeconds ? " The hours run out first." : " The daily time runs out first.")
+    : "";
+  return bits.join(", and ") + "." + binding;
+}
+
+function dayMeter(lv){
+  const used = lv.usedTodaySeconds;
+  if(used==null || lv.budgetSeconds<0) return "";
+  const total = used + Math.max(0, lv.budgetSeconds);
+  if(total<=0) return "";
+  const pct = Math.max(0, Math.min(100, Math.round(100*used/total)));
+  const left = Math.max(0, lv.budgetSeconds);
+  const k = left===0 ? "gone" : (left < 15*60 ? "tight" : "");
+  return `
+    <div class="card" style="margin-top:16px">
+      <div class="row-between"><div class="card-title">Screen time today</div>
+        <span class="muted">${esc(fmtClock(used))} of ${esc(fmtClock(total))}</span></div>
+      <div class="meter"><div class="bar"><i class="${k}" style="width:${pct}%"></i></div>
+        <div class="ends"><span>${esc(fmtClock(used))} used</span><span>${esc(fmtClock(left))} left</span></div></div>
+    </div>`;
+}
+
+// One named allowance's own detail line: day alone, or day-and-week joined —
+// mirrors charter-tray's `bucket_time_detail` exactly, right down to the
+// weekly-only dedupe (no day cap of its own reads identical to its week
+// figure, so it says the one true sentence rather than the same number
+// twice).
+function bucketAmount(b){
+  const lim = b.limitSeconds|0, used = b.usedSeconds|0, rem = b.remainingSeconds|0;
+  if(!b.capped) return `${fmtClock(used)} used · not capped today`;
+  if(b.spent)   return `${fmtClock(used)} used · finished for today`;
+  const week = b.weekLimitSeconds!=null && b.weekLimitSeconds>=0;
+  if(week){
+    const weekRem = Math.max(0, b.weekRemainingSeconds|0);
+    if(weekRem === rem) return `${fmtClock(weekRem)} left this week`;
+    return `${fmtClock(rem)} left today · ${fmtClock(weekRem)} left this week`;
+  }
+  return `${fmtClock(used)} of ${fmtClock(lim)}`;
+}
+
+function bucketsCard(lv, ward){
+  const bs = lv.buckets || [];
+  if(!bs.length) return "";
+  const rows = bs.map(b=>{
+    const lim = b.limitSeconds|0, used = b.usedSeconds|0, rem = b.remainingSeconds|0;
+    const pct = lim>0 ? Math.max(0, Math.min(100, Math.round(100*used/lim))) : 0;
+    const k = !b.capped ? "" : (b.spent ? "gone" : (rem < 10*60 ? "tight" : ""));
+    // A SPENT group is the one moment "ask for more" of it makes sense —
+    // ward-only, like every other ask verb, and only once a phone is paired
+    // (there is nobody to ask otherwise).
+    const ask = (ward && S.paired && b.capped && b.spent)
+      ? `<button class="btn btn-ghost btn-block" data-ask-bucket="${esc(b.id)}" data-ask-bucket-label="${esc(b.label)}" style="margin-top:8px">Ask for more ${esc(b.label)} time</button>`
+      : "";
+    return `<div class="bkt ${b.spent&&b.capped?"spent":""}">
+        <div class="top"><span class="nm">${esc(b.label)}</span><span class="amt">${esc(bucketAmount(b))}</span></div>
+        <div class="bar"><i class="${k}" style="width:${b.capped?pct:0}%"></i></div>
+        ${ask}
+      </div>`;
+  }).join("");
+  return `
+    <div class="card" style="margin-top:16px">
+      <div class="card-title" style="margin-bottom:14px">Its own allowance</div>
+      <div class="buckets">${rows}</div>
+      <p class="muted" style="margin-top:14px;font-size:.84rem">When one of these runs out, only its own apps stop — the rest of the day carries on.</p>
+    </div>`;
+}
+
+// Apps presently gated by `blocked`/`askFirst` — an explicit invitation to
+// ask instead of a flat wall. Ward-only (the guardian sets these from
+// Kintrinsic, not here) and only once a phone is paired.
+function askToOpenCard(lv){
+  const apps = lv.askFirst || [];
+  if(!apps.length || !S.paired) return "";
+  const rows = apps.map(a=>`
+    <button class="btn btn-ghost btn-block" data-ask-open="${esc(a.pkg)}" data-ask-open-label="${esc(a.label)}" style="margin-top:8px">Ask to open ${esc(a.label)}</button>`
+  ).join("");
+  return `
+    <div class="card pad-lg" style="margin-top:16px">
+      <div class="card-title">Ask to open something</div>
+      <p class="muted" style="margin-top:4px">These need a yes from your guardian first — they'll get your ask on their phone.</p>
+      ${rows}
+    </div>`;
+}
+
+function askCard(lv){
+  if(!S.paired) return `
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Need more time?</div>
+      <p class="muted" style="margin-top:4px">No phone is connected to this computer, so an ask has nowhere to go. Talk to whoever set it up — they can change it here.</p>
+    </div>`;
+  // What an ask actually buys. An ask adds to the ward's SCREEN TIME (or
+  // pushes the window, whichever is stopping them) — it cannot top up a named
+  // bucket, because there is no way on the wire to say which bucket you mean.
+  // Saying so is the honest move: an ask that silently landed in the wrong
+  // pool is exactly the trap that once made "+30 minutes past bedtime" buy
+  // nothing at all, and a ward whose Play is spent deserves to know that more
+  // screen time will not reopen it.
+  const spent = (lv.buckets||[]).filter(b=>b.capped && b.spent);
+  const note = spent.length
+    ? `<div class="banner warn" style="margin-top:12px"><span>${esc(spent.map(b=>b.label).join(" and "))} ${spent.length>1?"are":"is"} finished for today. More time here adds <b>general screen time</b> — it doesn't reopen ${spent.length>1?"them":"it"}. Only a grown-up can change that.</span></div>`
+    : "";
+  return `
+    <div class="card pad-lg" style="margin-top:16px">
+      <div class="card-title">Ask for more time</div>
+      <p class="muted" style="margin-top:4px">Goes to your guardian's phone. They decide — you'll get a message either way.</p>
+      <div class="quick">
+        ${[10,20,30].map(m=>`<button data-ask="${m}">${m}<small>minutes</small></button>`).join("")}
+      </div>
+      <div class="slider-wrap">
+        <div class="slider-head"><span class="muted">Or choose an amount</span><span class="amt" id="ask-amt">${askMins} min</span></div>
+        <input type="range" id="ask-range" min="5" max="120" step="5" value="${askMins}">
+        <div class="ticks"><span>5 min</span><span>1 hour</span><span>2 hours</span></div>
+        <button class="btn btn-wax btn-block" id="do-ask" style="margin-top:12px">${busySpin("Ask for "+askMins+" minutes")}</button>
+      </div>
+      ${note}
+    </div>`;
+}
+
+function giveCard(c, lv){
+  const none = lv.scheduleSeconds<0 && lv.budgetSeconds<0;
+  if(none) return `
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Give or take time</div>
+      <p class="muted" style="margin-top:4px">${esc(cap(c.user))} has no daily limit or bedtime set, so there's no time to give or take. Set their limits under <b>The rules</b> first.</p>
+    </div>`;
+  return `
+    <div class="card pad-lg" style="margin-top:16px">
+      <div class="card-title">Give or take time</div>
+      <p class="muted" style="margin-top:4px">Changes just today's time for ${esc(cap(c.user))}, and resets tomorrow. It comes off whichever limit they're actually up against.</p>
+      <div class="chips" style="margin-top:14px">${amountChips()}</div>
+      <div class="give-row">
+        <button class="btn btn-leaf" id="do-give">${busySpin("Give "+adjustMins+" min")}</button>
+        <button class="btn btn-ghost" id="do-take">${busySpin("Take "+adjustMins+" min back")}</button>
+      </div>
+      <p class="muted" style="margin-top:12px;text-align:center;font-size:.84rem">Asks for your admin password, like a terminal does.</p>
+    </div>`;
+}
+
+function amountChips(){
+  return [5,15,30,60].map(m=>`<button class="chip ${m===adjustMins?"on":""}" data-amt="${m}">${m} min</button>`).join("");
+}
+
+// h:mm for anything over an hour, plain minutes below it — and never "0m" for
+// a live number, which reads as "nothing left" when seconds remain.
+function fmtClock(s){
+  if(s==null||s<0) return "—";
+  const t=Math.max(0,Math.round(s));
+  const h=Math.floor(t/3600), m=Math.floor((t%3600)/60);
+  if(h>0) return h+"h "+(m<10?"0":"")+m+"m";
+  if(m>0) return m+" min";
+  return t>0 ? "under a minute" : "0 min";
+}
+function fmtAt(unix){
+  try { return new Date(unix*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
+  catch(e){ return "later"; }
+}
+
+function vHome(){
+  if(!S.configured){
+    const opts = S.candidates.length
+      ? `<select class="input" id="pick-child">${S.candidates.map(u=>`<option value="${esc(u)}">${esc(u)}</option>`).join("")}</select>`
+      : `<div class="muted">No ordinary user accounts were found to manage. Create a standard account for your child in <b>System Settings → Users</b>, then come back.</div>`;
+    return `
+      <p class="eyebrow">Welcome</p>
+      <h2 class="title">Set up Kintrinsic</h2>
+      <p class="lede">Kintrinsic keeps agreed screen-time on this computer — gently, and even offline. Choose the account your child uses to begin.</p>
+      <div class="card pad-lg stack" style="margin-top:28px">
+        ${S.candidates.length?`
+        <label class="field"><span class="flabel">Your child's account on this computer</span>${opts}
+          <span class="fhint">This removes that account from the administrators and starts keeping its limits. Your own admin account is never touched.</span>
+        </label>
+        <button class="btn btn-wax btn-lg btn-block" id="do-setup">${busySpin("Set up Kintrinsic")}</button>`:opts}
+      </div>`;
+  }
+  const kids = S.children.map(c=>childCard(c,true)).join("");
+  return `
+    <p class="eyebrow">Overview</p>
+    <h2 class="title">Home</h2>
+    <div class="card pad-lg" style="margin-top:24px">
+      <div class="shield">
+        <div class="glyph ok"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-3 8-7 9-4-1-7-4.4-7-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <div class="grow"><h3>Kintrinsic is protecting this computer</h3><p>Limits are kept on the device itself — they hold even with no internet.</p></div>
+        <span class="pill ${S.paired?"ok":"warn"}"><span class="d"></span>${S.paired?"Phone connected":"No phone yet"}</span>
+      </div>
+    </div>
+    <div class="stack">${kids}</div>
+    ${S.paired?"":`<div class="card" style="margin-top:16px"><div class="row-between"><div class="grow"><div class="card-title">Manage from your phone</div><p class="muted" style="margin-top:3px">Connect your phone to change limits and approve “more time” from anywhere.</p></div><button class="btn btn-soft" data-goto="connect">Connect →</button></div></div>`}
+  `;
+}
+
+function childCard(c, withActions){
+  const initial = cap((c.user||"?").charAt(0));
+  const lv = live(c);
+  // What is true right now, next to what was agreed — the card used to show
+  // only the agreement, which is why the console could look fine while the
+  // ward sat locked out.
+  const now = !lv ? `<span class="pill off"><span class="d"></span>No live figures</span>`
+    : lv.locked ? `<span class="pill warn"><span class="d"></span>Locked now</span>`
+    : lv.effectiveSeconds < 0 ? `<span class="pill ok"><span class="d"></span>No limit today</span>`
+    : `<span class="pill ok"><span class="d"></span>${esc(fmtClock(lv.effectiveSeconds))} left</span>`;
+  return `
+    <div class="card">
+      <div class="child">
+        <div class="av">${esc(initial)}</div>
+        <div class="meta"><div class="name">${esc(cap(c.user))}</div><div class="sub">${c.paired?"Connected to a guardian":"Kept on this device"}</div></div>
+        ${now}
+        ${withActions?`<button class="btn btn-ghost" data-goto="today" data-user="${esc(c.user)}">Open</button>`:""}
+      </div>
+      <div class="facts">
+        <div class="fact"><div class="k">Screen allowed</div><div class="v">${esc(fmtWindow(c.wake,c.bedtime))}</div></div>
+        <div class="fact"><div class="k">Time each day</div><div class="v">${esc(fmtDaily(c.daily))}</div></div>
+      </div>
+    </div>`;
+}
+
+function vTime(){
+  if(!S.configured) return notReady("Set up Kintrinsic first","Choose your child's account on the Home screen to start keeping limits.");
+  const c = currentChild();
+  // The ward sees exactly what is being kept — that is the whole promise — but
+  // as a statement, not a form. An editable form that refuses on Save is the
+  // failure this release exists to remove; it is not made better by leaving
+  // the fields enabled.
+  if(isWard()) return `
+    <p class="eyebrow">Your day</p>
+    <h2 class="title">The rules</h2>
+    <p class="lede">This is what has been agreed for this computer. Only a grown-up can change it.</p>
+    <div class="card pad-lg" style="margin-top:26px">
+      <div class="facts" style="margin-top:0;padding-top:0;border-top:0">
+        <div class="fact"><div class="k">Screen allowed</div><div class="v">${esc(fmtWindow(c.wake,c.bedtime))}</div></div>
+        <div class="fact"><div class="k">Time each day</div><div class="v">${esc(fmtDaily(c.daily))}</div></div>
+      </div>
+      ${c.learningKhan?`<div class="banner ok" style="margin-top:18px"><span>Khan Academy is <b>time-free</b> — time you spend in it doesn't use up your screen time.</span></div>`:""}
+    </div>
+    <div class="card" style="margin-top:16px">
+      <p class="muted">Think something here is wrong? Say so — Kintrinsic works best when it matches what you actually agreed.</p>
+    </div>
+    <button class="btn btn-soft" data-goto="today" style="margin-top:18px">← See today</button>`;
+  const d = draft[c.user] || (draft[c.user]={ wake:c.wake, bedtime:c.bedtime, daily:c.daily });
+  const picker = S.children.length>1 ? `
+    <label class="field" style="margin-bottom:22px"><span class="flabel">Whose limits?</span>
+      <select class="input" id="child-select">${S.children.map(k=>`<option value="${esc(k.user)}" ${k.user===c.user?"selected":""}>${esc(cap(k.user))}</option>`).join("")}</select></label>`:"";
+  return `
+    <p class="eyebrow">Screen time · ${esc(cap(c.user))}</p>
+    <h2 class="title">Set the limits</h2>
+    <p class="lede">Choose when the computer can be used, and how long each day. Changes take effect within seconds.</p>
+    <div class="card pad-lg stack" style="margin-top:26px">
+      ${picker}
+      <div>
+        <span class="flabel">Allowed hours</span>
+        <div class="timegrid" style="margin-top:2px">
+          ${timeStepper("wake", d.wake, "From")}
+          ${timeStepper("bedtime", d.bedtime, "Until")}
+        </div>
+      </div>
+      <div class="sep"></div>
+      <div>
+        <span class="flabel">Time each day</span>
+        ${dailyStepper(d.daily)}
+      </div>
+      <button class="btn btn-wax btn-lg btn-block" id="do-save" style="margin-top:6px">${busySpin("Save limits")}</button>
+    </div>
+    <div class="card pad-lg stack" style="margin-top:16px">
+      <div class="row-between">
+        <div class="grow">
+          <div class="card-title">Learning time</div>
+          <p class="muted" style="margin-top:3px">Khan Academy becomes its own app on this computer, locked to the site — and time in it is <b>time-free</b> (it never uses up screen time).</p>
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="learn-khan" ${c.learningKhan?"checked":""} style="width:18px;height:18px;accent-color:var(--wax,#8b2d2d)">
+        <span>Khan Academy is time-free</span>
+      </label>
+      <p class="muted" style="font-size:.8rem">More learning apps, their own projects, and a daily learning cap are on the phone app (Connect a phone).</p>
+      <button class="btn btn-soft btn-block" id="do-learning">${busySpin("Save learning time")}</button>
+    </div>`;
+}
+
+function timeStepper(key,val,label){
+  return `<div><div class="muted" style="margin-bottom:6px;font-size:.8rem">${label}</div>
+    <div class="stepper"><button data-step="${key}" data-d="-1">−</button><div class="val" id="v-${key}">${esc(val)}</div><button data-step="${key}" data-d="1">+</button></div></div>`;
+}
+function dailyStepper(min){
+  return `<div class="stepper" style="max-width:280px"><button data-step="daily" data-d="-1">−</button><div class="val" id="v-daily">${esc(fmtDaily(min))}</div><button data-step="daily" data-d="1">+</button></div>`;
+}
+
+function vConnect(){
+  if(!S.configured) return notReady("Set up Kintrinsic first","Connect a phone once this computer is set up on the Home screen.");
+  if(S.paired) return `
+    <p class="eyebrow">Connect a phone</p>
+    <h2 class="title">Connected to a guardian</h2>
+    <p class="lede">This computer takes its limits from your phone. You can set limits, see time used, and approve “more time” from Kintrinsic — anywhere.</p>
+    <div class="card pad-lg" style="margin-top:26px">
+      <div class="banner ok"><svg class="bi" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg><span>Your phone is connected.</span></div>
+      <button class="btn btn-ghost btn-block" id="do-invite" style="margin-top:18px">${busySpin("Connect a different phone")}</button>
+      <p class="muted" style="margin-top:10px;text-align:center">Connecting another phone replaces this one.</p>
+    </div>`;
+
+  // Waiting for the scan: the QR carries a one-time code, so the phone can
+  // finish the pairing by itself. This page flips on its own when it lands.
+  // NO QR is drawn until that code exists — a scannable code with no token in
+  // it looks like it works and silently cannot.
+  const qr = S.qr
+    ? `<div class="qr">${S.qr}</div>`
+    : `<div class="qr empty">Press <b>Show the<br>pairing code</b><br>to begin</div>`;
+  // An expired code is GONE, not greyed out — the daemon refuses it, so
+  // leaving it scannable is the same trap as showing one with no token.
+  const expired = S.invitedOnce && !S.invited;
+  return `
+    <p class="eyebrow">Connect a phone</p>
+    <h2 class="title">Manage from your phone</h2>
+    <p class="lede">Link your phone once. Then you set limits, see time used, and approve “more time” from Kintrinsic — anywhere.</p>
+    <div class="card pad-lg" style="margin-top:26px">
+      ${S.invited?"":`<div class="stack" style="margin-bottom:18px">
+        ${expired?`<div class="banner warn"><span>That code has expired. Show a new one.</span></div>`:""}
+        <button class="btn btn-wax btn-block" id="do-invite">${busySpin(expired?"Show a new pairing code":"Show the pairing code")}</button>
+        <p class="muted" style="text-align:center">Asks for your admin password — only a parent can invite a phone.</p>
+      </div>`}
+      <div class="qr-wrap">
+        ${qr}
+        <ol class="steps">
+          <li><span class="txt">Press <b>Show the pairing code</b> above — a code appears here.</span></li>
+          <li><span class="txt">On your phone, open the <b>Kintrinsic</b> app, add your child, and choose <b>Set up a computer</b>.</span></li>
+          <li><span class="txt">Point the camera at the code. This page then says <b>“Connected”</b> on its own.</span></li>
+        </ol>
+      </div>
+      ${S.invited?`<p class="muted" style="margin-top:16px;text-align:center"><span class="spinner"></span> Waiting for your phone… this code expires in ${fmtLeft(S.secsLeft)}.</p>`:""}
+      ${S.deviceCode?`<div class="code-chip">${esc(S.deviceCode)}</div>`:""}
+    </div>
+    <details class="card stack" style="margin-top:18px">
+      <summary style="cursor:pointer;font-weight:600">No internet? Enter a code by hand</summary>
+      <p class="muted" style="margin-top:8px">Scanning needs both devices online. Offline, paste the pairing link from Kintrinsic instead.</p>
+      <label class="field"><span class="flabel">Pairing link from Kintrinsic</span>
+        <textarea class="input" id="pair-link" placeholder="bunker://…" spellcheck="false"></textarea></label>
+      <label class="field"><span class="flabel">Child's ID <span class="muted">(optional)</span></span>
+        <input class="input" id="pair-subject" placeholder="Leave blank unless Kintrinsic gave you one" spellcheck="false" autocomplete="off"></label>
+      <button class="btn btn-soft btn-block" id="do-pair">${busySpin("Connect this computer")}</button>
+    </details>`;
+}
+
+function vRecovery(){
+  return `
+    <p class="eyebrow">Safety</p>
+    <h2 class="title">Recovery</h2>
+    <p class="lede">Your own admin account is never limited, so you can always get back in. If a limit ever locks your child out at the wrong moment, pause or turn off Kintrinsic here.</p>
+    <div class="card pad-lg" style="margin-top:26px">
+      <div class="rec-opt"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg><div class="grow"><b>Pause</b><div class="muted">Lift all limits for now — resume when you're ready.</div></div></div>
+      <div class="rec-opt"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg><div class="grow"><b>Resume</b><div class="muted">Put agreed limits back in force.</div></div></div>
+      <div class="rec-opt"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64A9 9 0 1 1 5.64 6.64"/><path d="M12 2v10"/></svg><div class="grow"><b>Turn off</b><div class="muted">Stop Kintrinsic entirely and unfreeze everything.</div></div></div>
+      <button class="btn btn-ghost btn-block" id="do-recovery" style="margin-top:18px">Open Recovery</button>
+      <p class="muted" style="margin-top:12px;text-align:center">Opens the safety tool — it asks for your admin password.</p>
+    </div>`;
+}
+
+function notReady(t,s){ return `<p class="eyebrow">Not yet</p><h2 class="title">${esc(t)}</h2><p class="lede">${esc(s)}</p><button class="btn btn-wax" data-goto="home" style="margin-top:22px">Go to Home</button>`; }
+function fmtLeft(s){ if(s==null) return "10 minutes"; const m=Math.floor(s/60), r=s%60; return m>0? (m+" min "+(r<10?"0":"")+r+"s") : (r+"s"); }
+function busySpin(label){ return S.busy? `<span class="spinner"></span> Working…` : esc(label); }
+// A ward only ever sees their OWN record — never a sibling's. Not a security
+// boundary (the daemon's files are readable either way, deliberately), but
+// showing a child someone else's day is nobody's idea of the product.
+function currentChild(){
+  if(isWard()){
+    const mine = S.children.find(c=>c.user===S.viewer.user);
+    if(mine) return mine;
+  }
+  return S._sel && S.children.find(c=>c.user===S._sel) || S.children[0];
+}
+
+// ------- interactions -------
+function wire(){
+  document.querySelectorAll("[data-goto]").forEach(b=>b.onclick=()=>{ if(b.dataset.user) S._sel=b.dataset.user; route=b.dataset.goto; render(); });
+  const setup=document.getElementById("do-setup");
+  if(setup) setup.onclick=()=>{ const u=document.getElementById("pick-child").value; act(); send({cmd:"setup",user:u}); };
+  const cs=document.getElementById("child-select"); if(cs) cs.onchange=()=>{ S._sel=cs.value; render(); };
+  const save=document.getElementById("do-save");
+  if(save) save.onclick=()=>{ const c=currentChild(); const d=draft[c.user]; act(); send({cmd:"limits",user:c.user,wake:d.wake,bedtime:d.bedtime,daily:d.daily}); };
+  const learn=document.getElementById("do-learning");
+  if(learn) learn.onclick=()=>{ const c=currentChild(); const on=document.getElementById("learn-khan").checked; act(); send({cmd:"learning",user:c.user,khan:on}); };
+  document.querySelectorAll("[data-step]").forEach(b=>b.onclick=()=>step(b.dataset.step, +b.dataset.d));
+  const pair=document.getElementById("do-pair");
+  if(pair) pair.onclick=()=>{ const link=document.getElementById("pair-link").value.trim(); const subj=document.getElementById("pair-subject").value.trim(); if(!link){ showToast("Paste the pairing link","err"); return; } act(); send({cmd:"pair",link,subject:subj}); };
+  const inv=document.getElementById("do-invite");
+  if(inv) inv.onclick=()=>{ act(); send({cmd:"invite"}); };
+  const rec=document.getElementById("do-recovery"); if(rec) rec.onclick=()=>{ send({cmd:"recovery"}); showToast("Opening Recovery…"); };
+  // Amount chooser + the give/take/ask verbs.
+  document.querySelectorAll("[data-amt]").forEach(b=>b.onclick=()=>{ adjustMins=+b.dataset.amt; render(); });
+  const give=document.getElementById("do-give");
+  if(give) give.onclick=()=>{ const c=currentChild(); act(); send({cmd:"adjust",user:c.user,minutes:adjustMins}); };
+  const take=document.getElementById("do-take");
+  if(take) take.onclick=()=>{ const c=currentChild(); act(); send({cmd:"adjust",user:c.user,minutes:-adjustMins}); };
+  // Quick amounts ask straight away — one tap, no second decision.
+  document.querySelectorAll("[data-ask]").forEach(b=>b.onclick=()=>{
+    askMins = +b.dataset.ask; act(); send({cmd:"ask",minutes:askMins});
+  });
+  // A spent group's own "ask for more" — a fixed nudge amount, not a second
+  // negotiation on top of the one above.
+  document.querySelectorAll("[data-ask-bucket]").forEach(b=>b.onclick=()=>{
+    act();
+    send({cmd:"askBucket", bucketId:b.dataset.askBucket, label:b.dataset.askBucketLabel, minutes:BUCKET_ASK_MINUTES});
+  });
+  // "Ask to open X" — one askFirst app, one tap.
+  document.querySelectorAll("[data-ask-open]").forEach(b=>b.onclick=()=>{
+    act();
+    send({cmd:"askOpen", pkg:b.dataset.askOpen, label:b.dataset.askOpenLabel});
+  });
+  // The slider updates its own label live rather than re-rendering: a full
+  // render on every drag step rebuilds the input and the thumb jumps out from
+  // under the finger.
+  const range=document.getElementById("ask-range");
+  if(range) range.oninput=()=>{
+    askMins = +range.value;
+    const amt=document.getElementById("ask-amt"); if(amt) amt.textContent = askMins+" min";
+    const go=document.getElementById("do-ask"); if(go && !S.busy) go.textContent = "Ask for "+askMins+" minutes";
+  };
+  const ask=document.getElementById("do-ask");
+  if(ask) ask.onclick=()=>{ act(); send({cmd:"ask",minutes:askMins}); };
+}
+function act(){ S.busy=true; render(); }
+function step(key,dir){
+  const c=currentChild(); const d=draft[c.user];
+  if(key==="daily"){ d.daily=Math.max(15,Math.min(600, d.daily + dir*15)); document.getElementById("v-daily").textContent=fmtDaily(d.daily); return; }
+  let m=hmToMin(d[key]); m=(m + dir*30 + 1440)%1440; const hh=String(Math.floor(m/60)).padStart(2,"0"), mm=String(m%60).padStart(2,"0"); d[key]=hh+":"+mm;
+  document.getElementById("v-"+key).textContent=d[key];
+}
+
+document.querySelectorAll("#nav .item").forEach(b=>b.onclick=()=>{ route=b.dataset.view; render(); });
+
+// The popup is a glance, so Escape dismisses it — it opens over whatever the
+// ward was doing, and hunting for a close button to get back is friction the
+// full app doesn't have (there, Escape does nothing).
+document.addEventListener("keydown", e=>{ if(POPUP && e.key==="Escape") send({cmd:"close"}); });
+
+// initial paint + ask host for status
+render();
+send({cmd:"refresh"});
+// While a pairing code is on screen the phone finishes the job over the
+// network, so nothing here would otherwise tell us it landed. Poll until it
+// does — then the Connect page flips to "Connected" unaided.
+setInterval(()=>{ if(route==="connect" && !S.paired && (S.invited||S.invitedOnce)) send({cmd:"refresh"}); }, 1000);
+// Today is a LIVE panel: the numbers move on their own as time is used, and a
+// panel that only updates when you press something is how a ward ends up
+// staring at a figure that stopped being true ten minutes ago. Only while
+// that page is showing, and never mid-action (a refresh lands as a re-render
+// and would clear the spinner under a pending password prompt).
+setInterval(()=>{ if(route==="today" && !S.busy) send({cmd:"refresh"}); }, 5000);
+// demo fallback: if no host answers within 400ms (browser preview), show sample data
+setTimeout(()=>{ if(!S._got){ window.__charter(JSON.stringify(SAMPLE)); } }, 400);
+window.__charter = (function(orig){ return function(j){ S._got=true; orig(j); }; })(window.__charter);
+const SAMPLE = {"configured":true,"paired":true,"deviceCode":"a592958e c2ac5236 552a3abd 2bea9508 95c1eb91 9ffa497b c0422d9f 8d02b187","qr":null,"viewer":{"user":"axel","isWard":true},"children":[{"user":"axel","wake":"07:00","bedtime":"19:00","daily":120,"paired":true,"live":{"effectiveSeconds":2760,"scheduleSeconds":9300,"budgetSeconds":2760,"budgetDaySeconds":2760,"budgetWeekSeconds":18000,"extensionSeconds":0,"locked":false,"reason":null,"nextOpen":null,"usedTodaySeconds":4440,"buckets":[{"id":"play","label":"Play","usedSeconds":1320,"limitSeconds":3600,"remainingSeconds":2280,"weekLimitSeconds":18000,"weekRemainingSeconds":7800,"spent":false,"capped":true},{"id":"video","label":"Video","usedSeconds":1800,"limitSeconds":1800,"remainingSeconds":0,"weekLimitSeconds":-1,"weekRemainingSeconds":-1,"spent":true,"capped":true}],"askFirst":[{"pkg":"com.mojang.minecraftpe","label":"Minecraft"}],"__adjust":15,"__stale":null}}],"candidates":["axel"]};
+</script>
+</body>
+</html>

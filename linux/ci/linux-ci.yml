@@ -1,0 +1,76 @@
+# Charter for Linux headless CI gate.
+#
+# NOTE: this file lives under `linux/ci/` (not `.github/workflows/`) because the
+# overnight work is scoped to `linux/`. A maintainer wires it into
+# `.github/workflows/linux-ci.yml` (path-filtered to `linux/**`) at integration
+# time. Actions are SHA-pinned there.
+#
+# The bare host lacks WebKitGTK/GTK/libsoup and `sudo`, so the Tauri `src-tauri`
+# Rust build and the `cargo deny` / GTK steps run only on a provisioned image.
+
+name: linux-ci
+on:
+  push:
+    paths: ["linux/**", "core/**"]
+  pull_request:
+    paths: ["linux/**", "core/**"]
+
+defaults:
+  run:
+    working-directory: linux
+
+jobs:
+  # The shared decide/verify/crypto core (hoisted per graphene/port-spec.md §1)
+  # gates first: its tests protect BOTH substrates (Linux warden + Android .so).
+  core-gate:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test (mock)
+        run: cargo test --workspace
+      - name: test (real, headless)
+        run: cargo test --workspace --features charter-sys/real,charter-verify/real,charter-transport/real
+      - name: build (real, compile-only)
+        run: cargo build --workspace --no-default-features --features charter-sys/real,charter-verify/real,charter-transport/real
+      - name: lock parity (core vs linux)
+        working-directory: .
+        run: bash scripts/cargo-lock-parity.sh
+
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test (mock)
+        run: cargo test --workspace
+      - name: test (real, headless)
+        # The charterd runtime tests (display/VT resolution, lock copy, X argv
+        # parsing, ...) are behind `--features real` and never ran in the mock
+        # gate — this step covers them. They are pure/headless (no X server,
+        # no root): the privileged paths stay hardware-verified on the box.
+        run: cargo test --workspace --features real
+      - name: build (real, compile-only)
+        run: cargo build --workspace --no-default-features --features real
+
+  web-ui:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: linux/apps/charter-gui/ui
+    steps:
+      - uses: actions/checkout@v4
+      # Phase 8 slots the vite build + vitest run here.
+      - run: echo "vite build && vitest run (Phase 8)"
+
+  # The WebKitGTK-provisioned src-tauri build and `cargo deny check` run on a
+  # separate provisioned image, not the bare gate host (Phase 8 / CI image).

@@ -1,0 +1,12 @@
+node_modules
+dist
+dev-dist
+*.local
+.DS_Store
+coverage
+# D3 (artifact-hosting decoupling): release artifacts live on Blossom, never
+# in the repo. Ignore every binary form so a stray publish can't re-commit one;
+# the manifests (charter-apk.json etc.) name the Blossom URL instead.
+public/*.apk
+public/*.apk.txt
+public/*.deb

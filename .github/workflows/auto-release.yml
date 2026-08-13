@@ -1,0 +1,25 @@
+name: auto-release
+
+# Releases the ROOT npm SDK only, so only SDK-surface pushes need it —
+# docs/site/app/android/linux pushes used to burn an anvil run for nothing
+# (private-repo minutes are paid).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/auto-release.yml'
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  auto-release:
+    uses: forgesworn/anvil/.github/workflows/auto-release.yml@v0

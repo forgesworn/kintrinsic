@@ -1,0 +1,37 @@
+{
+  "vectors": [
+    {
+      "name": "paused_locks",
+      "clause": { "v": 1, "posture": "allowlist", "ageTier": "young", "paused": true, "issuedAt": 1 },
+      "lists": [],
+      "expect": { "locked": true }
+    },
+    {
+      "name": "revoked_unrestricted",
+      "clause": { "v": 1, "posture": "blocklist", "ageTier": "older", "revoked": true, "issuedAt": 1 },
+      "lists": [],
+      "expect": { "locked": false }
+    },
+    {
+      "name": "allowlist_quorum_two",
+      "clause": { "v": 1, "posture": "allowlist", "ageTier": "young", "curators": ["aa", "bb"], "quorumN": 2, "issuedAt": 1 },
+      "lists": [
+        { "curator": "aa", "entries": [ { "domain": "kids.example", "rating": "kid-safe" }, { "domain": "solo.example", "rating": "kid-safe" } ] },
+        { "curator": "bb", "entries": [ { "domain": "kids.example", "rating": "kid-safe" } ] }
+      ],
+      "expect": { "locked": false, "posture": "allowlist", "allow": ["kids.example"] }
+    },
+    {
+      "name": "allowlist_parent_deny_beats_curator",
+      "clause": { "v": 1, "posture": "allowlist", "ageTier": "young", "curators": ["aa"], "quorumN": 1, "parentDeny": ["kids.example"], "parentAllow": ["parent.example"], "issuedAt": 1 },
+      "lists": [ { "curator": "aa", "entries": [ { "domain": "kids.example", "rating": "kid-safe" } ] } ],
+      "expect": { "locked": false, "posture": "allowlist", "allow": ["parent.example"] }
+    },
+    {
+      "name": "blocklist_curator_and_category",
+      "clause": { "v": 1, "posture": "blocklist", "ageTier": "older", "curators": ["aa"], "blockCategories": ["gambling"], "issuedAt": 1 },
+      "lists": [ { "curator": "aa", "entries": [ { "domain": "bad.example", "rating": "block" } ] } ],
+      "expect": { "locked": false, "posture": "blocklist", "block": ["bad.example"], "categories": ["gambling"] }
+    }
+  ]
+}

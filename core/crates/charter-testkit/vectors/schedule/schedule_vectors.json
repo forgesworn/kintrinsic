@@ -1,0 +1,425 @@
+{
+  "vectors": [
+    {
+      "name": "weekday_in_window_bst",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782752400,
+      "expect": {
+        "allow": true
+      }
+    },
+    {
+      "name": "weekday_before_window_bst",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782741600,
+      "expect": {
+        "allow": false,
+        "reason": "schedule_locked"
+      }
+    },
+    {
+      "name": "weekday_in_window_gmt",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1769446800,
+      "expect": {
+        "allow": true
+      }
+    },
+    {
+      "name": "weekday_after_window_gmt",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1769459400,
+      "expect": {
+        "allow": false,
+        "reason": "schedule_locked"
+      }
+    },
+    {
+      "name": "weekend_not_in_weekday_window",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782666000,
+      "expect": {
+        "allow": false,
+        "reason": "schedule_locked"
+      }
+    },
+    {
+      "name": "friday_2300_in_window",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              5
+            ],
+            "startMinute": 1320,
+            "endMinute": 360
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782511200,
+      "expect": {
+        "allow": true
+      }
+    },
+    {
+      "name": "saturday_0500_in_window",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              5
+            ],
+            "startMinute": 1320,
+            "endMinute": 360
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782532800,
+      "expect": {
+        "allow": false,
+        "reason": "schedule_locked"
+      }
+    },
+    {
+      "name": "saturday_0700_out_of_window",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              5
+            ],
+            "startMinute": 1320,
+            "endMinute": 360
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782541800,
+      "expect": {
+        "allow": false,
+        "reason": "schedule_locked"
+      }
+    },
+    {
+      "name": "weekend_first_window",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              6,
+              0
+            ],
+            "startMinute": 540,
+            "endMinute": 720
+          },
+          {
+            "daysOfWeek": [
+              6,
+              0
+            ],
+            "startMinute": 840,
+            "endMinute": 1080
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782550800,
+      "expect": {
+        "allow": true
+      }
+    },
+    {
+      "name": "weekend_gap_locked",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              6,
+              0
+            ],
+            "startMinute": 540,
+            "endMinute": 720
+          },
+          {
+            "daysOfWeek": [
+              6,
+              0
+            ],
+            "startMinute": 840,
+            "endMinute": 1080
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782561600,
+      "expect": {
+        "allow": false,
+        "reason": "schedule_locked"
+      }
+    },
+    {
+      "name": "weekend_second_window",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              6,
+              0
+            ],
+            "startMinute": 540,
+            "endMinute": 720
+          },
+          {
+            "daysOfWeek": [
+              6,
+              0
+            ],
+            "startMinute": 840,
+            "endMinute": 1080
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782572400,
+      "expect": {
+        "allow": true
+      }
+    },
+    {
+      "name": "empty_always_allow",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782702000,
+      "expect": {
+        "allow": true,
+        "reason": "always_allow"
+      }
+    },
+    {
+      "name": "revoked_blocks",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": null,
+        "revoked": true
+      },
+      "now_unix": 1782752400,
+      "expect": {
+        "allow": false,
+        "reason": "clause_revoked"
+      }
+    },
+    {
+      "name": "expired_blocks",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Europe/London",
+        "endDate": 1000,
+        "revoked": false
+      },
+      "now_unix": 1782752400,
+      "expect": {
+        "allow": false,
+        "reason": "clause_expired"
+      }
+    },
+    {
+      "name": "bad_tz_fails_open",
+      "clause": {
+        "schemaVersion": 1,
+        "kind": "schedule",
+        "mechanism": "static-data",
+        "windows": [
+          {
+            "daysOfWeek": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "startMinute": 960,
+            "endMinute": 1200
+          }
+        ],
+        "timezone": "Not/AZone",
+        "endDate": null,
+        "revoked": false
+      },
+      "now_unix": 1782702000,
+      "expect": {
+        "allow": true,
+        "reason": "no_clause"
+      }
+    }
+  ]
+}

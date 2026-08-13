@@ -1,0 +1,23 @@
+[package]
+name = "charter-lock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The on-display undismissable lock: a fullscreen, input-grabbing X11 window
+# (Mint Cinnamon is X11). x11rb speaks the X11 wire protocol in pure Rust, so it
+# needs no libxcb/Xlib C libraries — it builds on the headless gate and runs on
+# a provisioned desktop.
+
+[[bin]]
+name = "charter-lock"
+path = "src/main.rs"
+
+[dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["composite"] }
+# Pure-Rust TTF rasterizer for the panel's text (X core fonts render as tiny
+# bitmap `fixed` on modern servers). The DejaVu faces are vendored in assets/
+# (Bitstream Vera license — embedding permitted; see assets/DEJAVU-LICENSE).
+ab_glyph = "0.2"

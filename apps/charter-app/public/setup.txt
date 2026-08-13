@@ -1,0 +1,129 @@
+Setting up Kintrinsic — the plain guide (early access)
+======================================================
+
+Kintrinsic is cooperative, private screen-time and app limits for a child's Linux
+computer: a parent sets the rules, the child's computer enforces them (even
+offline), and no platform account is involved.
+
+This page is written to be read by a person OR handed to a chatbot. If you're
+stuck, paste this whole page (or its link, kintrinsic.app/setup.txt) into
+ChatGPT or Claude and say:
+
+  "I'm setting up Kintrinsic on my child's Linux laptop and my phone. Walk me
+   through it one step at a time, and ask me what I see on screen before moving
+   on."
+
+(This text mirrors the in-app guide at kintrinsic.app/setup.html.)
+
+
+THE PIECES
+----------
+- Kintrinsic on the computer / "charterd" — the enforcer. Runs ON the child's
+  Linux computer. It actually holds the limits (locks the screen, pauses apps),
+  even offline. Nothing works until this is installed on the computer. ("charter"
+  and "charterd" stay as its permanent under-the-hood command and service names.)
+- The Kintrinsic app on the parent's phone — the remote control where limits are
+  set and requests are approved. Installs as an APK (no Google Play needed). It
+  holds the parent's key; no account, no sign-up.
+- Signet — an optional keyholder app that can hold the parent's key instead of
+  the Kintrinsic app. Not needed for setup; skip it unless you want it.
+
+
+HONEST STATUS (please read)
+---------------------------
+- The enforcer installs from a downloaded package (no building) and its screen
+  lock, schedules, warnings and "ask for more time" are proven on real hardware.
+- Setting limits and approving requests FROM THE PHONE for a computer is newly
+  live — early-access families are the first through it. If anything fails,
+  limits set directly on the computer keep working, offline included.
+- Everything is private by design: no platform account, no location tracking,
+  no browsing history uploaded. The parent's key stays on the parent's device.
+
+
+REQUIREMENTS
+------------
+- A Linux Mint 22.x (or Ubuntu-based) computer for the child, running an X11
+  session (Mint's default; on the login screen pick "Cinnamon", not "Wayland").
+- A normal, non-admin account for the child (example username: kid).
+- A SEPARATE admin account for the parent (Kintrinsic removes the child from the
+  admin groups, so the parent must not manage the machine from the child's
+  account).
+
+
+STEP 1 — Install Kintrinsic on the child's computer
+---------------------------------------------------
+On the child's computer, logged in as the PARENT'S admin account:
+1. In a browser, get the installer from https://kintrinsic.app/download.html
+2. Double-click the downloaded file and choose "Install Package" (it asks for
+   the admin password).
+Terminal equivalent:
+    # from https://kintrinsic.app/download.html download the .deb, then run:
+    sudo apt install ./the-downloaded-file.deb
+Installing is safe and changes nothing yet — the child's account is untouched
+until Step 2. This puts one app in your menu, "Kintrinsic" — everything below
+happens inside it.
+
+LEARNING TIME (time-free learning apps)
+---------------------------------------
+Time in learning apps doesn't have to use up screen time. In the Kintrinsic app
+on the computer (or in the Kintrinsic app on your phone, with more options) turn
+on "Learning time" and tick Khan Academy: it appears on the child's computer as
+its own app, locked to the site — outside links simply don't load in it — and
+minutes spent there are time-free. Homework never costs their game time. On
+the phone you can also make the child's own programs time-free and set an
+optional daily learning cap. Note: learning apps in the browser itself still
+count as normal screen time — only the dedicated learning app is free (it
+needs the chromium package: sudo apt install chromium).
+
+
+STEP 2 — Lock the child's account down
+--------------------------------------
+Open "Kintrinsic" from the menu. On its Home screen, pick the child's account
+and press "Set up Kintrinsic" (it asks for the admin password), then confirm.
+Terminal equivalent: sudo charter-setup kid (replace kid with the child's
+username). Safe to re-run.
+This seeds gentle default limits immediately (screen allowed 07:00-20:00, 2
+hours a day) — tune them in the next step.
+
+
+STEP 3 — Set limits ON THE COMPUTER (works with no phone)
+---------------------------------------------------------
+In the same app, open "The rules", set the allowed hours and daily minutes, and
+Save. Within seconds it is enforcing. This is a complete, working setup with no
+phone needed.
+
+
+STEP 4 — Connect the parent's phone (recommended)
+-------------------------------------------------
+This lets the parent change limits, see time used, and approve "more time"
+requests from their phone.
+1. On the parent's phone, install the Kintrinsic app from
+   https://kintrinsic.app/download.html and turn on "Parent approval" (this
+   creates the parent's signing key on the phone).
+2. In the computer's Kintrinsic app, open "Connect a phone" — a QR code appears
+   (asks for the admin password first — only a parent can invite a phone).
+3. In the Kintrinsic app on the phone, add the child and choose "Set up a
+   computer", then point the phone's camera at the QR code. The computer's
+   screen says "Connected" on its own.
+No internet on either device? The "Connect a phone" screen has an offline path:
+paste the pairing link from the Kintrinsic app instead of scanning.
+That's it: limits set on the phone now reach the computer, and "ask for more
+time" requests appear under Approvals on the phone.
+
+
+DAY TO DAY (commands on the child's computer)
+---------------------------------------------
+    charter time-left        # time left today (works with or without a phone)
+    charter ask-for-more 15  # ask a parent for 15 more minutes (needs Step 4)
+    charter run ~/Game.AppImage   # ask a parent to allow an app (needs Step 4)
+    charter status           # check whether a request was answered
+The child doesn't need commands for the basics: the lock screen itself shows
+the schedule, time left, and an "Ask for more time" button once paired.
+
+
+RECOVERY (if a limit locks the child out wrongly)
+-------------------------------------------------
+The parent's admin account is never governed. Log in as the admin account, open
+"Kintrinsic" and go to "Recovery" (Pause / Resume / Turn off). If the desktop is
+unreachable, from the admin account or a console (Ctrl+Alt+F3):
+    sudo systemctl stop charterd.service   # stops and unfreezes everything

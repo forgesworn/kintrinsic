@@ -1,0 +1,21 @@
+# charter.rules — fapolicyd policy fragment (loaded from /etc/fapolicyd/rules.d).
+#
+# Model: default-deny execution. Only binaries charterd has approved (copied
+# into the content-addressed store and trusted by sha256) may execute from the
+# approved store. charterd manages the trust entries via fapolicyd-cli; this
+# fragment pins the store as an allow anchor and keeps the system paths working.
+#
+# Exact ordering/syntax is validated on the Mint VM (design Spike #1); this is
+# the shipped baseline.
+
+# Allow execution of trusted (charterd-approved, hash-pinned) files anywhere.
+allow perm=execute trust=1 all : all
+
+# Allow execution from the Charter approved-exec store (relocated approved bins).
+allow perm=execute all : dir=/var/lib/charter/approved/
+
+# Allow the system flatpak install tree (broker installs here, exec-allowed).
+allow perm=execute all : dir=/var/lib/flatpak/
+
+# Everything else that is not trusted is denied by the default-deny tail.
+deny_audit perm=execute all : all

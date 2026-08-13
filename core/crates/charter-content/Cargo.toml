@@ -1,0 +1,12 @@
+[package]
+name = "charter-content"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+charter-testkit = { workspace = true }

@@ -1,0 +1,62 @@
+{
+  "note": "Frozen cross-language vectors for the pairing short-authentication code (S6, review 2026-08-07). THE WHOLE POINT of this code is that two screens show the SAME six digits for the same pairing link: the guardian's QR screen in MyCharter (TypeScript, src/domain/pairingSas.ts), the ward's landing page at /pair (hand-written JS inside public/pair/index.html, which has no bundler and so cannot import the module), and the ward's own Charter app (Kotlin, PairingSas.kt) — which is the screen that actually renders in the verified App-Link flow, and therefore the one that matters. Three implementations exist because these three runtimes cannot share code. If they ever disagree, a family sees two different codes for the same link, concludes the check is broken, and taps through it — which is worse than never having shown a code at all. So every implementation is pinned to THIS file.",
+  "derivation": "code = decimal(first 3 bytes of SHA-256(\"charter-pair-sas:v1:\" + lowercase(pubkeyHex) + \":\" + token), big-endian) mod 1000000, zero-padded to 6 digits, rendered as \"NNN NNN\".",
+  "notOnTheWire": "This value is never transmitted. Both sides derive it independently from the (guardian pubkey, one-time token) they already hold, which is exactly what makes comparing them out loud meaningful. It is a comparison code, not a secret: the modulo bias on the largest residues is irrelevant and must not be 'fixed' in a way that breaks agreement.",
+  "vectors": [
+    {
+      "name": "the ordinary case",
+      "pubkeyHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+      "token": "0123456789abcdef0123456789abcdef",
+      "code": "895 208"
+    },
+    {
+      "name": "a different guardian, same token - THE attack this exists for",
+      "pubkeyHex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "token": "0123456789abcdef0123456789abcdef",
+      "code": "850 736"
+    },
+    {
+      "name": "same guardian, a fresh token - a code seen once is not replayable",
+      "pubkeyHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+      "token": "ffffffffffffffffffffffffffffffff",
+      "code": "517 170"
+    },
+    {
+      "name": "an upper-case pubkey normalizes to the same code",
+      "pubkeyHex": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+      "token": "0123456789abcdef0123456789abcdef",
+      "code": "895 208"
+    },
+    {
+      "name": "no token at all",
+      "pubkeyHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+      "token": "",
+      "code": "278 600"
+    },
+    {
+      "name": "a code with leading zeros - padding must not be dropped",
+      "pubkeyHex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "token": "t24",
+      "code": "006 865"
+    }
+  ],
+  "npubNote": "The npub shown beside the code, so the two screens can also be compared character for character when six digits are not enough. NIP-19 bech32 of the same x-only pubkey. Kotlin and the /pair page each hand-roll bech32; MyCharter uses nostr-tools.",
+  "npubVectors": [
+    {
+      "pubkeyHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+      "npub": "npub1424242424242424242424242424242424242424242424242424sg6tqgp"
+    },
+    {
+      "pubkeyHex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "npub": "npub1enxvenxvenxvenxvenxvenxvenxvenxvenxvenxvenxvenxvenxqn2pktz"
+    },
+    {
+      "pubkeyHex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
+    },
+    {
+      "pubkeyHex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "npub": "npub1mhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwsgldmpv"
+    }
+  ]
+}

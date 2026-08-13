@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Content-Security-Policy (S5, review 2026-08-07).
+
+      This origin's entire job is holding the guardian secret key — the root
+      identity that signs every clause, grant and RELEASE for the family — and
+      it had no CSP at all, on a long-lived auto-updating service worker. There
+      is no XSS sink in the app today (React escaping throughout, no
+      dangerouslySetInnerHTML anywhere in src/), so this is not patching a
+      hole; it is the control that keeps a FUTURE injection, or one bad npm
+      dependency, from becoming silent theft of the family's root of trust.
+
+      In the document rather than only in nginx on purpose: the header set in
+      DEPLOY.md is stricter (it can carry frame-ancestors, which a meta tag
+      cannot), but a policy that lives only in a hand-built vhost is a policy
+      that disappears the day the app is served from anywhere else.
+
+      Choices worth knowing:
+      - script-src 'self': no inline scripts, no CDN. The one thing that would
+        turn an injection into key theft.
+      - style-src allows 'unsafe-inline': the app styles heavily through React
+        `style={{}}` props and Vite's dev server injects <style> elements.
+        Inline STYLE cannot execute; this is the accepted, ordinary trade.
+      - img-src data: — QR codes are rendered to data: URLs; blob: for the
+        camera preview.
+      - connect-src wss: — relays are wss://, and are chosen by the guardian,
+        so they cannot be enumerated into a fixed allowlist here.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" type="image/svg+xml" href="/seal.svg" />
+    <link rel="apple-touch-icon" href="/seal.svg" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#8F2A24" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Kintrinsic" />
+    <meta
+      name="description"
+      content="Calm, simple screen-time and app limits for your family."
+    />
+    <title>Kintrinsic</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

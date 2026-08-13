@@ -1,0 +1,31 @@
+[package]
+name = "charter-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["mock"]
+mock = ["charter-ipc/mock"]
+real = ["charter-ipc/real"]
+
+[lib]
+name = "charter_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "charter"
+path = "src/main.rs"
+
+[dependencies]
+charter-ipc = { workspace = true, default-features = false }
+# serde-only primitives for the strict bunker-pubkey decoder (no crypto/IO) so
+# the thin CLI validator stays in parity with charter-transport::pin_from_connect.
+charter-primitives = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }

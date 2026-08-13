@@ -1,0 +1,78 @@
+// 49-charter.rules — deny the managed user the admin escape hatches that would
+// route around charterd's broker. charter-setup places managed accounts in the
+// "charter-managed" group; everyone else is unaffected (NOT_HANDLED).
+//
+// This complements (does not replace) removing the account from sudo: polkit
+// guards the GUI/agent paths (PackageKit, system Flatpak, time changes) that
+// don't go through sudo.
+//
+// login1 is handled by an exact-match ALLOWLIST, not a prefix block: a blanket
+// "org.freedesktop.login1." deny also swallows plain power-off / suspend /
+// hibernate and the inhibitor grabs Cinnamon's own daemons need (lid switch,
+// power key) — the ward couldn't shut his own laptop down without logging out
+// first. Powering off or sleeping is never an escape hatch: the timer pauses
+// and charterd re-enforces on the next boot/resume. Only the override actions
+// (ignore-inhibit, firmware/boot-loader reboot, linger, VT hopping) stay
+// denied. Exact match, NOT prefix: "power-off" must not leak
+// "power-off-ignore-inhibit".
+
+polkit.addRule(function (action, subject) {
+    if (!subject.isInGroup("charter-managed")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    // Benign login1 actions: NOT_HANDLED so the distro default applies
+    // (allowed for an active local session on Mint).
+    var login1Allowed = [
+        // Plain power actions (and their multiple-sessions variants).
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.halt",
+        "org.freedesktop.login1.halt-multiple-sessions",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.suspend-multiple-sessions",
+        "org.freedesktop.login1.hibernate",
+        "org.freedesktop.login1.hibernate-multiple-sessions",
+        // Inhibitor grabs the ward's OWN desktop needs: csd-power/csd-media-keys
+        // take handle-* and delay-sleep to run lid/power-key/lock-before-sleep;
+        // media players take block-sleep/block-idle during video. Holding
+        // block-sleep only keeps the machine awake — awake time is charged, so
+        // it gains the ward nothing. block-shutdown stays denied below.
+        "org.freedesktop.login1.inhibit-delay-sleep",
+        "org.freedesktop.login1.inhibit-delay-shutdown",
+        "org.freedesktop.login1.inhibit-block-sleep",
+        "org.freedesktop.login1.inhibit-block-idle",
+        "org.freedesktop.login1.inhibit-handle-power-key",
+        "org.freedesktop.login1.inhibit-handle-suspend-key",
+        "org.freedesktop.login1.inhibit-handle-hibernate-key",
+        "org.freedesktop.login1.inhibit-handle-lid-switch",
+    ];
+    if (action.id.indexOf("org.freedesktop.login1.") === 0) {
+        if (login1Allowed.indexOf(action.id) !== -1) {
+            return polkit.Result.NOT_HANDLED;
+        }
+        // Everything else under login1 is an override: *-ignore-inhibit,
+        // set-reboot-to-firmware-setup / boot-loader, set-user-linger,
+        // attach/flush-devices, chvt, lock-sessions, wall messages.
+        return polkit.Result.NO;
+    }
+
+    // Prefix matches so sub-actions (e.g. *.app-install-*) are covered too.
+    var blockedPrefixes = [
+        "org.freedesktop.Flatpak.",                 // system flatpak install/modify
+        "org.freedesktop.packagekit.",              // apt/PackageKit installs + updates
+        "org.freedesktop.timedate1.",               // clock/NTP manipulation (quota resets)
+        "org.freedesktop.policykit.exec",           // pkexec
+        "org.freedesktop.systemd1.manage-units",    // start/stop services (e.g. charterd)
+        "org.freedesktop.accounts.",                // account self-modification
+    ];
+
+    for (var i = 0; i < blockedPrefixes.length; i++) {
+        if (action.id.indexOf(blockedPrefixes[i]) === 0) {
+            return polkit.Result.NO;
+        }
+    }
+    return polkit.Result.NOT_HANDLED;
+});

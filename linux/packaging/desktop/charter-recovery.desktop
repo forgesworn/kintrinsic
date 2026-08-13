@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic — Recovery
+Comment=Pause or turn off Kintrinsic if you ever get locked out
+Exec=charter-recovery-launch
+Icon=system-lock-screen
+Terminal=false
+Categories=System;Settings;
+Keywords=recovery;unlock;pause;charter;parental;locked;

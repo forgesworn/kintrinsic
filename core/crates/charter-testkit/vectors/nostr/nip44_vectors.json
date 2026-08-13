@@ -1,0 +1,55 @@
+{
+  "sender_secret": "0000000000000000000000000000000000000000000000000000000000000022",
+  "recipient_pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+  "conversation_key": "aaa01efd96983cffdd84daea7ddb88a23b3296f1c9294b08b268b9d1b527ec80",
+  "valid": [
+    {
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "plaintext": "a",
+      "payload": "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4uChNd3/sCRUDSS6qAu7RyrmfZW2AaxbyY9Jr3TlWpvsb0wJu8CsdyBqsUrwAYdBTv6c6QVyBn91of+tg+dYdnz0"
+    },
+    {
+      "nonce": "1111111111111111111111111111111111111111111111111111111111111111",
+      "plaintext": "hello charter",
+      "payload": "AhERERERERERERERERERERERERERERERERERERERERERoDmC86Jth4JnnirP28MzHMYOauo/G2WhdhXX1L+5emh7C1xeJ/keyWB8lSsQaa7xrKybR77unlQWp+8VUJJso101"
+    },
+    {
+      "nonce": "2222222222222222222222222222222222222222222222222222222222222222",
+      "plaintext": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "payload": "AiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiad8zr/MbVb3ParVRyHmG4kWD0uIjAsGjLJrfPo+cbs0xVtUX3eyQh8IWM4UeNNs3nHjUuNBU/iDpzrsKkmxxvC6t"
+    },
+    {
+      "nonce": "3333333333333333333333333333333333333333333333333333333333333333",
+      "plaintext": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "payload": "AjMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMziPdYfKNoEF8IgINxJzLWr+vCXLPSEEkh7+yuL/lHkEklIfCqDWYyV1TjqOPKb81rM68Z6N5yS7O8sGcKBy1EeJ2TeaSBIqJwEhzPGifP9rkl3AwsFgKjPH4NbiqrtebJsK4="
+    },
+    {
+      "nonce": "4444444444444444444444444444444444444444444444444444444444444444",
+      "plaintext": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "payload": "AkREREREREREREREREREREREREREREREREREREREREREbgtNEoMwXmaJXdo/HpwjgpPt/1fAFfDlSjXAhnRv19a2mJgtQSLhItSA+en3dybidCi3+z8uvVQLIdV/7zSYktqYSp2SMPcVblMvwoBWEboz/AVABHSVrsZMYARFoSDystCZ7B1oAapQncr2maQ/M/N/qvDtkyyeHJ90GmsPGdRPYdlSqh23wz/t/Z5Df22nI5yRrC8e011mLzyDvJJw/7Oi"
+    },
+    {
+      "nonce": "5555555555555555555555555555555555555555555555555555555555555555",
+      "plaintext": "{\"v\":1,\"op\":\"time.extend\"}",
+      "payload": "AlVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVBPu9EBnR5LotFXJHGXh1DGyfTPQebSvTzcgCcryTNJn/FFv1QaSs7OqAwkLqYZ8QlenZ5xwZ9D2LgSTinMVzYadk"
+    }
+  ],
+  "invalid": [
+    {
+      "reason": "flipped_mac",
+      "payload": "AhERERERERERERERERERERERERERERERERERERERERERoDmC86Jth4JnnirP28MzHMYOauo/G2WhdhXX1L+5emh7C1xeJ/keyWB8lSsQaa7xrKybR77unlQWp+8VUJJso100"
+    },
+    {
+      "reason": "wrong_version",
+      "payload": "ARERERERERERERERERERERERERERERERERERERERERERoDmC86Jth4JnnirP28MzHMYOauo/G2WhdhXX1L+5emh7C1xeJ/keyWB8lSsQaa7xrKybR77unlQWp+8VUJJso101"
+    },
+    {
+      "reason": "too_short",
+      "payload": "AgA="
+    },
+    {
+      "reason": "not_base64",
+      "payload": "!!!!not base64!!!!"
+    }
+  ]
+}

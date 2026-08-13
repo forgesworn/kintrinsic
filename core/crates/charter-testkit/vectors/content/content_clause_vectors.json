@@ -1,0 +1,88 @@
+{
+  "note": "Canonical web-content (content) clause vectors — pins MyCharter (TS producer, contentToGrant) ↔ warden (Rust: GrantContent parse + evaluate). `input` is the app WebPolicy; `payload` is the wire GrantContent; `effective` is the enforced outcome the evaluator must yield. issuedAt is fixed for determinism.",
+  "vectors": [
+    {
+      "name": "blocklist_block_youtube_allow_wikipedia",
+      "input": {
+        "enabled": true,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "allow": ["wikipedia.org"],
+        "block": ["youtube.com", "openstax.org"],
+        "youtube": "strict",
+        "safeSearch": true
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "issuedAt": 1782734400,
+        "safeSearch": true,
+        "youtubeRestrict": "strict",
+        "parentAllow": ["wikipedia.org"],
+        "parentDeny": ["youtube.com", "openstax.org"]
+      },
+      "effective": {
+        "locked": false,
+        "posture": "blocklist",
+        "youtubeRestrict": "strict",
+        "safeSearch": true,
+        "blockedIncludes": "youtube.com",
+        "allowExceptionIncludes": "wikipedia.org"
+      }
+    },
+    {
+      "name": "allowlist_only_wikipedia_khan",
+      "input": {
+        "enabled": true,
+        "posture": "allowlist",
+        "ageTier": "young",
+        "allow": ["wikipedia.org", "khanacademy.org"],
+        "block": [],
+        "youtube": "moderate",
+        "safeSearch": true
+      },
+      "payload": {
+        "v": 1,
+        "posture": "allowlist",
+        "ageTier": "young",
+        "issuedAt": 1782734400,
+        "safeSearch": true,
+        "youtubeRestrict": "moderate",
+        "parentAllow": ["wikipedia.org", "khanacademy.org"]
+      },
+      "effective": {
+        "locked": false,
+        "posture": "allowlist",
+        "youtubeRestrict": "moderate",
+        "safeSearch": true,
+        "allowedIncludes": "wikipedia.org"
+      }
+    },
+    {
+      "name": "off_lifts_filtering_via_revoked",
+      "input": {
+        "enabled": false,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "allow": [],
+        "block": [],
+        "youtube": "off",
+        "safeSearch": true
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "issuedAt": 1782734400,
+        "revoked": true
+      },
+      "effective": {
+        "locked": false,
+        "posture": null,
+        "youtubeRestrict": "off",
+        "safeSearch": false
+      }
+    }
+  ]
+}

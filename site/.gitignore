@@ -1,0 +1,5 @@
+.playwright-mcp/
+/*.png
+/*.html.bak
+/*.apk
+/*.deb

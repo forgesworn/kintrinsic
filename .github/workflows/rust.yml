@@ -1,0 +1,177 @@
+name: Rust
+# Headless gate for the two Cargo workspaces (core/ and linux/). ci.yml only
+# covers the root TS package; this runs the project's documented four gates
+# (per linux/HANDOFF.md) minus the full `--features real` workspace build leg,
+# which needs system libs (webkit for charter-lock/console) not present on a
+# stock runner. fmt/clippy/test all build the default (mock) features and are
+# fully headless. charterd's OWN real-feature lane (zbus/rustls — pure Rust,
+# no system libs) is covered by the linux-real job below.
+# Private-repo minutes are paid: five runners per trigger, so scope to the
+# paths that can actually change the outcome. The vectors job also depends on
+# the TS SDK (src/ + the gen scripts), hence those entries.
+on:
+  push:
+    branches: [main, dev, 'feat/**', 'fix/**', 'chore/**']
+    paths:
+      - 'core/**'
+      - 'linux/**'
+      - 'src/**'
+      - 'scripts/gen-schedule-vectors.mjs'
+      - 'scripts/gen-nostr-vectors.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'core/**'
+      - 'linux/**'
+      - 'src/**'
+      - 'scripts/gen-schedule-vectors.mjs'
+      - 'scripts/gen-nostr-vectors.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/rust.yml'
+
+# A newer push supersedes the run in flight — never pay for both.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: ${{ matrix.workspace }} (fmt · clippy · test)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [core, linux]
+    defaults:
+      run:
+        working-directory: ${{ matrix.workspace }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The pinned toolchain lives in <workspace>/rust-toolchain.toml (channel +
+      # rustfmt/clippy components). Running rustup from inside the workspace dir
+      # makes it read that file and install the exact pinned toolchain, so we
+      # never duplicate (or drift from) the version pin here.
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ${{ matrix.workspace }}
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  # Real-relay lane. The live-websocket relay IO and its DoS-hardening code +
+  # tests live behind `#[cfg(feature = "real-relay")]` and are NOT built or run
+  # by the default `cargo test --workspace` above (that leg uses the mock
+  # features). Cover them explicitly so relay regressions are caught headlessly
+  # — these are unit/parse tests; no live relay is contacted.
+  real-relay:
+    name: charter-sys (real-relay)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Read core/rust-toolchain.toml for the pinned channel + components.
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: core
+      - name: cargo test -p charter-sys --features real-relay
+        run: cargo test -p charter-sys --features real-relay
+      - name: cargo clippy -p charter-sys --features real-relay --all-targets -- -D warnings
+        run: cargo clippy -p charter-sys --features real-relay --all-targets -- -D warnings
+
+  # charterd real lane. runtime.rs — the enforcement loop, the on-display lock
+  # and its VT/black-screen healing — is `#[cfg(feature = "real")]`, so the
+  # mock gate above never even COMPILES it: a broken edit there once shipped
+  # with every gate green. charterd's real feature needs no system libs (zbus
+  # and rustls are pure Rust), so build and test it headlessly here.
+  linux-real:
+    name: charterd (real)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: linux
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: linux
+      - name: cargo clippy -p charterd -p charter-tray --features real --all-targets -- -D warnings
+        run: cargo clippy -p charterd -p charter-tray --features real --all-targets -- -D warnings
+      - name: cargo test -p charterd -p charter-tray --features real
+        run: cargo test -p charterd -p charter-tray --features real
+        env:
+          # ACKNOWLEDGED, NOT SILENCED. `ancestry::exe_ownership_tests` stages a
+          # real unprivileged-user-namespace bind-mount to prove a ward cannot
+          # forge root ownership of their own binary (0.7.5, honest
+          # attribution). GitHub's ubuntu-latest runners restrict unprivileged
+          # userns via AppArmor, so the forgery cannot be staged and the test
+          # refuses — correctly — to pass by pretending it ran.
+          #
+          # The guard is NOT lost: it runs and passes on a developer machine
+          # (verified on Mint, 2026-08-07), which is the platform that matters,
+          # since it is the platform Charter enforces on. What CI checks is
+          # everything else.
+          #
+          # This has had `Rust` red on main since 2026-08-03 — four days during
+          # which a genuine break of mine landed and was invisible in the noise
+          # (2026-08-07). A permanently-red required check is not a safety
+          # margin, it is a broken smoke alarm.
+          CHARTER_ALLOW_NO_USERNS: "1"
+
+  # Golden-vector drift guard. The Rust interop suites are pinned to committed
+  # JSON vectors generated by the TS SDK (the same nostr-tools the guardian app
+  # uses). Regenerate them and fail if the DETERMINISTIC vectors drift from what
+  # is committed — drift means the TS engine and the Rust port would no longer
+  # agree and someone forgot to re-commit the regenerated vectors.
+  vectors:
+    name: golden vectors (no drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Regenerate golden vectors from the TS SDK
+        run: |
+          npm run build
+          node scripts/gen-schedule-vectors.mjs
+          node scripts/gen-nostr-vectors.mjs
+      # Only the DETERMINISTIC vectors are diffed. gen-nostr-vectors.mjs ALSO
+      # emits intentionally NON-deterministic files that change every run and
+      # would flap a blanket `git diff` over the vectors tree:
+      #   * the signed events — nip01_event.json, grant_*.json, clause_schedule.json
+      #     — carry BIP-340 signatures produced with random aux data, so the
+      #     `sig` differs each run;
+      #   * nip59_giftwrap.json carries a NIP-59 gift-wrap built with a fresh
+      #     ephemeral key + a jittered timestamp (its deterministic expected_rumor
+      #     sub-object can't be isolated by a per-file diff).
+      # The Rust suite *verifies* those signatures and *reproduces* the event id
+      # — it never reproduces the sig byte-for-byte — so they are deliberately
+      # NOT drift-checked. schedule_vectors.json, keys.json and nip44_vectors.json
+      # are fully deterministic (confirmed by running the generator twice) and
+      # ARE guarded here.
+      - name: Fail if the deterministic vectors drifted
+        run: |
+          git diff --exit-code -- \
+            core/crates/charter-testkit/vectors/schedule/schedule_vectors.json \
+            core/crates/charter-testkit/vectors/nostr/keys.json \
+            core/crates/charter-testkit/vectors/nostr/nip44_vectors.json

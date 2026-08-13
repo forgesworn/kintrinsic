@@ -1,0 +1,17 @@
+{
+  "event": {
+    "id": "217ad7d7215343bab65c1f824e193271e9ceef322f1d25c3498b3e1f506dc1f4",
+    "pubkey": "1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11",
+    "created_at": 1700000000,
+    "kind": 1,
+    "tags": [
+      [
+        "t",
+        "charter-device"
+      ]
+    ],
+    "content": "charter nip01 event-id kat",
+    "sig": "579a3b7091b084655ecde776b5f2cab579266ff9f6e9ebee8e03e113457615a18a0612e88e245727062e59f3e341af3d9e91f9cfce6adb00a99e7222a42583b8"
+  },
+  "canonical": "[0,\"1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11\",1700000000,1,[[\"t\",\"charter-device\"]],\"charter nip01 event-id kat\"]"
+}

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launch the Charter setup wizard as root (it locks down an account + enables
+# units), passing the parent's X session through pkexec so the dialogs can draw.
+# pkexec prompts for the parent's (admin) password. With no argument, charter-
+# setup runs its graphical "pick the child's account" wizard.
+exec pkexec env \
+    DISPLAY="${DISPLAY:-:0}" \
+    XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}" \
+    /usr/sbin/charter-setup

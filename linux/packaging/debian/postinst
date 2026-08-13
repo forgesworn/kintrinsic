@@ -1,0 +1,29 @@
+#!/bin/sh
+# postinst — register charterd with systemd + reload the bus policy. Account
+# lockdown is finished by the parent via the "Kintrinsic" menu entry (or
+# `charter-setup <user>` headless).
+set -e
+
+case "$1" in
+    configure)
+        systemctl daemon-reload || true
+        # Reload D-Bus so the system.d policy for org.forgesworn.charterd applies.
+        systemctl reload dbus 2>/dev/null || systemctl reload dbus-broker 2>/dev/null || true
+        systemctl enable charterd.service || true
+        # restart, not start: an upgrade must swap in the new binary. charterd's
+        # startup self-heal (thaw + re-enforce) makes a mid-session restart safe.
+        systemctl restart charterd.service || true
+        # Rename hygiene: the removed `charter` package leaves its old postrm
+        # behind as dpkg residue, and that script deletes /var/lib/charter on
+        # purge — which is now OUR live state. Neutralize it so even an
+        # accidental `apt purge charter` cannot destroy keys/pairing.
+        if [ -f /var/lib/dpkg/info/charter.postrm ]; then
+            printf '#!/bin/sh\nexit 0\n' > /var/lib/dpkg/info/charter.postrm
+        fi
+        # Refresh the menu so the "Kintrinsic" entry appears now.
+        update-desktop-database -q 2>/dev/null || true
+        echo "kintrinsic: installed. Open \"Kintrinsic\" from the menu to choose the child's account and finish."
+        ;;
+esac
+
+exit 0

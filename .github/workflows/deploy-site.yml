@@ -1,0 +1,48 @@
+name: Deploy site
+
+# kintrinsic.app marketing site (site/ directory) → the Hetzner box.
+# Same target dir the retired charter-you repo deployed to; the vhost
+# (charter.signet.you today, kintrinsic.app when DNS lands) points at it.
+# Path-filtered so app commits don't re-deploy the site.
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**']
+  workflow_dispatch: {}
+
+# One deploy at a time; a push burst collapses to the newest queued run.
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+# Least privilege — reads the repo, deploys over SSH (matches deploy-charter-app).
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned like every other workflow (no mutable ref in a secret-bearing job).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Deploy to Hetzner
+        env:
+          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$HETZNER_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          # --delete-excluded so anything newly excluded actually leaves the
+          # server, rather than a stale copy lingering after an exclude is added.
+          rsync -avz --delete --delete-excluded \
+            --exclude='README.md' \
+            --exclude='docs' \
+            --exclude='img/src' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./site/ deploy@"$DEPLOY_HOST":/opt/charter-you/

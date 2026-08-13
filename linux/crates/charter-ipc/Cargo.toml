@@ -1,0 +1,31 @@
+[package]
+name = "charter-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["mock"]
+# In-memory mock client (all headless tests).
+mock = []
+# Real zbus client proxy over the system bus (exercised on a real bus / VM).
+real = ["dep:zbus", "dep:futures-util"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+# real-only system-bus client proxy.
+zbus = { version = "4.4", optional = true, default-features = false, features = [
+    "tokio",
+] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

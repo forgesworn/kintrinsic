@@ -1,0 +1,53 @@
+version: 2
+
+# Canonical dependabot config for npm/TypeScript repos in forgesworn.
+# Synced from forgesworn/.github/templates/dependabot/dependabot.npm.yml.
+# Edit the template, not individual repos -- run the propagator to sync.
+#
+# Tiering:
+#   patch + minor  -> grouped, auto-merged on green CI
+#   major          -> individual PR, manual review
+#   TS / Node / framework majors -> ignored here, upgraded deliberately
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      # DELIBERATE local deviation from the forgesworn template (weekly):
+      # monthly while the repo is private — every dependabot PR burns paid CI
+      # minutes. Restore weekly when the repos go public and minutes are free.
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      production-minor:
+        dependency-type: production
+        update-types: ["patch", "minor"]
+      dev-minor:
+        dependency-type: development
+        update-types: ["patch", "minor"]
+    ignore:
+      # nostr-tools >=2.23.11 corrupts the pool's in-use counter under enablePing
+      # and idle-closes relays with reconnection disabled; repos pin 2.23.9.
+      # Remove once nbd-wtf/nostr-tools#539 is fixed and pins are lifted.
+      - dependency-name: "nostr-tools"
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      actions-minor:
+        update-types: ["patch", "minor"]

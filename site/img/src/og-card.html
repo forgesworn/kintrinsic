@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; }
+  body {
+    background: #f9f8f4;
+    font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    color: #1d1a17;
+    position: relative;
+    overflow: hidden;
+  }
+  /* faint rule-work, like the edge of a sealed document */
+  .edge {
+    position: absolute; inset: 26px;
+    border: 1.5px solid #e5e1d6; border-radius: 14px;
+  }
+  .edge::after {
+    content: ""; position: absolute; inset: 9px;
+    border: 1px dashed #ece8dc; border-radius: 8px;
+  }
+  .inner {
+    position: absolute; inset: 26px;
+    padding: 62px 70px;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .top { display: flex; align-items: center; gap: 16px; }
+  .seal {
+    width: 58px; height: 58px; border-radius: 14px;
+    background: #241b12;
+    display: grid; place-items: center;
+    box-shadow: inset 0 0 0 3px rgba(0, 0, 0, 0.35);
+  }
+  .seal svg { width: 65%; height: 65%; display: block; }
+  .wordmark { font-size: 32px; font-weight: 700; letter-spacing: -0.01em; }
+  h1 {
+    font-size: 72px; line-height: 1.04; letter-spacing: -0.025em;
+    font-weight: 700; max-width: 15.2em; margin-bottom: 22px;
+  }
+  .sub {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 25px; line-height: 1.45; color: #4c463f; max-width: 24em;
+  }
+  .foot {
+    display: flex; align-items: baseline; justify-content: space-between;
+    font-family: "SF Mono", "Cascadia Code", ui-monospace, monospace;
+    font-size: 15px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: #6b655c;
+  }
+  .foot .dom { color: #8a5c0c; font-weight: 600; }
+  /* the big mark, bled off the right edge, tinted gold now instead of wax */
+  .bleed {
+    position: absolute; right: -132px; top: 50%; transform: translateY(-50%);
+    width: 430px; height: 430px; border-radius: 50%;
+    background: rgba(224, 164, 88, 0.07);
+    border: 1.5px solid rgba(224, 164, 88, 0.14);
+  }
+  .bleed::after {
+    content: ""; position: absolute; inset: 34px; border-radius: 50%;
+    border: 1.5px dashed rgba(224, 164, 88, 0.18);
+  }
+</style>
+</head>
+<body>
+  <div class="bleed"></div>
+  <div class="edge"></div>
+  <div class="inner">
+    <div class="top">
+      <div class="seal">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <g transform="translate(-17.698,-9.223) scale(1.7447)">
+            <g transform="translate(-2.5,1)">
+              <path fill="#e0a458" fill-rule="evenodd" d="M24 6c5 6.5 8 10.5 8 15.5a8 8 0 0 1-16 0C16 16.5 19 12.5 24 6Z M24 13c2.8 3.7 4.5 5.9 4.5 8.7a4.5 4.5 0 0 1-9 0c0-2.8 1.7-5.1 4.5-8.7Z"/>
+            </g>
+            <g transform="translate(31.5,14) rotate(22) scale(0.4) translate(-24,-17.75)">
+              <path fill="#e0a458" fill-rule="evenodd" d="M24 6c5 6.5 8 10.5 8 15.5a8 8 0 0 1-16 0C16 16.5 19 12.5 24 6Z M24 13c2.8 3.7 4.5 5.9 4.5 8.7a4.5 4.5 0 0 1-9 0c0-2.8 1.7-5.1 4.5-8.7Z"/>
+            </g>
+          </g>
+        </svg>
+      </div>
+      <div class="wordmark">Kintrinsic</div>
+    </div>
+    <div>
+      <h1>Screen time by agreement, not surveillance.</h1>
+      <p class="sub">You set the hours, the games, the websites. Your child's computer keeps them &mdash; even offline. No account, no tracking, no company in the middle.</p>
+    </div>
+    <div class="foot">
+      <span class="dom">kintrinsic.app</span>
+      <span>A ForgeSworn product</span>
+    </div>
+  </div>
+</body>
+</html>

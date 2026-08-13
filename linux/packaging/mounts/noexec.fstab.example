@@ -1,0 +1,17 @@
+# Charter noexec posture for the remaining user-writable mounts.
+#
+# /tmp and /dev/shm are handled by the shipped systemd .mount units. The mounts
+# below are real filesystems whose noexec posture is applied in fstab (or a
+# bind-remount) by charter-setup during the VM hardening pass — they are NOT
+# auto-applied by the package, since the right device/bind shape is host-specific.
+#
+# /var/tmp: bind /tmp or remount noexec.
+/var/tmp   /var/tmp   none   bind,noexec,nosuid,nodev   0 0
+#
+# $HOME of the managed user (substitute the real device/subvol). noexec on $HOME
+# is the highest-value lock but can break apps that exec helper scripts from
+# ~/.local — tune during VM test (design: "noexec $HOME fallout").
+# /dev/<disk>  /home  ext4  defaults,noexec,nosuid,nodev  0 2
+#
+# Removable media mount root.
+# /media  /media  none  bind,noexec,nosuid,nodev  0 0

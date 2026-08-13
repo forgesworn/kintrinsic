@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic — Pair Guardian
+Comment=Connect this computer to a guardian's phone (the Kintrinsic app)
+Exec=charter-pair-launch
+Icon=preferences-system-sharing
+Terminal=false
+Categories=System;Settings;
+Keywords=parental;pair;guardian;charter;phone;mycharter;signet;

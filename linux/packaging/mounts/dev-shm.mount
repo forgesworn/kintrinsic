@@ -1,0 +1,15 @@
+[Unit]
+Description=Charter: /dev/shm (noexec,nosuid,nodev)
+Documentation=https://kintrinsic.app
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+
+[Mount]
+What=tmpfs
+Where=/dev/shm
+Type=tmpfs
+Options=mode=1777,strictatime,nosuid,nodev,noexec
+
+[Install]
+WantedBy=local-fs.target

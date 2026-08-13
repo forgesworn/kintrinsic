@@ -1,0 +1,69 @@
+{
+  "note": "Frozen cross-stack vectors for the USAGE_SYNC (kind 31115) payload — spec/contract.md §USAGE_SYNC incl. the union-rule extension. Rust consumer: charter-proto/tests/usage_sync_vectors.rs (parse + reserialize must preserve every field, unknown-field tolerant). TS producer: the PWA's usageSyncToPayload must emit deep-equal JSON. 'invalid' payloads must be rejected by UsageSyncPayload::from_json (fail-closed).",
+  "vectors": [
+    {
+      "name": "scalar-only",
+      "payload": {
+        "v": 1,
+        "subject": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "ts": 1782734400,
+        "dayKey": "2026-06-29",
+        "spentElsewhereTodaySecs": 1800
+      }
+    },
+    {
+      "name": "with-week-scalars",
+      "payload": {
+        "v": 1,
+        "subject": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "ts": 1782734460,
+        "dayKey": "2026-06-29",
+        "spentElsewhereTodaySecs": 5400,
+        "weekKey": "2026-06-29",
+        "spentElsewhereWeekSecs": 21600
+      }
+    },
+    {
+      "name": "with-union-bitmap",
+      "payload": {
+        "v": 1,
+        "subject": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "ts": 1782734520,
+        "dayKey": "2026-06-29",
+        "spentElsewhereTodaySecs": 180,
+        "elsewhereMinutesToday": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong-version",
+      "payload": {
+        "v": 2,
+        "subject": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "ts": 1782734400,
+        "dayKey": "2026-06-29",
+        "spentElsewhereTodaySecs": 0
+      }
+    },
+    {
+      "name": "missing-day-key",
+      "payload": {
+        "v": 1,
+        "subject": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "ts": 1782734400,
+        "spentElsewhereTodaySecs": 0
+      }
+    },
+    {
+      "name": "non-hex-subject",
+      "payload": {
+        "v": 1,
+        "subject": "not-a-pubkey",
+        "ts": 1782734400,
+        "dayKey": "2026-06-29",
+        "spentElsewhereTodaySecs": 0
+      }
+    }
+  ]
+}

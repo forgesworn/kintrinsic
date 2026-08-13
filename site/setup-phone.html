@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Set up a child's phone — Kintrinsic for GrapheneOS</title>
+  <meta name="description" content="How to put Kintrinsic on a child's de-Googled Android phone: factory reset, connect a cable, pair. About twenty minutes, most of it waiting.">
+  <link rel="canonical" href="https://kintrinsic.app/setup-phone.html">
+  <link rel="icon" type="image/svg+xml" href="/seal.svg">
+  <link rel="apple-touch-icon" href="/seal.svg">
+  <link rel="stylesheet" href="/styles.css">
+  <meta name="theme-color" content="#f9f8f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#17140f" media="(prefers-color-scheme: dark)">
+  <meta property="og:title" content="Set up a child's phone — Kintrinsic for GrapheneOS">
+  <meta property="og:description" content="The longer path: a de-Googled Android phone, governed by a charter you signed. About twenty minutes.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://kintrinsic.app/setup-phone.html">
+  <meta property="og:image" content="https://kintrinsic.app/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="Kintrinsic">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <nav class="nav" aria-label="Main navigation">
+    <div class="container nav__inner">
+      <a href="/" class="nav__logo" aria-label="Kintrinsic home"><img src="/seal.svg" alt="" width="30" height="30"> <span class="nav__word">Kintrinsic</span></a>
+      <ul class="nav__links">
+        <li class="hide-m"><a href="/#does">What it does</a></li>
+        <li class="hide-m"><a href="/download.html">Download</a></li>
+        <li class="hide-m"><a href="/setup.html" aria-current="page">Setup</a></li>
+        <li class="hide-m"><a href="/roadmap.html">Roadmap</a></li>
+        <li class="hide-m"><a href="/faq.html">FAQ</a></li>
+        <li><a class="btn btn-wax nav__cta" href="/download.html">Get Kintrinsic</a></li>
+        <li>
+          <details class="nav__menu">
+            <summary>Menu</summary>
+            <ul class="nav__drawer">
+              <li><a href="/#does">What it does</a></li>
+              <li><a href="/#see">See it</a></li>
+              <li><a href="/download.html">Download</a></li>
+              <li><a href="/setup.html">Setup</a></li>
+              <li><a href="/roadmap.html">Roadmap</a></li>
+              <li><a href="/faq.html">FAQ</a></li>
+            </ul>
+          </details>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <main id="main">
+
+  <header class="page-head">
+    <div class="container">
+      <p class="t-eyebrow">Setup guide · the phone <span class="chip chip-soon">preview</span></p>
+      <h1 class="t-display">Set up a child's phone.</h1>
+      <p class="t-sub lede">Longer than the computer, and more involved — about twenty minutes, most of
+        it a factory reset running on its own. Pairing and remote lock are proven on real hardware;
+        the rest is in preview with early-access families.</p>
+    </div>
+  </header>
+
+  <section>
+    <div class="container">
+      <div class="prose">
+
+        <div class="callout warn">
+          <b>Read this bit first.</b> Android will only hand over the control Kintrinsic needs on a phone
+          with <em>no accounts on it at all</em>. That means the phone must be factory reset, and a
+          factory reset erases everything on it. If this is a phone already in use, back it up — or
+          better, do this on a phone you're giving them fresh.
+        </div>
+
+        <h2 id="need">What you'll need</h2>
+        <ul>
+          <li>A <strong>Pixel running <a href="https://grapheneos.org">GrapheneOS</a></strong> — a private,
+            Google-free Android. Other Android 14+ phones are being tested but aren't supported yet.</li>
+          <li>A <strong>USB cable</strong> and a computer.</li>
+          <li><strong>The Kintrinsic app</strong> on your own phone.</li>
+        </ul>
+
+        <h2 id="reset">1 · Factory reset the phone</h2>
+        <p>Reset it, and on first boot <strong>skip every account sign-in</strong>. Don't add a Google
+          account, don't restore a backup, don't sign into anything. The phone has to be genuinely empty
+          — that emptiness is what lets Kintrinsic become its device owner, and it's a one-time window that
+          closes as soon as an account is added.</p>
+
+        <h2 id="debug">2 · Turn on USB debugging</h2>
+        <p>On the phone: <strong>Settings → About phone</strong>, then tap <strong>Build number</strong>
+          seven times. That unlocks <strong>Developer options</strong>, where you switch on
+          <strong>USB debugging</strong>. Plug the phone into the computer and accept the prompt that
+          appears on the phone's screen.</p>
+
+        <h2 id="install">3 · Install and hand over control</h2>
+        <p>This step runs from the computer, over the cable: a guided setup fetches the app, installs it,
+          makes it the phone's device owner, and starts pairing. You get one prompt on the phone —
+          <strong>Pair with guardian</strong> — and that completes it.</p>
+        <div class="callout warn">
+          <b>Being rebuilt under the new name.</b> The guided cable setup lived in the old Charter web
+          app, which is being retired as part of the move to Kintrinsic — the same tool is being folded
+          into Kintrinsic itself. Until it ships, phone setup stays hands-on with early-access families,
+          and the <a href="/roadmap.html">roadmap</a> tracks it. The
+          <a href="/setup.html">computer setup</a> needs none of this and works today.</div>
+
+        <h2 id="govern">4 · Name it and sign the charter</h2>
+        <p>Give the phone a name in the Kintrinsic app, choose <strong>Govern this device</strong>, then set its
+          allowed hours and daily time and sign. From that moment the phone accepts rules from your key
+          and no one else's.</p>
+        <p>If your child also has a Kintrinsic computer, the two share <strong>one daily total</strong>
+          rather than one each — an hour on both at once counts as an hour, not two.</p>
+
+        <h2 id="lifeline">What still works when the phone is locked</h2>
+        <p>A locked phone is still a phone. Out of hours, your child can always:</p>
+        <ul>
+          <li><strong>Reach up to five people you name</strong>, by name, plus their country's real
+            emergency number — 999 here, 911 in the States, and it follows you abroad. Held rather than
+            tapped, so a pocket can't dial.</li>
+          <li><strong>Break the glass.</strong> An emergency unlock opens the phone immediately, with no
+            waiting and no signal needed — and tells you the moment they do. Nothing stops them; it's a
+            fire alarm, not a lock.</li>
+          <li><strong>See the time, the battery and their signal.</strong> Being out of hours never makes
+            those less true.</li>
+        </ul>
+
+        <h2 id="wrong">If something goes wrong</h2>
+        <p>To hand the phone back completely, remove Kintrinsic as device owner from the parent app, or factory
+          reset the phone again — a reset always works and always will. Your own key is backed up
+          separately; losing the phone doesn't lose your ability to manage anything else.</p>
+
+        <div class="callout warn">
+          <b>Honestly: this is the preview.</b> One-scan pairing and remote lock and unlock are proven on
+          a real GrapheneOS Pixel. Web filtering on the phone, the lifeline and per-app rules are newly
+          landed and being verified with early-access families. The <a href="/roadmap.html">roadmap</a>
+          is kept current.
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-band" aria-label="Get started">
+    <div class="container narrow">
+      <p class="t-eyebrow">Or start easier</p>
+      <h2 class="t-heading">The computer takes five minutes.</h2>
+      <p>If the phone is more than you fancy tonight, the Linux setup is the proven, quick one.</p>
+      <div class="cta-band__row">
+        <a class="btn btn-wax" href="/setup.html">The computer guide</a>
+        <a class="btn btn-ghost" href="/faq.html">Read the FAQ</a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <footer class="footer" role="contentinfo">
+    <div class="container footer__inner">
+      <div>
+        <div class="footer__brand">Kintrinsic</div>
+        <div>Part of the <a href="https://signet.you">Signet</a> family · a ForgeSworn product</div>
+      </div>
+      <ul>
+        <li><a href="/#does">What it does</a></li>
+        <li><a href="/#see">See it</a></li>
+        <li><a href="/download.html">Download</a></li>
+        <li><a href="/setup.html">Setup</a></li>
+        <li><a href="/roadmap.html">Roadmap</a></li>
+        <li><a href="/faq.html">FAQ</a></li>
+        <li><a href="https://signet.you">signet.you</a></li>
+      </ul>
+    </div>
+  </footer>
+
+</body>
+</html>

@@ -1,0 +1,66 @@
+[package]
+name = "charterd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["mock"]
+mock = [
+    "charter-sys/mock",
+    "charter-verify/mock",
+    "charter-transport/mock",
+    "charter-ipc/mock",
+    "charter-spine/mock",
+]
+real = [
+    "charter-sys/real",
+    "charter-verify/real",
+    "charter-transport/real",
+    "charter-ipc/real",
+    "charter-spine/real",
+    "dep:zbus",
+    "dep:libc",
+    "dep:reqwest",
+]
+
+[dependencies]
+charter-primitives = { workspace = true }
+charter-spine = { workspace = true, default-features = false }
+charter-crypto = { workspace = true }
+charter-proto = { workspace = true }
+charter-schedule = { workspace = true }
+charter-content = { workspace = true }
+charter-webpolicy = { workspace = true }
+charter-verify = { workspace = true, default-features = false }
+charter-transport = { workspace = true, default-features = false }
+charter-sys = { workspace = true, default-features = false }
+charter-ipc = { workspace = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The lock panel's child-facing schedule lines ("back at 07:00 tomorrow",
+# the week's hours) need local-time formatting in the child's tz.
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+# real-only: the live org.forgesworn.Charter1 zbus server.
+zbus = { version = "4.4", optional = true, default-features = false, features = [
+    "tokio",
+] }
+# real-only: SIGTERM a ward's blocked per-app processes (POSIX kill(2)).
+libc = { version = "0.2", optional = true }
+# real-only (D2): download release-event-named deb blobs from Blossom mirrors.
+# rustls-only, reusing the TLS stack the relay websocket already links — the
+# first (and only) HTTP client in the linux tree.
+reqwest = { version = "0.12", optional = true, default-features = false, features = [
+    "rustls-tls-webpki-roots",
+] }
+
+[dev-dependencies]
+charter-testkit = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+serde = { workspace = true }

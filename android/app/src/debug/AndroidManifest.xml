@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds are testOnly so `dpm remove-active-admin` can undo Device Owner
+     during development. Release builds stay non-testOnly: on a real ward device
+     the Device Owner must NOT be casually removable. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application android:testOnly="true">
+        <!-- Debug only: let the shade be raised straight from adb so its
+             rendering can be proved with a screenshot without provisioning a
+             whole Device Owner and waiting for a schedule edge. Release keeps
+             exported="false" — the ward's lock screen must never be startable
+             by another app. -->
+        <activity
+            android:name="org.forgesworn.charter.ui.LockActivity"
+            android:exported="true"
+            tools:replace="android:exported" />
+        <!-- adb-reachable bring-up triggers (pair + submit install ask). Debug
+             only; never merged into a release APK. Both actions are inert
+             without a guardian-signed grant, so this changes no security
+             property — it only avoids fragile UI automation on-metal. -->
+        <receiver
+            android:name="org.forgesworn.charter.debug.DebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.forgesworn.charter.debug.PAIR" />
+                <action android:name="org.forgesworn.charter.debug.INSTALL_REQUEST" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

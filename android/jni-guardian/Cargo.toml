@@ -1,0 +1,32 @@
+[package]
+name = "charter-guardian-jni"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "charter_guardian_jni"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.21"
+serde_json = "1"
+# Wipe the guardian secret the moment classification is done (S12).
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# The shared wire/crypto core — same crates the ward jni uses. No charter-sys
+# in the lib: the carrier's websocket lives in Kotlin; Rust only unwraps and
+# classifies.
+charter-primitives = { path = "../../core/crates/charter-primitives" }
+charter-proto = { path = "../../core/crates/charter-proto" }
+charter-transport = { path = "../../core/crates/charter-transport", default-features = false }
+
+[dev-dependencies]
+# Fixture building (TestGuardian, sign_event, SeedSigner) — mock features in
+# tests ONLY; dev-deps never reach the release .so.
+charter-verify = { path = "../../core/crates/charter-verify", features = ["mock"] }
+charter-sys = { path = "../../core/crates/charter-sys", features = ["mock"] }
+getrandom = "0.2"
+
+# Standalone workspace while core/ stays a sibling; joins nothing.
+[workspace]

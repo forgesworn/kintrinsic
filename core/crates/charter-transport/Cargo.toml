@@ -1,0 +1,36 @@
+[package]
+name = "charter-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["mock"]
+mock = ["charter-sys/mock", "charter-verify/mock"]
+real = ["charter-sys/real", "charter-verify/real"]
+
+[dependencies]
+charter-primitives = { workspace = true }
+charter-crypto = { workspace = true }
+charter-content = { workspace = true }
+charter-proto = { workspace = true }
+charter-verify = { workspace = true, default-features = false }
+charter-sys = { workspace = true, default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chacha20 = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+charter-testkit = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

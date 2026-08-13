@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kintrinsic Setup
+Comment=Set up Kintrinsic to manage a child's account on this computer
+Exec=charter-setup-launch
+Icon=preferences-system-parental
+Terminal=false
+Categories=System;Settings;
+Keywords=parental;setup;charter;child;lockdown;
