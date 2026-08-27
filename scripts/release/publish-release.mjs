@@ -23,6 +23,7 @@ import { join } from "node:path";
 import {
   buildBlossomAuth,
   buildReleaseEvent,
+  isCanonicalBlossomUrl,
   RELEASE_RELAYS,
 } from "./release-helpers.mjs";
 
@@ -92,10 +93,14 @@ async function fetchDirect(url) {
 
 /**
  * Verify a mirror the way a DEVICE will use it: GET, no redirects, full-body
- * sha256. If the server answers with ONE redirect (primal fronts blobs with
- * a CDN: HEAD lies 200, GET 302s — found live 2026-08-12), resolve it and
- * verify the target instead — the event then carries the direct URL.
- * Returns the verified URL or null.
+ * sha256. The event may only ever carry the blob's CANONICAL root address
+ * (`https://server/<sha>[.ext]`, see isCanonicalBlossomUrl) — never a
+ * redirect target. primal fronts blobs with a CDN whose `GET /<sha>` 302s to
+ * `media.primal.net/uploads2/…`; until 2026-08-27 we resolved that hop and
+ * announced the TARGET, and when primal purged it every ward on 0.6.3 sat in
+ * a 404-retry loop against a URL that was never a real address, with the
+ * healthy second mirror never tried. Now: a redirecting server still counts
+ * as an upload success (the blob is there), but it contributes no URL.
  */
 /**
  * Verify the EXACT device download URL the manifests + front door will use:
@@ -110,9 +115,12 @@ async function verifyDeviceUrl(url, sha256) {
   return createHash("sha256").update(bytes).digest("hex") === sha256;
 }
 
-async function verifyBlossom(server, sha256) {
-  let url = `${server}/${sha256}`;
-  for (let hop = 0; hop < 2; hop++) {
+async function verifyBlossom(server, sha256, ext) {
+  // Prefer the extension-bearing form (a browser download keeps a sensible
+  // filename; blossom.primal.net serves it direct-200 where the bare form
+  // 302s), then the bare BUD-01 form. Only a DIRECT 200 with the right bytes
+  // yields a URL a device may be given.
+  for (const url of [`${server}/${sha256}.${ext}`, `${server}/${sha256}`]) {
     const r = await fetchDirect(url);
     if (r.bytes) {
       const got = createHash("sha256").update(r.bytes).digest("hex");
@@ -123,14 +131,11 @@ async function verifyBlossom(server, sha256) {
       return url;
     }
     if (r.location) {
-      url = new URL(r.location, url).toString();
-      if (!url.startsWith("https://")) return null;
+      console.error(`mirror ${url}: redirects (${r.location}) — blob present, but not device-servable; no URL from this mirror`);
       continue;
     }
     console.error(`mirror ${url}: ${r.error}`);
-    return null;
   }
-  console.error(`mirror ${server}: too many redirects`);
   return null;
 }
 
@@ -183,7 +188,20 @@ async function main() {
     .map((s) => s.trim().replace(/\/$/, ""))
     .filter(Boolean);
 
-  const urls = [];
+  // The single DEVICE download URL the manifests + downloads.json will name.
+  // Extension-bearing (so a browser download keeps a sensible filename) and
+  // verified direct-200 with matching bytes — never reconstructed blindly.
+  // It is also the FIRST url tag on the event: consumers that take one URL
+  // (the guardian's update clause carries exactly one) get the verified one.
+  const ext = args.channel.endsWith("deb") ? "deb" : "apk";
+  const deviceBase = (process.env.CHARTER_BLOSSOM_DL_BASE ?? "https://nostr.download").replace(
+    /\/$/,
+    "",
+  );
+  const deviceUrl = `${deviceBase}/${sha256}.${ext}`;
+
+  const urls = [deviceUrl];
+  let uploaded = 0;
   if (args.dryRun) {
     // A dry-run event must still be VALID: derive mirror URLs without uploading.
     for (const s of servers) urls.push(`${s}/${sha256}`);
@@ -191,34 +209,31 @@ async function main() {
     for (const server of servers) {
       try {
         await uploadToBlossom(server, bytes, sha256, sk);
-        const verified = await verifyBlossom(server, sha256);
+        uploaded++;
+        const verified = await verifyBlossom(server, sha256, ext);
         if (verified) {
           urls.push(verified);
           console.log(`mirror ok: ${verified}`);
         } else {
-          console.error(`mirror FAILED verification: ${server}`);
+          console.error(`mirror ${server}: uploaded, but no device-servable URL`);
         }
       } catch (err) {
         console.error(`mirror FAILED: ${err.message}`);
       }
     }
-    if (urls.length === 0) {
-      console.error("no Blossom mirror verified — refusing to announce");
+    if (uploaded === 0) {
+      console.error("no Blossom mirror accepted the upload — refusing to announce");
+      process.exit(1);
+    }
+    if (!(await verifyDeviceUrl(deviceUrl, sha256))) {
+      console.error(`device URL not servable (direct-200 + matching bytes): ${deviceUrl}`);
       process.exit(1);
     }
   }
-
-  // The single DEVICE download URL the manifests + downloads.json will name.
-  // Extension-bearing (so a browser download keeps a sensible filename) and
-  // verified direct-200 with matching bytes — never reconstructed blindly.
-  const ext = args.channel.endsWith("deb") ? "deb" : "apk";
-  const deviceBase = (process.env.CHARTER_BLOSSOM_DL_BASE ?? "https://nostr.download").replace(
-    /\/$/,
-    "",
-  );
-  const deviceUrl = `${deviceBase}/${sha256}.${ext}`;
-  if (!args.dryRun && !(await verifyDeviceUrl(deviceUrl, sha256))) {
-    console.error(`device URL not servable (direct-200 + matching bytes): ${deviceUrl}`);
+  // Belt and braces: buildReleaseEvent throws on a non-canonical URL too.
+  const bad = urls.filter((u) => !isCanonicalBlossomUrl(u, sha256));
+  if (bad.length) {
+    console.error(`refusing to announce non-canonical mirror url(s): ${bad.join(", ")}`);
     process.exit(1);
   }
 
@@ -229,7 +244,7 @@ async function main() {
       versionCode: args.versionCode,
       sha256,
       sizeBytes,
-      urls,
+      urls: [...new Set(urls)],
       certSha256: args.cert,
       notes: args.notes,
       createdAt: Math.floor(Date.now() / 1000),

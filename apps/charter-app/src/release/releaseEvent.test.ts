@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { finalizeEvent } from "nostr-tools/pure";
 import { getPublicKey } from "nostr-tools";
-import { latestRelease, releaseFromEvent } from "./releaseEvent";
+import {
+  isCanonicalBlossomUrl,
+  latestRelease,
+  pickInstallUrl,
+  releaseFromEvent,
+} from "./releaseEvent";
 
 const SHA = "a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c";
 const CERT = "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42";
@@ -149,5 +154,46 @@ describe("golden vector parity with the Rust verifier", () => {
     expect(r!.certSha256).toBe(v.expected.certSha256);
     expect(r!.sizeBytes).toBe(v.expected.sizeBytes);
     expect(r!.urls).toEqual(v.expected.urls);
+  });
+});
+
+describe("isCanonicalBlossomUrl", () => {
+  it("accepts only the blob's root address for this sha", () => {
+    expect(isCanonicalBlossomUrl(`https://nostr.download/${SHA}`, SHA)).toBe(true);
+    expect(isCanonicalBlossomUrl(`https://nostr.download/${SHA}.apk`, SHA)).toBe(true);
+    expect(isCanonicalBlossomUrl(`https://media.primal.net/uploads2/a/1e/a8/${SHA}`, SHA)).toBe(
+      false,
+    );
+    expect(isCanonicalBlossomUrl(`http://nostr.download/${SHA}`, SHA)).toBe(false);
+    expect(isCanonicalBlossomUrl(`https://nostr.download/${"b".repeat(64)}`, SHA)).toBe(false);
+    expect(isCanonicalBlossomUrl(`https://nostr.download/${SHA}?x`, SHA)).toBe(false);
+    expect(isCanonicalBlossomUrl("not a url", SHA)).toBe(false);
+  });
+});
+
+describe("pickInstallUrl", () => {
+  it("prefers a canonical Blossom address over a CDN redirect target (the 0.6.9 event)", () => {
+    const urls = [
+      `https://media.primal.net/uploads2/a/1e/a8/${SHA}`,
+      `https://nostr.download/${SHA}`,
+    ];
+    expect(pickInstallUrl(urls, SHA)).toBe(`https://nostr.download/${SHA}`);
+  });
+
+  it("prefers the extension-bearing canonical form", () => {
+    const urls = [`https://nostr.download/${SHA}`, `https://blossom.primal.net/${SHA}.apk`];
+    expect(pickInstallUrl(urls, SHA)).toBe(`https://blossom.primal.net/${SHA}.apk`);
+  });
+
+  it("keeps event order within a class", () => {
+    const urls = [`https://a.example/${SHA}.apk`, `https://b.example/${SHA}.apk`];
+    expect(pickInstallUrl(urls, SHA)).toBe(`https://a.example/${SHA}.apk`);
+  });
+
+  it("falls back to the first url when nothing is canonical, and null on empty", () => {
+    expect(pickInstallUrl([`https://x.example/dl/${SHA}`, `https://y.example/z`], SHA)).toBe(
+      `https://x.example/dl/${SHA}`,
+    );
+    expect(pickInstallUrl([], SHA)).toBeNull();
   });
 });

@@ -27,6 +27,32 @@ class UrlStager {
         NETWORK,
     }
 
+    /**
+     * Stage from the first of [urls] that serves bytes hashing to
+     * [expectedSha256]. The clause names ONE url, and on 2026-08-27 that one
+     * was a purged CDN path: every ward on 0.6.3 retried it (HTTP 404) every
+     * tick for as long as the clause stood, while a healthy mirror it was never
+     * told about sat next to it. The archive is content-addressed and pinned,
+     * so ANY source that serves the right bytes is as good as the named one —
+     * a wrong source fails closed on the hash, never open.
+     *
+     * Result: OK on the first success; otherwise HASH_MISMATCH only when EVERY
+     * attempt served wrong bytes (a poisoned clause — TERMINAL), else NETWORK
+     * (something was unreachable — retry next tick).
+     */
+    fun stageAny(urls: List<String>, expectedSha256: String, dest: File): StageResult {
+        var sawNetwork = false
+        var sawMismatch = false
+        for (url in urls.distinct()) {
+            when (stage(url, expectedSha256, dest)) {
+                StageResult.OK -> return StageResult.OK
+                StageResult.HASH_MISMATCH -> sawMismatch = true
+                StageResult.NETWORK -> sawNetwork = true
+            }
+        }
+        return if (sawMismatch && !sawNetwork) StageResult.HASH_MISMATCH else StageResult.NETWORK
+    }
+
     fun stage(url: String, expectedSha256: String, dest: File): StageResult {
         // A non-absolute destination can never be written to: an Android
         // process's working directory is `/`. Catch it HERE with a distinct
@@ -92,5 +118,25 @@ class UrlStager {
         private const val TAG = "UrlStager"
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 60_000
+
+        /**
+         * The Blossom servers releases are published to
+         * (scripts/release/publish-release.mjs DEFAULT_BLOSSOM). Keep in sync
+         * with the carrier's ApkStager.
+         */
+        internal val BLOSSOM_SERVERS = listOf("https://nostr.download", "https://blossom.primal.net")
+
+        /**
+         * Canonical content-addressed URLs (BUD-01 `https://server/<sha>[.ext]`)
+         * for an archive pinned to [sha256] — where the bytes live regardless
+         * of what the clause named. Extension-bearing first: blossom.primal.net
+         * serves `<sha>.apk` direct-200 where the bare form redirects, and this
+         * stager refuses redirects. Empty for a malformed pin.
+         */
+        fun contentAddressedFallbacks(sha256: String): List<String> {
+            val sha = sha256.lowercase()
+            if (!Regex("^[0-9a-f]{64}$").matches(sha)) return emptyList()
+            return BLOSSOM_SERVERS.flatMap { listOf("$it/$sha.apk", "$it/$sha") }
+        }
     }
 }

@@ -50,6 +50,14 @@ class ApkStagerTest {
                                         "Connection: close\r\n\r\n").toByteArray(),
                                 )
                                 out.write(payload)
+                            } else if (requestLine.startsWith("GET /wrong-bytes")) {
+                                val bad = ByteArray(1000) { 7 }
+                                out.write(
+                                    ("HTTP/1.1 200 OK\r\n" +
+                                        "Content-Length: ${bad.size}\r\n" +
+                                        "Connection: close\r\n\r\n").toByteArray(),
+                                )
+                                out.write(bad)
                             } else if (requestLine.startsWith("GET /redirect")) {
                                 // Blossom mirrors must serve 200 directly; a
                                 // redirect is NETWORK, matching the ward.
@@ -136,5 +144,61 @@ class ApkStagerTest {
         val r = ApkStager().stage(url("/apk"), payloadSha, dest)
         assertEquals(ApkStager.StageResult.OK, r)
         assertArrayEquals(payload, dest.readBytes())
+    }
+
+    // --- stageAny: a dead named url must not strand the guardian either (2026-08-27) ---
+
+    @Test
+    fun stageAnyFallsThroughADeadMirrorToAGoodOne() {
+        val dest = File(tmpDir, "mycharter.apk")
+        val r = ApkStager().stageAny(listOf(url("/missing"), url("/redirect"), url("/apk")), payloadSha, dest)
+        assertEquals(ApkStager.StageResult.OK, r)
+        assertArrayEquals(payload, dest.readBytes())
+    }
+
+    @Test
+    fun stageAnyIsNetworkWhenEveryMirrorIsDead() {
+        val dest = File(tmpDir, "mycharter.apk")
+        val r = ApkStager().stageAny(listOf(url("/missing"), url("/redirect")), payloadSha, dest)
+        assertEquals(ApkStager.StageResult.NETWORK, r)
+        assertFalse(dest.exists())
+    }
+
+    @Test
+    fun stageAnyIsTerminalOnlyWhenEveryMirrorServesWrongBytes() {
+        val dest = File(tmpDir, "mycharter.apk")
+        val wrong = "0".repeat(64)
+        assertEquals(
+            ApkStager.StageResult.HASH_MISMATCH,
+            ApkStager().stageAny(listOf(url("/apk"), url("/apk")), wrong, dest),
+        )
+        assertEquals(
+            ApkStager.StageResult.NETWORK,
+            ApkStager().stageAny(listOf(url("/apk"), url("/missing")), wrong, dest),
+        )
+        assertFalse(dest.exists())
+    }
+
+    @Test
+    fun stageAnyRecoversFromAPoisonedNamedUrl() {
+        val dest = File(tmpDir, "mycharter.apk")
+        val r = ApkStager().stageAny(listOf(url("/wrong-bytes"), url("/apk")), payloadSha, dest)
+        assertEquals(ApkStager.StageResult.OK, r)
+        assertArrayEquals(payload, dest.readBytes())
+    }
+
+    @Test
+    fun contentAddressedFallbacksAreCanonicalBlossomAddresses() {
+        val sha = "d5344cd5674d3bce4c5a81e82008dc0a0c8572930264fa1d5ff260b572457be1"
+        assertEquals(
+            listOf(
+                "https://nostr.download/$sha.apk",
+                "https://nostr.download/$sha",
+                "https://blossom.primal.net/$sha.apk",
+                "https://blossom.primal.net/$sha",
+            ),
+            ApkStager.contentAddressedFallbacks(sha.uppercase()),
+        )
+        assertTrue(ApkStager.contentAddressedFallbacks("nope").isEmpty())
     }
 }

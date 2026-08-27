@@ -56,7 +56,9 @@ class SelfUpdater(private val context: Context) {
 
     private fun run(url: String, sha256: String) {
         val dest = File(File(context.filesDir, "updates"), "mycharter.apk")
-        when (ApkStager().stage(url, sha256, dest)) {
+        // The named url first, then every canonical mirror the pin implies.
+        val sources = listOf(url) + ApkStager.contentAddressedFallbacks(sha256)
+        when (ApkStager().stageAny(sources, sha256, dest)) {
             ApkStager.StageResult.OK -> {}
             ApkStager.StageResult.HASH_MISMATCH ->
                 return fail("the download didn't match its checksum")

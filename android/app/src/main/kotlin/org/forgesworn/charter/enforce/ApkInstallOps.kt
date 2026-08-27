@@ -122,7 +122,10 @@ class DpmApkInstallOps(
                 Log.e(TAG, "url install without url/apkSha256 — refusing")
                 return CharterCore.InstallOutcome.TERMINAL
             }
-            when (stager.stage(url, pinnedApkSha, apk)) {
+            // The clause's url first, then every canonical mirror the pin
+            // implies — a dead named url must not strand a ward (2026-08-27).
+            val sources = listOf(url) + UrlStager.contentAddressedFallbacks(pinnedApkSha)
+            when (stager.stageAny(sources, pinnedApkSha, apk)) {
                 UrlStager.StageResult.HASH_MISMATCH -> {
                     failure = "the download didn't match its checksum"
                     return CharterCore.InstallOutcome.TERMINAL

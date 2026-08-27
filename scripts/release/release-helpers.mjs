@@ -19,6 +19,28 @@ export const BLOSSOM_AUTH_KIND = 24242;
 const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
+ * A URL a device may be told to fetch `sha256` from: https, and the blob at
+ * the server ROOT, addressed by its own hash (`https://host/<sha>` or
+ * `https://host/<sha>.<ext>`, BUD-01). That path is the one address a
+ * Blossom server promises to keep serving. Anything else — in particular a
+ * CDN redirect *target* like `media.primal.net/uploads2/a/1e/a8/<sha>` — is
+ * an implementation detail that can vanish (primal's did, 2026-08-27: every
+ * ward on 0.6.3 sat in a 404-retry loop while the second mirror was fine).
+ */
+export function isCanonicalBlossomUrl(url, sha256) {
+  if (typeof url !== "string" || !HEX64.test(sha256 ?? "")) return false;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.search || u.hash || u.username || u.password) return false;
+  const m = /^\/([0-9a-f]{64})(\.[A-Za-z0-9]{1,8})?$/.exec(u.pathname);
+  return m !== null && m[1] === sha256;
+}
+
+/**
  * The unsigned kind-30063 template announcing one artifact. Throws on any
  * invalid field — a malformed release event must never reach finalizeEvent.
  */
@@ -45,6 +67,8 @@ export function buildReleaseEvent({
   for (const u of urls) {
     if (typeof u !== "string" || !u.startsWith("https://"))
       throw new Error(`mirror url must be https: ${u}`);
+    if (!isCanonicalBlossomUrl(u, sha256))
+      throw new Error(`mirror url must be the blob's canonical root address (https://host/<sha>[.ext]): ${u}`);
   }
   if (channel !== "charter-deb" && !HEX64.test(certSha256 ?? ""))
     throw new Error("APK channels require certSha256 (64 lowercase hex chars)");

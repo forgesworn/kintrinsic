@@ -46,7 +46,7 @@ import { decisionTiming } from "./decisionTiming";
 import { runApproveAppOpenFlow } from "./approveAppOpenFlow";
 import { getPublicKey, SimplePool } from "nostr-tools";
 import { fetchAllReleaseManifests } from "../release/fetchReleases";
-import type { ReleaseManifest } from "../release/releaseEvent";
+import { pickInstallUrl, type ReleaseManifest } from "../release/releaseEvent";
 import { SignerCancelled, type ConfirmGate } from "../signer/mockSigner";
 import type { DecisionContext, InstallDecision, Signer } from "../signer/Signer";
 import { catalogLookup } from "../data/appCatalog";
@@ -1302,17 +1302,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (childId: string): Promise<boolean> => {
       const manifest = updateManifest;
       if (!manifest || !signer.current!.status().connected) return false;
-      // A relay-announced release names absolute Blossom mirrors; the origin
-      // JSON fallback now names a single Blossom `url` (D3); only very old
-      // manifests fall back to a same-origin path. Either way the ward
-      // re-verifies the bytes against the clause's sha256 + cert pins.
+      // A relay-announced release names absolute Blossom mirrors — the clause
+      // carries ONE, so pick the canonical address, never a CDN redirect
+      // target (the 0.6.9 event led with one; it 404'd for every ward,
+      // 2026-08-27). The origin JSON fallback names a single Blossom `url`
+      // (D3); only very old manifests fall back to a same-origin path. Either
+      // way the ward re-verifies the bytes against the clause's sha256 + cert pins.
       const mirrors = (manifest as Partial<ReleaseManifest>).urls;
       const url =
-        mirrors && mirrors.length > 0
-          ? mirrors[0]
-          : manifest.url
-            ? manifest.url
-            : new URL(manifest.path ?? APK_PATH, window.location.origin).toString();
+        (mirrors && pickInstallUrl(mirrors, manifest.apkSha256)) ??
+        (manifest.url
+          ? manifest.url
+          : new URL(manifest.path ?? APK_PATH, window.location.origin).toString());
       try {
         await signer.current!.signUpdateClause(childId, manifest, url);
         addActivity(

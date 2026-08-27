@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { UpdateManifest } from "../wire/types";
+import { pickInstallUrl } from "../release/releaseEvent";
 import {
   MYCHARTER_DOWNLOAD_URL,
   fetchKintrinsicManifest,
@@ -135,19 +136,21 @@ function BehindNotice({
 
   const carrier = window.CharterCarrier;
   // A relay ReleaseManifest carries `urls[]`; the origin-JSON fallback carries
-  // a single Blossom `url` (D3). Either supplies the self-install source.
+  // a single Blossom `url` (D3). Either supplies the self-install source —
+  // the canonical Blossom address, never a CDN redirect target (2026-08-27).
   const rm = latest as Partial<{ urls: string[]; url: string }>;
   const mirrors =
     rm.urls && rm.urls.length > 0 ? rm.urls : rm.url ? [rm.url] : [];
+  const installUrl = pickInstallUrl(mirrors, latest.apkSha256);
   const canSelfInstall =
-    Boolean(carrier && typeof carrier.installUpdate === "function") && mirrors.length > 0;
+    Boolean(carrier && typeof carrier.installUpdate === "function") && installUrl !== null;
 
   if (!canSelfInstall) {
     return line(`Kintrinsic ${installed} — ${latest.versionName} is available.`, "Update →");
   }
 
   const start = () => {
-    const answer = carrier!.installUpdate!(mirrors![0], latest.apkSha256);
+    const answer = carrier!.installUpdate!(installUrl!, latest.apkSha256);
     if (answer !== "started" && answer !== "busy") {
       setPhase({ phase: "failed", error: answer });
       return;

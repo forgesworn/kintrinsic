@@ -128,3 +128,51 @@ export function latestRelease(
   }
   return best;
 }
+
+/**
+ * Is `url` the blob's canonical Blossom address for `sha256` —
+ * `https://host/<sha>` or `https://host/<sha>.<ext>` (BUD-01)? That is the
+ * one path a Blossom server promises to keep serving. A CDN redirect target
+ * (`media.primal.net/uploads2/a/1e/a8/<sha>`) is not, and the 0.6.9 event
+ * carried one FIRST: primal purged it, and every ward taking `urls[0]` looped
+ * on HTTP 404 while the second mirror was fine (2026-08-27).
+ */
+export function isCanonicalBlossomUrl(url: string, sha256: string): boolean {
+  if (!HEX64.test(sha256)) return false;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.search || u.hash || u.username || u.password) return false;
+  const m = /^\/([0-9a-f]{64})(\.[A-Za-z0-9]{1,8})?$/.exec(u.pathname);
+  return m !== null && m[1] === sha256;
+}
+
+/**
+ * The one URL to hand a device (the update clause carries exactly one):
+ * canonical Blossom addresses beat anything else, extension-bearing beats
+ * bare (blossom.primal.net serves `<sha>.apk` direct-200 where the bare form
+ * 302s, and the stagers refuse redirects), and within a class the event's
+ * order stands. Falls back to `urls[0]` when nothing is canonical — the
+ * device still pins the bytes to `sha256`, so a wrong mirror fails closed.
+ * Empty input → null.
+ */
+export function pickInstallUrl(urls: readonly string[], sha256: string): string | null {
+  if (urls.length === 0) return null;
+  const rank = (u: string): number => {
+    if (!isCanonicalBlossomUrl(u, sha256)) return 2;
+    return new URL(u).pathname.includes(".") ? 0 : 1;
+  };
+  let best = urls[0];
+  let bestRank = rank(best);
+  for (const u of urls.slice(1)) {
+    const r = rank(u);
+    if (r < bestRank) {
+      best = u;
+      bestRank = r;
+    }
+  }
+  return best;
+}

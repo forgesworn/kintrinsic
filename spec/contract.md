@@ -1043,6 +1043,14 @@ clause is safe to leave standing. Attempts and the last error are retained for
 STATUS rather than retried silently forever — a device that cannot update needs
 to be able to say so.
 
+**`url` names a source, not the only source.** The archive is content-addressed
+by `apkSha256`, so a device MAY also try the canonical Blossom address of that
+hash on the release mirrors (`https://<server>/<sha256>[.apk]`) when the named
+`url` fails; every source is held to the same sha256 + signing-cert pins, so a
+wrong mirror fails closed. Guardians SHOULD name a canonical Blossom address,
+never a CDN redirect target (one was purged under the 0.6.9 release and every
+ward that trusted it alone retried HTTP 404 indefinitely, 2026-08-27).
+
 **Platform scope: Android only.** Charter for Linux updates through `apt` /
 the published `.deb`, so `charterd` stores this clause and never reads it.
 

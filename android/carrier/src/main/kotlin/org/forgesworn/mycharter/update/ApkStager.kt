@@ -27,6 +27,28 @@ class ApkStager {
         NETWORK,
     }
 
+    /**
+     * Stage from the first of [urls] that serves bytes hashing to
+     * [expectedSha256]; the archive is content-addressed and pinned, so any
+     * source serving the right bytes is as good as the named one and a wrong
+     * source fails closed on the hash. OK on the first success; HASH_MISMATCH
+     * only when EVERY attempt served wrong bytes; else NETWORK. Mirrors the
+     * ward's UrlStager.stageAny (2026-08-27: a purged CDN path named first
+     * stranded every ward on 0.6.3 in a 404 loop).
+     */
+    fun stageAny(urls: List<String>, expectedSha256: String, dest: File): StageResult {
+        var sawNetwork = false
+        var sawMismatch = false
+        for (url in urls.distinct()) {
+            when (stage(url, expectedSha256, dest)) {
+                StageResult.OK -> return StageResult.OK
+                StageResult.HASH_MISMATCH -> sawMismatch = true
+                StageResult.NETWORK -> sawNetwork = true
+            }
+        }
+        return if (sawMismatch && !sawNetwork) StageResult.HASH_MISMATCH else StageResult.NETWORK
+    }
+
     fun stage(url: String, expectedSha256: String, dest: File): StageResult {
         val parent = dest.parentFile
         if (!dest.isAbsolute || parent == null) {
@@ -87,5 +109,19 @@ class ApkStager {
         private const val TAG = "ApkStager"
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 60_000
+
+        /** Keep in sync with the ward's UrlStager + publish-release.mjs DEFAULT_BLOSSOM. */
+        internal val BLOSSOM_SERVERS = listOf("https://nostr.download", "https://blossom.primal.net")
+
+        /**
+         * Canonical content-addressed URLs (`https://server/<sha>[.apk]`) for
+         * an archive pinned to [sha256]. Extension-bearing first (served
+         * direct-200 where the bare form redirects). Empty for a malformed pin.
+         */
+        fun contentAddressedFallbacks(sha256: String): List<String> {
+            val sha = sha256.lowercase()
+            if (!Regex("^[0-9a-f]{64}$").matches(sha)) return emptyList()
+            return BLOSSOM_SERVERS.flatMap { listOf("$it/$sha.apk", "$it/$sha") }
+        }
     }
 }
