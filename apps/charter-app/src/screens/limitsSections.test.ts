@@ -154,6 +154,39 @@ describe("buildApps", () => {
     const out = buildApps({ enabled: true, posture: "blocklist", blocked: [], allowed: [] });
     expect(out.askFirst).toBeUndefined();
   });
+
+  // "Remove from device" has exactly the askFirst failure mode above: it is a
+  // dimension the draft/saved comparison reads, so dropping it here would
+  // leave the Apps row showing unsaved changes for ever after the first
+  // removal — the save itself being perfectly correct throughout.
+  it("carries hidden through, so a saved removal reads as saved", () => {
+    expect(
+      buildApps({
+        enabled: false,
+        posture: "blocklist",
+        blocked: [],
+        allowed: [],
+        hidden: ["com.samsung.android.game.gamehome"],
+      }),
+    ).toEqual({
+      enabled: false,
+      posture: "blocklist",
+      blocked: [],
+      allowed: [],
+      hidden: ["com.samsung.android.game.gamehome"],
+    });
+  });
+
+  it("omits hidden entirely when empty, matching every other array here", () => {
+    const out = buildApps({
+      enabled: true,
+      posture: "blocklist",
+      blocked: [],
+      allowed: [],
+      hidden: [],
+    });
+    expect(out.hidden).toBeUndefined();
+  });
 });
 
 /**
@@ -226,6 +259,43 @@ describe("appsSummary", () => {
         T0,
       ),
     ).toBe("No app blocks");
+  });
+
+  // Removals survive `paused` on the wire (`appsToGrant` emits `hidden`
+  // before the paused early-return), so the collapsed row has to say so: a
+  // flat "No app blocks" for a tablet with three apps taken off it would hide
+  // the only thing this section had actually done.
+  it("names removals even with app control off", () => {
+    expect(
+      appsSummary(
+        { enabled: false, posture: "blocklist", blocked: [], allowed: [], hidden: ["a", "b", "c"] },
+        T0,
+      ),
+    ).toBe("No app blocks, 3 removed from device");
+  });
+
+  it("appends removals to the blocked count", () => {
+    expect(
+      appsSummary(
+        { enabled: true, posture: "blocklist", blocked: ["a", "b"], allowed: [], hidden: ["c"] },
+        T0,
+      ),
+    ).toBe("2 apps blocked, 1 removed");
+  });
+
+  it("appends removals to the allowed count too", () => {
+    expect(
+      appsSummary(
+        { enabled: true, posture: "allowlist", blocked: [], allowed: ["a"], hidden: ["b", "c"] },
+        T0,
+      ),
+    ).toBe("Only 1 app allowed, 2 removed");
+  });
+
+  it("says nothing extra when nothing is removed (unchanged case)", () => {
+    expect(
+      appsSummary({ enabled: true, posture: "blocklist", blocked: ["a"], allowed: [], hidden: [] }, T0),
+    ).toBe("1 app blocked");
   });
 });
 

@@ -607,9 +607,33 @@ interface GrantApps {
    *  open" affordance for, instead of a flat block. Every listed pkg MUST
    *  also be in `blocked`. */
   askFirst?: string[];
+  /** Apps the device REMOVES from the ward's surface entirely ("Remove from
+   *  device"): gone from the launcher, drawer and Settings as if
+   *  uninstalled; put back when dropped from this list. Independent of
+   *  posture and NOT lifted by `paused`. */
+  hidden?: string[];
   issuedAt: number;
 }
 ```
+
+**`hidden` — remove from device (ward Kintrinsic ≥ 0.6.10 / versionCode 41,
+Android only).** A tablet ships full of OEM apps nobody asked for, and since
+0.6.9 a ward device refuses USB debugging by construction, so there is no cable
+to clean it with — the warden's own Device Owner power is the only honest tool.
+Every pkg in `hidden` is hidden with `setApplicationHidden` (it vanishes from
+the launcher, the drawer and Settings' app list as if uninstalled; storage on
+the system partition is unaffected either way), and un-hidden the moment the
+guardian drops it from the list — the warden remembers what it hid so a later
+clause can undo it, and keeps reporting hidden apps in the STATUS inventory
+(`AppRef.hidden`) so the guardian can list them to put back. It is a **device
+tidy, not a time-of-day policy**: independent of `posture`/`blocked`/
+`allowed`, and deliberately **not lifted by `paused`** — pausing app blocks for
+an hour must not make the junk reappear. The warden's deny-list (itself,
+Settings, SystemUI, the dialer, the launcher, the IME) can never be hidden.
+Additive at `v: 1`: an older warden ignores the field and the app simply
+stays, gated by posture as before; guardian surfaces version-gate instead
+(MyCharter: `wardenSupport.appHide`). charterd never hides apps (`linux:
+NEVER`).
 
 **Holds** exist because a guardian who wants a one-off ("let him on the browser
 for an hour") otherwise has to edit a standing RULE and remember to put it back.
@@ -698,6 +722,10 @@ interface AppRef {
   label: string;
   /** true only for an entry from a ward-writable scan dir; absent (root-owned) otherwise. */
   userInstalled?: boolean;
+  /** true while the warden hides this app under the `apps` clause's `hidden`
+   *  list (ward Kintrinsic ≥ 0.6.10). Reported from the warden's own memory
+   *  of what it hid, so the guardian can still list it to put it back. */
+  hidden?: boolean;
 }
 ```
 

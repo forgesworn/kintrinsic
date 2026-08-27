@@ -41,6 +41,24 @@ interface AppGateOps {
         alwaysAvailable: Set<String> = emptySet(),
     ): List<String>
     fun isSuspended(pkg: String): Boolean
+
+    /**
+     * Level-triggered "remove from device" (2026-08-27). [desired] is the set
+     * that must be HIDDEN right now — gone from the launcher, the drawer and
+     * Settings as if uninstalled ([android.app.admin.DevicePolicyManager.setApplicationHidden]).
+     * Every package the warden hid that is NOT in [desired] is unhidden, so a
+     * guardian dropping a name from the clause puts the app back.
+     *
+     * Its own dimension, deliberately NOT unioned into [reconcile]: hiding is a
+     * standing tidy of the device, not a time-of-day posture. It survives a
+     * pause, an unlock and an always-available exemption, because none of those
+     * are answers to "should this app be on this phone at all?".
+     *
+     * Idempotent and difference-only: a tick where nothing moved must make no
+     * binder calls at all (the [syncOnChange] discipline). Returns the packages
+     * it could not change (never fatal).
+     */
+    fun reconcileHidden(desired: Set<String>): List<String>
 }
 
 /**
@@ -94,6 +112,48 @@ fun appSuspendSet(
     // rule, OR its named-times bucket stays suspended — the dimensions never
     // cancel each other out.
     return lockPosture + standing + ruleSuspensions + bucketSuspensions
+}
+
+/**
+ * The packages to HIDE — the `apps` clause's "remove from device" list,
+ * narrowed to what this phone actually has and widened by nothing.
+ *
+ * Origin (2026-08-27): a ward's Samsung tablet arrived carrying a screenful of
+ * OEM bloatware nobody in the family wanted, and since 0.6.9 locks USB
+ * debugging by design there is no cable path to sweep it off — the tidy has to
+ * come down the charter or not at all. Suspending those apps was the wrong
+ * shape: a suspended app still sits in the drawer wearing a grey badge,
+ * advertising itself and inviting a tap that goes nowhere.
+ *
+ * Deliberately unlike [appSuspendSet]: this reads NOTHING but
+ * [org.forgesworn.charter.native.CharterCore.AppPolicy.hidden]. Not the
+ * posture, not `blocked`, not `allowed`, not the lock, not a bucket — hiding
+ * is a standing statement about which apps belong on the device, so no clock
+ * and no exemption may move it. A pause lifts BLOCKING and leaves this exactly
+ * where it stands (the pure logic here cannot even see a pause; see the call
+ * site in `WardenController` for the contract that keeps it that way).
+ *
+ * Two narrowings, both non-negotiable:
+ *  - `∩ installed` — a named package the phone never had is silently ignored,
+ *    so a guardian pasting a list of bloatware package names that only half
+ *    matches this model does not produce a tick of failure spam forever.
+ *  - `− deny` — [denyListPackages] may NEVER be hidden. Hiding the launcher,
+ *    the IME, Settings, the dialer or Kintrinsic itself would strand the ward on
+ *    a phone she cannot use or call out of, and unlike a suspension there is no
+ *    grey badge to explain it. The clause is not permitted to brick the device.
+ *
+ * Empty when there is no policy at all — nothing hidden, everything the warden
+ * previously hid comes back.
+ *
+ * Pure set logic — the JVM-testable seam [AppGateOps.reconcileHidden] applies.
+ */
+fun appHideSet(
+    policy: org.forgesworn.charter.native.CharterCore.AppPolicy?,
+    installed: Collection<String>,
+    deny: Set<String>,
+): Set<String> {
+    if (policy == null) return emptySet()
+    return policy.hidden.toSet().intersect(installed.toSet()) - deny
 }
 
 /**
@@ -203,6 +263,107 @@ fun launchablePackages(context: Context): List<String> {
 }
 
 /**
+ * What the warden has HIDDEN, remembered across ticks and reboots.
+ *
+ * This has to be persisted, and the reason is the whole trick: a hidden package
+ * drops out of `queryIntentActivities` — the device stops admitting it exists.
+ * So the warden cannot re-derive "what did I hide?" by looking; it would find
+ * nothing, unhide nothing, and a package dropped from the clause would stay
+ * invisible forever with no way back short of a factory reset. The memory IS
+ * the undo.
+ *
+ * A plain string-set under one key: this is a small set that is rewritten
+ * whole, never merged.
+ */
+class HiddenAppsStore(context: Context) {
+    // Lazy so merely CONSTRUCTING the ops object never touches storage — the
+    // production wiring builds it eagerly and a first tick is not guaranteed.
+    private val prefs by lazy {
+        context.getSharedPreferences("charter-hidden-apps", Context.MODE_PRIVATE)
+    }
+
+    fun read(): Set<String> = prefs.getStringSet(KEY, emptySet())?.toSet() ?: emptySet()
+
+    /** Writes ONLY on a real change — a quiet tick must not touch flash (this
+     *  runs on every enforcement tick). A defensive copy goes in, because
+     *  SharedPreferences does not copy the set it is handed. */
+    fun write(next: Set<String>, previous: Set<String>) {
+        if (next == previous) return
+        prefs.edit().putStringSet(KEY, HashSet(next)).apply()
+    }
+
+    companion object {
+        private const val KEY = "charter.hiddenApps"
+    }
+}
+
+/**
+ * Which of [packages] this device actually has, hidden ones included.
+ *
+ * `MATCH_UNINSTALLED_PACKAGES` is the point: a package the warden has hidden
+ * reads as uninstalled to every ordinary query, so without this flag the
+ * hide-set would empty itself the tick after it took effect and the warden
+ * would immediately unhide everything it just hid.
+ *
+ * Probes only the named packages rather than enumerating the whole device —
+ * `getInstalledApplications` costs real time on a phone (the same reason the
+ * install account refreshes on a cadence instead of every tick), and the clause
+ * names a handful of packages, not thousands.
+ */
+fun installedAmong(context: Context, packages: Collection<String>): Set<String> {
+    if (packages.isEmpty()) return emptySet()
+    val pm = context.packageManager
+    return packages.filterTo(HashSet()) { installedInfo(pm, it) != null }
+}
+
+/**
+ * The [android.content.pm.ApplicationInfo] for [pkg] if the device really has
+ * it, hidden included; null otherwise.
+ *
+ * `MATCH_UNINSTALLED_PACKAGES` widens the query far enough to see a hidden
+ * package — but it also drags in the ghosts of packages removed with their data
+ * kept, so `FLAG_INSTALLED` narrows it back. A hidden package keeps that flag
+ * (hiding marks the package hidden for the user, not uninstalled), a ghost does
+ * not: the flag is exactly the line between "here but invisible" and "gone".
+ * Chasing a ghost would mean a `setApplicationHidden` call that fails every
+ * tick forever, which is the failure spam this whole path must not produce.
+ */
+private fun installedInfo(
+    pm: PackageManager,
+    pkg: String,
+): android.content.pm.ApplicationInfo? {
+    val info = runCatching {
+        pm.getApplicationInfo(pkg, PackageManager.MATCH_UNINSTALLED_PACKAGES)
+    }.getOrNull() ?: return null
+    val installed = info.flags and android.content.pm.ApplicationInfo.FLAG_INSTALLED != 0
+    return if (installed) info else null
+}
+
+/**
+ * Labels for packages the warden has HIDDEN, as `(pkg, label)` — the inventory
+ * entries no launcher query can produce any more, since hiding removes the
+ * package from `queryIntentActivities`.
+ *
+ * Without this the guardian's app picker would lose an app the moment she hid
+ * it, leaving her no row to un-hide from: the tidy would be one-way, which is
+ * exactly the trap Kintrinsic must never build. Deliberately kept OUT of
+ * [launchableAppsPairs] — the shade's Open row is built from that list, and a
+ * button that opens a hidden app is a button that does nothing.
+ *
+ * A package that is genuinely gone (uninstalled while hidden) is dropped; a
+ * package whose label cannot be read falls back to its own name.
+ */
+fun hiddenAppsPairs(context: Context, hidden: Set<String>): List<Pair<String, String>> {
+    if (hidden.isEmpty()) return emptyList()
+    val pm = context.packageManager
+    val deny = denyListPackages(context)
+    return hidden.filterNot { it in deny }.sorted().mapNotNull { pkg ->
+        val info = installedInfo(pm, pkg) ?: return@mapNotNull null
+        pkg to runCatching { pm.getApplicationLabel(info).toString() }.getOrDefault(pkg)
+    }
+}
+
+/**
  * Installed launchable apps as `(pkg, label)` pairs, excluding the deny-list —
  * the shared query-and-dedupe loop behind [launchableAppsJson] (the guardian's
  * app-picker source) and the shade's Open-row inventory. Deduped by package;
@@ -228,11 +389,27 @@ fun launchableAppsPairs(context: Context): List<Pair<String, String>> {
 
 /** Installed launchable apps as JSON `[{"pkg":…,"label":…}]`, excluding the
  *  deny-list — the guardian's app-picker source (rides STATUS). Deduped by
- *  package; labels are the friendly display names. */
+ *  package; labels are the friendly display names.
+ *
+ *  Packages the warden has HIDDEN are appended with `"hidden": true` (2026-08-27).
+ *  They must appear, or the picker loses the app the moment it is hidden and
+ *  the guardian has nothing to un-hide from — a one-way tidy. The flag is
+ *  emitted ONLY on those entries: an ordinary app's object is byte-for-byte
+ *  what every shipped guardian already parses, so nothing older has to change
+ *  to keep working. */
 fun launchableAppsJson(context: Context): String {
     val arr = org.json.JSONArray()
+    val seen = HashSet<String>()
     for ((pkg, label) in launchableAppsPairs(context)) {
+        if (!seen.add(pkg)) continue
         arr.put(org.json.JSONObject().put("pkg", pkg).put("label", label))
+    }
+    // `seen` guards the seam between the two sources: a package the warden
+    // believes it hid but that is somehow still launchable (a hide that failed,
+    // a stale memory) must appear once, not twice.
+    for ((pkg, label) in hiddenAppsPairs(context, HiddenAppsStore(context).read())) {
+        if (!seen.add(pkg)) continue
+        arr.put(org.json.JSONObject().put("pkg", pkg).put("label", label).put("hidden", true))
     }
     return arr.toString()
 }
@@ -286,6 +463,10 @@ class DpmAppGateOps(
     private val admin: ComponentName,
 ) : AppGateOps {
 
+    /** What we hid, so we can put it back — a hidden package stops answering
+     *  launcher queries, so this memory is the only route home. */
+    private val hiddenStore = HiddenAppsStore(context)
+
     override fun reconcile(
         locked: Boolean,
         appPolicy: org.forgesworn.charter.native.CharterCore.AppPolicy?,
@@ -328,6 +509,48 @@ class DpmAppGateOps(
         } catch (e: PackageManager.NameNotFoundException) {
             false
         }
+
+    override fun reconcileHidden(desired: Set<String>): List<String> {
+        // Belt and braces over [appHideSet]'s own subtraction: whatever route a
+        // package took to get here, the deny-list is never hidden. Stranding the
+        // ward on a phone with no launcher, no keyboard or no dialer is not a
+        // failure mode worth one binder call's saving.
+        val target = desired - denyListPackages(context)
+        val remembered = hiddenStore.read()
+        val toHide = target - remembered
+        val toUnhide = remembered - target
+        // The difference discipline (see [syncOnChange]): a settled device makes
+        // NO calls here. Hiding is level-triggered like the suspend reconcile,
+        // and this runs every tick — re-asserting an unchanged set would be the
+        // ~68-redundant-changes-a-minute mistake again, on a heavier call.
+        if (toHide.isEmpty() && toUnhide.isEmpty()) return emptyList()
+        val failed = mutableListOf<String>()
+        val next = remembered.toMutableSet()
+        for (pkg in toHide) {
+            if (setHidden(pkg, true)) next.add(pkg) else failed.add(pkg)
+        }
+        for (pkg in toUnhide) {
+            // A failed unhide stays REMEMBERED so the next tick retries it —
+            // forgetting it would leave the app invisible with nothing left on
+            // the device that knows to bring it back. The one exception is a
+            // package that is simply gone: nothing to unhide and nothing to
+            // retry, so it leaves the memory rather than failing forever.
+            when {
+                setHidden(pkg, false) -> next.remove(pkg)
+                installedAmong(context, listOf(pkg)).isEmpty() -> next.remove(pkg)
+                else -> failed.add(pkg)
+            }
+        }
+        hiddenStore.write(next, remembered)
+        if (failed.isNotEmpty()) Log.w(TAG, "could not hide/unhide: ${failed.joinToString()}")
+        return failed
+    }
+
+    /** One [DevicePolicyManager.setApplicationHidden] call, never fatal: it
+     *  throws for a package this user does not have, and a single bad name in
+     *  the clause must not take the rest of the reconcile down with it. */
+    private fun setHidden(pkg: String, hide: Boolean): Boolean =
+        runCatching { dpm.setApplicationHidden(admin, pkg, hide) }.getOrDefault(false)
 
     companion object {
         private const val TAG = "DpmAppGateOps"

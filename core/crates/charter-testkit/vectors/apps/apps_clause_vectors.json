@@ -141,6 +141,32 @@
         "issuedAt": 1782734400,
         "paused": true
       }
+    },
+    {
+      "name": "remove_from_device_with_app_blocks_off",
+      "note": "A tablet's OEM bloatware removed via `hidden` while app blocks are OFF: `paused` lifts blocking, never the tidy — `hidden` rides the clause regardless (2026-08-27, a Samsung ward tablet with no cable since 0.6.9).",
+      "input": {
+        "enabled": false,
+        "posture": "blocklist",
+        "blocked": [],
+        "allowed": [],
+        "hidden": [
+          "com.samsung.android.bixby.agent",
+          "com.facebook.katana",
+          "com.microsoft.office.outlook"
+        ]
+      },
+      "payload": {
+        "v": 1,
+        "posture": "blocklist",
+        "issuedAt": 1782734400,
+        "paused": true,
+        "hidden": [
+          "com.samsung.android.bixby.agent",
+          "com.facebook.katana",
+          "com.microsoft.office.outlook"
+        ]
+      }
     }
   ]
 }

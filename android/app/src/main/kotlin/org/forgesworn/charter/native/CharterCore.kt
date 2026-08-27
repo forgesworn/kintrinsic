@@ -150,11 +150,22 @@ object CharterCore {
         )
     }
 
-    /** The ward's standing per-app policy. `posture` = "blocklist" | "allowlist". */
+    /** The ward's standing per-app policy. `posture` = "blocklist" | "allowlist".
+     *
+     *  [hidden] is a different KIND of thing from the other three: not a
+     *  time-of-day posture but a standing "remove from device" — the packages
+     *  the warden hides outright (they leave the launcher, the drawer and
+     *  Settings as if uninstalled). It rides the same clause because it is the
+     *  same conversation ("which apps are on this phone?"), but it is
+     *  independent of [posture]/[blocked]/[allowed] and is NOT lifted by a
+     *  pause. Optional and additive: absent ⇒ empty ⇒ nothing hidden, so every
+     *  charter written before 2026-08-27 means exactly what it always meant.
+     */
     data class AppPolicy(
         val posture: String,
         val blocked: List<String>,
         val allowed: List<String>,
+        val hidden: List<String> = emptyList(),
     )
 
     /**
@@ -201,6 +212,9 @@ object CharterCore {
                 posture = o.optString("posture", "blocklist"),
                 blocked = list("blocked"),
                 allowed = list("allowed"),
+                // Additive and optional — an older core that never emits the
+                // key parses to an empty list, never a failure.
+                hidden = list("hidden"),
             )
         } catch (_: Throwable) {
             null

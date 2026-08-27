@@ -529,6 +529,13 @@ export function applyAppsFragment(
   };
   if (prior?.holds !== undefined) out.holds = prior.holds.map((h) => ({ ...h }));
   if (fragment.askFirst.length) out.askFirst = dedupe(fragment.askFirst);
+  // "Remove from device" is carried through UNTOUCHED and named times never
+  // writes it: hiding an app is a different decision from what a named time
+  // costs, and this function rebuilds the policy from scratch, so anything it
+  // forgets to copy is silently deleted on the next save (the `allowed` bug
+  // above, in a different dimension). Absent when empty, like `askFirst`, so
+  // an unchanged policy stays byte-identical.
+  if (prior?.hidden?.length) out.hidden = [...prior.hidden];
   return out;
 }
 

@@ -26,6 +26,7 @@ export type WardenFeature =
   | "gift"
   | "lifelineV2"
   | "appHold"
+  | "appHide"
   // Named times (2026-08): the weekly bucket axis, and the app.open ask /
   // askFirst "on request" affordance. Both are new to THIS branch's wards on
   // BOTH platforms, unlike the older per-platform-only gates below.
@@ -126,6 +127,14 @@ const MIN_VERSION: Record<WardenFeature, Partial<Record<Device["platform"], Thre
   // ignores the whole clause, and naming that honestly ("needs the latest
   // Kintrinsic") is exactly what this gate is for.
   appHold: { android: 36, linux: 701 },
+  // "Remove from device" — hiding an app outright (`apps.hidden`). Ward
+  // Kintrinsic 0.6.10 (versionCode 41) is the first build that reads the field;
+  // 0.6.9 (40) is the release that locked USB debugging and so created the
+  // need for it. charterd never hides apps at any version: there is no Linux
+  // equivalent of a Device Owner making a package vanish from the launcher,
+  // and a laptop has no OEM bloat a guardian can't uninstall the ordinary
+  // way — so NEVER, not a future threshold this repo hasn't shipped.
+  appHide: { android: 41, linux: NEVER },
   // Honest attribution (charterd 0.7.5 / versionCode 705): the `cmdline:`
   // identity form, and the `unrecognisedTodaySecs` floor it makes visible
   // for. Android never enforces either (see the union's own doc above).

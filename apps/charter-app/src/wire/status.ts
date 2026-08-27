@@ -174,6 +174,17 @@ export interface AppRef {
    * were an inventory the ward has no way to have altered.
    */
   userInstalled?: boolean;
+  /**
+   * true when the device is currently HIDING this app on the guardian's
+   * orders (the `apps` clause's `hidden` list) — absent otherwise, never
+   * coerced to `false`, matching `userInstalled` directly above.
+   *
+   * The device keeps REPORTING a hidden app rather than dropping it from the
+   * inventory, and that is the whole point: an app that vanished from both
+   * the tablet and the guardian's list would be unrecoverable — nothing left
+   * anywhere to press "Put back" on.
+   */
+  hidden?: boolean;
 }
 
 /** One named-times bucket's spent seconds, day- and week-keyed. */
@@ -212,10 +223,12 @@ function parseApps(v: unknown): AppRef[] | undefined {
       const label = (e as Record<string, unknown>).label;
       if (typeof pkg === "string" && pkg && typeof label === "string") {
         const userInstalled = (e as Record<string, unknown>).userInstalled;
+        const hidden = (e as Record<string, unknown>).hidden;
         out.push({
           pkg,
           label: label || pkg,
           ...(userInstalled === true ? { userInstalled: true as const } : {}),
+          ...(hidden === true ? { hidden: true as const } : {}),
         });
       }
     }

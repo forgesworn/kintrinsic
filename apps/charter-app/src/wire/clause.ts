@@ -153,6 +153,16 @@ export function contentToGrant(web: WebPolicy, issuedAt: number): GrantContent {
  */
 export function appsToGrant(apps: AppsPolicy, issuedAt: number): GrantApps {
   const g: GrantApps = { v: 1, posture: apps.posture, issuedAt };
+  // "Remove from device" is emitted BEFORE the paused early-return, on
+  // purpose: hiding is not part of the block/allow policy and `paused` is the
+  // app's "off" for THAT policy only. A guardian who lifts app blocks for the
+  // holidays has not asked for the tablet's forty preinstalled apps back on
+  // the home screen — folding the two together would make lifting one rule
+  // silently undo a completely different decision. Trimmed and deduped, and
+  // dropped entirely (never an empty array) so an unchanged policy keeps a
+  // byte-identical clause — the same rule `askFirst` and `holds` follow below.
+  const hidden = [...new Set((apps.hidden ?? []).map((s) => s.trim()).filter(Boolean))];
+  if (hidden.length) g.hidden = hidden;
   if (!apps.enabled) {
     g.paused = true; // policy lifted — no app is blocked by it
     return g;

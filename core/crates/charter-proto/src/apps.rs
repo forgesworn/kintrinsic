@@ -89,6 +89,19 @@ pub struct GrantApps {
     /// affordance). Enforcement never reads this list; only `blocked` gates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ask_first: Vec<String>,
+    /// Apps the device REMOVES from the ward's surface entirely (Android:
+    /// Device Owner `setApplicationHidden`) — gone from the launcher, the
+    /// drawer and Settings as if uninstalled, and put back the moment the
+    /// guardian drops the pkg from this list. A device tidy, not a
+    /// time-of-day policy: independent of `posture`/`blocked`/`allowed`, and
+    /// NOT lifted by `paused` (pausing app blocks must not make a tablet's
+    /// OEM bloatware reappear for an hour). Additive at `v: 1`: an older
+    /// warden ignores it and the app simply stays, gated by posture as
+    /// before; guardian surfaces version-gate instead (`wardenSupport`,
+    /// `appHide`). Born 2026-08-27: a Samsung ward tablet full of junk and,
+    /// since 0.6.9 locks USB debugging by design, no cable to clean it with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<String>,
     pub issued_at: u64,
 }
 
@@ -217,6 +230,7 @@ mod tests {
             paused: None,
             holds,
             ask_first: Vec::new(),
+            hidden: Vec::new(),
             issued_at: T0,
         }
     }
@@ -230,6 +244,7 @@ mod tests {
             paused: None,
             holds,
             ask_first: Vec::new(),
+            hidden: Vec::new(),
             issued_at: T0,
         }
     }
@@ -436,5 +451,33 @@ mod tests {
         let mut plain = g.clone();
         plain.ask_first = Vec::new();
         assert!(!serde_json::to_string(&plain).unwrap().contains("askFirst"));
+    }
+
+    // --- hidden ("remove from device") ---------------------------------
+
+    #[test]
+    fn hidden_defaults_empty_on_old_bytes() {
+        let json = r#"{"v":1,"posture":"blocklist","blocked":["a.b"],"issuedAt":7}"#;
+        let g = GrantApps::from_value(&serde_json::from_str(json).unwrap()).unwrap();
+        assert!(g.hidden.is_empty());
+        // Unchanged families keep byte-identical clauses: no `hidden` key.
+        assert!(!serde_json::to_string(&g).unwrap().contains("hidden"));
+    }
+
+    #[test]
+    fn hidden_round_trips_and_survives_pause_and_holds() {
+        let json = r#"{"v":1,"posture":"blocklist","paused":true,
+            "hidden":["com.samsung.android.bixby.agent","com.facebook.katana"],
+            "holds":[{"pkg":"a.b","state":"allowed","untilUnix":100}],"issuedAt":7}"#;
+        let g = GrantApps::from_value(&serde_json::from_str(json).unwrap()).unwrap();
+        assert_eq!(g.hidden.len(), 2);
+        assert!(g.is_paused());
+        // `paused` lifts blocking, never the tidy; `effective_at` dissolves
+        // holds but carries `hidden` through untouched for enforcement.
+        let eff = g.effective_at(50);
+        assert_eq!(eff.hidden, g.hidden);
+        assert!(eff.holds.is_empty());
+        let out = serde_json::to_string(&eff).unwrap();
+        assert!(out.contains("\"hidden\":[\"com.samsung.android.bixby.agent\""));
     }
 }

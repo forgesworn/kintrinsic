@@ -66,6 +66,7 @@ pub fn parse_desktop_entry(filename: &str, content: &str) -> Option<AppRef> {
             pkg: id,
             label,
             user_installed: None,
+            hidden: None,
         });
     }
     // Otherwise the first Exec token (with any %-field codes ignored).
@@ -77,6 +78,7 @@ pub fn parse_desktop_entry(filename: &str, content: &str) -> Option<AppRef> {
         pkg: first,
         label,
         user_installed: None,
+        hidden: None,
     })
 }
 

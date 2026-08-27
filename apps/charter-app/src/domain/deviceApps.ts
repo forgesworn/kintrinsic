@@ -11,6 +11,11 @@ export interface ReportedApp {
    *  see `AppRef.userInstalled`. Absent (root-owned) otherwise; never
    *  coerced to `false`, so a picker can tell "root-owned" from "unknown". */
   userInstalled?: boolean;
+  /** true when the device is currently hiding this app on the guardian's
+   *  orders ("Remove from device") — see `AppRef.hidden`. Carried through
+   *  every selector here so the Apps editor can list a removed app and offer
+   *  to put it back; a hidden app is still reported, never dropped. */
+  hidden?: boolean;
 }
 
 /**

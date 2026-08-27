@@ -336,6 +336,25 @@ export interface GrantApps {
    * blocked, no ask button, fail CLOSED — never fail open.
    */
   askFirst?: string[];
+  /**
+   * Packages the device should HIDE outright — gone from the launcher, the
+   * app drawer and Settings, as if never installed (Android Device Owner's
+   * `setApplicationHidden`). Omitted when empty.
+   *
+   * Deliberately its OWN axis, not a posture or a list the block/allow rules
+   * touch: a Samsung tablet ships with a screenful of OEM bloat, and since
+   * ward 0.6.9 locks USB debugging by design there is no cable left to
+   * uninstall it with — the guardian's only route is this clause. It is
+   * therefore NOT lifted by `paused` either: pausing app CONTROL ("no app is
+   * blocked today") must not silently restore forty preinstalled apps to a
+   * child's home screen. Reversible by dropping the package from the list.
+   *
+   * Ships at `v: 1` for the same reason `holds` did — an older warden that
+   * has never heard of the field ignores it and keeps enforcing the rest of
+   * the clause rather than rejecting it. Kintrinsic version-gates the
+   * affordance instead (`wardenSupport`, `appHide`).
+   */
+  hidden?: string[];
   issuedAt: number;
 }
 

@@ -515,6 +515,38 @@ class WardenController(
                 alwaysAvailable = alwaysAvailable,
             )
 
+            // "Remove from device" (2026-08-27): the apps clause's `hidden` list,
+            // enacted OUTSIDE the union above because it answers a different
+            // question. Suspension asks "may she open this now?"; hiding asks
+            // "does this belong on the phone at all?" — so no lock, exemption,
+            // bucket or pause moves it. It exists because a ward's Samsung
+            // tablet arrived full of OEM bloatware and, since 0.6.9 locks USB
+            // debugging by design, there is no cable path to sweep it off; the
+            // tidy has to come down the charter.
+            //
+            // Level-triggered like everything else here: re-derived every tick,
+            // with `reconcileHidden` making binder calls only on a difference.
+            // Installedness is probed for the NAMED packages only —
+            // `MATCH_UNINSTALLED_PACKAGES` under the hood, since a package we
+            // already hid reads as uninstalled to any ordinary query.
+            //
+            // The pause contract: pausing lifts BLOCKING, it does not put
+            // bloatware back. The core (`warden.rs` `app_policy`) therefore
+            // still surfaces a PAUSED clause that names hidden apps — with its
+            // posture lists emptied, so the suspend set above blocks nothing
+            // while `hidden` here stays in force. A paused clause hiding
+            // nothing arrives as null exactly as it always did.
+            runCatching {
+                val hidden = appPolicy?.hidden.orEmpty()
+                appGate.reconcileHidden(
+                    org.forgesworn.charter.enforce.appHideSet(
+                        appPolicy,
+                        org.forgesworn.charter.enforce.installedAmong(context, hidden),
+                        org.forgesworn.charter.enforce.denyListPackages(context),
+                    ),
+                )
+            }
+
             // An app that starts working and later stops working, with nothing
             // on the phone explaining either moment, is the silent change
             // Kintrinsic's transparency invariant forbids. Both edges are told.

@@ -365,3 +365,79 @@ describe("appsToGrant — askFirst (named times' on-request apps)", () => {
     expect(g.askFirst).toBeUndefined();
   });
 });
+
+/**
+ * "Remove from device" (2026-08-27): a ward tablet full of Samsung bloatware,
+ * and no cable path left to strip it — ward 0.6.9 locks USB debugging by
+ * design — so the warden's Device Owner power is the only route. The clause
+ * axis is deliberately independent of everything the tests above cover.
+ */
+describe("appsToGrant — hidden (remove from device)", () => {
+  const apps = (over: Partial<AppsPolicy> = {}): AppsPolicy => ({
+    enabled: true,
+    posture: "blocklist",
+    blocked: ["com.google.android.youtube"],
+    allowed: [],
+    ...over,
+  });
+
+  it("emits hidden alongside the standing lists", () => {
+    const g = appsToGrant(apps({ hidden: ["com.samsung.android.game.gamehome"] }), 1700);
+    expect(g.hidden).toEqual(["com.samsung.android.game.gamehome"]);
+    expect(g.blocked).toEqual(["com.google.android.youtube"]);
+  });
+
+  it("trims and dedupes, so a pasted package list can't emit the same app twice", () => {
+    const g = appsToGrant(
+      apps({
+        hidden: ["  com.samsung.android.game.gamehome ", "com.samsung.android.game.gamehome", "com.sec.android.app.samsungapps"],
+      }),
+      1700,
+    );
+    expect(g.hidden).toEqual([
+      "com.samsung.android.game.gamehome",
+      "com.sec.android.app.samsungapps",
+    ]);
+  });
+
+  it("drops hidden entirely (never an empty array) when nothing survives the trim", () => {
+    const g = appsToGrant(apps({ hidden: ["", "   "] }), 1700);
+    expect(g.hidden).toBeUndefined();
+    expect("hidden" in g).toBe(false);
+  });
+
+  it("emits nothing extra when hidden is unset (byte-identical to before)", () => {
+    const g = appsToGrant(apps(), 1700);
+    expect("hidden" in g).toBe(false);
+  });
+
+  // The whole point of the axis: `paused` is app CONTROL's off switch. A
+  // guardian lifting app blocks for the holidays has not asked for forty
+  // preinstalled apps back on their child's home screen, so the removal
+  // survives the lift — and the clause still says `paused: true` for
+  // everything else.
+  it("emits hidden even on a paused (enabled:false) policy", () => {
+    const g = appsToGrant(
+      apps({ enabled: false, hidden: ["com.samsung.android.game.gamehome"] }),
+      1700,
+    );
+    expect(g.paused).toBe(true);
+    expect(g.hidden).toEqual(["com.samsung.android.game.gamehome"]);
+    // …and nothing from the standing lists rides along with it.
+    expect(g.blocked).toBeUndefined();
+    expect(g.allowed).toBeUndefined();
+  });
+
+  it("is independent of posture — an allowlist family removes apps the same way", () => {
+    const g = appsToGrant(
+      apps({
+        posture: "allowlist",
+        allowed: ["org.mozilla.fenix"],
+        hidden: ["com.sec.android.app.samsungapps"],
+      }),
+      1700,
+    );
+    expect(g.allowed).toEqual(["org.mozilla.fenix"]);
+    expect(g.hidden).toEqual(["com.sec.android.app.samsungapps"]);
+  });
+});

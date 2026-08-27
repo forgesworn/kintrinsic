@@ -323,6 +323,64 @@ describe("wardenSupport — alwaysAvailable (Android version-gated, Linux NEVER)
   });
 });
 
+// "Remove from device" (2026-08-27): an Android Device Owner power with no
+// Linux counterpart at all — charterd has no launcher to make a package vanish
+// from, and a laptop's junk can be uninstalled the ordinary way — so Linux is
+// a permanent NEVER rather than a threshold this repo hasn't shipped yet. Ward
+// Kintrinsic 0.6.10 (versionCode 41) is the first build that reads the field;
+// 0.6.9 (40) is the release that locked USB debugging and so created the need.
+describe("wardenSupport — appHide (Android 41+, Linux NEVER)", () => {
+  it("names a laptop as unsupported at any reported version", () => {
+    const s = wardenSupport(
+      [laptop],
+      { [laptop.devicePubkey as string]: status({ appVersionCode: 99999 }) },
+      "appHide",
+    );
+    expect(s.unsupported.map((d) => d.id)).toEqual(["l1"]);
+    expect(s.tooOld).toEqual([]);
+    expect(s.canSend).toBe(false);
+  });
+
+  it("names a phone reporting versionCode 40 as too old", () => {
+    const s = wardenSupport(
+      [phone],
+      { [phone.devicePubkey as string]: status({ appVersionCode: 40 }) },
+      "appHide",
+    );
+    expect(s.tooOld.map((d) => d.id)).toEqual(["p1"]);
+    expect(s.unsupported).toEqual([]);
+    expect(s.canSend).toBe(false);
+  });
+
+  it("sends to a phone reporting versionCode 41", () => {
+    const s = wardenSupport(
+      [phone],
+      { [phone.devicePubkey as string]: status({ appVersionCode: 41 }) },
+      "appHide",
+    );
+    expect(s.tooOld).toEqual([]);
+    expect(s.canSend).toBe(true);
+  });
+
+  // Silence is not incapacity — a tablet that is simply switched off still
+  // gets the clause, and the guardian still gets the Remove button.
+  it("sends to a phone that has never reported", () => {
+    expect(wardenSupport([phone], {}, "appHide").canSend).toBe(true);
+  });
+
+  // A mixed family: the laptop can never hide an app, but the phone can, so
+  // the affordance stays live and the note names the laptop.
+  it("still sends when only some devices can honour it", () => {
+    const s = wardenSupport(
+      [phone, laptop],
+      { [phone.devicePubkey as string]: status({ appVersionCode: 41 }) },
+      "appHide",
+    );
+    expect(s.canSend).toBe(true);
+    expect(s.unsupported.map((d) => d.id)).toEqual(["l1"]);
+  });
+});
+
 // Every ward on the branch before this one reports versionCode 38, so on the
 // day always-available ships EVERY existing phone is `tooOld` — without this
 // note a guardian would name an app, see nothing wrong, and watch nothing

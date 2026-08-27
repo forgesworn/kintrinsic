@@ -261,6 +261,51 @@ describe("AppRef.userInstalled", () => {
   });
 });
 
+/**
+ * A device the guardian has removed apps from keeps REPORTING them, flagged —
+ * the inventory is the only surface a removal can be undone from, so an app
+ * that vanished from the tablet AND the guardian's list would be gone for
+ * good. Parsed with exactly `userInstalled`'s rules above (true or absent,
+ * never coerced), so an old warden that reports neither reads the same as it
+ * always did.
+ */
+describe("AppRef.hidden", () => {
+  const withApps = (apps: unknown) => ({ ...sample("ab".repeat(32), "cd".repeat(32)), apps });
+
+  it("parses true only when explicitly true", () => {
+    const parsed = parseStatus(
+      JSON.stringify(withApps([{ pkg: "com.sec.android.app.samsungapps", label: "Galaxy Store", hidden: true }])),
+    );
+    expect(parsed?.apps).toEqual([
+      { pkg: "com.sec.android.app.samsungapps", label: "Galaxy Store", hidden: true },
+    ]);
+  });
+
+  it("stays undefined (never false) when absent — an ordinary app is unflagged", () => {
+    const parsed = parseStatus(JSON.stringify(withApps([{ pkg: "org.mozilla.firefox", label: "Firefox" }])));
+    expect(parsed?.apps?.[0].hidden).toBeUndefined();
+    expect(parsed?.apps?.[0]).not.toHaveProperty("hidden");
+  });
+
+  it("never coerces a truthy-but-not-true value to true", () => {
+    const parsed = parseStatus(
+      JSON.stringify(withApps([{ pkg: "org.mozilla.firefox", label: "Firefox", hidden: "yes" }])),
+    );
+    expect(parsed?.apps?.[0].hidden).toBeUndefined();
+  });
+
+  it("carries both flags at once — a hidden ward-writable entry is still flagged as one", () => {
+    const parsed = parseStatus(
+      JSON.stringify(
+        withApps([{ pkg: "org.prismlauncher.PrismLauncher", label: "Prism", userInstalled: true, hidden: true }]),
+      ),
+    );
+    expect(parsed?.apps).toEqual([
+      { pkg: "org.prismlauncher.PrismLauncher", label: "Prism", userInstalled: true, hidden: true },
+    ]);
+  });
+});
+
 describe("unwrapStatus", () => {
   it("round-trips a device-emitted STATUS to the guardian", () => {
     const machineSk = generateSecretKey();

@@ -182,6 +182,19 @@ export interface AppsPolicy {
    * also be in `blocked`; `appsToGrant` enforces this on the way to the wire.
    */
   askFirst?: string[];
+  /**
+   * Apps to REMOVE from the device — hidden outright, gone from the launcher,
+   * the drawer and Settings as if never installed. Absent/empty = nothing
+   * removed.
+   *
+   * Its own axis, independent of `enabled`/`posture`/`blocked`/`allowed`: a
+   * tablet's OEM bloatware is not a rule about the child's day, it is junk
+   * that should not be on the device at all, and (since ward 0.6.9 locks USB
+   * debugging) this clause is the only way left to take it off. Lifting app
+   * control does NOT put it back — see `appsToGrant`, which emits this before
+   * the `paused` early-return. Reversible: drop the package and it returns.
+   */
+  hidden?: string[];
 }
 
 /**

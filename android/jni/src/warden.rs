@@ -753,8 +753,10 @@ impl Warden {
         .unwrap_or_default()
     }
 
-    /// The sole ward's stored `apps` clause, if there is a usable one.
-    fn apps_clause(&self) -> Option<charter_proto::GrantApps> {
+    /// The sole ward's stored `apps` clause at this build's version, paused or
+    /// not. Only [`Warden::app_policy`] wants the paused one (for `hidden`,
+    /// which `paused` does not lift); everything else reads [`Warden::apps_clause`].
+    fn stored_apps_clause(&self) -> Option<charter_proto::GrantApps> {
         let subject = self.subject?;
         let stored = self
             .child_clauses
@@ -770,11 +772,16 @@ impl Warden {
             // (`apps_policy.rs`), so a version bump behaves identically on
             // both platforms: the loosening direction (a blocked-list simply
             // stops being enforced) rather than confiscating on a guess.
-            Ok(g) if g.v == charter_proto::APPS_VERSION && !g.is_paused() => Some(g),
-            // Fail-closed: a malformed, future-versioned, or paused clause
-            // suspends nothing.
+            Ok(g) if g.v == charter_proto::APPS_VERSION => Some(g),
             _ => None,
         }
+    }
+
+    /// The sole ward's stored `apps` clause, if there is a usable one.
+    fn apps_clause(&self) -> Option<charter_proto::GrantApps> {
+        // Fail-closed: a malformed, future-versioned, or paused clause
+        // suspends nothing.
+        self.stored_apps_clause().filter(|g| !g.is_paused())
     }
 
     /// The sole ward's standing per-app policy AS ENFORCED AT `now_unix`
@@ -789,13 +796,29 @@ impl Warden {
     /// did. Recomputed per call for the same reason [`Warden::tethering_mode`]
     /// is — a hold ends at an absolute instant, and a stored clause re-read
     /// after a reboot must not extend it by a second.
+    ///
+    /// `hidden` ("remove from device") is the one field `paused` does NOT
+    /// lift: pausing app blocks for an hour must not make a tablet's OEM
+    /// bloatware reappear. A paused clause that names hidden apps is still
+    /// surfaced — with its posture lists EMPTIED, so Kotlin's suspend set
+    /// (which reads posture + lists and knows nothing of `paused`) blocks
+    /// nothing, while its hide reconcile still sees the list. A paused
+    /// clause hiding nothing stays "" exactly as before (2026-08-27).
     pub fn app_policy(&self, now_unix: i64) -> String {
-        match self.apps_clause() {
-            Some(g) => {
-                serde_json::to_string(&g.effective_at(now_unix.max(0) as u64)).unwrap_or_default()
+        let Some(g) = self.stored_apps_clause() else {
+            return String::new();
+        };
+        let mut eff = g.effective_at(now_unix.max(0) as u64);
+        if eff.is_paused() {
+            if eff.hidden.is_empty() {
+                return String::new();
             }
-            None => String::new(),
+            eff.blocked.clear();
+            eff.allowed.clear();
+            eff.holds.clear();
+            eff.ask_first.clear();
         }
+        serde_json::to_string(&eff).unwrap_or_default()
     }
 
     /// The sole ward's LIVE app holds at `now_unix`, as a JSON array of
@@ -3429,6 +3452,54 @@ mod tests {
             w.app_policy(200).is_empty(),
             "paused apps clause suspends nothing"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `hidden` ("remove from device") outlives `paused`: a paused clause that
+    /// names hidden apps still reaches Kotlin, with the blocking lists emptied
+    /// so nothing is suspended while the tidy stands (2026-08-27).
+    #[test]
+    fn paused_apps_clause_still_carries_hidden_with_lists_emptied() {
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x45);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+
+        let ev = ClauseBuilder::apps(1)
+            .subject(ward.pubkey())
+            .body(json!({
+                "v":1,"posture":"blocklist","blocked":["app.example.block"],
+                "askFirst":["app.example.block"],
+                "holds":[{"pkg":"app.example.block","state":"allowed","untilUnix":500}],
+                "hidden":["com.samsung.android.bixby.agent"],
+                "paused":true,"issuedAt":1
+            }))
+            .build(&guardian);
+        let res = w.ingest_clause(&serde_json::to_string(&ev).unwrap(), 100);
+        assert!(res.accepted, "clause rejected: {}", res.reason);
+
+        let policy: serde_json::Value =
+            serde_json::from_str(&w.app_policy(100)).expect("paused-with-hidden is surfaced");
+        assert_eq!(policy["hidden"], json!(["com.samsung.android.bixby.agent"]));
+        assert_eq!(policy["paused"], json!(true));
+        // Nothing to suspend: the lists are emptied, not merely flagged.
+        assert!(policy.get("blocked").map_or(true, |b| b.as_array().unwrap().is_empty()));
+        assert!(policy.get("allowed").map_or(true, |a| a.as_array().unwrap().is_empty()));
+        assert!(policy.get("holds").is_none(), "holds dissolved: {policy}");
+        assert!(policy.get("askFirst").is_none(), "askFirst dropped: {policy}");
+
+        // A live one keeps the whole policy AND the hidden list.
+        let ev2 = ClauseBuilder::apps(2)
+            .subject(ward.pubkey())
+            .body(json!({"v":1,"posture":"blocklist","blocked":["app.example.block"],
+                "hidden":["com.samsung.android.bixby.agent"],"issuedAt":2}))
+            .build(&guardian);
+        assert!(w.ingest_clause(&serde_json::to_string(&ev2).unwrap(), 200).accepted);
+        let live = w.app_policy(200);
+        assert!(live.contains("app.example.block") && live.contains("bixby"), "live: {live}");
 
         let _ = std::fs::remove_dir_all(&base);
     }

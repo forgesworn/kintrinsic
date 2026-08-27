@@ -338,6 +338,13 @@ pub struct AppRef {
     /// installable identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_installed: Option<bool>,
+    /// `true` when the warden currently HIDES this app under the `apps`
+    /// clause's `hidden` list (removed from the ward's surface). It drops out
+    /// of the launchable query, so the warden reports it from its own memory
+    /// of what it hid — the guardian must still be able to list it in order
+    /// to put it back. Additive; absent for every visible app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 impl StatusPayload {
@@ -456,6 +463,7 @@ mod tests {
             pkg: "/home/robin/.local/bin/prismlauncher".into(),
             label: "Prism Launcher".into(),
             user_installed: Some(true),
+            hidden: None,
         }]);
         let json = s.to_json();
         assert!(json.contains("\"unrecognisedTodaySecs\":11520"), "{json}");
@@ -560,6 +568,7 @@ mod tests {
             pkg: "/usr/bin/gcompris-qt".into(),
             label: "GCompris".into(),
             user_installed: None,
+            hidden: None,
         }]);
         let json = s.to_json();
         assert!(!json.contains("userInstalled"), "None must omit: {json}");
@@ -568,6 +577,7 @@ mod tests {
             pkg: "/home/kid/.local/bin/prismlauncher".into(),
             label: "Prism Launcher".into(),
             user_installed: Some(true),
+            hidden: None,
         }]);
         let json = s.to_json();
         assert!(json.contains("\"userInstalled\":true"), "got {json}");
@@ -691,6 +701,7 @@ mod tests {
                     pkg: format!("/usr/bin/app-{i}"),
                     label: format!("App {i}"),
                     user_installed: None,
+                    hidden: None,
                 })
                 .collect(),
         );

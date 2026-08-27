@@ -569,6 +569,27 @@ describe("namedTimesError", () => {
 });
 
 describe("applyAppsFragment", () => {
+  // "Remove from device" belongs to the classic Apps section, not to named
+  // times — and this function rebuilds the policy from scratch, so a
+  // dimension it forgets to copy is silently deleted on the very next save
+  // (exactly the `allowed` bug the N1 tests below guard against).
+  it("carries hidden through untouched", () => {
+    const prior: AppsPolicy = {
+      enabled: true,
+      posture: "blocklist",
+      blocked: ["yt"],
+      allowed: [],
+      hidden: ["com.samsung.android.game.gamehome"],
+    };
+    const out = applyAppsFragment(prior, { blockedAdd: ["ig"], askFirst: ["ig"] });
+    expect(out.hidden).toEqual(["com.samsung.android.game.gamehome"]);
+  });
+
+  it("omits hidden when the prior policy had none (byte-identical to before)", () => {
+    const out = applyAppsFragment(undefined, { blockedAdd: [], askFirst: [] });
+    expect(out).not.toHaveProperty("hidden");
+  });
+
   it("layers on-request pkgs onto an empty prior apps policy", () => {
     const out = applyAppsFragment(undefined, { blockedAdd: ["ig"], askFirst: ["ig"] });
     expect(out).toEqual({ enabled: true, posture: "blocklist", blocked: ["ig"], allowed: [], askFirst: ["ig"] });

@@ -42,6 +42,14 @@ fn apps_clause_vectors_parse_and_match() {
             .unwrap_or_default();
         assert_eq!(g.allowed, want_allowed, "{name}: allowed");
 
+        // `hidden` ("remove from device") is additive and independent of
+        // posture/paused — a vector that carries it pins that it survives.
+        let want_hidden: Vec<String> = payload["hidden"]
+            .as_array()
+            .map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default();
+        assert_eq!(g.hidden, want_hidden, "{name}: hidden");
+
         // Holds carry an ABSOLUTE expiry, so a vector that has one also pins what
         // the device must be enforcing at a stated instant — the whole point of
         // the field is that the two sides agree about when it ends.

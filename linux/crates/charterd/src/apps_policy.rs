@@ -262,6 +262,7 @@ mod tests {
             pkg: pkg.to_string(),
             label: label.to_string(),
             user_installed: None,
+            hidden: None,
         }
     }
 

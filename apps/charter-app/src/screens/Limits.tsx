@@ -378,6 +378,10 @@ export function buildApps(src?: AppsPolicy): AppsPolicy {
   // moment an on-request group existed: the save round-tripped fine, but the
   // Apps row never settled. Found live-testing this feature.
   if (src?.askFirst?.length) apps.askFirst = [...src.askFirst];
+  // Same reason as `askFirst` above: this normalized shape is what `appsDirty`
+  // compares the draft against, so a dimension dropped here reads as an unsaved
+  // change forever the moment it has a value. Absent when empty, never `[]`.
+  if (src?.hidden?.length) apps.hidden = [...src.hidden];
   return apps;
 }
 
@@ -395,15 +399,23 @@ export function buildApps(src?: AppsPolicy): AppsPolicy {
  * summary was reading the pre-strip count.
  */
 export function appsSummary(a: AppsPolicy, nowUnix: number): string {
-  if (!a.enabled) return "No app blocks";
+  // Removed apps are counted whatever app CONTROL is doing — the clause emits
+  // them even when the policy is paused (see `appsToGrant`), so a collapsed
+  // row that said a flat "No app blocks" for a tablet with forty apps taken
+  // off it would be hiding the only thing that section had actually done.
+  const removed = a.hidden?.length ?? 0;
+  const alsoRemoved = removed ? `, ${removed} removed` : "";
+  if (!a.enabled) {
+    return removed ? `No app blocks, ${removed} removed from device` : "No app blocks";
+  }
   const held = pruneHolds(a.holds, nowUnix).length;
   const forAWhile = held ? `, ${held} for a while` : "";
   if (a.posture === "allowlist") {
     const askFirst = new Set(a.askFirst ?? []);
     const allowedCount = a.allowed.filter((p) => !askFirst.has(p)).length;
-    return `Only ${allowedCount} app${allowedCount === 1 ? "" : "s"} allowed${forAWhile}`;
+    return `Only ${allowedCount} app${allowedCount === 1 ? "" : "s"} allowed${forAWhile}${alsoRemoved}`;
   }
-  return `${a.blocked.length} app${a.blocked.length === 1 ? "" : "s"} blocked${forAWhile}`;
+  return `${a.blocked.length} app${a.blocked.length === 1 ? "" : "s"} blocked${forAWhile}${alsoRemoved}`;
 }
 
 /** The collapsed-row summary for Named times — a closed row has to say what
@@ -2157,18 +2169,39 @@ interface HoldCtx {
   saving: boolean;
 }
 
+/**
+ * Everything the "Remove from device" subsection needs. Its own bundle rather
+ * than three loose props for the same reason `HoldCtx` is: it is one feature,
+ * and every one of these is about whether the ward's devices can honour it —
+ * removal is Android Device Owner only (`wardenSupport`'s `appHide`), so a
+ * guardian must be told before they press it, not after nothing happens.
+ */
+interface HideCtx {
+  /** Could ANY paired device actually hide an app right now? False greys the
+   *  Remove buttons — putting an app BACK stays available regardless, since
+   *  that is the direction that can only ever help. */
+  canRemove: boolean;
+  /** Paired devices reporting a Kintrinsic too old to hide an app, named. */
+  tooOldNote: string | null;
+  /** Devices whose platform never hides apps at any version (a laptop), named. */
+  parityNote: string | null;
+}
+
 function AppsEditor({
   apps,
   available,
   sections,
   onChange,
   hold,
+  hide,
   coversComputer = false,
   wardName,
 }: {
   apps: AppsPolicy;
-  /** Apps the device reported (pkg + label, + userInstalled) — the picker source. */
-  available: { pkg: string; label: string; userInstalled?: boolean }[];
+  /** Apps the device reported (pkg + label, + userInstalled, + hidden) — the
+   *  picker source. `hidden` is what the device says it is CURRENTLY hiding,
+   *  which is not always what this draft asks for (see `removed` below). */
+  available: { pkg: string; label: string; userInstalled?: boolean; hidden?: boolean }[];
   /** The SAME inventory as `available`, grouped one section per paired
    *  device. Present only when this editor covers the whole ward (the
    *  unsplit render) — a per-device copy already IS one device's list,
@@ -2179,6 +2212,9 @@ function AppsEditor({
   onChange: (a: AppsPolicy) => void;
   /** Absent = no holds offered (the app-scope card reuses this editor). */
   hold?: HoldCtx;
+  /** Absent = no "Remove from device" affordance at all — a card with no
+   *  device inventory behind it has nothing to remove. */
+  hide?: HideCtx;
   /** Does this rule reach a computer? Drives the allowlist caveat below. */
   coversComputer?: boolean;
   /** The ward's own name, for the "from <ward>'s account" mark on a
@@ -2209,6 +2245,43 @@ function AppsEditor({
   // Which app's hold sheet is open, by package. Null = none.
   const [holdFor_, setHoldFor] = useState<string | null>(null);
   const openApp = available.find((a) => a.pkg === holdFor_);
+
+  // --- "Remove from device" ------------------------------------------------
+  // Deliberately outside everything above: hiding an app is not a rule about
+  // the child's day, so it is neither a posture nor gated on the "Control
+  // apps" switch (the wire agrees — `appsToGrant` emits `hidden` before the
+  // paused early-return).
+  const hiddenList = apps.hidden ?? [];
+  const hiddenSet = new Set(hiddenList);
+  const setHidden = (next: string[]) => {
+    const out: AppsPolicy = { ...apps, hidden: next };
+    // Absent when empty, never `[]` — an empty array would be a change the
+    // dirty-check can see and the wire cannot (`buildApps` drops it too), so
+    // the Apps row would sit unsaved for ever after the last Put back.
+    if (!next.length) delete out.hidden;
+    onChange(out);
+  };
+  // Apps the DEVICE reports as hidden that this draft has no record of —
+  // a rule authored before a device split, or an inventory that hasn't caught
+  // up with the last save. They are still listed as removed, because that is
+  // what the device is actually doing, and the guardian must have something
+  // to press "Put back" on. `putBack` remembers a press on one of THOSE: the
+  // draft never listed it, so filtering it out is a no-op and the row would
+  // otherwise stick under Removed for ever, looking broken. The clause about
+  // to be signed already doesn't hide it, so the device restores it anyway.
+  const [putBack, setPutBack] = useState<string[]>([]);
+  const removed = [
+    ...hiddenList,
+    ...available
+      .filter((a) => a.hidden && !hiddenSet.has(a.pkg) && !putBack.includes(a.pkg))
+      .map((a) => a.pkg),
+  ];
+  const removedSet = new Set(removed);
+  const labelForPkg = (pkg: string) => available.find((a) => a.pkg === pkg)?.label ?? pkg;
+  const restore = (pkg: string) => {
+    setHidden(hiddenList.filter((p) => p !== pkg));
+    if (!hiddenSet.has(pkg)) setPutBack((prev) => [...prev, pkg]);
+  };
 
   /** One app's row — same markup whether it's under a flat list or a
    *  per-device section. */
@@ -2371,6 +2444,92 @@ function AppsEditor({
             rejectMessage="Kintrinsic attaches this kind of identity for supported apps itself (like Minecraft) — you can't type it directly."
             onChange={(nextExtras) => setList([...list.filter((p) => reportedPkgs.has(p)), ...nextExtras])}
           />
+        </div>
+      )}
+
+      {/* Removing an app is a different decision from blocking one — the junk a
+          tablet ships with is not a rule about the child's day — so it sits
+          OUTSIDE the "Control apps" switch above and stays available even when
+          app control is off. Since ward 0.6.9 locks USB debugging by design,
+          this is the only route a guardian has left to take OEM bloat off a
+          device at all. */}
+      {hide && (
+        <div style={{ marginTop: 4 }}>
+          <div className="field-label">Remove from device</div>
+          <p className="card-sub" style={{ margin: "2px 0 8px" }}>
+            Removed apps disappear from the device as if uninstalled — good for
+            the junk a tablet ships with. You can put them back any time.
+          </p>
+          {/* Named devices, never a count, and said BEFORE the press rather
+              than discovered after nothing happens — the same shape every
+              other gate on this screen uses. */}
+          {hide.tooOldNote && (
+            <p className="card-sub" style={{ margin: "0 0 8px" }}>{hide.tooOldNote}</p>
+          )}
+          {hide.parityNote && (
+            <p className="card-sub" style={{ margin: "0 0 8px" }}>{hide.parityNote}</p>
+          )}
+          {removed.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="row-sub" style={{ marginBottom: 4 }}>Removed</div>
+              <div className="stack" style={{ gap: 2 }}>
+                {removed.map((pkg) => (
+                  <div className="row-between" key={pkg} style={{ padding: "4px 0" }}>
+                    <span>
+                      {labelForPkg(pkg)}
+                      <span className="muted" style={{ fontSize: "var(--fs-small)", marginLeft: 8 }}>
+                        {pkg}
+                      </span>
+                    </span>
+                    {/* Never disabled by the gate above: putting an app BACK
+                        is the direction that can only ever help, and a
+                        guardian must be able to undo a removal even while
+                        some device is too old to have honoured it. */}
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      aria-label={`Put ${labelForPkg(pkg)} back on the device`}
+                      style={{ padding: "4px 10px", minWidth: 0, lineHeight: 1.1 }}
+                      onClick={() => restore(pkg)}
+                    >
+                      Put back
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {available.length === 0 ? (
+            <p className="card-sub" style={{ margin: 0 }}>
+              No apps reported from the device yet — they’ll appear here once it
+              syncs.
+            </p>
+          ) : (
+            <div className="stack" style={{ gap: 2 }}>
+              {available
+                .filter((a) => !removedSet.has(a.pkg))
+                .map((a) => (
+                  <div className="row-between" key={a.pkg} style={{ padding: "4px 0" }}>
+                    <span>
+                      {a.label}
+                      <span className="muted" style={{ fontSize: "var(--fs-small)", marginLeft: 8 }}>
+                        {a.pkg}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={!hide.canRemove}
+                      aria-label={`Remove ${a.label} from the device`}
+                      style={{ padding: "4px 10px", minWidth: 0, lineHeight: 1.1 }}
+                      onClick={() => setHidden([...hiddenList, a.pkg])}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -2979,6 +3138,25 @@ function DeviceLimits({
         ? `${cmdlineSupport.tooOld.map((d) => d.label).join(" and ")} needs the latest Kintrinsic before Minecraft gets its extra identity — until then, Kintrinsic isn't attaching it at all.${cmdlineFallbackClause}`
         : null;
 
+  // "Remove from device" is Android Device Owner only and brand new (ward
+  // Kintrinsic 0.6.10, versionCode 41), so on the day it ships EVERY phone
+  // already out there reports too old and every laptop is a permanent NEVER —
+  // exactly the two failure shapes this screen names devices for rather than
+  // letting a guardian press a button and watch nothing happen.
+  const appHideSupport = useMemo(
+    () => wardenSupport(deliverableDevices(child.devices), deviceStatus, "appHide"),
+    [child.devices, deviceStatus],
+  );
+  const hideCtx: HideCtx = {
+    canRemove: appHideSupport.canSend,
+    tooOldNote: tooOldNote(appHideSupport, "remove an app from the device"),
+    parityNote: parityNote(
+      "appHide",
+      "Removing an app",
+      "A computer has no launcher to hide an app from — uninstall it there the ordinary way.",
+    ),
+  };
+
   const holdCtx: HoldCtx = {
     nowUnix: holdNow,
     schedule: scheduleAuthored ? draftSchedule : undefined,
@@ -3355,6 +3533,7 @@ function DeviceLimits({
                 sections={deviceId === undefined ? appSections : undefined}
                 onChange={on}
                 hold={holdCtx}
+                hide={hideCtx}
                 coversComputer={coversComputer(deviceId)}
                 wardName={child.name}
               />
