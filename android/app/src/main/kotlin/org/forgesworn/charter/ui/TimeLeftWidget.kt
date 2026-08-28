@@ -42,16 +42,8 @@ class TimeLeftWidget : AppWidgetProvider() {
             val view = runCatching {
                 CharterCore.scheduleView(System.currentTimeMillis() / 1000)
             }.getOrNull()
-            val (big, small) = when {
-                view == null -> "—" to "no charter yet"
-                view.locked -> "🔒" to "locked right now"
-                // -1 = no WHOLE-DEVICE time wall at all (a buckets-only
-                // ward, most commonly, since Task 9) — never format it
-                // through timeLeft(), which would print "0s" and read as
-                // "about to lock any second" on a device that is not.
-                view.secondsLeft < 0 -> "—" to "no whole-device limit"
-                else -> TimeText.timeLeft(view.secondsLeft) to "left today"
-            }
+            // One wording for the widget and the screen behind it (HomeCopy).
+            val (big, small) = HomeCopy.headline(view).let { it.big to it.caption }
             val key = "$big|$small"
             if (!force && key == lastShown) return
             lastShown = key

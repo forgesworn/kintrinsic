@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The seal's ground (seal.svg's rect fill). -->
+    <color name="ic_launcher_background">#241B12</color>
+</resources>

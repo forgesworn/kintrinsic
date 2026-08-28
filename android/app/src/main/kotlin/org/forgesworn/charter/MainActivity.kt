@@ -26,8 +26,20 @@ import org.forgesworn.charter.service.CharterService
 import org.json.JSONObject
 
 /**
- * Onboarding surface (port-spec §3.8). Shows Device Owner status, the device
- * code, and the pairing step. The happy path is the QR scan: Kintrinsic shows a
+ * The ward's home screen — and, until a guardian is pinned, the onboarding
+ * surface (port-spec §3.8).
+ *
+ * Paired, it leads with the child's question: how much time is left, big,
+ * then their named-times allowances, the things they can ask for, and the
+ * guest hotspot if the charter allows one. The grown-up detail it used to
+ * open with — Device Owner status, the 64-character device code, the
+ * guardian's key, the relay — lives one tap away under "About this device"
+ * ([org.forgesworn.charter.ui.AboutActivity]), together with the version
+ * (2026-08-28, the founder's look at the tablet: "all they really care about
+ * is how much time they've got left").
+ *
+ * Unpaired, it is the set-up screen: Device Owner status, the device code
+ * and the pairing step. The happy path is the QR scan: Kintrinsic shows a
  * QR, the parent scans it with the SYSTEM camera (this app never requests the
  * camera permission), and the link opens here for a one-tap confirm — the
  * bunker:// scheme or the https://charter.mysignet.app/pair App Link, whose
@@ -52,6 +64,12 @@ class MainActivity : Activity() {
     private lateinit var hotspotNote: TextView
     private var groupsCard: LinearLayout? = null
     private var askOpenCard: LinearLayout? = null
+    private lateinit var title: TextView
+    private lateinit var ownerLine: TextView
+    private lateinit var codeCard: LinearLayout
+    private lateinit var heroCard: LinearLayout
+    private lateinit var heroBig: TextView
+    private lateinit var heroCaption: TextView
 
     /**
      * Which brokered ask (if any) is outstanding for a given named-times
@@ -114,15 +132,32 @@ class MainActivity : Activity() {
             setLineSpacing(CharterTheme.dp(this@MainActivity, 3).toFloat(), 1f)
         }
 
-        root.addView(line("This phone", CharterTheme.FS_TITLE, CharterTheme.PAPER_TEXT))
-        root.addView(
-            line(
-                if (isOwner) "Kintrinsic is set up on this phone" else "Kintrinsic isn't set up yet",
-                CharterTheme.FS_BODY,
-                if (isOwner) CharterTheme.OK else CharterTheme.WARN,
-                6,
-            )
+        // The title and the set-up line are the ONBOARDING voice; once paired
+        // the title becomes the child's and the set-up line moves to About.
+        title = line("Set up this device", CharterTheme.FS_TITLE, CharterTheme.PAPER_TEXT)
+        root.addView(title)
+        ownerLine = line(
+            if (isOwner) "Kintrinsic is set up on this device" else "Kintrinsic isn't set up yet",
+            CharterTheme.FS_BODY,
+            if (isOwner) CharterTheme.OK else CharterTheme.WARN,
+            6,
         )
+        root.addView(ownerLine)
+
+        // The hero (D8 mirror, the child's own question first): the big
+        // figure and its caption, then the detail lines beneath. Hidden
+        // until paired — there is nothing to mirror before a charter exists.
+        heroBig = line("—", CharterTheme.FS_DISPLAY, CharterTheme.PAPER_TEXT).apply {
+            typeface = Typeface.DEFAULT_BOLD
+            includeFontPadding = false
+        }
+        heroCaption = line("", CharterTheme.FS_BODY, CharterTheme.PAPER_TEXT_2, 2)
+        heroCard = CharterTheme.card(this).apply {
+            visibility = View.GONE
+            addView(heroBig)
+            addView(heroCaption)
+        }
+        root.addView(heroCard, CharterTheme.stackParams(this, 14))
 
         if (!isOwner) {
             val help = line(
@@ -152,9 +187,10 @@ class MainActivity : Activity() {
             root.addView(card, CharterTheme.stackParams(this, 18))
         }
 
-        val codeCard = CharterTheme.card(this)
+        // Onboarding only: once paired the code lives under About.
+        codeCard = CharterTheme.card(this)
         codeCard.addView(
-            line("This phone's code", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2)
+            line("This device's code", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2)
         )
         // The short form is what a parent actually reads aloud and checks
         // against Kintrinsic; the full value stays selectable beneath it.
@@ -243,37 +279,9 @@ class MainActivity : Activity() {
         root.addView(uriInput, CharterTheme.stackParams(this, 14))
         root.addView(pairButton, CharterTheme.stackParams(this, 12))
 
-        // Ward-facing: ask a guardian for one of the apps they've staged. Shown
-        // only once paired (a request needs a guardian to answer it).
-        requestAppsButton = CharterTheme.secondaryButton(this, "Ask for an app").apply {
-            visibility = View.GONE
-            setOnClickListener {
-                startActivity(Intent(this@MainActivity, org.forgesworn.charter.ui.RequestAppsActivity::class.java))
-            }
-        }
-        root.addView(requestAppsButton, CharterTheme.stackParams(this, 12))
-
-        // The ward's guest-hotspot switch. Shown only while the charter allows a
-        // filtered hotspot: the clause is the permission, this is the switch, so
-        // the AP is up only while it's wanted (HotspotWish — a hotspot held up
-        // by a standing grant flattens the battery for nobody).
-        hotspotNote = line("", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 24).apply { visibility = View.GONE }
-        hotspotButton = CharterTheme.secondaryButton(this, "Turn on guest hotspot").apply {
-            visibility = View.GONE
-            setOnClickListener {
-                if (HotspotWish.on) HotspotWish.turnOff() else HotspotWish.turnOn()
-                // The controller picks the wish up on its next tick (≤2s) and
-                // the AP itself takes up to 20s, so say "Starting…" now rather
-                // than leave the button looking inert.
-                refresh()
-            }
-        }
-        root.addView(hotspotNote)
-        root.addView(hotspotButton)
-        (hotspotButton.layoutParams as? LinearLayout.LayoutParams)?.topMargin = 12
-
-        // The ward's own mirror (spec D8): time left + the week, the same
-        // facts the guardian sees. View, never edit — no surprises.
+        // The ward's own mirror (spec D8): the detail beneath the hero — the
+        // schedule's own lines and the week, the same facts the guardian
+        // sees. View, never edit — no surprises.
         charterStatus = TextView(this).apply {
             textSize = CharterTheme.FS_BODY
             setTextColor(Color.parseColor(CharterTheme.PAPER_TEXT))
@@ -298,6 +306,51 @@ class MainActivity : Activity() {
         val askOpen = CharterTheme.card(this).apply { visibility = View.GONE }
         askOpenCard = askOpen
         root.addView(askOpen, CharterTheme.stackParams(this, 14))
+
+        // Ward-facing: ask a guardian for one of the apps they've staged. Shown
+        // only once paired (a request needs a guardian to answer it). Below
+        // the mirror: what you HAVE, then what you can ask for.
+        requestAppsButton = CharterTheme.secondaryButton(this, "Ask for an app").apply {
+            visibility = View.GONE
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, org.forgesworn.charter.ui.RequestAppsActivity::class.java))
+            }
+        }
+        root.addView(requestAppsButton, CharterTheme.stackParams(this, 14))
+
+        // The ward's guest-hotspot switch. Shown only while the charter allows a
+        // filtered hotspot: the clause is the permission, this is the switch, so
+        // the AP is up only while it's wanted (HotspotWish — a hotspot held up
+        // by a standing grant flattens the battery for nobody).
+        hotspotNote = line("", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 24).apply { visibility = View.GONE }
+        hotspotButton = CharterTheme.secondaryButton(this, "Turn on guest hotspot").apply {
+            visibility = View.GONE
+            setOnClickListener {
+                if (HotspotWish.on) HotspotWish.turnOff() else HotspotWish.turnOn()
+                // The controller picks the wish up on its next tick (≤2s) and
+                // the AP itself takes up to 20s, so say "Starting…" now rather
+                // than leave the button looking inert.
+                refresh()
+            }
+        }
+        root.addView(hotspotNote)
+        root.addView(hotspotButton)
+        (hotspotButton.layoutParams as? LinearLayout.LayoutParams)?.topMargin = 12
+
+        // The quiet footer: everything a grown-up (or a tester) wants that a
+        // child does not — set-up status, device code, guardian, version.
+        val versionName = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+        val aboutLink = line(
+            org.forgesworn.charter.ui.HomeCopy.aboutLink(versionName),
+            CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 28,
+        ).apply {
+            minHeight = CharterTheme.dp(this@MainActivity, CharterTheme.TAP)
+            gravity = Gravity.CENTER_VERTICAL
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, org.forgesworn.charter.ui.AboutActivity::class.java))
+            }
+        }
+        root.addView(aboutLink)
 
         pairButton.setOnClickListener {
             val uri = uriInput.text.toString().trim()
@@ -456,10 +509,22 @@ class MainActivity : Activity() {
         nowUnix: Long = System.currentTimeMillis() / 1000,
     ) {
         val paired = state?.paired == true
+        // Two voices, one screen. Paired: the child's ("Your charter", the
+        // hero). Unpaired: the set-up screen, exactly as before. The grown-up
+        // lines (who it is paired with, the code, the set-up status) are not
+        // repeated here once paired — they are one tap away under About.
+        title.text = if (paired) "Your charter" else "Set up this device"
+        ownerLine.visibility = if (paired) View.GONE else View.VISIBLE
+        codeCard.visibility = if (paired) View.GONE else View.VISIBLE
+        heroCard.visibility = if (paired) View.VISIBLE else View.GONE
+        if (paired) {
+            val h = org.forgesworn.charter.ui.HomeCopy.headline(view)
+            heroBig.text = h.big
+            heroCaption.text = h.caption
+        }
         pairingStatus.text =
-            if (paired) "✓ Paired with guardian ${state?.guardianShort}" +
-                (state?.relays?.firstOrNull()?.let { "\nListening on $it" } ?: "")
-            else "Waiting to pair with a guardian…\nIn Kintrinsic: Family → Set up a device → Phone, then scan the QR with this phone's camera."
+            if (paired) ""
+            else "Waiting to pair with a guardian…\nIn Kintrinsic: Family → Set up a device → Phone, then scan the QR with this device's camera."
         pairError.text = state?.error ?: ""
         if (paired) scanBanner.text = ""
         for (v in listOf(pairingStatus, scanBanner, pairError)) {
@@ -471,40 +536,28 @@ class MainActivity : Activity() {
 
         // The D8 mirror block: only meaningful once paired. "No charter yet"
         // beats a silent blank — the ward should never have to guess.
-        charterStatus.visibility = if (paired) View.VISIBLE else View.GONE
-        charterStatusCard?.visibility = if (paired) View.VISIBLE else View.GONE
-        if (paired) {
-            charterStatus.text = if (view == null) {
-                "Your charter\nNo charter set yet — ask your guardian."
-            } else {
-                buildString {
-                    append("Your charter\n")
-                    append(
-                        when {
-                            view.locked -> "Locked right now"
-                            // -1 = no WHOLE-DEVICE time wall at all (a
-                            // buckets-only ward, most commonly) — never
-                            // format it through timeLeft(), which would
-                            // print "0s left today" and read as "about to
-                            // lock any second".
-                            view.secondsLeft < 0 -> "No whole-device time limit"
-                            else -> "${org.forgesworn.charter.ui.TimeText.timeLeft(view.secondsLeft)} left today"
-                        },
-                    )
-                    view.detail?.let { append("\n").append(it) }
-                    if (view.lines.isNotEmpty()) {
-                        append("\n\n").append(view.lines.joinToString("\n"))
-                    }
-                    // A quiet, informational line — not a warning, not a
-                    // badge, no colour change (spec 2026-08-03). Absent
-                    // entirely when the guardian never set the
-                    // always-available clause. Same wording her app shows —
-                    // there is no guardian-only variant of this sentence.
-                    GroupMirror.outOfHoursLine(view.outOfHoursNightsWeek, view.outOfHoursWeekSecs)
-                        ?.let { append("\n\n").append(it) }
-                }
+        // The detail beneath the hero (the headline itself is the hero now,
+        // via HomeCopy — never repeated here). Hidden when there is nothing
+        // beyond the headline to say.
+        val detail = if (!paired || view == null) "" else buildString {
+            view.detail?.let { append(it) }
+            if (view.lines.isNotEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                append(view.lines.joinToString("\n"))
+            }
+            // A quiet, informational line — not a warning, not a badge, no
+            // colour change (spec 2026-08-03). Absent entirely when the
+            // guardian never set the always-available clause. Same wording
+            // her app shows — there is no guardian-only variant of this
+            // sentence.
+            GroupMirror.outOfHoursLine(view.outOfHoursNightsWeek, view.outOfHoursWeekSecs)?.let {
+                if (isNotEmpty()) append("\n\n")
+                append(it)
             }
         }
+        charterStatus.text = detail
+        charterStatus.visibility = if (detail.isEmpty()) View.GONE else View.VISIBLE
+        charterStatusCard?.visibility = charterStatus.visibility
 
         // Named-times groups + "ask to open" (Task 9) — ward-only, like every
         // other ask verb, and only meaningful once paired (there's nobody to
