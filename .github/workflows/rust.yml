@@ -60,7 +60,7 @@ jobs:
       # never duplicate (or drift from) the version pin here.
       - name: Install pinned Rust toolchain (from rust-toolchain.toml)
         run: rustup show
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ matrix.workspace }}
       - name: cargo fmt --all --check
@@ -86,7 +86,7 @@ jobs:
       # Read core/rust-toolchain.toml for the pinned channel + components.
       - name: Install pinned Rust toolchain (from rust-toolchain.toml)
         run: rustup show
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: core
       - name: cargo test -p charter-sys --features real-relay
@@ -109,7 +109,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain (from rust-toolchain.toml)
         run: rustup show
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: linux
       - name: cargo clippy -p charterd -p charter-tray --features real --all-targets -- -D warnings
