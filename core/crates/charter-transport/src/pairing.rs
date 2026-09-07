@@ -37,6 +37,19 @@ pub fn pin_from_connect(
     subject_pubkey: PubKey,
     now: u64,
 ) -> Result<Pairing, PairingError> {
+    // The QR-scannable form is the https App Link with the bunker URI in its
+    // #fragment (`https://charter.mysignet.app/pair#bunker://…`). A scan that
+    // lands in a browser instead of the app leaves the ward holding that whole
+    // URL, so accept it here and pin from the fragment. Trust is unchanged:
+    // the link was always attacker-supplyable, and the SAS check on the ward's
+    // screen is what defends it, not the scheme it arrived under.
+    let bunker_uri = match bunker_uri.strip_prefix("https://") {
+        Some(_) => bunker_uri
+            .split_once('#')
+            .map(|(_, frag)| frag)
+            .ok_or(PairingError::NotBunkerUri)?,
+        None => bunker_uri,
+    };
     let rest = bunker_uri
         .strip_prefix("bunker://")
         .ok_or(PairingError::NotBunkerUri)?;
@@ -113,6 +126,30 @@ mod tests {
         let p = pin_from_connect(&good_uri(), machine(), subject(), 100).unwrap();
         assert_eq!(p.relays.len(), 1);
         assert_eq!(p.paired_at, 100);
+    }
+
+    /// The QR encodes the https App Link form — `https://charter.mysignet.app/pair#bunker://…`.
+    /// When the scan lands in a browser instead of the app, the whole URL is what
+    /// the ward can paste (or be handed over adb), so the parser accepts it too.
+    #[test]
+    fn pins_from_https_app_link_fragment() {
+        let uri = format!("https://charter.mysignet.app/pair#{}&token=t0k3n", good_uri());
+        let p = pin_from_connect(&uri, machine(), subject(), 7).unwrap();
+        assert_eq!(p.guardian_pubkey, PubKey::from_hex(&"11".repeat(32)).unwrap());
+        assert_eq!(p.relays.len(), 1);
+        assert_eq!(p.paired_at, 7);
+    }
+
+    #[test]
+    fn rejects_https_link_without_bunker_fragment() {
+        assert_eq!(
+            pin_from_connect("https://charter.mysignet.app/pair", machine(), subject(), 0),
+            Err(PairingError::NotBunkerUri)
+        );
+        assert_eq!(
+            pin_from_connect("https://charter.mysignet.app/pair#nostrconnect://x", machine(), subject(), 0),
+            Err(PairingError::NotBunkerUri)
+        );
     }
 
     #[test]
