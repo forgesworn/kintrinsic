@@ -344,13 +344,23 @@ class WardenController(
         // for that span — and it comes straight back when the window shuts,
         // including after a reboot, because it is re-derived here rather than
         // latched.
+        //
+        // And ONLY while paired. A released phone must be left with no
+        // Kintrinsic restriction at all (I17, and the clearBaseline contract),
+        // but this line used to re-lock install every tick regardless: a
+        // guardian who disconnected a phone to repair it over a cable got adb
+        // (the baseline had stood down) and `adb install` refused
+        // (INSTALL_FAILED_USER_RESTRICTED) — with no window to open, because
+        // an unpaired ward has no guardian to sign one (2026-09-07).
+        val pairing = CharterCore.pairingState()
         if (Provisioning.isDeviceOwner(context)) {
-            runCatching { restrictions.setInstallLock(!CharterCore.maintenanceOpen(nowUnix)) }
+            val locked = pairing.paired && !CharterCore.maintenanceOpen(nowUnix)
+            runCatching { restrictions.setInstallLock(locked) }
             // Never let the account or the ward's notice break enforcement: a
             // PackageManager that throws must not stop the lock coming back.
             runCatching { accountForInstallWindow(nowUnix) }
         }
-        val subject = CharterCore.pairingState().subject
+        val subject = pairing.subject
         // Ward-on-primary (D1): the WHOLE phone is the ward's surface, so ANY
         // foreground app while the screen is interactive is the ward using
         // their time — the subject is a pubkey and foreground is a package;
