@@ -8,6 +8,7 @@ use base64::Engine;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
 use hkdf::Hkdf;
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -84,7 +85,7 @@ fn pad(data: &[u8]) -> Vec<u8> {
 }
 
 fn mac(hmac_key: &[u8; 32], nonce: &[u8; 32], ciphertext: &[u8]) -> [u8; 32] {
-    let mut m = HmacSha256::new_from_slice(hmac_key).expect("hmac key");
+    let mut m = <HmacSha256 as KeyInit>::new_from_slice(hmac_key).expect("hmac key");
     m.update(nonce);
     m.update(ciphertext);
     let out = m.finalize().into_bytes();

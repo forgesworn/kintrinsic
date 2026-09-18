@@ -9,8 +9,13 @@ import org.forgesworn.charter.service.CharterVpnService
 
 /** The web-content enforcement capability: program + pin the DNS filter. */
 interface DnsFilterOps {
-    /** (Re)apply the plan of the given revision to the running filter. */
-    fun apply(revision: String)
+    /**
+     * (Re)apply the plan of the given revision to the running filter. Returns
+     * true iff the apply was dispatched — a false return means the caller must
+     * NOT record the revision as applied, so the next level-triggered tick
+     * retries (the DNS-filter analog of the lock-surface success-only latch).
+     */
+    fun apply(revision: String): Boolean
     /** Pin the filter always-on with lockdown (fail-closed). Idempotent. */
     fun pinAlwaysOn()
     /** Unpin + stop (used on release / clear). */
@@ -31,11 +36,17 @@ class VpnDnsFilterOps(
     private val admin: ComponentName,
 ) : DnsFilterOps {
 
-    override fun apply(revision: String) {
-        // Starting the service (re)reads the current plan from the core.
-        runCatching {
-            context.startService(CharterVpnService.applyIntent(context, revision))
-        }.onFailure { Log.w(TAG, "apply($revision) failed", it) }
+    override fun apply(revision: String): Boolean {
+        // Starting the service (re)reads the current plan from the core. A
+        // background-start refusal (or a null ComponentName) means it did NOT
+        // dispatch — report false so the caller retries next tick rather than
+        // latching a revision that never reached the filter.
+        return runCatching {
+            context.startService(CharterVpnService.applyIntent(context, revision)) != null
+        }.getOrElse {
+            Log.w(TAG, "apply($revision) failed", it)
+            false
+        }
     }
 
     override fun pinAlwaysOn() {
@@ -73,7 +84,12 @@ class FakeDnsFilterOps : DnsFilterOps {
     val applied = mutableListOf<String>()
     var pinned = false
     var cleared = false
-    override fun apply(revision: String) { applied.add(revision) }
+    /** Flip to false to simulate a dispatch failure (background-start refusal). */
+    var applySucceeds = true
+    override fun apply(revision: String): Boolean {
+        applied.add(revision)
+        return applySucceeds
+    }
     override fun pinAlwaysOn() { pinned = true }
     override fun clear() { cleared = true }
     override fun isPinned(): Boolean = pinned

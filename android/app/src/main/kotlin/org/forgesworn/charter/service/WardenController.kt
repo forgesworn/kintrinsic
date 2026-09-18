@@ -639,8 +639,11 @@ class WardenController(
         if (enforcing) {
             val plan = runCatching { CharterCore.dnsPlan() }.getOrNull()
             val rev = plan?.revision ?: ""
-            if (rev != appliedDnsRevision) {
-                dnsFilter.apply(rev)
+            // Latch the revision ONLY on a successful dispatch — a swallowed
+            // background-start failure must not mark an unreached plan as
+            // applied, or the new clause is silently dropped until the next
+            // revision change (mirrors the lock-surface success-only latch).
+            if (rev != appliedDnsRevision && dnsFilter.apply(rev)) {
                 appliedDnsRevision = rev
             }
         }

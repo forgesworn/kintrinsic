@@ -26,12 +26,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
-secp256k1 = { version = "0.30", default-features = false, features = ["std", "alloc"] }
-sha2 = "0.10"
-chacha20 = "0.9"
-hkdf = "0.12"
-hmac = "0.12"
-base64 = "0.22"
+secp256k1 = { version = "0.33", default-features = false, features = ["std", "alloc"] }
+sha2 = "0.11"
+chacha20 = "0.10"
+hkdf = "0.13"
+hmac = "0.13"
+base64 = "0.23"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
 chrono-tz = { version = "0.10", default-features = false }

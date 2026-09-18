@@ -33,11 +33,15 @@ jobs:
         env:
           HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh
           echo "$HETZNER_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          # Host keys are pinned (DEPLOY_KNOWN_HOSTS), never ssh-keyscanned per run:
+          # TOFU could redirect an `rsync --delete`, and a failed scan aborts under
+          # `set -e` with no diagnostic.
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           # --delete-excluded so anything newly excluded actually leaves the
           # server, rather than a stale copy lingering after an exclude is added.
           rsync -avz --delete --delete-excluded \

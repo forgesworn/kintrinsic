@@ -23,6 +23,7 @@
 //! conversation key used for message encryption, so exposing an unlock code (or
 //! the derived secret passed to `charter-lock`) never weakens the wire crypto.
 
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -37,7 +38,10 @@ pub const UNLOCK_CODE_DIGITS: usize = 8;
 
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     // HMAC accepts a key of any length, so `new_from_slice` never errors here.
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    // hmac 0.13 moved `new_from_slice` off `Mac` onto `KeyInit`; `Mac` still
+    // provides `update`/`finalize` below.
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg);
     mac.finalize().into_bytes().into()
 }

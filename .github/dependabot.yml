@@ -1,8 +1,10 @@
 version: 2
 
-# Canonical dependabot config for npm/TypeScript repos in forgesworn.
-# Synced from forgesworn/.github/templates/dependabot/dependabot.npm.yml.
-# Edit the template, not individual repos -- run the propagator to sync.
+# Dependabot config for charter. Based on the canonical npm/TypeScript config
+# in forgesworn/.github/templates/dependabot/dependabot.npm.yml, but NOT a
+# straight sync: charter is also two cargo workspaces, and there is no cargo
+# template to sync from. Re-running the propagator over this file will drop
+# the cargo block below and orphan every Rust dependency again.
 #
 # Tiering:
 #   patch + minor  -> grouped, auto-merged on green CI
@@ -39,6 +41,43 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
+
+  # Rust. charter is two cargo workspaces: /core (the shared engine) and
+  # /linux (the daemon and tray). Neither was managed at all after this file
+  # was synced from the npm template, which is why sixteen cargo PRs opened in
+  # July then sat untouched while main moved on underneath them.
+  - package-ecosystem: cargo
+    directories:
+      - "/core"
+      - "/linux"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # The RustCrypto crates share a `digest` version and CANNOT be bumped one
+      # at a time. sha2 0.11 pulls digest 0.11 while hmac 0.12 is still on
+      # digest 0.10, and the build dies on "expected trait ... found trait".
+      # They move as a unit or not at all, so this group takes majors too.
+      rustcrypto:
+        patterns:
+          - "sha2"
+          - "sha3"
+          - "hkdf"
+          - "hmac"
+          - "digest"
+          - "chacha20*"
+          - "cipher"
+          - "aead"
+          - "crypto-common"
+          - "block-buffer"
+          - "universal-hash"
+          - "poly1305"
+        update-types: ["patch", "minor", "major"]
+      cargo-minor:
+        update-types: ["patch", "minor"]
 
   - package-ecosystem: github-actions
     directory: "/"

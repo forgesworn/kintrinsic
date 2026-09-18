@@ -7,7 +7,7 @@
 //! touch `secp256k1` types directly.
 
 use secp256k1::schnorr::Signature;
-use secp256k1::{Keypair, Parity, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+use secp256k1::{Keypair, Parity, PublicKey, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 
 pub mod unlock;
@@ -40,32 +40,30 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 /// BIP-340 schnorr verification. Returns `false` for any malformed input
 /// (bad pubkey, bad signature) or a failed check — never panics, never errors.
 pub fn schnorr_verify(pubkey32: &[u8; 32], msg32: &[u8; 32], sig64: &[u8; 64]) -> bool {
-    let pk = match XOnlyPublicKey::from_slice(pubkey32) {
+    let pk = match XOnlyPublicKey::from_byte_array(*pubkey32) {
         Ok(pk) => pk,
         Err(_) => return false,
     };
-    let sig = match Signature::from_slice(sig64) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let secp = Secp256k1::verification_only();
-    secp.verify_schnorr(&sig, msg32, &pk).is_ok()
+    // 0.33's from_byte_array is infallible: any 64 bytes are a syntactically
+    // valid signature, and a bad one simply fails verification below, so this
+    // still returns false for malformed input exactly as before.
+    let sig = Signature::from_byte_array(*sig64);
+    secp256k1::schnorr::verify(&sig, msg32, &pk).is_ok()
 }
 
 /// Derive the 32-byte x-only public key for a secret key.
 pub fn xonly_pubkey(secret32: &[u8; 32]) -> Result<[u8; 32], CryptoError> {
-    let sk = SecretKey::from_byte_array(secret32).map_err(|_| CryptoError::BadSecretKey)?;
-    let secp = Secp256k1::new();
-    let kp = Keypair::from_secret_key(&secp, &sk);
-    Ok(kp.x_only_public_key().0.serialize())
+    let sk = SecretKey::from_secret_bytes(*secret32).map_err(|_| CryptoError::BadSecretKey)?;
+    let kp = Keypair::from_secret_key(&sk);
+    Ok(kp.x_only_public_key().0.to_byte_array())
 }
 
 /// The x-coordinate of the ECDH shared point `secret * pubkey`, where `pubkey`
 /// is an x-only key lifted with even y (NIP-44 v2 convention). Returns `None`
 /// for an invalid secret or pubkey.
 pub fn ecdh_x(secret32: &[u8; 32], xonly_pub32: &[u8; 32]) -> Option<[u8; 32]> {
-    let sk = SecretKey::from_byte_array(secret32).ok()?;
-    let xonly = XOnlyPublicKey::from_slice(xonly_pub32).ok()?;
+    let sk = SecretKey::from_secret_bytes(*secret32).ok()?;
+    let xonly = XOnlyPublicKey::from_byte_array(*xonly_pub32).ok()?;
     let full: PublicKey = xonly.public_key(Parity::Even);
     let point = secp256k1::ecdh::shared_secret_point(&full, &sk);
     let mut x = [0u8; 32];
@@ -79,10 +77,9 @@ pub fn ecdh_x(secret32: &[u8; 32], xonly_pub32: &[u8; 32]) -> Option<[u8; 32]> {
 /// that want aux randomness should still verify against a generated vector
 /// rather than reproducing a signature byte-for-byte.
 pub fn schnorr_sign(secret32: &[u8; 32], msg32: &[u8; 32]) -> Result<[u8; 64], CryptoError> {
-    let sk = SecretKey::from_byte_array(secret32).map_err(|_| CryptoError::BadSecretKey)?;
-    let secp = Secp256k1::new();
-    let kp = Keypair::from_secret_key(&secp, &sk);
-    let sig = secp.sign_schnorr_no_aux_rand(msg32, &kp);
+    let sk = SecretKey::from_secret_bytes(*secret32).map_err(|_| CryptoError::BadSecretKey)?;
+    let kp = Keypair::from_secret_key(&sk);
+    let sig = secp256k1::schnorr::sign_no_aux_rand(msg32, &kp);
     Ok(*sig.as_ref())
 }
 

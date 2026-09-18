@@ -133,9 +133,15 @@ mod tests {
     /// the ward can paste (or be handed over adb), so the parser accepts it too.
     #[test]
     fn pins_from_https_app_link_fragment() {
-        let uri = format!("https://charter.mysignet.app/pair#{}&token=t0k3n", good_uri());
+        let uri = format!(
+            "https://charter.mysignet.app/pair#{}&token=t0k3n",
+            good_uri()
+        );
         let p = pin_from_connect(&uri, machine(), subject(), 7).unwrap();
-        assert_eq!(p.guardian_pubkey, PubKey::from_hex(&"11".repeat(32)).unwrap());
+        assert_eq!(
+            p.guardian_pubkey,
+            PubKey::from_hex(&"11".repeat(32)).unwrap()
+        );
         assert_eq!(p.relays.len(), 1);
         assert_eq!(p.paired_at, 7);
     }
@@ -147,7 +153,12 @@ mod tests {
             Err(PairingError::NotBunkerUri)
         );
         assert_eq!(
-            pin_from_connect("https://charter.mysignet.app/pair#nostrconnect://x", machine(), subject(), 0),
+            pin_from_connect(
+                "https://charter.mysignet.app/pair#nostrconnect://x",
+                machine(),
+                subject(),
+                0
+            ),
             Err(PairingError::NotBunkerUri)
         );
     }
