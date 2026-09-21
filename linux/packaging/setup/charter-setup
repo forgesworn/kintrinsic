@@ -58,10 +58,30 @@ echo "==> account lockdown for '$MANAGED_USER'"
 # Dedicated group that the polkit rules key off.
 getent group charter-managed >/dev/null || groupadd --system charter-managed
 usermod -aG charter-managed "$MANAGED_USER"
-# Out of the admin groups — the broker becomes the only privileged path.
-for g in sudo adm lpadmin; do
+# Out of the admin groups — the broker becomes the only privileged path. The
+# list covers every group the brick guard above counts as admin (sudo, wheel,
+# the legacy Ubuntu `admin`) plus adm/lpadmin; stripping fewer than the guard
+# tests left a wheel/admin child with full sudo under a "lockdown" that
+# reported success.
+for g in sudo wheel admin adm lpadmin; do
     gpasswd -d "$MANAGED_USER" "$g" 2>/dev/null || true
 done
+# Verify, don't trust: gpasswd can't remove a PRIMARY group, and a personal
+# sudoers entry isn't a group at all. Every other control is moot while the
+# child can still become root, so refuse to report a lockdown that isn't one.
+still_admin="$(id -nG "$MANAGED_USER" 2>/dev/null | tr ' ' '\n' \
+    | grep -xE 'sudo|wheel|admin' | tr '\n' ' ' || true)"
+if [ -n "$still_admin" ]; then
+    fail "\"$MANAGED_USER\" is still in an administrator group (${still_admin% }) and could not be removed from it — Kintrinsic cannot protect this computer while that account can become root. Remove the account from that group, then run setup again."
+fi
+# Only a BLANKET rule ("(ALL : ALL) ALL", "(root) NOPASSWD: ALL") counts: Mint
+# grants every account a few fixed helper commands (mint-refresh-cache, …), so
+# "may run something" is true of every user on the target platform.
+if command -v sudo >/dev/null 2>&1 \
+    && LC_ALL=C sudo -n -l -U "$MANAGED_USER" 2>/dev/null \
+        | grep -qE '^[[:space:]]+\([^)]*\)[[:space:]]+(.*[,:][[:space:]]*)?ALL[[:space:]]*(,.*)?$'; then
+    fail "\"$MANAGED_USER\" still has sudo rights from a sudoers rule (see /etc/sudoers and /etc/sudoers.d) — Kintrinsic cannot protect this computer while that account can become root. Remove the rule, then run setup again."
+fi
 
 echo "==> charter state dirs"
 install -d -m 0755 /var/lib/charter
