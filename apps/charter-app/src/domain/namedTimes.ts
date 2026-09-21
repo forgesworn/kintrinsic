@@ -107,6 +107,9 @@ export const MAX_BUCKETS = 12;
  *  the device today, but a runaway list (every app on the device, picked by
  *  accident) should read as a mistake to fix, not silently truncate on save. */
 export const MAX_BUCKET_APPS = 64;
+/** The longest name a counted named time may carry — the device's
+ *  `GrantBuckets::is_valid` and the wire's `validBucket` both drop a longer one. */
+export const MAX_BUCKET_LABEL = 32;
 
 /**
  * Reserved synthetic group ids, used ONLY when `decompose` has to invent a
@@ -464,6 +467,13 @@ export function namedTimesError(groups: NamedGroup[]): string | null {
     return "Give every named time a name — an unnamed one can’t be sent to the device.";
   }
   const counted = groups.filter((g) => g.policy === "counted");
+  // `validBucket` (wire) and the device's `GrantBuckets::is_valid` both drop a
+  // counted group whose name is over 32 — individually and silently, so the
+  // guardian's screen kept showing a limit that never reached the device.
+  const longName = counted.find((g) => g.label.trim().length > MAX_BUCKET_LABEL);
+  if (longName) {
+    return `“${longName.label.trim()}” is too long a name — keep it to ${MAX_BUCKET_LABEL} characters or it can’t be sent to the device.`;
+  }
   if (counted.length > MAX_BUCKETS) {
     return `Up to ${MAX_BUCKETS} counted named times — combine or remove one before saving.`;
   }

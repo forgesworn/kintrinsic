@@ -540,6 +540,14 @@ describe("moveApp", () => {
 });
 
 describe("namedTimesError", () => {
+  it("refuses a counted name the wire would silently drop (over 32 characters)", () => {
+    const long = "Play time on the tablet in the evening"; // 38
+    expect(namedTimesError([counted("c", long, ["x"], { dailyMinutes: 60 })])).toMatch(/too long a name/);
+    expect(namedTimesError([counted("c", "x".repeat(32), ["x"], { dailyMinutes: 60 })])).toBeNull();
+    // Free and on-request names never ride the buckets clause.
+    expect(namedTimesError([free("f", long, [])])).toBeNull();
+  });
+
   it("is null for a clean, valid set", () => {
     expect(namedTimesError([free("f", "Learning", []), counted("c", "Play", ["x"], { dailyMinutes: 60 })])).toBeNull();
   });

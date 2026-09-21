@@ -809,7 +809,7 @@ export function NamedTimesSection({
               placeholder="Name this time (e.g. Play)"
               aria-label="New named time"
               value={draftLabel}
-              onChange={(e) => setDraftLabel(e.target.value)}
+              onChange={(e) => setDraftLabel(e.target.value.slice(0, 32))}
               onKeyDown={(e) => e.key === "Enter" && createGroup(draftLabel)}
             />
             <Button variant="primary" disabled={!draftLabel.trim()} onClick={() => createGroup(draftLabel)}>
