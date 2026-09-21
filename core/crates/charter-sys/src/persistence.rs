@@ -926,8 +926,23 @@ mod real {
                 if !is_json(&path) {
                     continue;
                 }
-                if let Some(rec) = read_json::<CuratorRec>(&path)? {
-                    recs.push(rec);
+                // One torn record used to `?` out of the walk, and both
+                // wardens turn that error into an EMPTY curator set. In
+                // blocklist posture — the one most families are in — that is
+                // the fail-OPEN direction: every curator-sourced block
+                // disappears at once, the child's only remaining restriction
+                // is the guardian's own deny list, and the device still
+                // reports itself as filtering the web. Keep the lists we can
+                // read; the missing one is one curator's votes, not all of
+                // them.
+                match read_json::<CuratorRec>(&path) {
+                    Ok(Some(rec)) => recs.push(rec),
+                    Ok(None) => {}
+                    Err(e) => eprintln!(
+                        "charter: cached curator list {} is unreadable ({e}) — skipping it; \
+                         that curator's votes are not in force until it is fetched again",
+                        path.display()
+                    ),
                 }
             }
             recs.sort_by(|a, b| a.key.cmp(&b.key));
@@ -1177,6 +1192,29 @@ mod real {
                 vec![r#"{"c":"aaN"}"#.to_string(), r#"{"c":"bb"}"#.to_string()]
             );
             assert!(!s2.put_list("aa:main", 20, r#"{"c":"z"}"#).unwrap()); // still protected
+        }
+
+        #[test]
+        fn one_unreadable_curator_record_does_not_empty_the_cache() {
+            // Both wardens do `.all_lists().unwrap_or_default()`, so failing
+            // the walk on one torn record handed them an EMPTY curator set —
+            // and in blocklist posture, the one most families are in, an
+            // empty set means every curator block is gone while the device
+            // still reports itself as filtering.
+            let base = tmp("curator-torn");
+            let s = RealCuratorListStore::with_base(&base);
+            assert!(s.put_list("aa:main", 10, r#"{"c":"aa"}"#).unwrap());
+            assert!(s.put_list("bb:main", 10, r#"{"c":"bb"}"#).unwrap());
+            let torn = base
+                .join("curator")
+                .join(format!("{}.json", hex_bytes(b"aa:main")));
+            fs::write(&torn, r#"{"key":"aa:main","created_"#).unwrap();
+
+            assert_eq!(
+                s.all_lists().unwrap(),
+                vec![r#"{"c":"bb"}"#.to_string()],
+                "the readable curator's votes still apply"
+            );
         }
 
         #[test]
