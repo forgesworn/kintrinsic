@@ -415,7 +415,22 @@ fn perform(action: Action, uid: Option<u32>, dry_run: bool) {
         // Fire-and-forget: never block the lock's event loop on the action
         // (terminate-user against a frozen session can wait out logind's stop
         // timeout). Reap in a detached thread so nothing is left un-waited.
-        match Command::new(&argv[0]).args(&argv[1..]).spawn() {
+        // A CLEAN environment, always. This process holds the offline-unlock
+        // code (`CHARTER_LOCK_UNLOCK_EXPECT`) and the root X cookie's path in
+        // its own, and "Ask for more time" runs `charter` AS THE WARD via
+        // `runuser`, which keeps whatever it is handed: the code would sit in
+        // a ward-uid process's `/proc/<pid>/environ`, readable by any ward
+        // process outside the frozen slice — which could then simply type it
+        // in. None of the sanctioned actions need anything but a PATH.
+        match Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .spawn()
+        {
             Ok(mut child) => {
                 std::thread::spawn(move || {
                     let _ = child.wait();
