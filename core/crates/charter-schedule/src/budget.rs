@@ -128,7 +128,8 @@ pub fn quota_left_signed_pooled(
 /// running out — "40 minutes left today" and "2 hours left this week" are
 /// different sentences with different consequences, and the minimum alone
 /// cannot say which it is. `None` for a cap means that cap is not set (or the
-/// whole budget is revoked); `Some(0)` for both means paused.
+/// whole budget is revoked); `Some(0)` on every SET cap means paused — and on
+/// the daily slot alone when a paused budget sets neither.
 ///
 /// Returns SIGNED remainders for the same reason as the collapsed form: an
 /// overdrawn ward must stay overdrawn.
@@ -145,7 +146,15 @@ pub fn quota_parts_signed_pooled(
     }
     if budget.paused == Some(true) {
         // Paused reads as "nothing left" on whichever caps are actually set,
-        // so a paused budget can never be mistaken for an absent one.
+        // so a paused budget can never be mistaken for an absent one — and on
+        // the DAILY slot when NEITHER is set. `(None, None)` is how this
+        // function says "unbounded", so a paused budget carrying no caps used
+        // to enforce nothing at all, against the contract ("blocks all time
+        // (quota = 0). Distinct from absent.") and against
+        // `quota_left_pooled` below, which always answered zero.
+        if budget.daily_minutes.is_none() && budget.weekly_minutes.is_none() {
+            return (Some(0), None);
+        }
         return (
             budget.daily_minutes.map(|_| 0),
             budget.weekly_minutes.map(|_| 0),
@@ -251,6 +260,27 @@ mod tests {
         b.paused = None;
         b.revoked = Some(true);
         assert_eq!(quota_left(&u, &b, NOON), QuotaStatus::Unbounded);
+    }
+
+    /// The enforcer's own function (`quota_parts_signed_pooled`) and the
+    /// exported one (`quota_left`) are two implementations of one rule; on a
+    /// paused budget with NO caps they used to disagree — zero vs unbounded —
+    /// and the enforcer's answer, the one that matters, was the wrong one.
+    #[test]
+    fn a_paused_budget_with_no_caps_is_still_zero_for_the_enforcer() {
+        let u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        let mut b = budget(None, None);
+        b.paused = Some(true);
+        assert_eq!(quota_left(&u, &b, NOON), QuotaStatus::Remaining(0));
+        let (daily, weekly) = quota_parts_signed_pooled(&u, &b, None, NOON, 0, None);
+        assert_eq!(
+            (daily, weekly),
+            (Some(0), None),
+            "never (None, None) = unbounded"
+        );
+        // A grant does not reopen a paused budget.
+        let (daily, _) = quota_parts_signed_pooled(&u, &b, None, NOON, 3600, None);
+        assert_eq!(daily, Some(0));
     }
 
     #[test]
