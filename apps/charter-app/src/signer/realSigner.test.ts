@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   finalizeEvent,
   generateSecretKey,
@@ -13,6 +13,10 @@ import type { GrantAppRules } from "../wire/types";
 import { unwrapClause, unwrapGrant, type GuardianOps } from "../wire/giftwrap";
 import type { DecisionContext } from "./Signer";
 import { RealSigner, type ChildTarget } from "./realSigner";
+
+// The signer persists its clause clock (`nextIssuedAt`) so a reload can't step
+// back under it; with a frozen `now` that floor would leak between tests.
+beforeEach(() => localStorage.clear());
 
 const GSK = generateSecretKey();
 const GUARDIAN = getPublicKey(GSK);
@@ -918,6 +922,32 @@ describe("RealSigner.signStandDownClause", () => {
       issuedAt: number;
     };
     expect(lift.issuedAt).toBeGreaterThan(call.issuedAt);
+  });
+});
+
+// The same floor applies to EVERY kind, not just stand-down: closing a
+// maintenance window opened in the same second used to be dropped, leaving
+// the window open while the app said it was shut.
+describe("RealSigner clause clock", () => {
+  it("never signs two clauses of a kind at one issuedAt, across a reload too", async () => {
+    const published: { relays: string[]; event: NostrEvent }[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }], relays: RELAYS };
+    const signer = makeSigner(target, published);
+    await signer.connect("signet");
+
+    await signer.signMaintenanceClause!("child_sam", 30);
+    await signer.signMaintenanceClause!("child_sam", 0);
+    // A fresh signer (the app reloaded) inside the same frozen second.
+    const reloaded = makeSigner(target, published);
+    await reloaded.connect("signet");
+    await reloaded.signMaintenanceClause!("child_sam", 15);
+
+    const stamps = published.map(
+      (p) => (unwrapClause(p.event, DEV1, GUARDIAN).payload as { issuedAt: number }).issuedAt,
+    );
+    expect(stamps).toHaveLength(3);
+    expect(stamps[1]).toBeGreaterThan(stamps[0]);
+    expect(stamps[2]).toBeGreaterThan(stamps[1]);
   });
 });
 

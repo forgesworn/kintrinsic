@@ -93,9 +93,43 @@ function labelFor(kind: SignerKind): string | undefined {
 export class RealSigner implements Signer {
   private state: SignerState;
   private guardian: GuardianOps | null = null;
-  /** Last stand-down `issuedAt` signed per child this session — see the bump
-   *  in `signStandDownClause`. */
-  private lastStandDownIssuedAt = new Map<string, number>();
+  /** The last clause `issuedAt` this signer handed out — see `nextIssuedAt`. */
+  private lastIssuedAt = RealSigner.loadLastIssuedAt();
+
+  private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
+
+  private static loadLastIssuedAt(): number {
+    try {
+      const n = Number(localStorage.getItem(RealSigner.ISSUED_AT_KEY));
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * The `issuedAt` for the next clause: now, but STRICTLY above every one
+   * signed before. The device's per-(subject, kind) rollback floor DROPS a
+   * clause whose `issuedAt` does not exceed the standing one's, and `now()` is
+   * whole seconds — so two clauses of a kind inside one second silently lost
+   * the second: a lift that left the ward locked till midnight, a second
+   * "give 5 minutes" the log said had landed, the `apps` clause that actually
+   * opens an approved app. Stand-down used to carry its own per-session bump;
+   * one clock for every clause covers them all, and it is persisted so a
+   * reload inside the same second can't step back under it. It only ever runs
+   * ahead by as many seconds as clauses were signed in a burst; the device has
+   * no future-skew gate (its own clock may be dead), so that costs nothing.
+   */
+  private nextIssuedAt(): number {
+    const issuedAt = Math.max(this.deps.now(), this.lastIssuedAt + 1);
+    this.lastIssuedAt = issuedAt;
+    try {
+      localStorage.setItem(RealSigner.ISSUED_AT_KEY, String(issuedAt));
+    } catch {
+      // Private mode / quota — the in-memory floor still holds this session.
+    }
+    return issuedAt;
+  }
 
   constructor(private deps: RealSignerDeps) {
     this.state = deps.initial ?? { connected: false, kind: "none", autoSign: false };
@@ -196,7 +230,7 @@ export class RealSigner implements Signer {
 
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
-    const issuedAt = this.deps.now();
+    const issuedAt = this.nextIssuedAt();
     if (policy.scope.kind === "app") {
       // App-scope rebuilds the child's ONE aggregate `appRules` clause, which
       // is the same set for every device — per-app rules are not splittable.
@@ -269,7 +303,7 @@ export class RealSigner implements Signer {
         ? `Close the install window on ${target.name ?? childId}'s phone now`
         : `Allow installs on ${target.name ?? childId}'s phone for ${minutes} minutes`,
     );
-    const issuedAt = this.deps.now();
+    const issuedAt = this.nextIssuedAt();
     // Absolute expiry, computed once: a duration would restart on every
     // re-read of the stored clause and the window would never shut.
     //
@@ -309,7 +343,7 @@ export class RealSigner implements Signer {
     if (!target) throw new Error(`unknown child: ${childId}`);
     this.requireDeliverable(target, childId);
     await this.authorize("clause", `Give ${minutes} more minutes to ${target.name ?? childId}`);
-    const issuedAt = this.deps.now();
+    const issuedAt = this.nextIssuedAt();
     // Each gift needs its own identity: the device's extension ledger applies
     // an id exactly once, which is what stops a clause it re-reads every tick
     // from topping the ward up forever — and what lets a SECOND gift add again.
@@ -368,16 +402,9 @@ export class RealSigner implements Signer {
       "clause",
       lift ? `Allow ${who} back on` : `Ask ${who} to finish up now`,
     );
-    // The device's per-(subject, kind) monotonic floor DROPS a clause whose
-    // issuedAt does not exceed the standing one's, and now() is whole seconds
-    // — so a call lifted in the same second silently lost the lift: the app
-    // said "allowed back on" while the ward stayed locked until midnight.
-    // Bump past the last stand-down we signed this session.
-    const issuedAt = Math.max(
-      this.deps.now(),
-      (this.lastStandDownIssuedAt.get(childId) ?? 0) + 1,
-    );
-    this.lastStandDownIssuedAt.set(childId, issuedAt);
+    // Strictly above the last stand-down — a lift signed in the same second
+    // as the call must supersede it (see `nextIssuedAt`).
+    const issuedAt = this.nextIssuedAt();
     const bytes = new Uint8Array(8);
     crypto.getRandomValues(bytes);
     const id = `${issuedAt}-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
@@ -420,7 +447,7 @@ export class RealSigner implements Signer {
       `Update Kintrinsic to ${manifest.versionName} on ${target.name ?? childId}'s devices`,
     );
 
-    const issuedAt = this.deps.now();
+    const issuedAt = this.nextIssuedAt();
     const body = updateToGrant(manifest, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
