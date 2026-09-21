@@ -120,6 +120,25 @@ pub trait ChildClauseStore: Send + Sync {
     /// kind. A missing directory is `Ok` with nothing in it: that is a child
     /// nobody has set anything for, not a fault.
     fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses>;
+    /// The all-or-nothing read: `Err` if ANY kind is present but unreadable.
+    ///
+    /// For a caller whose own answer to "the store cannot be fully read" is
+    /// already the safe one — the Android warden HOLDS its last decision (and
+    /// keeps the install lockdown latched) on `Err`. Handing such a caller the
+    /// readable subset and letting it ignore [`ChildClauses::unreadable`]
+    /// would read a torn `2.json` as "no budget was ever set": for a
+    /// budget-only ward that is the inert branch — nothing enforced at all,
+    /// repeatable by whoever can tear the file.
+    fn clauses_for_strict(&self, subject_hex: &str) -> SysResult<Vec<(u16, String)>> {
+        let found = self.clauses_for(subject_hex)?;
+        if !found.unreadable.is_empty() {
+            return Err(crate::error::SysError::Io(format!(
+                "clause kinds present but unreadable: {:?}",
+                found.unreadable
+            )));
+        }
+        Ok(found.clauses)
+    }
     /// Forget every clause for `subject_hex` (a release: enforcement must stop,
     /// and the rollback floor must reset so a later re-pair starts clean).
     fn clear_for(&self, subject_hex: &str) -> SysResult<()>;
@@ -1118,6 +1137,29 @@ mod real {
                 s.get_child_clause("aa", 1).unwrap(),
                 Some(r#"{"s":"up"}"#.to_string())
             );
+        }
+
+        #[test]
+        fn the_strict_read_refuses_a_store_with_a_torn_kind() {
+            // The Android warden holds its last decision on `Err`. Given the
+            // readable subset instead, a budget-only ward with a torn `2.json`
+            // read as "nothing was ever set" — inert, nothing enforced.
+            let base = tmp("childclause-strict");
+            let s = RealChildClauseStore::with_base(&base);
+            assert!(s.put_child_clause("aa", 2, 100, r#"{"b":"good"}"#).unwrap());
+            assert_eq!(
+                s.clauses_for_strict("aa").unwrap(),
+                vec![(2, r#"{"b":"good"}"#.to_string())]
+            );
+            let budget_file = base
+                .join("children")
+                .join("aa")
+                .join("clauses")
+                .join("2.json");
+            fs::write(&budget_file, r#"{"issued_at":100,"js"#).unwrap();
+            assert!(s.clauses_for_strict("aa").is_err(), "torn is not absent");
+            // A child nobody has set anything for is still simply empty.
+            assert_eq!(s.clauses_for_strict("bb").unwrap(), vec![]);
         }
 
         #[test]
