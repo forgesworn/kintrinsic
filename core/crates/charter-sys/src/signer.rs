@@ -137,12 +137,42 @@ impl RealMachineSigner {
     /// only the in-process daemon assembly calls it.
     pub fn load_or_create_secret(path: impl AsRef<std::path::Path>) -> SysResult<[u8; 32]> {
         let path = path.as_ref();
-        if let Some(secret) = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| decode_hex32(s.trim()))
-            .and_then(validate_secret)
-        {
-            return Ok(secret);
+        // "Absent" and "present but unusable" are different events and must not
+        // collapse into one: the machine key has no backup by design and the
+        // guardian's pairing is pinned to its pubkey, so minting over a key we
+        // merely FAILED TO READ silently orphans the device for good.
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                if let Some(secret) = decode_hex32(text.trim()).and_then(validate_secret) {
+                    return Ok(secret);
+                }
+                // The bytes on disk are not a key, so there is no identity
+                // left to protect — but they are never destroyed: a hand
+                // repair (or a post-mortem) needs them. An empty file holds
+                // nothing to keep. Enforcement carries on under a fresh
+                // identity rather than stopping until someone notices.
+                if !text.trim().is_empty() {
+                    let aside = set_aside_path(path);
+                    std::fs::rename(path, &aside).map_err(|e| {
+                        crate::error::SysError::Io(format!("set aside unusable key: {e}"))
+                    })?;
+                    eprintln!(
+                        "charter: machine key at {} is not a valid key — kept as {}, minting a NEW device identity (this device must be paired again)",
+                        path.display(),
+                        aside.display()
+                    );
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // EIO / EACCES / …: the key may be perfectly good. Touch nothing;
+            // the caller fails and is retried, which a transient error survives
+            // and an overwrite would not.
+            Err(e) => {
+                return Err(crate::error::SysError::Io(format!(
+                    "machine key at {} is unreadable ({e}); refusing to replace it",
+                    path.display()
+                )));
+            }
         }
         let secret = generate_secret()?;
         persist_key(path, &secret)?;
@@ -259,7 +289,27 @@ fn persist_key(path: &std::path::Path, secret: &[u8; 32]) -> SysResult<()> {
     }
     std::fs::rename(&tmp, path)
         .map_err(|e| crate::error::SysError::Io(format!("rename key: {e}")))?;
+    // The rename lives in the DIRECTORY: without this a power loss right after
+    // provisioning can leave no key at all, and the next boot mints another.
+    // Best-effort — some filesystems refuse a directory fsync.
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
     Ok(())
+}
+
+/// Where an unusable key file is moved: `<name>.unusable-<unix secs>` beside it.
+#[cfg(any(feature = "real-relay", feature = "real-os"))]
+fn set_aside_path(path: &std::path::Path) -> std::path::PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".unusable-{secs}"));
+    path.with_file_name(name)
 }
 
 #[cfg(all(test, any(feature = "real-relay", feature = "real-os")))]
@@ -285,6 +335,59 @@ mod real_tests {
             &msg,
             sig.as_bytes()
         ));
+    }
+
+    #[test]
+    fn a_corrupt_key_is_set_aside_never_overwritten() {
+        let dir = tmp("set-aside");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("machine.key");
+        // One flipped character: no longer a key, but still worth a post-mortem.
+        std::fs::write(&path, "zz".repeat(32)).unwrap();
+        let s = RealMachineSigner::load_or_create(&path).unwrap();
+        assert!(
+            s.is_provisioned(),
+            "enforcement carries on under a fresh identity"
+        );
+        let kept: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("machine.key.unusable-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "the old bytes are kept beside the new key");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&kept[0])).unwrap(),
+            "zz".repeat(32)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_key_is_an_error_and_is_left_alone() {
+        // A directory where the key file should be: `read_to_string` fails with
+        // something other than NotFound — the stand-in for EIO / EACCES (root
+        // in CI can read any 0000 file, so a mode bit would prove nothing).
+        let dir = tmp("unreadable");
+        let path = dir.join("machine.key");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(RealMachineSigner::load_or_create(&path).is_err());
+        assert!(path.is_dir(), "nothing was replaced");
+    }
+
+    #[test]
+    fn an_empty_key_file_is_simply_provisioned() {
+        let dir = tmp("empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("machine.key");
+        std::fs::write(&path, "\n").unwrap();
+        assert!(RealMachineSigner::load_or_create(&path)
+            .unwrap()
+            .is_provisioned());
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "nothing to set aside"
+        );
     }
 
     #[test]
