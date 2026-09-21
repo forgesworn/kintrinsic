@@ -13,10 +13,23 @@
 //! matches the existing single-child semantics (absent budget = no cap) and
 //! keeps a child from being governed by two parents' rules at once.
 //!
-//! **Malformed-clause asymmetry** (preserved from `enforcer_runtime`): a
-//! present-but-unparseable **schedule** fail-SAFES to a paused schedule (that
-//! child locks); a present-but-unparseable **budget** fail-OPENS to no cap (the
-//! schedule remains the fail-safe gate). Both are scoped to the one child.
+//! **A clause that is there and cannot be used fails SAFE, on every
+//! dimension.** A present-but-unparseable **schedule** becomes a paused
+//! schedule and a present-but-unparseable **budget** becomes a zero-minute
+//! one, so either way that child locks and the guardian can see that something
+//! needs fixing. Both are scoped to the one child.
+//!
+//! The budget used to fail OPEN here, justified by "the schedule remains the
+//! fail-safe gate". That argument has a hole: it only holds if a schedule
+//! clause exists. A guardian who sets "2 hours a day, any time" and no
+//! schedule — an entirely ordinary setup — got ZERO enforcement the moment the
+//! budget blob became unreadable, with no lock, no audit and no reason
+//! reported, indefinitely. An unreadable clause must never be quieter than a
+//! readable one.
+//!
+//! Learning is the exception that proves the rule and is unchanged: it is the
+//! one dimension that CREATES free time, so its fail-safe is `None` — nothing
+//! is time-free, and the ward is charged for everything.
 //!
 //! Pure — no I/O, no clock — so every precedence branch is unit-tested.
 
@@ -51,12 +64,17 @@ pub struct EffectivePolicy {
     pub source: PolicySource,
 }
 
+/// The tz a synthesised fail-safe carries. Whatever the guardian meant is
+/// exactly what we could not read, so there is no better answer — and none is
+/// needed: both syntheses block all time in every tz.
+pub(crate) const FAIL_SAFE_TZ: &str = "UTC";
+
 /// The fail-SAFE schedule used when a guardian schedule clause is present but
 /// unparseable: `paused` blocks all time regardless of tz, so the child locks.
-fn fail_safe_schedule() -> GrantSchedule {
+pub(crate) fn fail_safe_schedule(tz: &str) -> GrantSchedule {
     GrantSchedule {
         v: 1,
-        tz: "UTC".into(),
+        tz: tz.to_string(),
         paused: Some(true),
         weekly: WeeklySchedule::default(),
         overrides: None,
@@ -65,17 +83,23 @@ fn fail_safe_schedule() -> GrantSchedule {
 }
 
 /// The fail-SAFE budget used when a guardian budget clause is present but
-/// cannot be read or parsed: nothing left on either cap today.
+/// cannot be read or parsed: nothing left on either cap today. The mirror of
+/// [`fail_safe_schedule`], and for the same reason — a clause we cannot use
+/// must never be quieter than one we can.
 ///
 /// `paused` alone is not enough. `quota_parts_signed_pooled` answers a paused
 /// budget with "nothing left" only on the caps that are actually SET, so a
 /// paused budget carrying no `dailyMinutes`/`weeklyMinutes` reads as
 /// unbounded — the exact fail-open this is here to prevent. Both caps are
 /// therefore named at zero as well.
-fn fail_safe_budget() -> GrantBudget {
+///
+/// A paused budget also ignores every extension pool, so this cannot be
+/// undone by a grant that happens to be in flight: the way out is a readable
+/// budget clause, which is the thing that actually needs fixing.
+pub(crate) fn fail_safe_budget(tz: &str) -> GrantBudget {
     GrantBudget {
         v: 1,
-        tz: "UTC".into(),
+        tz: tz.to_string(),
         daily_minutes: Some(0),
         weekly_minutes: Some(0),
         week_start: None,
@@ -143,11 +167,17 @@ pub fn resolve_effective(
                 // Malformed schedule fail-SAFES (paused → locks this child).
                 schedule = Some(
                     serde_json::from_str::<GrantSchedule>(json)
-                        .unwrap_or_else(|_| fail_safe_schedule()),
+                        .unwrap_or_else(|_| fail_safe_schedule(FAIL_SAFE_TZ)),
                 );
             } else if *kind == ClauseKind::Budget.store_key() {
-                // Malformed budget fail-OPENS (None → no cap; schedule still gates).
-                budget = serde_json::from_str::<GrantBudget>(json).ok();
+                // Malformed budget fail-SAFES too (zero cap → locks this
+                // child). It used to fail OPEN on the argument that the
+                // schedule still gates — which is only true for a child who
+                // HAS a schedule. See the module doc.
+                budget = Some(
+                    serde_json::from_str::<GrantBudget>(json)
+                        .unwrap_or_else(|_| fail_safe_budget(FAIL_SAFE_TZ)),
+                );
             }
         }
         // A slot we could not read takes the SAME branch a body we could not
@@ -155,10 +185,10 @@ pub fn resolve_effective(
         // concerned, and the one that reads as "the guardian set nothing" is
         // the dangerous one.
         if unreadable(ClauseKind::Schedule) {
-            schedule = Some(fail_safe_schedule());
+            schedule = Some(fail_safe_schedule(FAIL_SAFE_TZ));
         }
         if unreadable(ClauseKind::Budget) {
-            budget = Some(fail_safe_budget());
+            budget = Some(fail_safe_budget(FAIL_SAFE_TZ));
         }
         return EffectivePolicy {
             schedule,
@@ -376,19 +406,67 @@ mod tests {
     }
 
     #[test]
-    fn malformed_guardian_budget_fail_opens_to_no_cap() {
+    fn malformed_guardian_budget_fail_safes_to_a_zero_cap() {
         let clauses = vec![
             (SCHEDULE, guardian_schedule_json()),
             (BUDGET, "garbage".to_string()),
         ];
         let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
-        assert!(
-            p.budget.is_none(),
-            "a broken guardian budget fails open (schedule still gates)"
-        );
-        // The schedule is intact and NOT the fail-safe paused one.
+        let b = p
+            .budget
+            .as_ref()
+            .expect("a broken guardian budget must not read as no cap at all");
+        assert_eq!((b.paused, b.daily_minutes), (Some(true), Some(0)));
+        // The schedule is intact and NOT the fail-safe paused one: one bad
+        // dimension never drags the other down with it.
         assert_eq!(p.schedule.as_ref().unwrap().paused, None);
+    }
+
+    #[test]
+    fn a_budget_only_child_with_a_malformed_budget_is_not_left_unenforced() {
+        // The hole in the old "the schedule remains the fail-safe gate"
+        // argument: there is no schedule here. `dailyMinutes: -5` against
+        // `Option<u32>` is enough to get to this state, and it used to mean
+        // schedule None, budget None, effective -1, locked false, forever.
+        let clauses = vec![(
+            BUDGET,
+            r#"{"v":1,"tz":"Europe/London","dailyMinutes":-5,"issuedAt":500}"#.to_string(),
+        )];
+        let p = resolve_effective(&readable(clauses), None, None);
+        assert_eq!(p.source, PolicySource::Guardian);
+        assert!(p.schedule.is_none(), "this child genuinely has no schedule");
+        let b = p.budget.as_ref().expect("and their cap must still bite");
+        assert_eq!(
+            (b.paused, b.daily_minutes, b.weekly_minutes),
+            (Some(true), Some(0), Some(0))
+        );
+
+        // And the enforcer agrees: nothing left, so the child is locked.
+        let rem = charter_schedule::compute_remaining(&charter_schedule::EnforcerInputs {
+            now_unix: 1_700_000_000,
+            schedule: None,
+            budget: p.budget.as_ref(),
+            usage: &charter_schedule::UsageLedger::new(
+                "UTC",
+                charter_schedule::WeekStart::Mon,
+                1_700_000_000,
+            ),
+            extension: &charter_schedule::ExtensionLedger::new("UTC", 1_700_000_000),
+            consolidated: None,
+            stand_down: None,
+        });
+        assert_eq!(rem.budget_secs, 0);
+        assert!(rem.locked, "a budget-only child with an unusable cap locks");
+    }
+
+    #[test]
+    fn a_budget_only_child_with_no_budget_at_all_is_still_unconstrained() {
+        // The control, and the line the fail-safe must not cross: absent is
+        // not malformed. A guardian who set nothing has lost nothing.
+        let p = resolve_effective(&readable(vec![]), None, None);
+        assert_eq!(p.source, PolicySource::Unconstrained);
+        assert!(p.schedule.is_none() && p.budget.is_none());
     }
 
     /// A clause set where `unreadable` names kinds whose file is on disk and

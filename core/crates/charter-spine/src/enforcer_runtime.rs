@@ -3,17 +3,21 @@
 //! returns the effects for the platform's enforce half to apply (cgroup
 //! freeze and VT lock on Linux; `setPackagesSuspended` and LockTask on
 //! Android), then persists the usage + extension snapshots. Enforcement is
-//! fail-SAFE: a present-but-malformed schedule clause locks. The Linux-only
-//! halves — `managed_freeze_target` (uid → cgroup slice) and `apply_effects`
-//! (the freeze/VT port applier) — stay in `charterd::enforcer_runtime`.
+//! fail-SAFE: a present-but-malformed schedule OR budget clause locks (see
+//! `child_policy`'s module doc for why the budget cannot be the exception).
+//! The Linux-only halves — `managed_freeze_target` (uid → cgroup slice) and
+//! `apply_effects` (the freeze/VT port applier) — stay in
+//! `charterd::enforcer_runtime`.
 
 use charter_proto::ClauseKind;
 use charter_schedule::{
     Activity, Dimension, EnforcerCore, EnforcerEffect, EnforcerInputs, ExtensionLedger,
-    GrantBudget, GrantSchedule, LockReason, Remaining, UsageLedger, WeekStart, WeeklySchedule,
+    GrantBudget, GrantSchedule, LockReason, Remaining, UsageLedger, WeekStart,
 };
 use charter_sys::persistence::{ClauseStore, ExtensionStore, UsageStore};
 use charter_sys::{Clock, SystemLayer};
+
+use crate::child_policy::{fail_safe_budget, fail_safe_schedule, FAIL_SAFE_TZ};
 
 /// The runtime enforcer: owns the durable ledgers + the decision state machine.
 pub struct EnforcerRuntime {
@@ -75,24 +79,31 @@ impl EnforcerRuntime {
         match serde_json::from_str::<GrantSchedule>(&json) {
             Ok(s) => Some(s),
             // Fail-SAFE: an authenticated-but-unparseable schedule locks.
-            Err(_) => Some(GrantSchedule {
-                v: 1,
-                tz: self.tz.clone(),
-                paused: Some(true),
-                weekly: WeeklySchedule::default(),
-                overrides: None,
-                issued_at: 0,
-            }),
+            Err(_) => Some(fail_safe_schedule(&self.tz)),
         }
     }
 
+    /// The cached budget clause, or the fail-SAFE stand-in when one is there
+    /// and will not parse.
+    ///
+    /// This used to be `.ok()`, i.e. an unparseable budget became `None`,
+    /// which `compute_remaining` reads as NO CAP AT ALL. The justification was
+    /// that the schedule remains the fail-safe gate — true only for a child
+    /// who has a schedule. A budget-only charter ("2 hours a day, any time")
+    /// therefore enforced nothing at all the moment the blob stopped parsing,
+    /// and a value as ordinary as `"dailyMinutes": -5` against `Option<u32>`
+    /// is enough to get there. Absent still means `None`: a guardian who set
+    /// no budget has not lost one.
     fn load_budget<S: SystemLayer>(&self, sys: &S) -> Option<GrantBudget> {
         let json = sys
             .clauses()
             .get_clause(ClauseKind::Budget.store_key())
             .ok()
             .flatten()?;
-        serde_json::from_str(&json).ok()
+        match serde_json::from_str::<GrantBudget>(&json) {
+            Ok(b) => Some(b),
+            Err(_) => Some(fail_safe_budget(&self.tz)),
+        }
     }
 
     /// Decide one tick: credit usage, evaluate, persist the snapshots, and
@@ -222,18 +233,22 @@ impl EnforcerRuntime {
 /// budget clauses). The time.extend enactor's today-only cap must use THIS so it
 /// agrees with `compute_remaining`, never the daemon's ambient runtime tz.
 pub fn time_extend_eod<S: SystemLayer>(sys: &S, now_unix: i64) -> i64 {
+    // A clause that is PRESENT and will not parse is the same event here as
+    // it is in `load_schedule`/`load_budget`: it stands in as its fail-safe,
+    // so the enactor's end-of-day agrees with what the enforcer is about to
+    // do rather than silently pretending the clause is absent.
     let schedule: Option<GrantSchedule> = sys
         .clauses()
         .get_clause(ClauseKind::Schedule.store_key())
         .ok()
         .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok());
+        .map(|j| serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_schedule(FAIL_SAFE_TZ)));
     let budget: Option<GrantBudget> = sys
         .clauses()
         .get_clause(ClauseKind::Budget.store_key())
         .ok()
         .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok());
+        .map(|j| serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_budget(FAIL_SAFE_TZ)));
     // The extension is dimension-isolated, but the grant `exp` may legitimately
     // be the end-of-day in EITHER clause's tz (a schedule extension uses the
     // schedule tz, a budget extension the budget tz). Cap at the LATER of the two
@@ -357,6 +372,62 @@ mod tests {
         ] {
             assert_eq!(lock_message_for(reason, true), lock_message(reason));
         }
+    }
+
+    /// A device-only charter with a budget and no schedule — "2 hours a day,
+    /// any time", which is how a great many families set a single laptop up.
+    #[cfg(feature = "mock")]
+    fn budget_only_runtime(
+        budget_json: Option<&str>,
+    ) -> (charter_sys::MockSystem, EnforcerRuntime) {
+        use charter_sys::persistence::ClauseStore;
+        use charter_sys::SystemLayer;
+        let sys = charter_sys::MockSystem::new(1_700_000_000);
+        if let Some(j) = budget_json {
+            sys.clauses()
+                .put_clause(ClauseKind::Budget.store_key(), 100, j)
+                .unwrap();
+        }
+        let rt = EnforcerRuntime::new(&sys, "Europe/London");
+        (sys, rt)
+    }
+
+    #[test]
+    #[cfg(feature = "mock")]
+    fn a_budget_that_will_not_parse_locks_instead_of_lifting_the_cap() {
+        // `.ok()` here used to turn an unreadable budget into `None`, which
+        // `compute_remaining` reads as no cap at all. With no schedule to fall
+        // back on there was then nothing left enforcing anything: no lock, no
+        // reason, no audit, until someone noticed by hand.
+        let (sys, rt) = budget_only_runtime(Some(
+            r#"{"v":1,"tz":"Europe/London","dailyMinutes":1.5,"issuedAt":100}"#,
+        ));
+        let rem = rt.time_left(&sys);
+        assert_eq!(rem.budget_secs, 0);
+        assert!(rem.locked, "a present-but-unusable budget must lock");
+    }
+
+    #[test]
+    #[cfg(feature = "mock")]
+    fn no_budget_clause_at_all_is_still_unconstrained() {
+        let (sys, rt) = budget_only_runtime(None);
+        let rem = rt.time_left(&sys);
+        assert_eq!(rem.budget_secs, -1);
+        assert!(
+            !rem.locked,
+            "absent is not malformed — nothing was ever set"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "mock")]
+    fn a_readable_budget_is_untouched() {
+        let (sys, rt) = budget_only_runtime(Some(
+            r#"{"v":1,"tz":"Europe/London","dailyMinutes":120,"issuedAt":100}"#,
+        ));
+        let rem = rt.time_left(&sys);
+        assert_eq!(rem.budget_secs, 120 * 60);
+        assert!(!rem.locked);
     }
 
     #[test]
