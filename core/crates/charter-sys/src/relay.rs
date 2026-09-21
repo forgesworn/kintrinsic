@@ -203,10 +203,13 @@ mod real {
     /// exhaust the daemon's memory/CPU before the downstream `.take(max_inbound)`
     /// ever runs. A well-behaved relay sends only the handful of matching wraps
     /// then `EOSE`, so this never bites in normal operation — it is a *safety
-    /// ceiling*, not a functional limit. It sits well above `charter-transport`'s
-    /// `max_inbound` default (256, the functional per-poll cap applied downstream
-    /// via `.take`), so a legitimate backlog is never truncated here; only a
-    /// flood is bounded. Per-relay: `query` dedups across relays afterward.
+    /// ceiling*, not a functional limit. `charter-transport` examines everything
+    /// fetched (its `max_inbound` default sits above this ceiling on purpose: a
+    /// lower cap, applied before unwrapping, let junk wraps crowd out the
+    /// guardian's), so THIS is the bound on per-poll work. Per-relay: `query`
+    /// dedups across relays afterward. It is also the remaining flood surface —
+    /// a relay asked for "everything p-tagged to me" returns its newest 1024,
+    /// and NIP-59's ephemeral outer author leaves nothing to filter on.
     const MAX_EVENTS_PER_QUERY: usize = 1024;
 
     /// The pure "should [`RealRelayTransport::query_one`] buffer this

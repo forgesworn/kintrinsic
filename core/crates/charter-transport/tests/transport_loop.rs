@@ -240,3 +240,57 @@ async fn a_malformed_pair_offer_is_ignored() {
 
     assert!(ward_side.poll_pair_offers(0, NOW).await.unwrap().is_empty());
 }
+
+/// The recipient key in a wrap's `p` tag is public, so anyone — the ward
+/// included — can publish junk wraps at it. The inbound cap used to sit at 256
+/// and was applied in delivery order BEFORE any unwrap, so a few hundred junk
+/// wraps ahead of a genuine one hid it from every poll: no stand-down, no
+/// tightened schedule, no release ever reached the device again.
+#[tokio::test]
+async fn a_junk_wrap_flood_cannot_crowd_out_the_guardians_grant() {
+    let guardian = TestGuardian::new();
+    let guardian_sk = secret(0x11);
+    let attacker_sk = secret(0x66);
+    let machine_sk = secret(0x22);
+    let machine_pk = PubKey::from_bytes(charter_crypto::xonly_pubkey(&machine_sk).unwrap());
+
+    let relay = MockRelayTransport::new();
+    // 300 junk wraps delivered FIRST (relays serve newest-first; the mock
+    // serves in injection order) — more than the old cap of 256.
+    let junk = GrantBuilder::install_allow(rid(), non()).build(&guardian);
+    for i in 0u16..300 {
+        let mut eph = [0u8; 32];
+        eph[29] = 0x40;
+        eph[30] = (i >> 8) as u8;
+        eph[31] = i as u8;
+        let mut nonce = [0u8; 32];
+        nonce[0] = (i >> 8) as u8;
+        nonce[1] = i as u8;
+        let r = WrapRandomness {
+            ephemeral_secret: eph,
+            seal_nonce: nonce,
+            wrap_nonce: nonce,
+            seal_created_at: NOW,
+            wrap_created_at: NOW,
+        };
+        let wrap = nip59::wrap(
+            &Rumor::from_signed_event(&junk),
+            &attacker_sk,
+            machine_pk.as_bytes(),
+            &r,
+        )
+        .unwrap();
+        relay.inject(wrap);
+    }
+    let grant_ev = GrantBuilder::install_allow(rid(), non()).build(&guardian);
+    deliver(&relay, &grant_ev, &guardian_sk, &machine_pk, 0x01);
+
+    let t = transport(relay, machine_sk, guardian.pubkey());
+    let grants = t.poll_grants(0, NOW).await.unwrap();
+    let guardian_seal = PubKey::from_bytes(charter_crypto::xonly_pubkey(&guardian_sk).unwrap());
+    assert!(
+        grants.iter().any(|g| g.seal_author == guardian_seal),
+        "the guardian's wrap was examined despite {} junk wraps ahead of it",
+        grants.len() - 1
+    );
+}

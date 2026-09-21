@@ -87,6 +87,11 @@ pub struct ReceivedPairOffer {
     pub seal_author: PubKey,
 }
 
+/// Default [`CharterTransport`] inbound cap: eight relays' worth of the
+/// per-relay fetch ceiling (`charter-sys` `MAX_EVENTS_PER_QUERY`, 1024), so a
+/// poll never discards a fetched event without looking at it.
+pub const DEFAULT_MAX_INBOUND: usize = 8 * 1024;
+
 /// The device transport. Holds the machine secret (for ECDH + sealing) and the
 /// pinned guardian pubkey + relays.
 pub struct CharterTransport<R: RelayTransport, E: Entropy> {
@@ -96,7 +101,15 @@ pub struct CharterTransport<R: RelayTransport, E: Entropy> {
     machine_pk: PubKey,
     guardian_pk: PubKey,
     relays: Vec<RelayUrl>,
-    /// Cap on inbound wraps processed per poll (DoS hardening).
+    /// Cap on inbound events processed per poll (DoS hardening). It must sit
+    /// ABOVE what a poll can fetch (`charter-sys` buffers at most 1024 events
+    /// per relay): the recipient key in a wrap's `p` tag is public, so anyone —
+    /// the ward included — can publish junk wraps at it, and a cap below the
+    /// fetch ceiling was applied in relay-delivery order BEFORE any unwrap, so
+    /// a few hundred fresh junk wraps pushed every genuine clause, stand-down
+    /// and release past the cut, poll after poll. An unwrap attempt is one
+    /// schnorr verify plus one ECDH; the whole fetch ceiling is a fraction of a
+    /// second, so there is nothing to gain by discarding events unexamined.
     max_inbound: usize,
 }
 
@@ -118,11 +131,11 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             machine_pk,
             guardian_pk,
             relays,
-            max_inbound: 256,
+            max_inbound: DEFAULT_MAX_INBOUND,
         }
     }
 
-    /// Lower the inbound cap (rate-limit / flood tests).
+    /// Change the inbound cap (rate-limit / flood tests).
     pub fn with_max_inbound(mut self, cap: usize) -> Self {
         self.max_inbound = cap;
         self
