@@ -63,6 +63,7 @@ import {
   type ClauseDelivery,
 } from "./clauseDelivery";
 import { admitStatus } from "./statusAdmission";
+import { reviveState } from "./reviveState";
 import { unclaimedDevices, type UnclaimedDevice } from "./unclaimedDevices";
 import { forgetPairToken, livePairTokens, rememberPairToken } from "./pairTokens";
 import { readyResends, type PendingResend } from "./resendOnClaim";
@@ -139,12 +140,33 @@ function trimHandled(handled: Set<string>): void {
   }
 }
 
+/** Where an unusable persisted household is kept. Written once and never
+ *  overwritten, so the FIRST damaged blob — the one closest to the family's
+ *  real data — is the one that survives for recovery. */
+export const BROKEN_STATE_KEY = `${STORAGE_KEY}.broken`;
+
 function loadState(): CharterState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw) as CharterState;
+    const revived = reviveState(localStorage.getItem(STORAGE_KEY), makeEmpty() as CharterState);
+    if (revived.kind === "ok") return revived.state;
+    if (revived.kind === "broken") {
+      // Set it aside BEFORE the persist-on-change effect writes an empty
+      // household over it (see ./reviveState).
+      try {
+        if (localStorage.getItem(BROKEN_STATE_KEY) === null) {
+          localStorage.setItem(BROKEN_STATE_KEY, revived.raw);
+        }
+      } catch {
+        // Quota — the likeliest cause of the damage in the first place. If it
+        // can't be copied aside, the original must not be written over either.
+        persistenceFrozen = true;
+      }
+      console.warn(
+        `Kintrinsic: the saved family data could not be read; it is kept under "${BROKEN_STATE_KEY}". Restore your backup from Family.`,
+      );
+    }
   } catch {
-    // Corrupt or unavailable storage — fall through to the default below.
+    // Unavailable storage — fall through to the default below.
   }
   // Production starts CLEAN (straight into "Add your first child"); the sample
   // family is a dev-only convenience so the UI is explorable while building.
