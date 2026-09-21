@@ -100,6 +100,13 @@ pub fn evaluate_content(clause: &GrantContent, lists: &[CuratorList]) -> Effecti
         .filter_map(|d| parse_domain(d))
         .collect();
     let subscribed: BTreeSet<&str> = clause.curators.iter().map(|s| s.as_str()).collect();
+    // "parentDeny beats parentAllow" has to hold on EVERY output channel. The
+    // exceptions list used to be the raw parentAllow, so a domain in both
+    // lists — allowed once, denied later: the obvious UI flow — was blocked
+    // AND published as an exception, leaving the answer to whichever rule the
+    // DNS applier happened to rank first.
+    let allow_exceptions: BTreeSet<String> =
+        parent_allow.difference(&parent_deny).cloned().collect();
 
     match clause.posture {
         Posture::Allowlist => {
@@ -131,7 +138,7 @@ pub fn evaluate_content(clause: &GrantContent, lists: &[CuratorList]) -> Effecti
                 allow_domains: allow,
                 block_domains: BTreeSet::new(),
                 block_categories: BTreeSet::new(),
-                allow_exceptions: parent_allow.clone(),
+                allow_exceptions: allow_exceptions.clone(),
                 safe_search,
                 youtube_restrict,
             }
@@ -164,7 +171,7 @@ pub fn evaluate_content(clause: &GrantContent, lists: &[CuratorList]) -> Effecti
                 allow_domains: BTreeSet::new(),
                 block_domains: block,
                 block_categories: categories,
-                allow_exceptions: parent_allow.clone(),
+                allow_exceptions: allow_exceptions.clone(),
                 safe_search,
                 youtube_restrict,
             }
@@ -301,6 +308,22 @@ mod tests {
         let p = evaluate_content(&c, &lists);
         assert!(p.allow_domains.contains("parent.example")); // parentAllow added
         assert!(!p.allow_domains.contains("kids.example")); // parentDeny beats curator
+    }
+
+    /// A domain allowed once and denied later sits in BOTH lists. It must not
+    /// leave as an exception on either posture — that is the channel the DNS
+    /// plan documents as "parent allows that override category blocks".
+    #[test]
+    fn a_domain_in_both_lists_is_never_published_as_an_exception() {
+        for posture in [Posture::Allowlist, Posture::Blocklist] {
+            let mut c = base_clause();
+            c.posture = posture;
+            c.parent_allow = vec!["both.example".into(), "kept.example".into()];
+            c.parent_deny = vec!["both.example".into()];
+            let p = evaluate_content(&c, &[]);
+            assert!(!p.allow_exceptions.contains("both.example"));
+            assert!(p.allow_exceptions.contains("kept.example"));
+        }
     }
 
     #[test]
