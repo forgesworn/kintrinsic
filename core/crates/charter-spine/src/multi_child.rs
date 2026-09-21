@@ -664,6 +664,17 @@ impl MultiChildEnforcer {
             .unwrap_or_default()
     }
 
+    /// Whether two instants fall in the same enforcement day for a tracked
+    /// child, judged by that child's own extension ledger — the same tz and
+    /// the same boundary its applied-id list is cleared on. `None` if the uid
+    /// isn't tracked.
+    ///
+    /// For callers that replay a durable record of adjustments every tick and
+    /// must not re-apply yesterday's. See `ExtensionLedger::same_day`.
+    pub fn same_enforcement_day(&self, uid: u32, a: i64, b: i64) -> Option<bool> {
+        Some(self.children.get(&uid)?.extension.same_day(a, b))
+    }
+
     /// Per-child `(uid, usage_snapshot, extension_snapshot)` for the loop to
     /// persist (restart durability).
     pub fn snapshots(&self) -> Vec<(u32, String, String)> {

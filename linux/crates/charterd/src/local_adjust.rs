@@ -19,10 +19,17 @@
 //! which is the stronger check of the two. Writing it as an unsigned local
 //! record keeps that distinction legible instead of minting a fake signature.
 //!
-//! Idempotency is by entry id against the [`ExtensionLedger`]'s single applied
+//! Idempotency is by entry id against the `ExtensionLedger`'s single applied
 //! list, so re-reading the file every tick (which is exactly what the loop
 //! does) applies each entry once, and a give and a take-back of the same size
 //! cancel exactly rather than depending on which the loop saw first.
+//!
+//! That list is cleared at the local day roll, so it is idempotency for
+//! TODAY and nothing more. An entry from yesterday is not refused by it — it
+//! is simply unknown again. So [`apply_to`] also refuses any entry whose `at`
+//! falls outside the ward's current enforcement day: an adjustment is a
+//! decision somebody made about one afternoon, and it belongs to that
+//! afternoon only.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,10 +49,16 @@ pub fn adjust_path(uid: u32) -> String {
 /// The frozen record version.
 pub const ADJUST_VERSION: u32 = 1;
 
-/// How long a spent entry is kept before the next write prunes it. Entries are
-/// day-scoped by the ledger, so anything older than this can never apply
-/// again; keeping two days means a box that was off overnight still finds
-/// yesterday's ids in place and cannot re-apply them on a stale clock.
+/// How long a spent entry is kept before the next write prunes it. Keeping two
+/// days means a box that was off overnight still has yesterday's entries in
+/// hand for the ward's own on-screen account of what happened, and a clock
+/// that has drifted by a few hours cannot strand a genuine entry.
+///
+/// Retention is NOT what stops an old entry applying twice — [`apply_to`]
+/// refuses anything outside the ledger's current day. This used to say that
+/// "entries are day-scoped by the ledger, so anything older than this can
+/// never apply again", which is false: the day roll does not refuse an old
+/// id, it CLEARS the applied list, which makes every id new again.
 pub const ADJUST_RETENTION_SECS: i64 = 2 * 24 * 3600;
 
 /// One give or take-back.
@@ -169,9 +182,25 @@ pub fn dimension_for(r: &Remaining) -> Dimension {
 /// because applying one can change which wall is binding for the next — a give
 /// that reopens the budget must not leave the following take-back aimed at a
 /// dimension nobody is up against.
+///
+/// **Only entries made TODAY apply.** The whole file was replayed every tick
+/// with no date filter, and the ledger's applied-id list — the only thing
+/// stopping a second application — is cleared at the local day boundary. So a
+/// parent who gave a ward +60 on Monday evening handed them a second unearned
+/// hour at the first tick after midnight, and it ran both ways: a Monday
+/// "take 30 back" was silently deducted again on Tuesday. The window is the
+/// ward's own enforcement day, taken from their extension ledger, so there is
+/// exactly one definition of "day" in play and it is the one the roll uses.
 pub fn apply_to(multi: &mut MultiChildEnforcer, uid: u32, now: i64, record: &AdjustRecord) -> i32 {
     let mut net = 0;
     for entry in &record.entries {
+        // Not today's (or the uid isn't tracked): nothing to move. Entries
+        // are kept on disk for two days so the ward's console can still
+        // account for yesterday, and this is what keeps that from being a
+        // second chance to apply them.
+        if multi.same_enforcement_day(uid, entry.at, now) != Some(true) {
+            continue;
+        }
         let Some(rem) = multi.remaining(uid, now) else {
             continue; // uid not tracked (not set up yet) — nothing to move
         };

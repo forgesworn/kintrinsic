@@ -114,6 +114,21 @@ impl ExtensionLedger {
         self.day_key = day_key(self.tz(), now_unix);
     }
 
+    /// Whether `a` and `b` fall in the same local day, by THIS ledger's tz —
+    /// the very boundary [`roll`](Self::roll) uses to clear the applied list.
+    ///
+    /// Exposed because a caller that re-reads a durable record every tick has
+    /// to ask the question, and the only wrong answer is a second definition
+    /// of "day". The ledger's idempotency is an applied-id list that the day
+    /// roll CLEARS; an id from yesterday is therefore not refused, it is
+    /// simply unknown again — so anything replaying an old record must filter
+    /// by the same boundary the roll uses, or the roll hands it a fresh
+    /// licence every midnight.
+    pub fn same_day(&self, a: i64, b: i64) -> bool {
+        let tz = self.tz();
+        day_key(tz, a) == day_key(tz, b)
+    }
+
     fn roll(&mut self, now_unix: i64) {
         let dk = day_key(self.tz(), now_unix);
         if dk != self.day_key {

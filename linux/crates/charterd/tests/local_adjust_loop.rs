@@ -192,6 +192,78 @@ fn an_adjustment_does_not_survive_the_day_roll() {
     );
 }
 
+/// Monday's +60 is Monday's. The loop re-reads the whole file every tick and
+/// entries live on disk for two days, so without a date filter the first tick
+/// after local midnight hands the ward a second unearned hour — the ledger's
+/// applied-id list, the only thing that had been stopping it, is CLEARED at
+/// the day roll rather than refusing the old id.
+#[test]
+fn a_give_made_on_monday_does_not_apply_again_on_tuesday() {
+    let mut multi = enforcer(policy(None, Some(budget(120))));
+    let monday = record(&[("a", 60)]);
+    assert_eq!(apply_to(&mut multi, UID, IN_WINDOW, &monday), 60);
+    assert_eq!(
+        multi.remaining(UID, IN_WINDOW).unwrap().budget_secs,
+        180 * 60
+    );
+
+    // Same file, next day — the box was on through midnight, or came back up.
+    let tuesday = IN_WINDOW + 24 * 3600;
+    assert_eq!(
+        apply_to(&mut multi, UID, tuesday, &monday),
+        0,
+        "yesterday's entry is not a fresh one"
+    );
+    assert_eq!(
+        multi.remaining(UID, tuesday).unwrap().budget_secs,
+        120 * 60,
+        "Tuesday starts on the plain allowance, not on Monday's gift"
+    );
+}
+
+/// And the same in the direction that hurts the ward: a Monday take-back must
+/// not be charged a second time on Tuesday.
+#[test]
+fn a_take_back_made_on_monday_is_not_deducted_again_on_tuesday() {
+    let mut multi = enforcer(policy(None, Some(budget(120))));
+    let monday = record(&[("a", -30)]);
+    assert_eq!(apply_to(&mut multi, UID, IN_WINDOW, &monday), -30);
+
+    let tuesday = IN_WINDOW + 24 * 3600;
+    assert_eq!(apply_to(&mut multi, UID, tuesday, &monday), 0);
+    assert_eq!(
+        multi.remaining(UID, tuesday).unwrap().budget_secs,
+        120 * 60,
+        "a punishment nobody made twice must not be served twice"
+    );
+}
+
+/// A fresh daemon on Tuesday reading Monday's still-retained file is the
+/// restart shape of the same bug — the in-memory ledger is empty, so the id
+/// is unknown, and only the date filter stops it.
+#[test]
+fn a_restart_on_tuesday_does_not_replay_mondays_entries() {
+    let tuesday = IN_WINDOW + 24 * 3600;
+    let mut multi = MultiChildEnforcer::new();
+    multi.sync(&[(UID, policy(None, Some(budget(120))))], tuesday, |_| {
+        (None, None)
+    });
+    assert_eq!(apply_to(&mut multi, UID, tuesday, &record(&[("a", 60)])), 0);
+    assert_eq!(multi.remaining(UID, tuesday).unwrap().budget_secs, 120 * 60);
+}
+
+/// The boundary is the ward's own LOCAL midnight, not 24 hours after the
+/// entry: an entry made at 18:00 Monday is still Monday's at 23:59 Monday.
+#[test]
+fn an_entry_applies_all_of_its_own_day() {
+    let mut multi = enforcer(policy(None, Some(budget(120))));
+    let late_monday = IN_WINDOW + 5 * 3600 + 3540; // 23:59 BST, same day
+    assert_eq!(
+        apply_to(&mut multi, UID, late_monday, &record(&[("a", 60)])),
+        60
+    );
+}
+
 /// A ward this machine does not track absorbs nothing — no panic, no phantom
 /// grant waiting to land on whoever gets that uid next.
 #[test]
