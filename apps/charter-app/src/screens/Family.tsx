@@ -243,8 +243,10 @@ function ChildCard({ child }: { child: Child }) {
           {confirmingRemove && (
             <div style={{ marginTop: 12 }}>
               <Banner tone="warn">
-                Remove {child.name}? This stops managing their screen time and
-                clears their pending requests.
+                Remove {child.name}? This releases every device of theirs from
+                Kintrinsic — all limits lift — and clears their pending
+                requests. A device that is offline is released when it next
+                connects.
               </Banner>
               <div className="row-between" style={{ marginTop: 10, gap: 8 }}>
                 <Button variant="secondary" block onClick={() => setConfirmingRemove(false)}>
@@ -415,6 +417,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   );
   const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
   const [unlockOpen, setUnlockOpen] = useState(false);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const [updateSent, setUpdateSent] = useState(false);
   const paired = device.pairing === "paired";
   // Self-update (#44): offer only when the device REPORTS a version that is
@@ -642,7 +645,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
           <Button
             variant="ghost"
             aria-label={`Disconnect ${device.label}`}
-            onClick={() => unpairDevice(child.id, device.id)}
+            onClick={() => setConfirmingDisconnect(true)}
           >
             Disconnect
           </Button>
@@ -668,6 +671,35 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
         </div>
       )}
       </div>
+
+      {/* Disconnect publishes a signed RELEASE — the most destructive wire
+          action there is — and with "Approve without the extra tap" on, no
+          sign sheet stands in front of it. One mis-tap in this crowded row
+          must not un-govern a device, so it gets the same two-step confirm
+          as removing a child. */}
+      {confirmingDisconnect && (
+        <div style={{ marginTop: 12 }}>
+          <Banner tone="warn">
+            Disconnect {device.label}? Kintrinsic stops managing it — every
+            limit lifts — and it would need pairing again to come back.
+          </Banner>
+          <div className="row-between" style={{ marginTop: 10, gap: 8 }}>
+            <Button variant="secondary" block onClick={() => setConfirmingDisconnect(false)}>
+              Keep
+            </Button>
+            <Button
+              variant="danger"
+              block
+              onClick={() => {
+                setConfirmingDisconnect(false);
+                unpairDevice(child.id, device.id);
+              }}
+            >
+              Disconnect {device.label}
+            </Button>
+          </div>
+        </div>
+      )}
 
       {unlockOpen && (
         <UnlockDevice

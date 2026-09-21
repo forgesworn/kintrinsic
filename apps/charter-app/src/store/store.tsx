@@ -43,6 +43,7 @@ import { raceRefresh, REFRESH_OFFLINE_NOTICE } from "../domain/refreshDeadline";
 import { appOpenRequestToCard, timeExtendRequestToCard } from "../domain/requestCards";
 import { identityDisplayLabel } from "../domain/launchSignatures";
 import { decisionTiming } from "./decisionTiming";
+import { devicesToRelease } from "./releaseOnRemove";
 import { runApproveAppOpenFlow } from "./approveAppOpenFlow";
 import { getPublicKey, SimplePool } from "nostr-tools";
 import { fetchAllReleaseManifests } from "../release/fetchReleases";
@@ -707,9 +708,6 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const removeChild = useCallback((childId: string) => {
-    dispatch({ type: "REMOVE_CHILD", childId });
-  }, []);
 
   // --- Devices (parent-governed pairing) -------------------------------
 
@@ -872,6 +870,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       void signer.current?.releaseDevice(pk, DEFAULT_RELAYS, device?.label).catch(() => {});
     }
   }, []);
+
+  const removeChild = useCallback((childId: string) => {
+    // RELEASE every paired device FIRST. Removing the child deletes the only
+    // record of each `devicePubkey` — and with it any ability to ever sign a
+    // release, a grant or a new clause to that device. A Device-Owner phone
+    // left behind keeps enforcing its last charter forever.
+    const child = stateRef.current.children.find((c) => c.id === childId);
+    for (const deviceId of devicesToRelease(child)) {
+      releaseDeviceOverWire(childId, deviceId);
+    }
+    dispatch({ type: "REMOVE_CHILD", childId });
+  }, [releaseDeviceOverWire]);
 
   // Scan-to-pair: after the camera reads a ward's QR, tell that ward who we
   // are. It has no other way to learn our key — scanning teaches this phone
