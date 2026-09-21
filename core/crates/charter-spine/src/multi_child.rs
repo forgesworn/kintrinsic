@@ -147,6 +147,32 @@ impl ChildEnforcer {
             self.usage = u;
         }
     }
+
+    /// Restore the extension ledger from a persisted snapshot.
+    ///
+    /// Without this a restart rebuilt the ledger EMPTY, and the two halves of
+    /// that both hurt. A guardian-approved `time.extend` was simply lost — the
+    /// grant's id was already burned at verify, so it could not be
+    /// re-delivered either, and the child stayed locked while the guardian's
+    /// phone and the D-Bus readout both said the time had been given. And
+    /// `schedule_consumed_secs`, the only counter that burns down an
+    /// out-of-window schedule gift, went with it: a ward given "+30 minutes
+    /// past bedtime" could reboot (which polkit deliberately allows them) and
+    /// come back to a full, unspent 30 minutes, as often as they liked until
+    /// the gift expired.
+    ///
+    /// A snapshot that will not parse starts empty and says so. That is the
+    /// fail-closed direction here — less time for the ward, not more — and it
+    /// is the same direction `restore_usage` takes for the same reason.
+    fn restore_extension(&mut self, snapshot: &str) {
+        match ExtensionLedger::from_snapshot(snapshot) {
+            Some(e) => self.extension = e,
+            None => eprintln!(
+                "charter: an extension snapshot would not parse — starting the pools empty, \
+                 so any time already given today must be given again"
+            ),
+        }
+    }
 }
 
 /// What the loop should do for one child this tick.
@@ -189,13 +215,22 @@ impl MultiChildEnforcer {
     /// new children, re-limit existing ones (keeping their accrued time), drop
     /// any no longer present. Each policy is the [`EffectivePolicy`] from
     /// [`crate::child_policy::resolve_effective`] (guardian-authoritative, else
-    /// device-only, else unconstrained). `restore` optionally seeds a new child's
-    /// usage ledger from a persisted snapshot.
+    /// device-only, else unconstrained). `restore` optionally seeds a new
+    /// child's ledgers from persisted snapshots, as `(usage, extension)` — the
+    /// same pair, in the same order, that [`snapshots`](Self::snapshots)
+    /// hands the loop to write. Both halves matter: the usage ledger holds
+    /// what the ward has spent, the extension ledger what the guardian has
+    /// given and how much of it is gone.
+    ///
+    /// This runs on more than a daemon restart. `retain` below evicts a child
+    /// who is missing from `configs` for even one tick, and they are rebuilt
+    /// from scratch on the next — so a ledger that is not restored here is a
+    /// ledger that can be lost without anything crashing.
     pub fn sync(
         &mut self,
         configs: &[(u32, EffectivePolicy)],
         now: i64,
-        restore: impl Fn(u32) -> Option<String>,
+        restore: impl Fn(u32) -> (Option<String>, Option<String>),
     ) {
         let keep: std::collections::BTreeSet<u32> = configs.iter().map(|(u, _)| *u).collect();
         self.children.retain(|u, _| keep.contains(u));
@@ -204,8 +239,12 @@ impl MultiChildEnforcer {
                 Some(c) => c.relimit(policy),
                 None => {
                     let mut child = ChildEnforcer::new(policy, now);
-                    if let Some(snap) = restore(*uid) {
+                    let (usage, extension) = restore(*uid);
+                    if let Some(snap) = usage {
                         child.restore_usage(&snap);
+                    }
+                    if let Some(snap) = extension {
+                        child.restore_extension(&snap);
                     }
                     self.children.insert(*uid, child);
                 }
@@ -712,6 +751,154 @@ mod tests {
         }
     }
 
+    /// A guardian policy that is out of window right now, with a budget —
+    /// the shape a "+30 minutes past bedtime" gift lands on.
+    fn after_bedtime_policy() -> EffectivePolicy {
+        guardian_child("20:00", 120)
+    }
+
+    #[test]
+    fn a_restart_keeps_the_time_the_guardian_gave_and_what_is_left_of_it() {
+        // The extension snapshot was produced by `snapshots()` and thrown
+        // away by the loop, and nothing ever read one back. So a reboot lost
+        // an approved `time.extend` outright — unrecoverably, because the
+        // grant's id is burned at verify — and refilled a schedule gift to
+        // its FULL value, which a ward is allowed to do as often as they like
+        // (polkit grants them reboot on purpose).
+        let now = wed_at(21); // past the 20:00 bedtime: the window is shut
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, after_bedtime_policy())], now, |_| (None, None));
+        assert!(
+            e.remaining(YOUNGER, now).unwrap().locked,
+            "out of window to begin with"
+        );
+
+        assert!(e.apply_extension(YOUNGER, now, "grant-a", 30, Dimension::Schedule));
+        // Ten minutes of it are spent while the window is shut.
+        e.tick(Some(YOUNGER), now + 600, 600);
+        let before = e.remaining(YOUNGER, now + 600).unwrap();
+        assert!(!before.locked, "the grant is holding the device open");
+
+        // Persist, then rebuild from nothing — a reboot, a `.deb` upgrade, or
+        // simply this child missing from `configs` for one tick.
+        let snaps = e.snapshots();
+        let (_, usage, ext) = snaps
+            .iter()
+            .find(|(u, _, _)| *u == YOUNGER)
+            .unwrap()
+            .clone();
+        let mut fresh = MultiChildEnforcer::new();
+        fresh.sync(&[(YOUNGER, after_bedtime_policy())], now + 600, |_| {
+            (Some(usage.clone()), Some(ext.clone()))
+        });
+
+        let after = fresh.remaining(YOUNGER, now + 600).unwrap();
+        assert_eq!(
+            after.schedule_secs, before.schedule_secs,
+            "the granted minutes survive the restart — and no more than that: \
+             the ten already spent are still spent"
+        );
+        assert!(!after.locked);
+
+        // And the grant cannot be applied a second time by a re-delivery,
+        // which is the whole reason the applied-id list has to survive too.
+        assert!(
+            !fresh.apply_extension(YOUNGER, now + 600, "grant-a", 30, Dimension::Schedule),
+            "a re-delivered grant id must be a no-op after the restore"
+        );
+        assert_eq!(
+            fresh.remaining(YOUNGER, now + 600).unwrap().schedule_secs,
+            after.schedule_secs
+        );
+    }
+
+    #[test]
+    fn a_restart_without_the_extension_snapshot_would_refill_the_gift() {
+        // The control that names the old behaviour: restoring ONLY the usage
+        // ledger (what the loop used to do) hands the ward the whole pool
+        // back, unspent.
+        let now = wed_at(21);
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, after_bedtime_policy())], now, |_| (None, None));
+        assert!(e.apply_extension(YOUNGER, now, "grant-a", 30, Dimension::Schedule));
+        e.tick(Some(YOUNGER), now + 600, 600);
+        let snaps = e.snapshots();
+        let (_, usage, ext) = snaps
+            .iter()
+            .find(|(u, _, _)| *u == YOUNGER)
+            .unwrap()
+            .clone();
+
+        let mut usage_only = MultiChildEnforcer::new();
+        usage_only.sync(&[(YOUNGER, after_bedtime_policy())], now + 600, |_| {
+            (Some(usage.clone()), None)
+        });
+        assert!(
+            usage_only.remaining(YOUNGER, now + 600).unwrap().locked,
+            "with no extension ledger the grant is simply gone"
+        );
+        assert!(
+            usage_only.apply_extension(YOUNGER, now + 600, "grant-a", 30, Dimension::Schedule),
+            "and the same id applies again — the applied list went with it"
+        );
+
+        // With the snapshot, neither happens.
+        let mut both = MultiChildEnforcer::new();
+        both.sync(&[(YOUNGER, after_bedtime_policy())], now + 600, |_| {
+            (Some(usage.clone()), Some(ext.clone()))
+        });
+        assert!(!both.remaining(YOUNGER, now + 600).unwrap().locked);
+        assert!(!both.apply_extension(YOUNGER, now + 600, "grant-a", 30, Dimension::Schedule));
+    }
+
+    #[test]
+    fn an_extension_snapshot_that_will_not_parse_starts_empty() {
+        // Fail-CLOSED for the ward: less time, not more. The alternative —
+        // guessing at a pool we cannot read — would be inventing minutes.
+        let now = wed_at(21);
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, after_bedtime_policy())], now, |_| {
+            (None, Some("{ not a ledger".to_string()))
+        });
+        assert!(e.remaining(YOUNGER, now).unwrap().locked);
+    }
+
+    #[test]
+    fn the_budget_baseline_survives_a_restart_too() {
+        // `note_budget_baseline` is the floor that lets a grant to an already
+        // overdrawn ward buy the minutes it says. It lives in the extension
+        // ledger, so it went with everything else.
+        let now = wed_at(10);
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| {
+            (None, None)
+        });
+        // Spend well past the 60-minute cap.
+        e.tick(Some(YOUNGER), now + 2 * 3600, 2 * 3600);
+        let t = now + 2 * 3600;
+        assert!(e.remaining(YOUNGER, t).unwrap().locked, "overdrawn");
+        assert!(e.apply_extension(YOUNGER, t, "grant-b", 20, Dimension::Budget));
+        let before = e.remaining(YOUNGER, t).unwrap();
+        assert_eq!(before.budget_secs, 20 * 60, "the grant means what it says");
+
+        let snaps = e.snapshots();
+        let (_, usage, ext) = snaps
+            .iter()
+            .find(|(u, _, _)| *u == YOUNGER)
+            .unwrap()
+            .clone();
+        let mut fresh = MultiChildEnforcer::new();
+        fresh.sync(&[(YOUNGER, guardian_child("20:00", 60))], t, |_| {
+            (Some(usage.clone()), Some(ext.clone()))
+        });
+        assert_eq!(
+            fresh.remaining(YOUNGER, t).unwrap().budget_secs,
+            before.budget_secs,
+            "and still means it after a restart, rather than being swallowed \
+             again by the overdraft"
+        );
+    }
+
     #[test]
     fn consolidated_view_pools_the_budget_through_tick() {
         // B3: 30m local + a 35m spent-elsewhere view against a 60m budget must
@@ -719,7 +906,9 @@ mod tests {
         let now = wed_at(10);
         let mut e = MultiChildEnforcer::new();
         // Budget-only policy: no curfew interference at 10:00 (07:00–20:00 open).
-        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| None);
+        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| {
+            (None, None)
+        });
         // 30 minutes of active use.
         let after = now + 30 * 60;
         e.tick(Some(YOUNGER), after, 30 * 60);
@@ -752,7 +941,9 @@ mod tests {
     fn a_stand_down_locks_a_child_through_tick_and_lifts_cleanly() {
         let now = wed_at(10); // mid-morning: allowed but for the stand-down
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| None);
+        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| {
+            (None, None)
+        });
         assert!(!dec(&e.tick(Some(YOUNGER), now, 0), YOUNGER).locked);
 
         // Still inside the grace: warned, not locked.
@@ -787,7 +978,7 @@ mod tests {
                 (OLDER, guardian_child("20:00", 60)),
             ],
             now,
-            |_| None,
+            |_| (None, None),
         );
         e.set_stand_down(YOUNGER, Some(StandDown { secs_until_lock: 0 }));
         let d = e.tick(Some(YOUNGER), now, 0);
@@ -801,7 +992,9 @@ mod tests {
         // a paused schedule actually drives a lock in MultiChildEnforcer::tick.
         let now = wed_at(10); // mid-morning — would be allowed but for the pause
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, fail_safe_guardian_policy())], now, |_| None);
+        e.sync(&[(YOUNGER, fail_safe_guardian_policy())], now, |_| {
+            (None, None)
+        });
         let d = e.tick(Some(YOUNGER), now, 0);
         assert!(
             dec(&d, YOUNGER).locked,
@@ -821,7 +1014,7 @@ mod tests {
                 (OLDER, child("20:00", 120)),
             ],
             now,
-            |_| None,
+            |_| (None, None),
         );
         let d = e.tick(Some(OLDER), now, 0);
         assert!(dec(&d, YOUNGER).locked, "younger is fail-safe locked");
@@ -838,7 +1031,7 @@ mod tests {
         e.sync(
             &[(YOUNGER, child("18:00", 60)), (OLDER, child("20:00", 120))],
             now,
-            |_| None,
+            |_| (None, None),
         );
         e
     }
@@ -884,7 +1077,9 @@ mod tests {
     fn learning_tick_does_not_reduce_remaining() {
         let now = wed_at(10);
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(OLDER, learning_child(None, None))], now, |_| None);
+        e.sync(&[(OLDER, learning_child(None, None))], now, |_| {
+            (None, None)
+        });
         e.tick_bucket(Some(OLDER), now, 1800, Bucket::Learning);
         // Half an hour of maths: the 120-min screen budget is untouched…
         assert_eq!(e.used_secs(OLDER, now), 120 * 60);
@@ -897,7 +1092,9 @@ mod tests {
         let now = wed_at(10);
         let mut e = MultiChildEnforcer::new();
         // 10-minute learning cap.
-        e.sync(&[(OLDER, learning_child(Some(10), None))], now, |_| None);
+        e.sync(&[(OLDER, learning_child(Some(10), None))], now, |_| {
+            (None, None)
+        });
         e.tick_bucket(Some(OLDER), now, 600, Bucket::Learning);
         assert_eq!(e.used_secs(OLDER, now), 120 * 60, "under cap: screen free");
         // Over the cap: learning time falls back to costing screen time.
@@ -918,7 +1115,7 @@ mod tests {
                 (OLDER, learning_child(None, Some(true))),
             ],
             now,
-            |_| None,
+            |_| (None, None),
         );
         e.tick_bucket(Some(YOUNGER), now, 300, Bucket::Learning);
         assert_eq!(e.used_secs(YOUNGER, now), 60 * 60 - 300, "no clause");
@@ -982,7 +1179,7 @@ mod tests {
         let mut e = two_kids(now);
         assert_eq!(e.uids(), vec![YOUNGER, OLDER]);
         // Drop the older child, re-limit the younger.
-        e.sync(&[(YOUNGER, child("19:00", 90))], now, |_| None);
+        e.sync(&[(YOUNGER, child("19:00", 90))], now, |_| (None, None));
         assert_eq!(e.uids(), vec![YOUNGER]);
         // Re-limit kept them tracked; the new curfew (19:00) now applies at 18:30.
         let later = wed_at(18) + 1800;
@@ -1001,7 +1198,7 @@ mod tests {
                 (OLDER, child("20:00", 120)),
             ],
             now,
-            |_| None,
+            |_| (None, None),
         );
         let d = e.tick(Some(OLDER), now, 0);
         assert_eq!(dec(&d, YOUNGER).source, PolicySource::Guardian);
@@ -1014,7 +1211,9 @@ mod tests {
         // one — MultiChildEnforcer enforces whatever the EffectivePolicy carries.
         let now = wed_at(10);
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, guardian_child("20:00", 30))], now, |_| None);
+        e.sync(&[(YOUNGER, guardian_child("20:00", 30))], now, |_| {
+            (None, None)
+        });
         e.tick(Some(YOUNGER), now, 31 * 60); // 31 min against a 30-min cap
         let d = e.tick(Some(YOUNGER), now, 0);
         assert!(
@@ -1051,7 +1250,9 @@ mod tests {
         // D-Bus readout move while enforcement keeps them frozen.
         let now = wed_at(10);
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, guardian_child("20:00", 30))], now, |_| None);
+        e.sync(&[(YOUNGER, guardian_child("20:00", 30))], now, |_| {
+            (None, None)
+        });
         e.tick(Some(YOUNGER), now, 31 * 60); // blow the 30-min cap
         assert!(
             dec(&e.tick(Some(YOUNGER), now, 0), YOUNGER).locked,
@@ -1085,10 +1286,12 @@ mod tests {
         // (same numbers). The accrued usage survives the source flip.
         let now = wed_at(10);
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, child("20:00", 60))], now, |_| None);
+        e.sync(&[(YOUNGER, child("20:00", 60))], now, |_| (None, None));
         e.tick(Some(YOUNGER), now, 20 * 60); // spend 20 of 60 min
                                              // Guardian now governs the child (re-limit, same cap).
-        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| None);
+        e.sync(&[(YOUNGER, guardian_child("20:00", 60))], now, |_| {
+            (None, None)
+        });
         let left = e.used_secs(YOUNGER, now);
         assert!(
             (2300..=2500).contains(&left),
@@ -1115,7 +1318,7 @@ mod tests {
             source: PolicySource::DeviceOnly,
         };
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, policy)], SAT_NOON, |_| None);
+        e.sync(&[(YOUNGER, policy)], SAT_NOON, |_| (None, None));
         // No budget clause — set the buckets clause's own tz/weekStart
         // BEFORE the first tick, exactly as the runtime loop will.
         e.set_buckets_policy(YOUNGER, Some("UTC"), Some(WeekStart::Sun));
@@ -1150,7 +1353,9 @@ mod tests {
         };
         const NOW: i64 = 1_704_499_200; // 2024-01-06 12:00 UTC
         let mut e = MultiChildEnforcer::new();
-        e.sync(&[(YOUNGER, policy.clone()), (OLDER, policy)], NOW, |_| None);
+        e.sync(&[(YOUNGER, policy.clone()), (OLDER, policy)], NOW, |_| {
+            (None, None)
+        });
 
         e.tick_attributed(Some(YOUNGER), NOW, 90, Bucket::Screen, None, true);
         assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(90));
@@ -1184,7 +1389,7 @@ mod tests {
 
         fn enforcer(policy: EffectivePolicy) -> MultiChildEnforcer {
             let mut e = MultiChildEnforcer::new();
-            e.sync(&[(YOUNGER, policy)], NOW, |_| None);
+            e.sync(&[(YOUNGER, policy)], NOW, |_| (None, None));
             e
         }
 

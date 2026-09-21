@@ -56,7 +56,7 @@ fn unruled_multi() -> MultiChildEnforcer {
             },
         )],
         NOW as i64,
-        |_| None,
+        |_| (None, None),
     );
     multi
 }

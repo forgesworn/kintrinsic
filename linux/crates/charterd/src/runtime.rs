@@ -577,8 +577,26 @@ fn notify_child(passwd: &str, uid: u32, display: &str, summary: &str, body: &str
 fn child_usage_path(uid: u32) -> String {
     format!("/var/lib/charter/children/{uid}.usage.json")
 }
-fn load_child_usage(uid: u32) -> Option<String> {
-    std::fs::read_to_string(child_usage_path(uid)).ok()
+/// The extension ledger sits beside the usage one, under the same mode, and
+/// is written the same way. Two files rather than one so that neither can be
+/// lost or torn by a write of the other, and so an operator reading
+/// `/var/lib/charter/children/` can see at a glance what the ward has SPENT
+/// and what they have been GIVEN.
+fn child_extension_path(uid: u32) -> String {
+    format!("/var/lib/charter/children/{uid}.extension.json")
+}
+
+/// Both of one child's persisted ledgers, in the order
+/// `MultiChildEnforcer::sync` wants them: `(usage, extension)`.
+///
+/// The extension half used to be missing entirely — `snapshots()` produced
+/// it, the persist loop named it `_ext` and dropped it, and nothing ever read
+/// one back. See `ChildEnforcer::restore_extension` for what that cost.
+fn load_child_ledgers(uid: u32) -> (Option<String>, Option<String>) {
+    (
+        std::fs::read_to_string(child_usage_path(uid)).ok(),
+        std::fs::read_to_string(child_extension_path(uid)).ok(),
+    )
 }
 /// Write one child's day-ledger, **0600** (review 2026-08-07), atomically.
 ///
@@ -604,7 +622,20 @@ fn save_child_usage(uid: u32, usage: &str) {
     if let Err(e) = atomic_write(&child_usage_path(uid), usage.as_bytes(), 0o600) {
         eprintln!(
             "charterd: could not persist the usage ledger for uid {uid} ({e}) — \
-                   the day's accrued time is still being enforced from memory"
+             the day's accrued time is still being enforced from memory"
+        );
+    }
+}
+
+/// Write one child's extension ledger — the guardian's given minutes and how
+/// much of them is spent — with the same durability and mode as the usage
+/// one. A failure here means a reboot loses today's grants, which is
+/// fail-closed for the ward, so it is reported and never fatal.
+fn save_child_extension(uid: u32, extension: &str) {
+    if let Err(e) = atomic_write(&child_extension_path(uid), extension.as_bytes(), 0o600) {
+        eprintln!(
+            "charterd: could not persist the extension ledger for uid {uid} ({e}) — \
+             a restart would lose any time given today"
         );
     }
 }
@@ -1606,7 +1637,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 lockable
             })
             .collect();
-        multi.sync(&policies, now, load_child_usage);
+        multi.sync(&policies, now, load_child_ledgers);
 
         // 1a) Every managed child's app buckets ("Play is an hour a day"),
         //     read once from their `buckets` clause and shared by every
@@ -2287,9 +2318,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             continue;
         }
 
-        // 4) Persist each child's accrued time (restart durability).
-        for (uid, usage, _ext) in multi.snapshots() {
+        // 4) Persist each child's accrued time AND the guardian's given
+        //    minutes (restart durability). The extension snapshot was
+        //    produced here and thrown away, which is what made a reboot
+        //    refill a schedule gift in full and lose an approved
+        //    `time.extend` outright.
+        for (uid, usage, ext) in multi.snapshots() {
             save_child_usage(uid, &usage);
+            save_child_extension(uid, &ext);
         }
 
         // 4b) Refresh the installed-app inventory when the launcher OR the
@@ -3031,7 +3067,7 @@ mod tests {
                 },
             )],
             NOW,
-            |_| None,
+            |_| (None, None),
         );
 
         let g = gift(Some("reading")); // "reading" does not exist below
@@ -3236,7 +3272,7 @@ mod tests {
         };
 
         let mut multi = MultiChildEnforcer::new();
-        multi.sync(&[(YOUNGER, policy)], MON_0000, |_| None);
+        multi.sync(&[(YOUNGER, policy)], MON_0000, |_| (None, None));
         let body = play_group(Some(60), Some(90)); // 60m/day, 90m/week — id "play"
                                                    // Monday: 50 minutes of Play (well under the 60m daily cap).
         multi.tick_attributed(
@@ -3318,7 +3354,7 @@ mod tests {
             source: PolicySource::DeviceOnly,
         };
         let mut multi = MultiChildEnforcer::new();
-        multi.sync(&[(YOUNGER, policy)], MON_0000, |_| None);
+        multi.sync(&[(YOUNGER, policy)], MON_0000, |_| (None, None));
         let b = play_bucket(Some(15), None); // 15m/day cap, id "play"
 
         // Spend the whole 15m cap.

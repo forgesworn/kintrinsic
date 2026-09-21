@@ -110,16 +110,18 @@ impl Enactor for TimeExtendEnactor {
                     &bucket_id,
                 )
             };
-            if applied {
-                if let Some(inbox) = &self.inbox {
-                    inbox.lock().expect("inbox lock").push(PendingExtension {
-                        req_id: grant.req_id().to_hex(),
-                        minutes: params.minutes_granted,
-                        dim: None,
-                        bucket_id: Some(bucket_id),
-                        at: now,
-                    });
-                }
+            // Unconditional for the same reason as the whole-device arm
+            // below: `ExtensionLedger::apply_bucket` shares the one `applied`
+            // list and refuses a duplicate reqId itself, so gating here only
+            // ever loses a grant the destination ledger has not yet seen.
+            if let Some(inbox) = &self.inbox {
+                inbox.lock().expect("inbox lock").push(PendingExtension {
+                    req_id: grant.req_id().to_hex(),
+                    minutes: params.minutes_granted,
+                    dim: None,
+                    bucket_id: Some(bucket_id),
+                    at: now,
+                });
             }
             return Ok(EnactOutcome {
                 detail: Some(
@@ -151,18 +153,27 @@ impl Enactor for TimeExtendEnactor {
             let mut e = self.enforcer.lock().expect("enforcer lock");
             e.apply_extension(now, &grant.req_id().to_hex(), params.minutes_granted, dim)
         };
-        // Newly applied: hand it to the enforcement loop's live per-child ledger
-        // (the EnforcerRuntime above drives only the D-Bus readout, not freeze).
-        if applied {
-            if let Some(inbox) = &self.inbox {
-                inbox.lock().expect("inbox lock").push(PendingExtension {
-                    req_id: grant.req_id().to_hex(),
-                    minutes: params.minutes_granted,
-                    dim: Some(dim),
-                    bucket_id: None,
-                    at: now,
-                });
-            }
+        // Hand it to the enforcement loop's live per-child ledger — the
+        // EnforcerRuntime above drives only the D-Bus readout, not the freeze.
+        //
+        // UNCONDITIONALLY, not `if applied`. Two ledgers each refusing a reqId
+        // they have already seen sounds like belt and braces; it is the exact
+        // mechanism that turns a transient divergence into a permanent one.
+        // The readout ledger is persisted and the enforcing one was not, so
+        // after a restart a re-delivered grant returned `applied == false`
+        // here and never reached the ledger that actually thaws the child:
+        // the guardian was told the time was given, the readout agreed, and
+        // the device stayed locked. The destination `ExtensionLedger::apply`
+        // dedupes by the same reqId, so idempotence is enforced once, at the
+        // ledger that acts — and a duplicate arriving here is a no-op there.
+        if let Some(inbox) = &self.inbox {
+            inbox.lock().expect("inbox lock").push(PendingExtension {
+                req_id: grant.req_id().to_hex(),
+                minutes: params.minutes_granted,
+                dim: Some(dim),
+                bucket_id: None,
+                at: now,
+            });
         }
         Ok(EnactOutcome {
             detail: Some(

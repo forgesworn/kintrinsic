@@ -50,7 +50,7 @@ fn after_school() -> GrantSchedule {
 
 fn enforcer(policy: EffectivePolicy) -> MultiChildEnforcer {
     let mut multi = MultiChildEnforcer::new();
-    multi.sync(&[(UID, policy)], IN_WINDOW, |_| None);
+    multi.sync(&[(UID, policy)], IN_WINDOW, |_| (None, None));
     multi
 }
 
