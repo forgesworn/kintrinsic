@@ -780,9 +780,19 @@ describe("stripManagedApps (I3)", () => {
 
 describe("learningAppPool", () => {
   it("prefers the catalogue entry over a saved shape for domain-pin freshness", () => {
-    const stale = { id: "khan-academy", label: "Khan Academy (old)", kind: "site" as const, url: "https://old", domains: ["old-domain.example"] };
+    // A stale pin: the SAME site, saved with an older domain list.
+    const stale = { id: "khan-academy", label: "Khan Academy (old)", kind: "site" as const, url: "https://khanacademy.org/", domains: ["old-domain.example"] };
     const pool = learningAppPool([stale]);
     expect(pool.get("khan-academy")?.domains).not.toEqual(["old-domain.example"]);
+    // …and an entry with no URL of its own can only be the catalogue's.
+    const bare = { id: "khan-academy", label: "Khan", kind: "site" as const };
+    expect(learningAppPool([bare]).get("khan-academy")?.url).toBe("https://www.khanacademy.org/");
+  });
+
+  it("never swaps the catalogue's entry in over a guardian's own site that shares its id", () => {
+    // Saved before new sites were barred from minting a catalogue id.
+    const mine = { id: "wikipedia", label: "Wikipedia", kind: "site" as const, url: "https://simple.wikipedia.org/wiki/Main_Page", domains: ["simple.wikipedia.org"] };
+    expect(learningAppPool([mine]).get("wikipedia")).toEqual(mine);
   });
 
   it("dedupes a legacy label-slug native entry by its real pkg too (I2 minor)", () => {

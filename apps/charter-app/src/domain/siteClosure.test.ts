@@ -119,3 +119,12 @@ describe("siteIdFor", () => {
     expect(siteIdFor("", [])).toBe("site");
   });
 });
+
+describe("siteIdFor against reserved ids", () => {
+  it("steps past an id the caller reserves (the learning catalogue's)", () => {
+    expect(siteIdFor("Wikipedia", [])).toBe("wikipedia");
+    const id = siteIdFor("Wikipedia", ["wikipedia"]);
+    expect(id).not.toBe("wikipedia");
+    expect(id.startsWith("wikipedia")).toBe(true);
+  });
+});

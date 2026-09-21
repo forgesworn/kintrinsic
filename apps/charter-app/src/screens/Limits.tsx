@@ -8,6 +8,7 @@ import {
   type AppSection,
 } from "../domain/deviceApps";
 import { deviceSetLimits } from "../domain/standing";
+import { LEARNING_CATALOGUE } from "../data/learning_catalogue";
 import { normalizeWebDomain } from "../domain/webDomain";
 import {
   deliverableDevices,
@@ -2128,7 +2129,10 @@ export function AddSiteForm({
       return;
     }
     onAdd({
-      id: siteIdFor(name, takenIds),
+      // The catalogue's ids are taken too: a guardian's own "Wikipedia"
+      // (their URL, their domains) must never mint the catalogue's id, or
+      // `learningAppPool` would swap the catalogue's entry in over it.
+      id: siteIdFor(name, [...takenIds, ...LEARNING_CATALOGUE.map((c) => c.id)]),
       label: name,
       kind: "site",
       url: closure.url,

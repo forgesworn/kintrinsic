@@ -162,8 +162,31 @@ export function learningAppPool(known?: LearningAppSel[]): Map<string, LearningA
     m.set(a.id, a);
     if (a.kind === "native" && a.exec) m.set(a.exec, a);
   }
-  for (const c of LEARNING_CATALOGUE) m.set(c.id, c);
+  for (const c of LEARNING_CATALOGUE) {
+    // The catalogue refreshes ITS OWN entries (a stale domain pin) — not a
+    // guardian's distinct site that happens to share the id. New sites can no
+    // longer mint a catalogue id, but ones saved before that fix still hold
+    // one, and overwriting them signed the catalogue's URL and domains in
+    // place of the guardian's and dropped their site from the editor.
+    const mine = m.get(c.id);
+    if (!mine || sameSite(mine, c)) m.set(c.id, c);
+  }
   return m;
+}
+
+/** Same site = same host (ignoring `www.`). An entry with no URL of its own
+ *  can only have come from the catalogue. */
+function sameSite(a: LearningAppSel, b: LearningAppSel): boolean {
+  const host = (u?: string): string | null => {
+    if (!u) return null;
+    try {
+      return new URL(u).hostname.replace(/^www\./, "").toLowerCase();
+    } catch {
+      return null;
+    }
+  };
+  const ha = host(a.url);
+  return ha === null || ha === host(b.url);
 }
 
 function resolveLearningApp(id: string, pool: Map<string, LearningAppSel>): LearningAppSel {
