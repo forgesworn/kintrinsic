@@ -87,11 +87,12 @@ pub(crate) fn fail_safe_schedule(tz: &str) -> GrantSchedule {
 /// [`fail_safe_schedule`], and for the same reason — a clause we cannot use
 /// must never be quieter than one we can.
 ///
-/// `paused` alone is not enough. `quota_parts_signed_pooled` answers a paused
-/// budget with "nothing left" only on the caps that are actually SET, so a
-/// paused budget carrying no `dailyMinutes`/`weeklyMinutes` reads as
-/// unbounded — the exact fail-open this is here to prevent. Both caps are
-/// therefore named at zero as well.
+/// Both caps are named at zero as well as `paused`, rather than leaning on
+/// `paused` alone. A paused budget with neither cap set answers zero only
+/// because `quota_parts_signed_pooled` was taught to (02-B4) — it used to
+/// read as unbounded, which is the exact fail-open this synthesis exists to
+/// prevent. A fail-safe should not be one clause of one other function away
+/// from meaning its opposite, so it says what it means outright.
 ///
 /// A paused budget also ignores every extension pool, so this cannot be
 /// undone by a grant that happens to be in flight: the way out is a readable
@@ -504,7 +505,7 @@ mod tests {
         assert_eq!(
             (b.daily_minutes, b.weekly_minutes),
             (Some(0), Some(0)),
-            "paused with no caps set reads as unbounded, so both caps are named at zero"
+            "the synthesis names both caps outright rather than leaning on `paused`"
         );
     }
 
