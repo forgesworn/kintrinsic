@@ -1,8 +1,15 @@
 [Unit]
 Description=Charter broker spine (org.forgesworn.charterd)
 Documentation=https://kintrinsic.app
-After=network-online.target dbus.service
-Wants=network-online.target
+# NOT ordered after network-online.target: enforcement (roster, freeze, lock,
+# budget ticking) needs no network, and the relay work already degrades to
+# "nothing delivered" while offline. Waiting for the network left the box
+# unenforced for the whole of NetworkManager-wait-online's timeout (30–60 s)
+# on any boot without one — and a ward may switch Wi-Fi off and reboot.
+# Before the display manager, so enforcement is up before there is a session
+# to enforce.
+After=dbus.service
+Before=display-manager.service
 
 [Service]
 Type=simple
