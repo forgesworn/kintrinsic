@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Device } from "./types";
 import type { DeviceStatus } from "../wire/status";
-import { deliverableDevices, tooOldNote, unsupportedNote, wardenSupport } from "./wardenSupport";
+import { deliverableDevices, supportNote, tooOldNote, unsupportedNote, wardenSupport } from "./wardenSupport";
 
 function device(over: Partial<Device>): Device {
   return {
@@ -423,5 +423,50 @@ describe("unsupportedNote", () => {
 
   it("says nothing when every device can honour it", () => {
     expect(unsupportedNote(wardenSupport([laptop], {}, "learning"), "A daily allowance")).toBeNull();
+  });
+});
+
+// Named times wired three VERSION thresholds (`buckets`, `bucketsWeekly`,
+// `appOpenAsk`) to `unsupportedNote`, which reports only the NEVER list — so
+// the warning could never render while a ward on 37 dropped every counted cap.
+// `supportNote` picks the sentence from the support shape itself.
+describe("supportNote", () => {
+  it("warns about a too-old ward for a version-threshold feature", () => {
+    const s = wardenSupport(
+      [phone],
+      { [phone.devicePubkey as string]: status({ appVersionCode: 37 }) },
+      "bucketsWeekly",
+    );
+    expect(unsupportedNote(s, "A weekly allowance")).toBeNull(); // the old wiring
+    expect(supportNote(s, "A weekly allowance")).toBe(
+      "Phone needs the latest Kintrinsic. A weekly allowance does nothing there until then.",
+    );
+  });
+
+  it("carries a feature's own consequence when it is worse than 'does nothing'", () => {
+    const s = wardenSupport(
+      [phone],
+      { [phone.devicePubkey as string]: status({ appVersionCode: 37 }) },
+      "bucketsWeekly",
+    );
+    expect(supportNote(s, "A weekly allowance", undefined, "Until then every cap lifts.")).toBe(
+      "Phone needs the latest Kintrinsic. Until then every cap lifts.",
+    );
+  });
+
+  it("still reports the permanent platform gap", () => {
+    const s = wardenSupport([phone], {}, "learning");
+    expect(supportNote(s, "A free named time", "There, it costs.")).toBe(
+      unsupportedNote(s, "A free named time", "There, it costs."),
+    );
+  });
+
+  it("is silent when every device can honour it", () => {
+    const s = wardenSupport(
+      [phone],
+      { [phone.devicePubkey as string]: status({ appVersionCode: 38 }) },
+      "bucketsWeekly",
+    );
+    expect(supportNote(s, "A weekly allowance")).toBeNull();
   });
 });

@@ -230,3 +230,32 @@ export function tooOldNote(support: WardenSupport, what: string): string | null 
   const names = support.tooOld.map((d) => d.label).join(" and ");
   return `${names} needs the latest Kintrinsic before it can ${what}. Update it, then this starts working by itself.`;
 }
+
+/**
+ * The ONE note a control should show: the permanent platform gap
+ * (`unsupportedNote`), the too-old gap, or both. Exists because every feature
+ * in the table is one shape or the other, and a caller that picks the reporter
+ * by hand can pick the wrong one — named times did, wiring three VERSION
+ * thresholds to the `NEVER`-only reporter, so the warning this table's own
+ * `bucketsWeekly` doc promises could never render while a stale ward dropped
+ * every counted cap. Asking for "the note" cannot be miswired that way.
+ *
+ * `untilUpdated` replaces the default consequence for a too-old device, for
+ * features whose failure there is worse than "does nothing".
+ */
+export function supportNote(
+  support: WardenSupport,
+  what: string,
+  insteadOnThose?: string,
+  untilUpdated?: string,
+): string | null {
+  const never = unsupportedNote(support, what, insteadOnThose);
+  let old: string | null = null;
+  if (support.tooOld.length > 0) {
+    const names = support.tooOld.map((d) => d.label).join(" and ");
+    const consequence = untilUpdated ?? `${what} does nothing there until then.`;
+    old = `${names} needs the latest Kintrinsic. ${consequence}`;
+  }
+  if (never && old) return `${never} ${old}`;
+  return never ?? old;
+}

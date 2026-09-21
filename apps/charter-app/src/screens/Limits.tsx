@@ -10,6 +10,7 @@ import {
 import { deviceSetLimits } from "../domain/standing";
 import {
   deliverableDevices,
+  supportNote,
   tooOldNote,
   unsupportedNote,
   wardenSupport,
@@ -3099,7 +3100,21 @@ function DeviceLimits({
    * that did not exist. Unlike the too-old note this can never lift by itself,
    * so it states the consequence plainly and says what governs there instead.
    */
-  const parityNote = (feature: WardenFeature, what: string, instead?: string) =>
+  const parityNote = (
+    feature: WardenFeature,
+    what: string,
+    instead?: string,
+    untilUpdated?: string,
+  ) =>
+    supportNote(
+      wardenSupport(deliverableDevices(child.devices), deviceStatus, feature),
+      what,
+      instead,
+      untilUpdated,
+    );
+  // The NEVER half alone — for the two controls that already render their own
+  // too-old sentence beside it (always-available, removing an app).
+  const neverNote = (feature: WardenFeature, what: string, instead?: string) =>
     unsupportedNote(
       wardenSupport(deliverableDevices(child.devices), deviceStatus, feature),
       what,
@@ -3150,7 +3165,7 @@ function DeviceLimits({
   const hideCtx: HideCtx = {
     canRemove: appHideSupport.canSend,
     tooOldNote: tooOldNote(appHideSupport, "remove an app from the device"),
-    parityNote: parityNote(
+    parityNote: neverNote(
       "appHide",
       "Removing an app",
       "A computer has no launcher to hide an app from — uninstall it there the ordinary way.",
@@ -3407,7 +3422,16 @@ function DeviceLimits({
               note={parityNote(
                 "bucketsWeekly",
                 "A weekly allowance",
-                "There, only the daily half of a counted named time is honoured until it updates.",
+                undefined,
+                // A group with BOTH axes stays `v: 1` and an older ward just
+                // ignores the weekly half. A weekly-ONLY group makes the whole
+                // clause `v: 2`, which that ward rejects outright — so EVERY
+                // counted named time stops being limited, not just this one.
+                draftGroups.some(
+                  (g) => g.policy === "counted" && g.weeklyMinutes != null && g.dailyMinutes == null,
+                )
+                  ? "Until then, a named time with only a weekly limit switches off every counted named time on it — give each a daily limit too, or update first."
+                  : "Until then only the daily limit is honoured there.",
               )}
             />
           )}
@@ -3481,7 +3505,7 @@ function DeviceLimits({
             </div>
           )}
           <ParityNote
-            note={parityNote(
+            note={neverNote(
               "alwaysAvailable",
               "Naming an app to stay open at any hour",
               "A computer's lock freezes everything, so nothing can be exempted there.",
