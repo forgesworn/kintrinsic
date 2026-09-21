@@ -65,6 +65,27 @@ impl DeviceLimits {
                 return Err("weekend wake/bedtime must be HH:MM".into());
             }
         }
+        // Wake must come BEFORE bedtime. The schedule evaluator drops a window
+        // whose start is not strictly before its end (midnight-crossing
+        // windows are forbidden by the contract), so an inverted pair left
+        // EVERY day with no window at all: locked forever, "Outside allowed
+        // hours", and no time to come back at — from one swapped pair of
+        // fields, or from editing only `wake` past an inherited bedtime.
+        // `HH:MM` is fixed-width and zero-padded, so string order is time order.
+        if self.wake >= self.bedtime {
+            return Err(format!(
+                "wake ({}) must be earlier than bedtime ({})",
+                self.wake, self.bedtime
+            ));
+        }
+        if let Some(w) = &self.weekend {
+            if w.wake >= w.bedtime {
+                return Err(format!(
+                    "weekend wake ({}) must be earlier than weekend bedtime ({})",
+                    w.wake, w.bedtime
+                ));
+            }
+        }
         if self.daily_minutes == 0 || self.daily_minutes > 24 * 60 {
             return Err("dailyMinutes must be between 1 and 1440".into());
         }
@@ -487,6 +508,31 @@ mod tests {
         let mut l = sample();
         l.bedtime = "8pm".into();
         assert!(l.validate().is_err());
+    }
+
+    /// An inverted pair used to validate clean and then lock the child out
+    /// FOREVER: the evaluator drops a window whose start isn't before its end,
+    /// leaving every day with none and no "come back at" time.
+    #[test]
+    fn validate_rejects_a_wake_at_or_after_bedtime() {
+        let mut l = sample();
+        l.wake = "21:00".into();
+        l.bedtime = "20:00".into();
+        assert!(l.validate().unwrap_err().contains("earlier than bedtime"));
+        l.wake = "20:00".into(); // an empty window is no window either
+        assert!(l.validate().is_err());
+
+        let mut l = sample();
+        l.weekend = Some(DayWindow {
+            wake: "22:00".into(),
+            bedtime: "09:00".into(),
+        });
+        assert!(l.validate().unwrap_err().contains("weekend"));
+        l.weekend = Some(DayWindow {
+            wake: "09:00".into(),
+            bedtime: "22:00".into(),
+        });
+        assert!(l.validate().is_ok());
     }
 
     #[test]
