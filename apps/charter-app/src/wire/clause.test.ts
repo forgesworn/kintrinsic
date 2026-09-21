@@ -221,17 +221,32 @@ describe("lifelineToGrant / policyToClauses lifeline (spec D9)", () => {
       lifeline: {
         numbers: [{ label: "Mum", number: "+44 7700 900123" }],
         emergencyServices: false,
-        breakGlass: { enabled: false, scope: "full", durationMinutes: 10 },
       },
     });
     const body = policyToClauses(SUBJECT, p, AT).find((c) => c.kind === "lifeline")!.body;
-    // Off means ABSENT on the wire — an older device must see exactly what
-    // it saw before (it drops an unknown-shaped body wholesale).
+    // Untouched means ABSENT on the wire — an older device must see exactly
+    // what it saw before.
     expect(body).toEqual({
       v: 1,
       numbers: [{ label: "Mum", number: "+44 7700 900123" }],
       issuedAt: AT,
     });
+  });
+
+  it("says break-glass OFF out loud — the device reads an absent field as ON", () => {
+    const p = devicePolicy({
+      lifeline: {
+        numbers: [{ label: "Mum", number: "+44 7700 900123" }],
+        emergencyServices: false,
+        breakGlass: { enabled: false, scope: "full", durationMinutes: 10 },
+      },
+    });
+    const body = policyToClauses(SUBJECT, p, AT).find((c) => c.kind === "lifeline")!.body as {
+      breakGlass?: { enabled: boolean; scope: string; durationMinutes: number };
+    };
+    // `BreakGlassCfg::safety_net` (charter-proto) makes absence mean enabled,
+    // so an omitted "off" is a switch that does nothing on the phone.
+    expect(body.breakGlass).toEqual({ enabled: false, scope: "full", durationMinutes: 10 });
   });
 
   it("carries five numbers, the emergency flag and break-glass when set", () => {

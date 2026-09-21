@@ -263,9 +263,14 @@ export function lifelineToGrant(lifeline: Lifeline, issuedAt: number): GrantLife
   // keeps a byte-identical payload (and older devices keep working).
   if (lifeline.emergencyServices) g.emergencyServices = true;
   if (lifeline.torch) g.torch = true;
-  if (lifeline.breakGlass?.enabled) {
+  // Break-glass is the exception to "only when set": the device reads an
+  // ABSENT field as the safety net being UP (`BreakGlassCfg::safety_net`), so
+  // "off" has to be SAID — omitting it left a guardian with a switch that
+  // changed nothing on the phone. Untouched (undefined) stays absent, which is
+  // ON on both sides. Older devices ignore the unknown field either way.
+  if (lifeline.breakGlass) {
     g.breakGlass = {
-      enabled: true,
+      enabled: lifeline.breakGlass.enabled,
       scope: lifeline.breakGlass.scope,
       durationMinutes: lifeline.breakGlass.durationMinutes,
     };

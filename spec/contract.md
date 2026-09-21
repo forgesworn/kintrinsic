@@ -1367,7 +1367,9 @@ durably and emitted on reconnect. Guardian side: the carrier notifies
 immediately on any `outcome=override` audit; MyCharter renders it in Activity
 and the week. Configuration rides the **lifeline clause** as an additive
 optional field — `breakGlass?: { enabled: boolean, scope: "calls"|"full",
-durationMinutes: number }` — and the lifeline `numbers` cap grows **1..3 →
+durationMinutes: number }` (**absent = enabled**, full scope, 10 minutes — the
+safety net must not depend on a guardian having configured anything — so the
+guardian app MUST send an explicit `enabled: false` to turn it off) — and the lifeline `numbers` cap grows **1..3 →
 1..5** plus an optional platform-sourced emergency entry
 (`emergencyServices?: boolean`; the device resolves the region-correct number
 itself, never a wire-carried digit string). Device-side acceptance of the
