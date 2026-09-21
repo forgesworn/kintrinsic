@@ -62,6 +62,7 @@ import {
   undeliveredNote,
   type ClauseDelivery,
 } from "./clauseDelivery";
+import { admitStatus } from "./statusAdmission";
 import { unclaimedDevices, type UnclaimedDevice } from "./unclaimedDevices";
 import { forgetPairToken, livePairTokens, rememberPairToken } from "./pairTokens";
 import { readyResends, type PendingResend } from "./resendOnClaim";
@@ -1341,6 +1342,23 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   const ingestDeviceStatus = useCallback((status: DeviceStatus) => {
+    // Gate BEFORE anything is recorded: an authentic wrap is not proof of
+    // pairing (see ./statusAdmission), and everything below is persisted.
+    const admission = admitStatus(status, stateRef.current.children, livePairTokens());
+    if (admission === "stranger") return;
+    if (admission === "pairing") {
+      // Live status only — what the pairing flow and the unclaimed-device
+      // recovery read. No usage history for a machine no child claims yet.
+      setDeviceStatus((prev) => {
+        const cur = prev[status.machine];
+        return cur && cur.ts >= status.ts ? prev : { ...prev, [status.machine]: status };
+      });
+      const waiting = phonePairingRef.current;
+      if (waiting && status.pairToken === waiting.token && !waiting.foundMachine) {
+        setPhonePairing({ ...waiting, foundMachine: status.machine });
+      }
+      return;
+    }
     dispatch({
       type: "SET_DEVICE_LAST_SEEN",
       machine: status.machine,
