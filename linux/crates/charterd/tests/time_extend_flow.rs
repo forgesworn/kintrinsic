@@ -50,6 +50,14 @@ fn budget_json(daily: u32) -> String {
 }
 
 fn build_extend_grant(req: ReqId, params: serde_json::Value, exp: i64) -> VerifiedGrant {
+    try_build_extend_grant(req, params, exp).unwrap()
+}
+
+fn try_build_extend_grant(
+    req: ReqId,
+    params: serde_json::Value,
+    exp: i64,
+) -> Result<VerifiedGrant, charter_verify::VerifyError> {
     let g = TestGuardian::new();
     let ev = GrantBuilder::install_allow(req, non())
         .op(OpType::TimeExtend)
@@ -68,7 +76,7 @@ fn build_extend_grant(req: ReqId, params: serde_json::Value, exp: i64) -> Verifi
         expected_op: OpType::TimeExtend,
         now: IN_WINDOW as u64,
     };
-    verify_grant(&ev, &p, &store).unwrap()
+    verify_grant(&ev, &p, &store)
 }
 
 /// A verified time.extend grant with explicit reqId, minutes, dimension, exp.
@@ -195,15 +203,15 @@ async fn expiry_beyond_eod_rejected() {
     assert!(matches!(err, EnactError::Terminal(_)));
 }
 
-#[tokio::test]
-async fn over_max_minutes_rejected() {
-    let (_sys, enforcer) = locked_setup().await;
-    let enactor = TimeExtendEnactor::new(enforcer);
-    let grant = extend_grant(rid(), 2000, "budget", eod()); // > 1440
-    assert!(matches!(
-        enactor.enact(&grant, &ctx()).await,
-        Err(EnactError::Terminal(_))
-    ));
+/// Over the contract's 1440-minute cap no longer even VERIFIES:
+/// `GrantParams::parse` validates at the trust boundary, so no reader of
+/// `allow_params()` can ever see the unbounded value. (The enactor keeps its
+/// own check as defence in depth.)
+#[test]
+fn over_max_minutes_never_becomes_a_verified_grant() {
+    let params = |m: u32| serde_json::json!({"minutesGranted": m, "limitHit": "budget"});
+    assert!(try_build_extend_grant(rid(), params(2000), eod()).is_err()); // > 1440
+    assert!(try_build_extend_grant(rid(), params(1440), eod()).is_ok());
 }
 
 /// A per-group (`limitHit: bucket`) grant credits the NAMED BUCKET's own

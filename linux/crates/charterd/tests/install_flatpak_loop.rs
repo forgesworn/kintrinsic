@@ -18,7 +18,6 @@ use charterd::enactor::Enactor;
 use charterd::enactors::install_flatpak::{
     build_install_request, InstallFlatpakEnactor, RequestBuildError,
 };
-use charterd::error::EnactError;
 use charterd::ports::NullEventSink;
 use charterd::{Broker, EnactorRegistry, RequestState};
 
@@ -31,8 +30,10 @@ fn non() -> Nonce {
     Nonce::from_bytes([0xB2; 32])
 }
 
-/// Build a VerifiedGrant for install.flatpak with arbitrary params.
-fn install_grant(params: serde_json::Value) -> VerifiedGrant {
+/// Verify an install.flatpak grant carrying arbitrary params.
+fn try_install_grant(
+    params: serde_json::Value,
+) -> Result<VerifiedGrant, charter_verify::VerifyError> {
     let g = TestGuardian::new();
     let ev = GrantBuilder::install_allow(rid(), non())
         .params(params)
@@ -46,7 +47,12 @@ fn install_grant(params: serde_json::Value) -> VerifiedGrant {
         expected_op: OpType::InstallFlatpak,
         now: NOW,
     };
-    verify_grant(&ev, &p, &store).unwrap()
+    verify_grant(&ev, &p, &store)
+}
+
+/// Build a VerifiedGrant for install.flatpak with arbitrary params.
+fn install_grant(params: serde_json::Value) -> VerifiedGrant {
+    try_install_grant(params).unwrap()
 }
 
 #[tokio::test]
@@ -64,20 +70,20 @@ async fn enactor_installs_from_grant_ref() {
     );
 }
 
-#[tokio::test]
-async fn rejects_injection_ref_before_syscall() {
-    let flat = MockFlatpakOps::new();
-    let enactor = InstallFlatpakEnactor::new(flat);
-    let grant = install_grant(serde_json::json!({"ref": "org.x; rm -rf /", "remote": "flathub"}));
-    let err = enactor
-        .enact(&grant, &charterd::enactor::EnactContext::default())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, EnactError::Terminal(_)));
-    assert_eq!(
-        enactor.flatpak().install_calls().len(),
-        0,
-        "FlatpakOps must never be called"
+/// An injection-shaped ref no longer even VERIFIES: `GrantParams::parse` runs
+/// it through `FlatpakRef` at the trust boundary, so no enactor — this one or
+/// a future one — is ever handed it. (The enactor keeps its own guard as
+/// defence in depth; with verification refusing first there is no verified
+/// grant left to drive it with.)
+#[test]
+fn an_injection_ref_never_becomes_a_verified_grant() {
+    assert!(
+        try_install_grant(serde_json::json!({"ref": "org.x; rm -rf /", "remote": "flathub"}))
+            .is_err()
+    );
+    assert!(
+        try_install_grant(serde_json::json!({"ref": "org.videolan.VLC", "remote": "flathub"}))
+            .is_ok()
     );
 }
 
