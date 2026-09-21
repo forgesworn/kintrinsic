@@ -134,13 +134,26 @@ systemctl enable --now charterd.service
 if [ "${CHARTER_SKIP_NOEXEC:-0}" = 1 ]; then
     echo "charter-setup: CHARTER_SKIP_NOEXEC=1 — leaving /tmp + /dev/shm as-is (no noexec)."
 else
-    systemctl enable --now tmp.mount dev-shm.mount || \
+    # `enable`, never `--now`: starting these mid-session stacks an empty tmpfs
+    # over the LIVE /tmp and /dev/shm, hiding /tmp/.X11-unix and every socket
+    # and shared-memory segment the parent's running desktop is using — and
+    # this wizard runs FROM that desktop. They take effect at the next boot.
+    if systemctl enable tmp.mount dev-shm.mount; then
+        NOEXEC_PENDING=1
+    else
         echo "charter-setup: WARN could not enable noexec tmpfs mounts (tune on host)"
+    fi
+fi
+
+NOEXEC_NOTE=""
+if [ "${NOEXEC_PENDING:-0}" = 1 ]; then
+    NOEXEC_NOTE="\n\nRestart this computer when convenient — one protection only switches on at the next start."
+    echo "==> noexec /tmp + /dev/shm enabled; they take effect at the next boot."
 fi
 
 if [ "$GUI" = 1 ]; then
     zenity --info --title="Kintrinsic Setup" \
-        --text="Kintrinsic is set up for \"$MANAGED_USER\".\n\nNow open the Kintrinsic app (\"The rules\") to set the daily limits." \
+        --text="Kintrinsic is set up for \"$MANAGED_USER\".\n\nNow open the Kintrinsic app (\"The rules\") to set the daily limits.${NOEXEC_NOTE}" \
         2>/dev/null || true
 else
     echo "==> guardian pairing is optional (device-only limits work without it)."
