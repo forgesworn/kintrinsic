@@ -233,3 +233,31 @@ export async function decryptGuardianBackup(
   if (typeof parsed.state === "string" && parsed.state.length > 0) out.stateJson = parsed.state;
   return out;
 }
+
+/** True when `stateJson` (the persisted store) holds at least one child. */
+function hasHousehold(stateJson: string | null): boolean {
+  if (!stateJson) return false;
+  try {
+    const parsed = JSON.parse(stateJson) as { children?: unknown };
+    return Array.isArray(parsed.children) && parsed.children.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The corrupt-key recovery screen's restore: the key always comes back; the
+ * backup's household only when this phone has none of its own. There the key
+ * is unreadable but the family data is usually intact — and NEWER than any
+ * backup — so it must not be rolled back; on a wiped or new phone there is
+ * nothing to lose and the v2 household is the whole point of the blob.
+ */
+export async function recoverGuardianBackup(
+  blob: string,
+  passphrase: string,
+  localStateJson: string | null,
+): Promise<GuardianBackup> {
+  const backup = await decryptGuardianBackup(blob, passphrase);
+  if (backup.stateJson && hasHousehold(localStateJson)) return { secret: backup.secret };
+  return backup;
+}

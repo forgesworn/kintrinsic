@@ -7,6 +7,7 @@ import {
   KeyBackupError,
   encryptGuardianBackup,
   decryptGuardianBackup,
+  recoverGuardianBackup,
 } from "./keyBackup";
 
 const PASS = "correct horse battery";
@@ -95,5 +96,39 @@ describe("v2 household backup", () => {
   it("wrong passphrase fails closed", async () => {
     const blob = await encryptGuardianBackup(secret, state, "hunter22222");
     await expect(decryptGuardianBackup(blob, "wrong-pass-9")).rejects.toThrow();
+  });
+});
+
+describe("corrupt-key recovery restore", () => {
+  const secret = new Uint8Array(32).fill(9);
+  const backedUp = JSON.stringify({ children: [{ id: "c1", name: "Robin" }] });
+  const PASS2 = "hunter22222";
+
+  it("reads the v2 blob the app actually produces", async () => {
+    const blob = await encryptGuardianBackup(secret, backedUp, PASS2);
+    const back = await recoverGuardianBackup(`  ${blob}\n`, PASS2, null);
+    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(back.stateJson).toBe(backedUp);
+  });
+
+  it("brings the household back on a phone that has none", async () => {
+    const blob = await encryptGuardianBackup(secret, backedUp, PASS2);
+    for (const local of [null, "", "not json", JSON.stringify({ children: [] })]) {
+      expect((await recoverGuardianBackup(blob, PASS2, local)).stateJson).toBe(backedUp);
+    }
+  });
+
+  it("never rolls intact local family data back to the backup's", async () => {
+    const blob = await encryptGuardianBackup(secret, backedUp, PASS2);
+    const local = JSON.stringify({ children: [{ id: "c1" }, { id: "c2" }] });
+    const back = await recoverGuardianBackup(blob, PASS2, local);
+    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(back.stateJson).toBeUndefined();
+  });
+
+  it("still restores a v1 key-only blob", async () => {
+    const v1 = await encryptGuardianKey(secret, PASS2);
+    const back = await recoverGuardianBackup(v1, PASS2, null);
+    expect(Array.from(back.secret)).toEqual(Array.from(secret));
   });
 });

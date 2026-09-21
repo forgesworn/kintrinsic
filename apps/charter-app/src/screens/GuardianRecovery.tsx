@@ -22,10 +22,20 @@ export default function GuardianRecovery({ onResolved }: { onResolved: () => voi
     setWorking(true);
     try {
       // Lazy-load the crypto (mirrors Family's backup flow) — off the boot path.
-      const { decryptGuardianKey } = await import("../signer/keyBackup");
-      const secret = await decryptGuardianKey(blob.trim(), pass);
-      await restoreGuardianKey(secret); // overwrites the corrupt value with the
-      onResolved(); //                     restored one, then reconnects.
+      // Reads BOTH blob generations: the only backup the app produces is v2,
+      // so a v1-only decrypt here refused every real backup and left "start
+      // fresh" — orphaning every pairing — as the only way off this screen.
+      const { recoverGuardianBackup } = await import("../signer/keyBackup");
+      const { exportPersistedState, importPersistedState } = await import("../store/store");
+      const backup = await recoverGuardianBackup(blob, pass, exportPersistedState());
+      await restoreGuardianKey(backup.secret); // overwrites the corrupt value
+      if (backup.stateJson) {
+        // No household on this phone — install the backup's and boot from it.
+        importPersistedState(backup.stateJson);
+        window.location.reload();
+        return;
+      }
+      onResolved(); // key restored over intact family data; reconnects.
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't restore that backup.");
     } finally {
@@ -65,7 +75,7 @@ export default function GuardianRecovery({ onResolved }: { onResolved: () => voi
             <textarea
               className="input"
               rows={3}
-              placeholder="CHARTER-KEYBAK.1.…"
+              placeholder="CHARTER-KEYBAK.…"
               aria-label="Backup blob"
               style={{ fontFamily: "monospace", fontSize: 11 }}
               value={blob}
