@@ -5,7 +5,8 @@
 //! the same trust basis as typing on the machine itself, which is why it is
 //! enough to authorise a pin.
 
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -33,10 +34,27 @@ pub fn mint(path: &str, now: u64, random: [u8; 16]) -> std::io::Result<String> {
     })
     .expect("token serializes");
     let tmp = format!("{path}.tmp");
-    std::fs::write(&tmp, body)?;
     // 0600 — unlike the pairing pin, this IS a secret: it is the sole proof of
-    // physical presence, so only root may read it.
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    // physical presence, so only root may read it. The mode is set AT OPEN, on
+    // a file this call created: a write-then-chmod leaves the token readable
+    // under root's 022 umask for the length of the write, in a 0755 directory
+    // the ward can poll — long enough to pin their own phone as guardian.
+    // A leftover tmp (crash, or a pre-fix 0644 one) is removed first so
+    // `create_new` never inherits an old file's mode or an open reader.
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path)?;
     Ok(token)
 }
@@ -117,5 +135,17 @@ mod tests {
         mint(&p, 1_000, [0x33; 16]).unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the token is a secret, unlike the pairing pin");
+    }
+
+    #[test]
+    fn a_stale_world_readable_tmp_never_lends_its_mode_to_the_token() {
+        let p = tmp("stale-tmp");
+        let stale = format!("{p}.tmp");
+        std::fs::write(&stale, b"left behind").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+        mint(&p, 1_000, [0x44; 16]).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!Path::new(&stale).exists(), "the tmp is renamed away");
     }
 }
