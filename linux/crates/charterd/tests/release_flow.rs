@@ -95,6 +95,7 @@ async fn a_guardian_release_unpairs_the_device_and_forgets_its_clauses() {
             .child_clauses()
             .clauses_for(&SUBJECT.to_hex())
             .unwrap()
+            .clauses
             .is_empty(),
         "and so are the rules it carried — a released device enforces nothing"
     );
@@ -222,6 +223,7 @@ async fn a_clause_in_the_same_round_as_a_release_is_not_ingested() {
         .child_clauses()
         .clauses_for(&SUBJECT.to_hex())
         .unwrap()
+        .clauses
         .is_empty());
 }
 

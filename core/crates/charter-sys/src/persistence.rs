@@ -58,6 +58,37 @@ pub trait CuratorListStore: Send + Sync {
     fn all_lists(&self) -> SysResult<Vec<String>>;
 }
 
+/// One child's cached clauses, and the kinds whose slot is on disk but could
+/// not be read.
+///
+/// The second list is the whole point. A single half-written `2.json` used to
+/// abort the directory walk, the caller `unwrap_or_default()`ed the error, and
+/// the child ended up with **no** policy at all — their schedule, stand-down,
+/// buckets and app rules gone along with the budget nobody could read. But an
+/// empty clause set is also the perfectly ordinary state of a child the
+/// guardian has not set anything for yet, and it must stay that way. So the
+/// two answers travel separately: `clauses` is what we could read, `unreadable`
+/// is what is there and illegible, and the resolver takes each affected
+/// dimension's fail-safe branch for the second without touching the first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChildClauses {
+    /// The readable `(kind, json)` pairs, in ascending `kind` order.
+    pub clauses: Vec<(u16, String)>,
+    /// Kinds whose `<kind>.json` is present but would not read or parse, in
+    /// ascending order. The kind survives a corrupt body because it is the
+    /// file's own name, not something inside it.
+    pub unreadable: Vec<u16>,
+}
+
+impl From<Vec<(u16, String)>> for ChildClauses {
+    fn from(clauses: Vec<(u16, String)>) -> Self {
+        ChildClauses {
+            clauses,
+            unreadable: Vec::new(),
+        }
+    }
+}
+
 /// Per-child authenticated standing-clause store: like [`ClauseStore`] but keyed
 /// by `(subject_hex, kind)` so a guardian can carry independent `schedule`/
 /// `budget` clauses for **each** managed child (multi-child, Signet-first). Each
@@ -80,8 +111,15 @@ pub trait ChildClauseStore: Send + Sync {
     fn get_child_clause(&self, subject_hex: &str, kind: u16) -> SysResult<Option<String>>;
     /// The highest `issued_at` ever accepted for `(subject_hex, kind)`.
     fn highest_issued_at(&self, subject_hex: &str, kind: u16) -> SysResult<Option<u64>>;
-    /// Every cached `(kind, json)` for `subject_hex`, in ascending `kind` order.
-    fn clauses_for(&self, subject_hex: &str) -> SysResult<Vec<(u16, String)>>;
+    /// Every cached `(kind, json)` for `subject_hex`, in ascending `kind`
+    /// order, plus the kinds whose slot is present-but-unreadable — see
+    /// [`ChildClauses`]. One bad file never costs the caller the others.
+    ///
+    /// `Err` is reserved for a failure of the walk ITSELF (the directory is
+    /// there and cannot be listed), which says nothing about any individual
+    /// kind. A missing directory is `Ok` with nothing in it: that is a child
+    /// nobody has set anything for, not a fault.
+    fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses>;
     /// Forget every clause for `subject_hex` (a release: enforcement must stop,
     /// and the rollback floor must reset so a later re-pair starts clean).
     fn clear_for(&self, subject_hex: &str) -> SysResult<()>;
@@ -135,6 +173,8 @@ mod mock {
         pairing: Option<String>,
         /// Fault injection — see [`MockDisk::break_clause_reads`].
         clause_reads_fail: bool,
+        /// Fault injection — see [`MockDisk::make_unreadable`].
+        unreadable_kinds: std::collections::BTreeSet<u16>,
     }
 
     /// A shared in-memory "disk". Cloning shares the same backing state, so a
@@ -166,6 +206,19 @@ mod mock {
         /// exercise the fail-safe, and then look at what was actually stored.
         pub fn repair_clause_reads(&self) {
             self.0.lock().expect("disk lock").clause_reads_fail = false;
+        }
+
+        /// Make one already-stored per-child clause kind read back as
+        /// present-but-unreadable, the way a truncated `<kind>.json` does on a
+        /// real disk. The slot stays stored (the file IS there — that is the
+        /// whole distinction); `clauses_for` reports it under `unreadable`
+        /// instead of returning its body.
+        pub fn make_unreadable(&self, kind: u16) {
+            self.0
+                .lock()
+                .expect("disk lock")
+                .unreadable_kinds
+                .insert(kind);
         }
 
         fn clause_reads_broken(&self) -> bool {
@@ -382,22 +435,29 @@ mod mock {
                 .get(&(subject_hex.to_string(), kind))
                 .map(|(t, _)| *t))
         }
-        fn clauses_for(&self, subject_hex: &str) -> SysResult<Vec<(u16, String)>> {
+        fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses> {
             if self.disk.clause_reads_broken() {
                 return Err(unreadable());
             }
             // BTreeMap is ordered by (subject, kind), so a subject's entries come
-            // out in ascending `kind` already.
-            Ok(self
-                .disk
-                .0
-                .lock()
-                .expect("disk lock")
-                .child_clauses
-                .iter()
-                .filter(|((s, _), _)| s == subject_hex)
-                .map(|((_, k), (_, j))| (*k, j.clone()))
-                .collect())
+            // out in ascending `kind` already. An in-memory map has no way to
+            // hold a torn record, so nothing here is ever unreadable — a test
+            // that needs that state names it with `MockDisk::make_unreadable`.
+            let g = self.disk.0.lock().expect("disk lock");
+            Ok(ChildClauses {
+                clauses: g
+                    .child_clauses
+                    .iter()
+                    .filter(|((s, k), _)| s == subject_hex && !g.unreadable_kinds.contains(k))
+                    .map(|((_, k), (_, j))| (*k, j.clone()))
+                    .collect(),
+                unreadable: g
+                    .child_clauses
+                    .keys()
+                    .filter(|(s, k)| s == subject_hex && g.unreadable_kinds.contains(k))
+                    .map(|(_, k)| *k)
+                    .collect(),
+            })
         }
         fn clear_for(&self, subject_hex: &str) -> SysResult<()> {
             self.disk
@@ -592,8 +652,17 @@ mod real {
                 if !is_json(&path) {
                     continue;
                 }
-                if let Some(rec) = read_json::<PendingRec>(&path)? {
-                    out.push((rec.id, rec.json));
+                // One torn record must not hide every other pending request —
+                // an in-flight guardian decision that vanishes from the list
+                // is a request nobody ever answers.
+                match read_json::<PendingRec>(&path) {
+                    Ok(Some(rec)) => out.push((rec.id, rec.json)),
+                    Ok(None) => {}
+                    Err(e) => eprintln!(
+                        "charter: pending record {} is unreadable ({e}) — skipping it; \
+                         the rest of the queue is unaffected",
+                        path.display()
+                    ),
                 }
             }
             out.sort();
@@ -738,13 +807,15 @@ mod real {
         fn highest_issued_at(&self, subject_hex: &str, kind: u16) -> SysResult<Option<u64>> {
             Ok(self.current(subject_hex, kind)?.map(|r| r.issued_at))
         }
-        fn clauses_for(&self, subject_hex: &str) -> SysResult<Vec<(u16, String)>> {
+        fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses> {
             let rd = match fs::read_dir(self.clauses_dir(subject_hex)) {
                 Ok(rd) => rd,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(ChildClauses::default())
+                }
                 Err(e) => return Err(io_err("read_dir child clauses", e)),
             };
-            let mut out = vec![];
+            let mut out = ChildClauses::default();
             for entry in rd {
                 let path = entry.map_err(|e| io_err("dir entry", e))?.path();
                 if !is_json(&path) {
@@ -757,11 +828,29 @@ mod real {
                 else {
                     continue;
                 };
-                if let Some(rec) = read_json::<ClauseRec>(&path)? {
-                    out.push((kind, rec.json));
+                // The `?` that used to be here gave one truncated file the
+                // power to delete a child's entire policy: the walk aborted,
+                // and the only caller read the error as "no clauses". Skip the
+                // bad entry and name its kind instead — which survives because
+                // it is the file's NAME, not anything inside the body we could
+                // not read.
+                match read_json::<ClauseRec>(&path) {
+                    Ok(Some(rec)) => out.clauses.push((kind, rec.json)),
+                    // Raced with a `clear_for`, nothing to report.
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!(
+                            "charter: child clause {} is present but unreadable ({e}) — that \
+                             dimension falls back to its fail-safe; the child's other clauses \
+                             still apply",
+                            path.display()
+                        );
+                        out.unreadable.push(kind);
+                    }
                 }
             }
-            out.sort_by_key(|(k, _)| *k);
+            out.clauses.sort_by_key(|(k, _)| *k);
+            out.unreadable.sort_unstable();
             Ok(out)
         }
         fn clear_for(&self, subject_hex: &str) -> SysResult<()> {
@@ -971,12 +1060,13 @@ mod real {
             assert_eq!(s2.highest_issued_at("aa", 1).unwrap(), Some(200));
             assert!(!s2.put_child_clause("aa", 1, 200, r#"{"s":9}"#).unwrap());
             assert_eq!(
-                s2.clauses_for("aa").unwrap(),
+                s2.clauses_for("aa").unwrap().clauses,
                 vec![(1, r#"{"s":4}"#.to_string()), (2, r#"{"b":1}"#.to_string())]
             );
             assert_eq!(
                 s2.clauses_for("missing").unwrap(),
-                Vec::<(u16, String)>::new()
+                ChildClauses::default(),
+                "an absent directory is a child nobody has set anything for"
             );
         }
 
@@ -1012,6 +1102,61 @@ mod real {
             assert_eq!(
                 s.get_child_clause("aa", 1).unwrap(),
                 Some(r#"{"s":"up"}"#.to_string())
+            );
+        }
+
+        #[test]
+        fn a_truncated_clause_file_costs_only_its_own_kind() {
+            // The failure this pins: a half-written `2.json` (budget) used to
+            // abort the walk, and the resolver read the error as "the guardian
+            // set nothing" — so the child's SCHEDULE went with it, and a
+            // half-finished write bought unlimited time.
+            let base = tmp("childclause-torn");
+            let s = RealChildClauseStore::with_base(&base);
+            assert!(s.put_child_clause("aa", 1, 100, r#"{"s":"good"}"#).unwrap());
+            assert!(s.put_child_clause("aa", 2, 100, r#"{"b":"good"}"#).unwrap());
+            // Truncate the budget file the way a power cut mid-write does.
+            let budget_file = base
+                .join("children")
+                .join("aa")
+                .join("clauses")
+                .join("2.json");
+            fs::write(&budget_file, r#"{"issued_at":100,"js"#).unwrap();
+
+            let got = s.clauses_for("aa").unwrap();
+            assert_eq!(
+                got.clauses,
+                vec![(1, r#"{"s":"good"}"#.to_string())],
+                "the readable schedule must survive its neighbour"
+            );
+            assert_eq!(
+                got.unreadable,
+                vec![2],
+                "and the budget must be reported as unreadable, not as absent"
+            );
+            // The whole file being empty (a 0-byte O_TRUNC victim) reads the
+            // same way: present, illegible.
+            fs::write(&budget_file, "").unwrap();
+            assert_eq!(s.clauses_for("aa").unwrap().unreadable, vec![2]);
+        }
+
+        #[test]
+        fn one_torn_pending_record_does_not_hide_the_queue() {
+            let base = tmp("pending-torn");
+            let s = RealPendingStore::with_base(&base);
+            s.put("alpha", r#"{"state":"pending"}"#).unwrap();
+            s.put("beta", r#"{"state":"enacting"}"#).unwrap();
+            let torn = base
+                .join("pending")
+                .join(format!("{}.json", hex_bytes(b"beta")));
+            fs::write(&torn, "{").unwrap();
+
+            let got = s.list().unwrap();
+            assert_eq!(
+                got,
+                vec![("alpha".to_string(), r#"{"state":"pending"}"#.to_string())],
+                "the readable record still lists — an in-flight ask must not \
+                 vanish because a sibling record tore"
             );
         }
 
@@ -1197,13 +1342,14 @@ mod tests {
         // Alice's two clauses, ascending kind; Bob's excluded.
         let got = s.clauses_for(ALICE).unwrap();
         assert_eq!(
-            got,
+            got.clauses,
             vec![
                 (SCHEDULE, r#"{"s":1}"#.to_string()),
                 (BUDGET, r#"{"b":1}"#.to_string())
             ]
         );
-        assert_eq!(s.clauses_for("unknown").unwrap(), vec![]);
+        assert!(got.unreadable.is_empty());
+        assert_eq!(s.clauses_for("unknown").unwrap(), ChildClauses::default());
     }
 
     #[test]
@@ -1216,7 +1362,7 @@ mod tests {
                 .unwrap());
         }
         let b = MockChildClauseStore::new(disk);
-        assert_eq!(b.clauses_for(ALICE).unwrap().len(), 1);
+        assert_eq!(b.clauses_for(ALICE).unwrap().clauses.len(), 1);
         assert!(!b
             .put_child_clause(ALICE, SCHEDULE, 7, r#"{"s":2}"#)
             .unwrap()); // still protected

@@ -22,7 +22,7 @@
 
 use charter_proto::{ClauseKind, GrantLearning};
 use charter_schedule::{GrantBudget, GrantSchedule, WeeklySchedule};
-use charter_sys::persistence::ChildClauseStore;
+use charter_sys::persistence::{ChildClauseStore, ChildClauses};
 use charter_sys::SystemLayer;
 
 use crate::local_limits::{uid_for_user, ChildConfig, DeviceLimits};
@@ -64,31 +64,69 @@ fn fail_safe_schedule() -> GrantSchedule {
     }
 }
 
+/// The fail-SAFE budget used when a guardian budget clause is present but
+/// cannot be read or parsed: nothing left on either cap today.
+///
+/// `paused` alone is not enough. `quota_parts_signed_pooled` answers a paused
+/// budget with "nothing left" only on the caps that are actually SET, so a
+/// paused budget carrying no `dailyMinutes`/`weeklyMinutes` reads as
+/// unbounded — the exact fail-open this is here to prevent. Both caps are
+/// therefore named at zero as well.
+fn fail_safe_budget() -> GrantBudget {
+    GrantBudget {
+        v: 1,
+        tz: "UTC".into(),
+        daily_minutes: Some(0),
+        weekly_minutes: Some(0),
+        week_start: None,
+        paused: Some(true),
+        revoked: None,
+        model: None,
+        issued_at: 0,
+    }
+}
+
 /// Resolve the effective policy for one child. `guardian_clauses` is the cached
-/// `(kind, json)` set for the child's subject (empty if unbound / none received
-/// yet); `device_only` is the local fallback (if any).
+/// clause set for the child's subject (empty if unbound / none received yet),
+/// together with the kinds whose slot is present-but-unreadable;
+/// `device_only` is the local fallback (if any).
 pub fn resolve_effective(
-    guardian_clauses: &[(u16, String)],
+    guardian_clauses: &ChildClauses,
     device_only: Option<&DeviceLimits>,
     device_learning: Option<&GrantLearning>,
 ) -> EffectivePolicy {
+    let clauses = &guardian_clauses.clauses;
+    let unreadable = |kind: ClauseKind| guardian_clauses.unreadable.contains(&kind.store_key());
+
     // Learning never participates in time ownership, but its SOURCE follows
     // the doctrine: a guardian learning clause always wins; with none, a
     // guardian who time-governs the child suppresses device-only learning (a
     // local admin must not open time-free holes in the guardian's budget);
     // only an un-governed child falls back to the device-only learning list.
-    let guardian_learning = guardian_clauses
+    let guardian_learning = clauses
         .iter()
         .find(|(k, _)| *k == ClauseKind::Learning.store_key())
         .and_then(|(_, json)| serde_json::from_str::<serde_json::Value>(json).ok())
         .and_then(|v| GrantLearning::from_value(&v).ok());
-    let guardian_time_governs = guardian_clauses.iter().any(|(k, _)| {
+    // An unreadable time clause governs exactly as a readable one does: the
+    // guardian HAS set something for this child, we simply cannot see what.
+    let guardian_time_governs = clauses.iter().any(|(k, _)| {
         *k == ClauseKind::Schedule.store_key() || *k == ClauseKind::Budget.store_key()
-    });
-    let learning = match guardian_learning {
-        Some(g) => Some(g),
-        None if guardian_time_governs => None,
-        None => device_learning.cloned(),
+    }) || unreadable(ClauseKind::Schedule)
+        || unreadable(ClauseKind::Budget);
+    let learning = if unreadable(ClauseKind::Learning) {
+        // Fail-CLOSED, the same direction a learning clause that will not
+        // parse already takes: no list means nothing is time-free, so the ward
+        // is charged for everything. Falling through to the device-only list
+        // would open time-free holes on the strength of a file we could not
+        // read.
+        None
+    } else {
+        match guardian_learning {
+            Some(g) => Some(g),
+            None if guardian_time_governs => None,
+            None => device_learning.cloned(),
+        }
     };
 
     // 1) The guardian owns the child's SCREEN-TIME once they set a time clause
@@ -97,13 +135,10 @@ pub fn resolve_effective(
     //    otherwise it would suppress the device-only curfew/cap and fail OPEN to
     //    unlimited time. (Body validity is irrelevant here: a present-but-
     //    malformed schedule still counts, so the fail-safe below still fires.)
-    let has_time_clause = guardian_clauses.iter().any(|(k, _)| {
-        *k == ClauseKind::Schedule.store_key() || *k == ClauseKind::Budget.store_key()
-    });
-    if has_time_clause {
+    if guardian_time_governs {
         let mut schedule = None;
         let mut budget = None;
-        for (kind, json) in guardian_clauses {
+        for (kind, json) in clauses {
             if *kind == ClauseKind::Schedule.store_key() {
                 // Malformed schedule fail-SAFES (paused → locks this child).
                 schedule = Some(
@@ -114,6 +149,16 @@ pub fn resolve_effective(
                 // Malformed budget fail-OPENS (None → no cap; schedule still gates).
                 budget = serde_json::from_str::<GrantBudget>(json).ok();
             }
+        }
+        // A slot we could not read takes the SAME branch a body we could not
+        // parse takes — the two are the same event as far as this child is
+        // concerned, and the one that reads as "the guardian set nothing" is
+        // the dangerous one.
+        if unreadable(ClauseKind::Schedule) {
+            schedule = Some(fail_safe_schedule());
+        }
+        if unreadable(ClauseKind::Budget) {
+            budget = Some(fail_safe_budget());
         }
         return EffectivePolicy {
             schedule,
@@ -159,8 +204,29 @@ pub fn resolve_child_policies<S: SystemLayer>(
             let uid = uid_for_user(passwd, user)?;
             // Guardian's per-child clauses (empty if unbound or none received yet).
             let guardian_clauses = match &cfg.subject {
-                Some(subject) => sys.child_clauses().clauses_for(subject).unwrap_or_default(),
-                None => Vec::new(),
+                Some(subject) => match sys.child_clauses().clauses_for(subject) {
+                    Ok(c) => c,
+                    // The walk itself failed: the directory is there and will
+                    // not be listed (an EIO, a permissions change). That says
+                    // nothing about any one kind, so the two dimensions that
+                    // actually gate time are both treated as unreadable.
+                    // `unwrap_or_default()` here used to mean "the guardian
+                    // set nothing", which is unlimited time on a disk fault.
+                    Err(e) => {
+                        eprintln!(
+                            "charter: cannot list the clause directory for uid {uid} ({e}) — \
+                             locking on schedule and budget until it reads again"
+                        );
+                        ChildClauses {
+                            clauses: Vec::new(),
+                            unreadable: vec![
+                                ClauseKind::Schedule.store_key(),
+                                ClauseKind::Budget.store_key(),
+                            ],
+                        }
+                    }
+                },
+                None => ChildClauses::default(),
             };
             Some((
                 uid,
@@ -177,6 +243,12 @@ pub fn resolve_child_policies<S: SystemLayer>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ordinary case: everything the guardian set for this child read back
+    /// cleanly. Tests that need the other case name the unreadable kinds.
+    fn readable(clauses: Vec<(u16, String)>) -> ChildClauses {
+        ChildClauses::from(clauses)
+    }
 
     fn device() -> DeviceLimits {
         DeviceLimits {
@@ -217,7 +289,7 @@ mod tests {
             (SCHEDULE, guardian_schedule_json()),
             (BUDGET, guardian_budget_json(60)),
         ];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
         // Guardian's tz + cap, not the device-only one.
         assert_eq!(p.schedule.as_ref().unwrap().tz, "America/New_York");
@@ -226,7 +298,7 @@ mod tests {
 
     #[test]
     fn device_only_when_no_guardian_clause() {
-        let p = resolve_effective(&[], Some(&device()), None);
+        let p = resolve_effective(&readable(vec![]), Some(&device()), None);
         assert_eq!(p.source, PolicySource::DeviceOnly);
         assert_eq!(p.schedule.as_ref().unwrap().tz, "Europe/London");
         assert_eq!(p.budget.as_ref().unwrap().daily_minutes, Some(120));
@@ -234,7 +306,7 @@ mod tests {
 
     #[test]
     fn unconstrained_when_neither_source() {
-        let p = resolve_effective(&[], None, None);
+        let p = resolve_effective(&readable(vec![]), None, None);
         assert_eq!(p.source, PolicySource::Unconstrained);
         assert!(p.schedule.is_none() && p.budget.is_none());
     }
@@ -243,7 +315,7 @@ mod tests {
     fn whole_child_partial_guardian_schedule_only_leaves_budget_unconstrained() {
         // Guardian set only a schedule — budget stays None (NOT device-only).
         let clauses = vec![(SCHEDULE, guardian_schedule_json())];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
         assert!(p.schedule.is_some());
         assert!(
@@ -255,7 +327,7 @@ mod tests {
     #[test]
     fn whole_child_partial_guardian_budget_only_leaves_schedule_unconstrained() {
         let clauses = vec![(BUDGET, guardian_budget_json(45))];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
         assert!(p.schedule.is_none());
         assert_eq!(p.budget.as_ref().unwrap().daily_minutes, Some(45));
@@ -264,7 +336,7 @@ mod tests {
     #[test]
     fn malformed_guardian_schedule_fail_safes_to_paused() {
         let clauses = vec![(SCHEDULE, "not json at all".to_string())];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
         assert_eq!(
             p.schedule.as_ref().unwrap().paused,
@@ -280,7 +352,7 @@ mod tests {
         // device-only curfew/cap — that would fail OPEN to unlimited time.
         const CONTENT: u16 = 3;
         let clauses = vec![(CONTENT, r#"{"any":"content"}"#.to_string())];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(
             p.source,
             PolicySource::DeviceOnly,
@@ -298,7 +370,7 @@ mod tests {
             (SCHEDULE, guardian_schedule_json()),
             (CONTENT, r#"{"any":"content"}"#.to_string()),
         ];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
         assert!(p.schedule.is_some());
     }
@@ -309,7 +381,7 @@ mod tests {
             (SCHEDULE, guardian_schedule_json()),
             (BUDGET, "garbage".to_string()),
         ];
-        let p = resolve_effective(&clauses, Some(&device()), None);
+        let p = resolve_effective(&readable(clauses), Some(&device()), None);
         assert_eq!(p.source, PolicySource::Guardian);
         assert!(
             p.budget.is_none(),
@@ -318,6 +390,86 @@ mod tests {
         // The schedule is intact and NOT the fail-safe paused one.
         assert_eq!(p.schedule.as_ref().unwrap().paused, None);
     }
+
+    /// A clause set where `unreadable` names kinds whose file is on disk and
+    /// illegible — the state a truncated `<kind>.json` leaves behind.
+    fn with_unreadable(clauses: Vec<(u16, String)>, unreadable: Vec<u16>) -> ChildClauses {
+        ChildClauses {
+            clauses,
+            unreadable,
+        }
+    }
+
+    #[test]
+    fn an_unreadable_budget_leaves_the_schedule_enforced_and_locks_the_budget() {
+        // The failure: one torn `2.json` used to take the child's schedule
+        // with it, because the whole walk aborted and the caller read the
+        // error as "no clauses" — no curfew, no cap, no lock, indefinitely.
+        let clauses = with_unreadable(vec![(SCHEDULE, guardian_schedule_json())], vec![BUDGET]);
+        let p = resolve_effective(&clauses, Some(&device()), None);
+        assert_eq!(p.source, PolicySource::Guardian);
+        assert_eq!(
+            p.schedule.as_ref().unwrap().tz,
+            "America/New_York",
+            "the readable schedule is still the guardian's own, unaltered"
+        );
+        assert_eq!(
+            p.schedule.as_ref().unwrap().paused,
+            None,
+            "and it is NOT the fail-safe paused one — only the budget was unreadable"
+        );
+        let b = p
+            .budget
+            .as_ref()
+            .expect("an unreadable budget is not an absent one");
+        assert_eq!(b.paused, Some(true));
+        assert_eq!(
+            (b.daily_minutes, b.weekly_minutes),
+            (Some(0), Some(0)),
+            "paused with no caps set reads as unbounded, so both caps are named at zero"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_schedule_locks_the_child_and_keeps_a_readable_budget() {
+        let clauses = with_unreadable(vec![(BUDGET, guardian_budget_json(60))], vec![SCHEDULE]);
+        let p = resolve_effective(&clauses, Some(&device()), None);
+        assert_eq!(p.source, PolicySource::Guardian);
+        assert_eq!(p.schedule.as_ref().unwrap().paused, Some(true));
+        assert_eq!(p.budget.as_ref().unwrap().daily_minutes, Some(60));
+    }
+
+    #[test]
+    fn an_unreadable_time_clause_still_makes_the_guardian_the_owner() {
+        // Nothing readable at all, and a device-only fallback sitting there.
+        // Falling back to device-only would be defensible; falling through to
+        // Unconstrained (what an `unwrap_or_default()`ed walk produced) is
+        // unlimited time, and that is the branch this pins shut.
+        let p = resolve_effective(
+            &with_unreadable(vec![], vec![SCHEDULE]),
+            Some(&device()),
+            None,
+        );
+        assert_eq!(p.source, PolicySource::Guardian);
+        assert_eq!(p.schedule.as_ref().unwrap().paused, Some(true));
+    }
+
+    #[test]
+    fn an_unreadable_learning_clause_does_not_fall_back_to_device_learning() {
+        // Learning is the one dimension that CREATES free time, so a list we
+        // cannot read must mean no free time — not the local admin's list.
+        const LEARNING: u16 = 5;
+        let p = resolve_effective(
+            &with_unreadable(vec![], vec![LEARNING]),
+            Some(&device()),
+            Some(&khan_learning()),
+        );
+        assert!(p.learning.is_none());
+        // …and an unreadable learning clause alone does not seize the child's
+        // screen-time: it is orthogonal, exactly as a readable one is.
+        assert_eq!(p.source, PolicySource::DeviceOnly);
+    }
+
     fn khan_learning() -> charter_proto::GrantLearning {
         charter_proto::GrantLearning::from_value(&serde_json::json!({
             "v": 1, "issuedAt": 5,
@@ -329,14 +481,14 @@ mod tests {
 
     #[test]
     fn device_learning_applies_to_a_device_only_child() {
-        let p = resolve_effective(&[], Some(&device()), Some(&khan_learning()));
+        let p = resolve_effective(&readable(vec![]), Some(&device()), Some(&khan_learning()));
         assert_eq!(p.source, PolicySource::DeviceOnly);
         assert!(
             p.learning.is_some(),
             "device learning rides device-only time"
         );
         // And to an unconstrained child (no time rules at all).
-        let p2 = resolve_effective(&[], None, Some(&khan_learning()));
+        let p2 = resolve_effective(&readable(vec![]), None, Some(&khan_learning()));
         assert!(p2.learning.is_some());
     }
 
@@ -348,7 +500,7 @@ mod tests {
         // learning clause, device learning set → NO learning in force.
         let sched = guardian_schedule_json();
         let clauses = vec![(ClauseKind::Schedule.store_key(), sched)];
-        let p = resolve_effective(&clauses, Some(&device()), Some(&khan_learning()));
+        let p = resolve_effective(&readable(clauses), Some(&device()), Some(&khan_learning()));
         assert_eq!(p.source, PolicySource::Guardian);
         assert!(p.learning.is_none());
     }
@@ -361,7 +513,7 @@ mod tests {
         let clauses = vec![(ClauseKind::Learning.store_key(), ljson)];
         let mut d = khan_learning();
         d.cap_minutes = Some(999);
-        let p = resolve_effective(&clauses, Some(&device()), Some(&d));
+        let p = resolve_effective(&readable(clauses), Some(&device()), Some(&d));
         assert_eq!(p.learning.as_ref().unwrap().cap_minutes, Some(45));
     }
 }
@@ -457,6 +609,30 @@ mod sys_tests {
         let configs = vec![("alice".to_string(), bound(SUBJ_A, None))];
         let out = resolve_child_policies(&sys, PASSWD, &configs);
         assert_eq!(out[0].1.source, PolicySource::Unconstrained);
+    }
+
+    #[test]
+    fn a_clause_directory_that_will_not_list_locks_rather_than_unconstrains() {
+        // The walk itself failing (EIO, a permissions change) says nothing
+        // about any one kind — but it used to be `unwrap_or_default()`ed into
+        // "the guardian set nothing", which on a child with a curfew and a cap
+        // is unlimited time for as long as the fault lasts.
+        let sys = MockSystem::new(1000);
+        store_guardian_schedule(&sys, SUBJ_A);
+        sys.disk().break_clause_reads();
+        let configs = vec![("alice".to_string(), bound(SUBJ_A, Some(dl())))];
+        let out = resolve_child_policies(&sys, PASSWD, &configs);
+        assert_eq!(out[0].1.source, PolicySource::Guardian);
+        assert_eq!(
+            out[0].1.schedule.as_ref().unwrap().paused,
+            Some(true),
+            "both enforcing dimensions take their fail-safe while the store is unreadable"
+        );
+        assert_eq!(
+            out[0].1.budget.as_ref().unwrap().daily_minutes,
+            Some(0),
+            "and the budget too — a schedule-less child would otherwise be uncapped"
+        );
     }
 
     #[test]

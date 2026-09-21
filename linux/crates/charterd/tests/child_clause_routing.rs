@@ -116,6 +116,7 @@ async fn subjectless_screentime_clause_routes_to_pairing_sole_subject() {
             .child_clauses()
             .clauses_for(&ALICE.to_hex())
             .unwrap()
+            .clauses
             .len(),
         0
     );
@@ -160,6 +161,7 @@ async fn subjectless_content_clause_stays_machine_wide() {
             .child_clauses()
             .clauses_for(&SOLE.to_hex())
             .unwrap()
+            .clauses
             .len(),
         0,
         "content is not per-child routed"
@@ -185,6 +187,7 @@ async fn per_child_clauses_are_independent_across_children() {
             .child_clauses()
             .clauses_for(&ALICE.to_hex())
             .unwrap()
+            .clauses
             .len(),
         1
     );
@@ -193,6 +196,7 @@ async fn per_child_clauses_are_independent_across_children() {
             .child_clauses()
             .clauses_for(&BOB.to_hex())
             .unwrap()
+            .clauses
             .len(),
         1
     );
@@ -320,6 +324,7 @@ async fn forged_per_child_clause_is_not_cached() {
             .child_clauses()
             .clauses_for(&ALICE.to_hex())
             .unwrap()
+            .clauses
             .len(),
         0,
         "a forged per-child clause must not be cached"

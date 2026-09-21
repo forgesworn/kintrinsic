@@ -55,6 +55,15 @@ pub fn read_opt(path: &Path) -> SysResult<Option<String>> {
 }
 
 /// Read + deserialize a JSON file, mapping "not found" to `None`.
+///
+/// The three outcomes are deliberately distinct, and a caller walking a
+/// directory must keep them so: `Ok(None)` is *no such file*, `Ok(Some)` is a
+/// record we have, and `Err` is *the file is there and we cannot read it* —
+/// a truncated write, a permissions change, an EIO. Propagating that `Err`
+/// out of a walk with `?` abandons every OTHER file in the directory on the
+/// strength of one bad one, and callers that then treat the error as "nothing
+/// was stored" turn one corrupt record into a wholesale loss of policy. Skip
+/// the entry and report it instead.
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> SysResult<Option<T>> {
     match read_opt(path)? {
         Some(s) => serde_json::from_str(&s)

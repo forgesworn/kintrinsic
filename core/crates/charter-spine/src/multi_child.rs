@@ -665,7 +665,11 @@ mod tests {
 
     /// A device-only-sourced policy (the standalone path).
     fn child(curfew_end: &str, daily_minutes: u32) -> EffectivePolicy {
-        resolve_effective(&[], Some(&limits(curfew_end, daily_minutes)), None)
+        resolve_effective(
+            &charter_sys::persistence::ChildClauses::default(),
+            Some(&limits(curfew_end, daily_minutes)),
+            None,
+        )
     }
 
     /// A guardian-sourced policy with the same numbers (Signet-first path).

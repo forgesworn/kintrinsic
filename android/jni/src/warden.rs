@@ -911,7 +911,7 @@ impl Warden {
         let Ok(clauses) = self.child_clauses.clauses_for(&subject.to_hex()) else {
             return String::new();
         };
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses.clauses);
         // A valid `buckets` clause is its own liveness signal here too — the
         // same fourth condition `tick()`/`time_left()` already carry (Task 9
         // review round): this is the D8 "Your charter" mirror BOTH the phone
@@ -1585,7 +1585,7 @@ impl Warden {
         let Ok(clauses) = self.child_clauses.clauses_for(&subject.to_hex()) else {
             return;
         };
-        for (kind, json) in clauses {
+        for (kind, json) in clauses.clauses {
             let issued_at = serde_json::from_str::<serde_json::Value>(&json)
                 .ok()
                 .and_then(|v| v.get("issuedAt").and_then(|x| x.as_u64()))
@@ -1629,7 +1629,7 @@ impl Warden {
     fn build_status(&self, now: u64) -> Option<StatusPayload> {
         let subject = self.subject?;
         let clauses = self.child_clauses.clauses_for(&subject.to_hex()).ok()?;
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses.clauses);
         let source = if schedule.is_some() || budget.is_some() {
             PolicySource::Guardian
         } else {
@@ -1885,7 +1885,7 @@ impl Warden {
             // I22: an unreadable store preserves prior state, skips accrual.
             Err(_) => return self.hold_decision(&subject_hex),
         };
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses.clauses);
         // The stand-down is consulted BEFORE the inert early-return: a paired
         // ward with no time rules yet is still stoppable ("an unbounded
         // charter is capped too"). Going inert first while STATUS reported
@@ -2189,7 +2189,7 @@ impl Warden {
             Ok(c) => c,
             Err(_) => return dto::TimeLeftView::unknown(),
         };
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses.clauses);
         // Same order as the tick: a standing stand-down means there IS a view
         // to report, even for a ward with no time rules. A valid `buckets`
         // clause is its own liveness signal too — tick()'s fourth condition,
@@ -2318,7 +2318,7 @@ impl Warden {
     fn budget_now(&self) -> Option<GrantBudget> {
         let subject = self.subject?;
         let clauses = self.child_clauses.clauses_for(&subject.to_hex()).ok()?;
-        resolve_effective(&clauses).1
+        resolve_effective(&clauses.clauses).1
     }
 
     /// Which packages may keep playing through the lock, and how long is left.
@@ -2411,7 +2411,7 @@ impl Warden {
     fn schedule_now(&self) -> Option<GrantSchedule> {
         let subject = self.subject?;
         let clauses = self.child_clauses.clauses_for(&subject.to_hex()).ok()?;
-        resolve_effective(&clauses).0
+        resolve_effective(&clauses.clauses).0
     }
 
     fn ensure_ledgers(&mut self, tz: &str, week_start: WeekStart, now: i64) {
@@ -3486,20 +3486,35 @@ mod tests {
         assert_eq!(policy["hidden"], json!(["com.samsung.android.bixby.agent"]));
         assert_eq!(policy["paused"], json!(true));
         // Nothing to suspend: the lists are emptied, not merely flagged.
-        assert!(policy.get("blocked").map_or(true, |b| b.as_array().unwrap().is_empty()));
-        assert!(policy.get("allowed").map_or(true, |a| a.as_array().unwrap().is_empty()));
+        assert!(policy
+            .get("blocked")
+            .map_or(true, |b| b.as_array().unwrap().is_empty()));
+        assert!(policy
+            .get("allowed")
+            .map_or(true, |a| a.as_array().unwrap().is_empty()));
         assert!(policy.get("holds").is_none(), "holds dissolved: {policy}");
-        assert!(policy.get("askFirst").is_none(), "askFirst dropped: {policy}");
+        assert!(
+            policy.get("askFirst").is_none(),
+            "askFirst dropped: {policy}"
+        );
 
         // A live one keeps the whole policy AND the hidden list.
         let ev2 = ClauseBuilder::apps(2)
             .subject(ward.pubkey())
-            .body(json!({"v":1,"posture":"blocklist","blocked":["app.example.block"],
-                "hidden":["com.samsung.android.bixby.agent"],"issuedAt":2}))
+            .body(
+                json!({"v":1,"posture":"blocklist","blocked":["app.example.block"],
+                "hidden":["com.samsung.android.bixby.agent"],"issuedAt":2}),
+            )
             .build(&guardian);
-        assert!(w.ingest_clause(&serde_json::to_string(&ev2).unwrap(), 200).accepted);
+        assert!(
+            w.ingest_clause(&serde_json::to_string(&ev2).unwrap(), 200)
+                .accepted
+        );
         let live = w.app_policy(200);
-        assert!(live.contains("app.example.block") && live.contains("bixby"), "live: {live}");
+        assert!(
+            live.contains("app.example.block") && live.contains("bixby"),
+            "live: {live}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
