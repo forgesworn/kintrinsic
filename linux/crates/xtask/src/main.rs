@@ -72,8 +72,9 @@ fn control_file(version: &str, arch: &str) -> String {
          \x20execution lockdown. Works standalone via device-only limits (set in\n\
          \x20the Screen Time settings app, no phone needed). Ships the systemd\n\
          \x20service, D-Bus policy, polkit rules, fapolicyd policy, noexec mount\n\
-         \x20units, the charter CLI, charter-lock, charter-settings, and\n\
-         \x20charter-setup. Run 'charter-setup <user>' to lock down an account.\n"
+         \x20units, the charter CLI, charter-lock, charter-xclients,\n\
+         \x20charter-settings, and charter-setup. Run 'charter-setup <user>' to\n\
+         \x20lock down an account.\n"
     )
 }
 
@@ -192,6 +193,15 @@ fn build_deb() -> Result<(), String> {
     stage(
         &rel.join("charter-lock"),
         &stage_dir.join("usr/bin/charter-lock"),
+        true,
+    )?;
+    // The window→process probe the named time model meters from. Needs no
+    // privilege (it only reads an X display charterd hands it the auth for),
+    // so it installs beside charter-lock in usr/bin; charterd spawns it under
+    // `timeout 2` because the display belongs to the ward.
+    stage(
+        &rel.join("charter-xclients"),
+        &stage_dir.join("usr/bin/charter-xclients"),
         true,
     )?;
     stage(

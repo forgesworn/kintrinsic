@@ -47,6 +47,11 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+# `charter-xclients` asks the X SERVER who owns each window (XRes
+# QueryClientIds) instead of believing `_NET_WM_PID`, which any client on the
+# display can delete or rewrite. Pure-Rust wire protocol, no libxcb/Xlib C deps
+# — same version and style as charter-lock, so it builds on the headless gate.
+x11rb = { version = "0.13", default-features = false, features = ["res"] }
 # real-only: the live org.forgesworn.Charter1 zbus server.
 zbus = { version = "4.4", optional = true, default-features = false, features = [
     "tokio",

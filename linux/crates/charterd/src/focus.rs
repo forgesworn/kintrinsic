@@ -4,10 +4,21 @@
 //! The identity ladder (weakest → strongest) is deliberate: window titles are
 //! page-controlled and are NOT consulted; matching is on OS-side identities
 //! only — the launcher cmdline markers for site apps, the executable path /
-//! flatpak id for native apps. The probe shells out to `xprop` with the active
-//! session's DISPLAY/XAUTHORITY (per-command env — charterd is multi-threaded,
-//! so no process-global env mutation) under the same hard-timeout discipline
-//! as `loginctl`: a wedged X server degrades attribution, never the tick loop.
+//! flatpak id for native apps. The probe shells out to `charter-xclients` with
+//! the active session's DISPLAY/XAUTHORITY (per-command env — charterd is
+//! multi-threaded, so no process-global env mutation) under the same
+//! hard-timeout discipline as `loginctl`: a wedged X server degrades
+//! attribution, never the tick loop.
+//!
+//! **Window→process attribution comes from the X server, never from a
+//! property.** This module used to read `_NET_WM_PID` and `_NET_CLIENT_LIST`
+//! with `xprop`, and X lets every client on a display rewrite every other
+//! client's properties: one `xprop -remove _NET_WM_PID` made a metered app
+//! unattributable, and under `TimeModel::Named` an unattributable window
+//! charged nothing at all. `charter-xclients` asks XRes `QueryClientIds`
+//! instead — the server derives the pid from the owning client's socket peer
+//! credentials — and takes the window set from the real window tree as well as
+//! the property, so the property can only ever ADD windows now.
 //!
 //! Fail-closed: ANY failure (no display, no active window, no PID, unreadable
 //! /proc) attributes `Bucket::Screen` — an error can never make time free.
@@ -17,65 +28,73 @@ use std::process::Command;
 use charter_proto::{LearningApp, LearningAppKind};
 use charter_schedule::Bucket;
 
-/// Parse `xprop -root -notype _NET_ACTIVE_WINDOW` output → window id.
-/// Format: `_NET_ACTIVE_WINDOW: window id # 0x3c00007` (may list several ids;
-/// the first is the active one; `0x0` means none).
-pub fn parse_active_window(out: &str) -> Option<String> {
-    let id = out.split('#').nth(1)?.split(',').next()?.trim();
-    if !id.starts_with("0x") || id == "0x0" {
+/// What the X server says is on the display right now, as one
+/// `charter-xclients` run reports it.
+///
+/// Every pid here came from XRes `QueryClientIds` — the server's own record of
+/// which connection created the window, taken from that socket's peer
+/// credentials. Nothing in this struct is readable, writable or deletable by a
+/// client on the display, which is the whole point of it: the properties this
+/// module used to read (`_NET_WM_PID`, `_NET_CLIENT_LIST`) are all three.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XSnapshot {
+    /// `GetInputFocus`, resolved to an owning pid. `None` when the focus is
+    /// `None`/`PointerRoot`/the root, or when the server would not name a pid.
+    focus: Option<u32>,
+    /// The root's `_NET_ACTIVE_WINDOW`, resolved the same way. Advisory — the
+    /// window manager writes it and the ward can rewrite it, which is exactly
+    /// why it is kept SEPARATE from `focus` rather than merged into it.
+    active: Option<u32>,
+    /// Every distinct window found, and its owning pid. `None` is a window the
+    /// server would not attribute (a TCP / forwarded client, or one that closed
+    /// mid-probe) — evidence of a window, never evidence of no window.
+    windows: Vec<(String, Option<u32>)>,
+    /// One of the helper's budgets truncated this answer, so `windows` is a
+    /// PREFIX of what is on the display rather than the whole of it.
+    ///
+    /// This is the flood defence's other half. A cap that quietly returned a
+    /// short list would be a bypass in its own right: open more windows than
+    /// the helper will walk, delete `_NET_CLIENT_LIST`, and the snapshot comes
+    /// back with no app in it and no `-` either — which reads as "nothing
+    /// costing is open" and charges nothing. Treated everywhere below exactly
+    /// like an unattributable window: it widens the process set and withdraws
+    /// the free-learning credit, never the reverse.
+    capped: bool,
+}
+
+/// Parse `charter-xclients` stdout. Pure, so the whole wire format is tested
+/// without a display.
+///
+/// Strict on the version line and forgiving about everything after it: a line
+/// kind this build does not know is skipped rather than failing the snapshot,
+/// so a newer helper against an older daemon degrades to "fewer facts" instead
+/// of "no display". The version line itself is not negotiable — a `v2` that
+/// reused `win` for something else would otherwise be silently mis-metered.
+pub fn parse_xsnapshot(out: &str) -> Option<XSnapshot> {
+    let mut lines = out.lines();
+    if lines.next()?.trim() != "v1" {
         return None;
     }
-    Some(id.to_string())
+    let mut snap = XSnapshot::default();
+    for line in lines {
+        let mut f = line.split_whitespace();
+        match (f.next(), f.next(), f.next(), f.next()) {
+            (Some("capped"), None, _, _) => snap.capped = true,
+            (Some("focus"), Some(pid), None, _) => snap.focus = parse_pid_field(pid),
+            (Some("active"), Some(pid), None, _) => snap.active = parse_pid_field(pid),
+            (Some("win"), Some(id), Some(pid), None) => {
+                snap.windows.push((id.to_string(), parse_pid_field(pid)));
+            }
+            _ => {}
+        }
+    }
+    Some(snap)
 }
 
-/// Parse `xprop -id <id> -notype _NET_WM_PID` output → pid.
-/// Format: `_NET_WM_PID = 12345` (absent property → no `=` / not a number).
-pub fn parse_wm_pid(out: &str) -> Option<u32> {
-    out.split('=').nth(1)?.trim().parse().ok()
-}
-
-/// Parse `xprop -root -notype _NET_CLIENT_LIST` output → every managed
-/// top-level window id, in stacking-independent order.
-/// Format: `_NET_CLIENT_LIST: window id # 0x2200003, 0x2400003, 0x3c00007`.
-/// An empty desktop yields an empty list (the property exists with no ids).
-///
-/// # Why the window list, and not the process table
-///
-/// Under [`charter_schedule::TimeModel::Named`] a costing app is charged while
-/// it has a window OPEN — not while it is focused, and not while its process
-/// merely exists.
-///
-/// Focus is the wrong test on a machine with two monitors: a game full-screen
-/// on one and YouTube on the other are both plainly being used, and only one
-/// of them can hold focus. That asymmetry is the entire bug this model exists
-/// to fix.
-///
-/// Process liveness is the wrong test because chat clients are resident BY
-/// DESIGN — that is how messages arrive. WhatsApp, Discord, Slack, Steam and
-/// Spotify all keep running after you "close" them, and charging a child all
-/// day for an app they opened once at breakfast, with no way to see why, is
-/// indefensible.
-///
-/// The window list separates those two cleanly, and does it by a property of
-/// how tray apps actually behave rather than by a list Kintrinsic would have to
-/// maintain: an app that minimises to the tray **destroys** its window, so the
-/// window manager stops listing it while its process lives on. Tray-resident
-/// software falls out of this test for free — no allowlist of background apps,
-/// nothing to keep up to date.
-///
-/// A MINIMISED window is still listed here, and that is deliberate: audio keeps
-/// playing when a video is minimised, it is one click from being back, and
-/// "hide it to stop the clock" is the wrong lesson. Close it, don't hide it.
-pub fn parse_client_list(out: &str) -> Vec<String> {
-    let Some(after) = out.split('#').nth(1) else {
-        return Vec::new();
-    };
-    after
-        .split(',')
-        .map(str::trim)
-        .filter(|id| id.starts_with("0x") && *id != "0x0")
-        .map(str::to_string)
-        .collect()
+/// One `<pid|->` field. `-` and anything unparseable are the same answer: the
+/// server did not name a pid for this window.
+fn parse_pid_field(field: &str) -> Option<u32> {
+    field.parse().ok()
 }
 
 /// Every named allowance represented by the processes currently holding a
@@ -466,12 +485,24 @@ pub fn user_installed_ids(
         .collect()
 }
 
-/// One `xprop` invocation against the active session's display, hard-capped at
-/// 2s (same rationale as `loginctl_value`: a wedged X server must degrade a
-/// tick, never stall the loop).
-fn xprop(display: &str, xauth: Option<&str>, args: &[&str]) -> Option<String> {
+/// Where the helper lives once installed. Overridable the same way the lock
+/// binary's path is (`CHARTER_LOCK_BIN`), so a dev tree can point at
+/// `target/debug/charter-xclients` without installing the `.deb`.
+const XCLIENTS_BIN: &str = "/usr/bin/charter-xclients";
+
+/// One `charter-xclients` run against the active session's display, hard-capped
+/// at 2s (same rationale as `loginctl_value`: a wedged X server must degrade a
+/// tick, never stall the loop — and the display belongs to the ward, so "wedged
+/// on purpose" is a case, not an accident).
+///
+/// `None` means **the display could not be read**: the helper is missing, it
+/// could not connect, the server has no XRes 1.2, or it was killed by the
+/// timeout. That is a different fact from "nothing is open", and every caller
+/// here keeps the two apart.
+fn xsnapshot(display: &str, xauth: Option<&str>) -> Option<XSnapshot> {
+    let bin = std::env::var("CHARTER_XCLIENTS_BIN").unwrap_or_else(|_| XCLIENTS_BIN.to_string());
     let mut cmd = Command::new("timeout");
-    cmd.arg("2").arg("xprop").args(args);
+    cmd.arg("2").arg(bin);
     cmd.env("DISPLAY", display);
     if let Some(a) = xauth {
         cmd.env("XAUTHORITY", a);
@@ -480,7 +511,7 @@ fn xprop(display: &str, xauth: Option<&str>, args: &[&str]) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    parse_xsnapshot(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Read the focused process's identity off /proc.
@@ -611,6 +642,52 @@ pub fn attribute(
     (bucket, bucket_id, unrecognised)
 }
 
+/// Which process is in FRONT, per the snapshot: the `GetInputFocus` pid, which
+/// is the server's own answer and cannot be written by a client. `active`
+/// (`_NET_ACTIVE_WINDOW`, written by the window manager) is the fallback for
+/// the servers and desktops where focus legitimately reads as nothing.
+fn foreground_pid(snap: &XSnapshot) -> Option<u32> {
+    snap.focus.or(snap.active)
+}
+
+/// The one place `_NET_ACTIVE_WINDOW` is allowed to influence a verdict, and it
+/// can only ever make time COST more.
+///
+/// The server's focus and the window manager's `_NET_ACTIVE_WINDOW` normally
+/// name the same client. When they disagree, one of two things is true: the
+/// desktop is mid app-switch (the WM has moved the property, the server has not
+/// yet moved focus, or vice versa), or somebody rewrote the property to point
+/// the meter at a free app while using another. The second is a bypass and the
+/// first costs exactly one tick, so the disagreement is resolved in the only
+/// safe direction: a free-learning credit is withdrawn for that tick and the
+/// time is charged as screen time. `Screen` is already the costing answer and
+/// is left alone — this rule only ever removes a waiver, never adds one.
+///
+/// **Only a genuine disagreement counts — BOTH sources present, and different.**
+/// A missing one is not a contradiction, and treating it as one made free
+/// learning unreachable on whole classes of honest desktop: a session with no
+/// EWMH window manager has no `_NET_ACTIVE_WINDOW` to compare against, and
+/// focus-follows-mouse (or a pointer over the root) legitimately reports no
+/// focus at all, so a first cut of this rule charged every single tick on
+/// those machines and never said why.
+///
+/// A `capped` snapshot IS a reason to withdraw the credit, and a different
+/// one: the display was not read in full, so "the only thing in front is a
+/// learning app" is a claim this tick has no standing to make.
+pub fn downgrade_on_focus_mismatch(bucket: Bucket, snap: &XSnapshot) -> Bucket {
+    if bucket != Bucket::Learning {
+        return bucket;
+    }
+    let disagree = match (snap.focus, snap.active) {
+        (Some(focus), Some(active)) => focus != active,
+        _ => false,
+    };
+    if disagree || snap.capped {
+        return Bucket::Screen;
+    }
+    bucket
+}
+
 /// Probe the foreground window ONCE and answer three questions about it: which
 /// meter it feeds (learning vs screen), which named bucket it spends, and
 /// whether it is unrecognised (§2.3 — see [`is_unrecognised`] for the
@@ -619,7 +696,13 @@ pub fn attribute(
 /// All three are read off a single X probe because two probes could straddle
 /// an app switch and credit one app's second to another app's allowance. The
 /// actual decision is [`attribute`], the pure/tested core; this is only the
-/// impure probe wrapped around it.
+/// impure probe wrapped around it, plus
+/// [`downgrade_on_focus_mismatch`].
+///
+/// `unrecognised` is deliberately computed BEFORE the downgrade: a waiver
+/// withdrawn because two sources disagreed about focus is not evidence of
+/// software Kintrinsic cannot vouch for, and this counter never claims a
+/// finding it has no basis for.
 #[allow(clippy::too_many_arguments)]
 pub fn attribute_tick(
     display: &str,
@@ -629,11 +712,10 @@ pub fn attribute_tick(
     user_installed: Option<&std::collections::BTreeSet<String>>,
     governed: &[String],
 ) -> (Bucket, Option<String>, bool) {
-    let probe = || -> Option<FocusedProcess> {
-        let root = xprop(display, xauth, &["-root", "-notype", "_NET_ACTIVE_WINDOW"])?;
-        let win = parse_active_window(&root)?;
-        let prop = xprop(display, xauth, &["-id", &win, "-notype", "_NET_WM_PID"])?;
-        focused_process(parse_wm_pid(&prop)?)
+    let probe = || -> Option<(XSnapshot, FocusedProcess)> {
+        let snap = xsnapshot(display, xauth)?;
+        let p = focused_process(foreground_pid(&snap)?)?;
+        Some((snap, p))
     };
     match probe() {
         // Fail-safe on ALL THREE counts: no probe means Screen (an error must
@@ -642,7 +724,10 @@ pub fn attribute_tick(
         // reading the window is not evidence of unrecognised software, and
         // this counter must never claim a finding it has no basis for.
         None => (Bucket::Screen, None, false),
-        Some(p) => attribute(&p, apps, buckets, user_installed, governed),
+        Some((snap, p)) => {
+            let (bucket, id, unrecognised) = attribute(&p, apps, buckets, user_installed, governed);
+            (downgrade_on_focus_mismatch(bucket, &snap), id, unrecognised)
+        }
     }
 }
 
@@ -658,85 +743,192 @@ pub fn bucket_for_tick(
     if apps.is_empty() {
         return Bucket::Screen;
     }
-    let probe = || -> Option<FocusedProcess> {
-        let root = xprop(display, xauth, &["-root", "-notype", "_NET_ACTIVE_WINDOW"])?;
-        let win = parse_active_window(&root)?;
-        let prop = xprop(display, xauth, &["-id", &win, "-notype", "_NET_WM_PID"])?;
-        focused_process(parse_wm_pid(&prop)?)
+    let probe = || -> Option<(XSnapshot, FocusedProcess)> {
+        let snap = xsnapshot(display, xauth)?;
+        let p = focused_process(foreground_pid(&snap)?)?;
+        Some((snap, p))
     };
     match probe() {
-        Some(p) => classify(&p, apps, user_installed),
+        Some((snap, p)) => downgrade_on_focus_mismatch(classify(&p, apps, user_installed), &snap),
         None => Bucket::Screen,
     }
 }
-
-/// Window id → the pid that owns it, remembered across ticks.
-///
-/// One `xprop` is one process spawn. Asking for the client list and then a pid
-/// per window would be thirty-odd spawns every two seconds on an ordinary
-/// desktop — a meter that costs more than the thing it measures. Window ids are
-/// stable for a window's lifetime, so the steady state here is ONE spawn per
-/// tick (the list itself) plus one for each genuinely new window.
-///
-/// `None` is cached too, and on purpose: a window whose `_NET_WM_PID` is absent
-/// (some panels, some remote clients) would otherwise be re-probed forever.
-pub type WindowPidCache = std::collections::BTreeMap<String, Option<u32>>;
 
 /// Probe every open window ONCE and answer which named allowances are being
 /// spent right now — the [`charter_schedule::TimeModel::Named`] counterpart to
 /// [`attribute_tick`].
 ///
-/// Returns the deduplicated, sorted bucket ids. An empty result means nothing
-/// costing is open, which in `Named` means **nothing is charged at all** — so
-/// the fail direction matters: a display we cannot read, an `xprop` that times
-/// out, a window that vanished mid-probe, all yield fewer ids and therefore
-/// charge LESS. That is the right way round. This meter's errors must never
-/// invent time a child did not spend, and a child under-charged by a flaky
-/// probe is recoverable in a way a false accusation is not.
+/// # Why the window set, and not the process table
 ///
-/// `cache` is retained by the caller across ticks; entries for windows that
-/// have closed are dropped here, so it cannot grow without bound.
+/// Under [`charter_schedule::TimeModel::Named`] a costing app is charged while
+/// it has a window OPEN — not while it is focused, and not while its process
+/// merely exists.
+///
+/// Focus is the wrong test on a machine with two monitors: a game full-screen
+/// on one and YouTube on the other are both plainly being used, and only one
+/// of them can hold focus. That asymmetry is the entire bug this model exists
+/// to fix.
+///
+/// Process liveness is the wrong test because chat clients are resident BY
+/// DESIGN — that is how messages arrive. WhatsApp, Discord, Slack, Steam and
+/// Spotify all keep running after you "close" them, and charging a child all
+/// day for an app they opened once at breakfast, with no way to see why, is
+/// indefensible.
+///
+/// The window set separates those two cleanly, and does it by a property of
+/// how tray apps actually behave rather than by a list Kintrinsic would have to
+/// maintain: an app that minimises to the tray **destroys** its window, so it
+/// stops being on the display while its process lives on. Tray-resident
+/// software falls out of this test for free — no allowlist of background apps,
+/// nothing to keep up to date.
+///
+/// A MINIMISED window is still counted, and that is deliberate: audio keeps
+/// playing when a video is minimised, it is one click from being back, and
+/// "hide it to stop the clock" is the wrong lesson. Close it, don't hide it.
+///
+/// # The fail direction, restated
+///
+/// **`None` means the display could not be read**; `Some(vec![])` means it was
+/// read fine and nothing costing is open. They are charged differently (see
+/// [`charter_spine::multi_child::MultiChildEnforcer::tick_open`]) and the
+/// distinction is the point.
+///
+/// The doc this replaces argued that under-charging is always the right
+/// direction for a probe failure. That is true of a FLAKY probe — one window
+/// that vanished mid-probe, one tick lost to load — and it is what `Some`
+/// still expresses. It is not true of a display that cannot be read at all: a
+/// Wayland seat, a killed X server, a helper the ward managed to make fail
+/// every time. "Charge nothing, forever" is not under-charging by a tick, it
+/// is an uncapped day, and an unreadable display is not a flaky probe.
 pub fn open_bucket_ids_tick(
     display: &str,
     xauth: Option<&str>,
     buckets: &charter_schedule::GrantBuckets,
-    cache: &mut WindowPidCache,
-) -> Vec<String> {
+    ward_uid: u32,
+) -> Option<Vec<String>> {
     if buckets.is_paused() || !buckets.is_valid() || buckets.buckets.is_empty() {
-        return Vec::new();
+        // Nothing to meter, so nothing to be unable to read. This must stay
+        // `Some`: a family with no buckets clause is not a family whose
+        // display is broken, and reporting it as one would charge them the
+        // screen baseline under a model that has no baseline.
+        return Some(Vec::new());
     }
-    let Some(root) = xprop(display, xauth, &["-root", "-notype", "_NET_CLIENT_LIST"]) else {
-        return Vec::new();
-    };
-    let windows = parse_client_list(&root);
-    // Drop closed windows before adding new ones — the cache tracks what is
-    // open, not everything that ever was.
-    cache.retain(|id, _| windows.contains(id));
-    let mut procs: Vec<FocusedProcess> = Vec::new();
-    let mut seen_pids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    for win in &windows {
-        let pid = match cache.get(win) {
-            Some(cached) => *cached,
-            None => {
-                let probed = xprop(display, xauth, &["-id", win, "-notype", "_NET_WM_PID"])
-                    .and_then(|p| parse_wm_pid(&p));
-                cache.insert(win.clone(), probed);
-                probed
+    let snap = xsnapshot(display, xauth)?;
+    Some(open_bucket_ids_for_snapshot(
+        &snap,
+        buckets,
+        focused_process,
+        || ward_pids(ward_uid),
+        crate::ancestry::read_proc,
+    ))
+}
+
+/// The pure core of [`open_bucket_ids_tick`]: snapshot in, bucket ids out, with
+/// `/proc` injected. Split out so the unidentified-window rule below is tested
+/// against a synthetic window set rather than only ever on a live desktop —
+/// which is how the focus-only path went untested as a COMPOSITION for so long.
+///
+/// # The unidentified-window fallback
+///
+/// A window the server will not attribute (`-`) is a real window with a real
+/// owner: a TCP or X-forwarded client, whose pid lives on another machine or
+/// behind a socket with no peer credentials to read. Treating it as "no app" is
+/// the free pass this whole change exists to close — `ssh -X` into the family
+/// NAS and run the game there, and the meter sees a window belonging to nobody.
+///
+/// So with evidence of even one such window, "running" is taken as "open" for
+/// that tick: every process the ward owns is fed to the matcher alongside the
+/// windows that DID resolve. That deliberately re-admits the tray-resident
+/// over-charge the window test exists to avoid — but only for a ward who has an
+/// unattributable window on screen, only while it is there, and only ever in
+/// the costing direction. The ordinary desktop never touches this path.
+///
+/// A `capped` snapshot triggers the same fallback for the same reason. A
+/// truncated window set is a set that may be missing the very window the ward
+/// is using — indistinguishable, from here, from a window we could see and
+/// could not name.
+pub fn open_bucket_ids_for_snapshot<R, W, F>(
+    snap: &XSnapshot,
+    buckets: &charter_schedule::GrantBuckets,
+    read: R,
+    ward_procs: W,
+    lookup: F,
+) -> Vec<String>
+where
+    R: Fn(u32) -> Option<FocusedProcess>,
+    W: Fn() -> Vec<u32>,
+    F: Fn(u32) -> Option<crate::ancestry::ProcId> + Copy,
+{
+    let mut pids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut unattributed = false;
+    for (_, pid) in &snap.windows {
+        match pid {
+            Some(pid) => {
+                pids.insert(*pid);
             }
-        };
-        // One process, many windows (a browser's several windows, an app's
-        // dialogs) is read from `/proc` once. This is only an optimisation —
-        // `open_bucket_ids` dedupes by bucket regardless — but it keeps a
-        // window-heavy desktop from re-reading the same process repeatedly.
-        if let Some(pid) = pid {
-            if seen_pids.insert(pid) {
-                if let Some(p) = focused_process(pid) {
-                    procs.push(p);
-                }
-            }
+            None => unattributed = true,
         }
     }
-    open_bucket_ids(&procs, buckets, crate::ancestry::read_proc)
+    if unattributed || snap.capped {
+        pids.extend(ward_procs());
+    }
+    // One process, many windows (a browser's several windows, an app's
+    // dialogs) is read from `/proc` once. Only an optimisation —
+    // `open_bucket_ids` dedupes by bucket regardless — but it keeps a
+    // window-heavy desktop from re-reading the same process repeatedly.
+    let procs: Vec<FocusedProcess> = pids.iter().filter_map(|pid| read(*pid)).collect();
+    open_bucket_ids(&procs, buckets, lookup)
+}
+
+/// How many ward-owned processes the fallback will consider, and how long it
+/// will spend finding them.
+///
+/// The fallback runs inside a tick the daemon repeats every two seconds, and
+/// each pid it returns costs a `/proc` read plus an ancestry walk downstream.
+/// A ward with more than [`WARD_PROC_MAX`] live processes is already at their
+/// `RLIMIT_NPROC`/`pids.max` ceiling — that is a cgroup's job to answer, not a
+/// meter's — and spending the whole tick enumerating them would turn the
+/// fallback into its own denial of service against the display probe.
+const WARD_PROC_MAX: usize = 2048;
+const WARD_PROC_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Every pid the ward owns, from `/proc`. Feeds the unidentified-window
+/// fallback above and nothing else — this is the expensive answer, and it is
+/// only ever asked for when the display could not be fully attributed.
+///
+/// Ownership is the owning uid of `/proc/<pid>` itself, which the kernel writes
+/// from the process's own credentials. An unreadable `/proc`, a pid that exited
+/// between the readdir and the stat, and a non-numeric entry all simply drop
+/// out: this set can only ever ADD candidate processes, so missing one
+/// under-charges a tick and inventing one is impossible.
+///
+/// Hitting either bound **keeps** everything found so far rather than giving
+/// up — the fallback's job is to raise the charge, and a partial answer still
+/// does that. Returning nothing on a flood would hand the ward the free pass
+/// back by making the expensive path the one that fails open.
+fn ward_pids(uid: u32) -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let started = std::time::Instant::now();
+    let mut out = Vec::new();
+    for entry in dir.flatten() {
+        if out.len() >= WARD_PROC_MAX || started.elapsed() >= WARD_PROC_BUDGET {
+            break;
+        }
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if entry.metadata().is_ok_and(|md| md.uid() == uid) {
+            out.push(pid);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -756,21 +948,94 @@ mod tests {
         }
     }
 
+    /// A whole desktop as `charter-xclients` reports it, including the two
+    /// shapes the old property-based probe could not express at all: a window
+    /// the SERVER declined to attribute, and "read fine, nothing here".
     #[test]
-    fn client_list_parses_every_window_and_an_empty_desktop() {
+    fn a_snapshot_parses_every_line_kind() {
+        let snap = parse_xsnapshot(
+            "v1\n\
+             focus 4242\n\
+             active 4242\n\
+             win 0x2200003 4242\n\
+             win 0x2400003 91\n\
+             win 0x3c00007 -\n",
+        )
+        .expect("a v1 snapshot parses");
+        assert!(!snap.capped);
+        assert_eq!(snap.focus, Some(4242));
+        assert_eq!(snap.active, Some(4242));
         assert_eq!(
-            parse_client_list("_NET_CLIENT_LIST: window id # 0x2200003, 0x2400003, 0x3c00007"),
-            vec!["0x2200003", "0x2400003", "0x3c00007"]
+            snap.windows,
+            vec![
+                ("0x2200003".to_string(), Some(4242)),
+                ("0x2400003".to_string(), Some(91)),
+                // `-` is a window we know about and cannot attribute. It must
+                // survive parsing as a distinct fact, because it is what
+                // triggers the ward-process fallback downstream.
+                ("0x3c00007".to_string(), None),
+            ]
         );
-        assert_eq!(
-            parse_client_list("_NET_CLIENT_LIST: window id # 0x2200003"),
-            vec!["0x2200003"]
+    }
+
+    /// The helper says when one of its budgets bit. Without this line a flood
+    /// of windows would come back as a short, confident, EMPTY-looking answer
+    /// — which is the fail-open the cap was supposed to prevent.
+    #[test]
+    fn a_truncated_answer_says_so() {
+        let snap = parse_xsnapshot("v1\ncapped\nfocus -\nactive -\nwin 0x1 4242\n")
+            .expect("a capped snapshot is still a snapshot");
+        assert!(snap.capped);
+        assert_eq!(snap.windows, vec![("0x1".to_string(), Some(4242))]);
+        // `capped` takes no argument; a line that looks like it but carries
+        // one is an unknown line kind, not a cap.
+        assert!(
+            !parse_xsnapshot("v1\ncapped 1\n")
+                .expect("still parses")
+                .capped
         );
-        // An empty desktop: the property exists, with no ids after the hash.
-        assert!(parse_client_list("_NET_CLIENT_LIST: window id # ").is_empty());
-        // A display we could not read at all.
-        assert!(parse_client_list("_NET_CLIENT_LIST:  not found.").is_empty());
-        assert!(parse_client_list("garbage").is_empty());
+    }
+
+    /// An empty desktop is a SUCCESSFUL read that found nothing — `Some` with
+    /// no windows, never `None`. `None` is reserved for "could not read the
+    /// display", and conflating the two is the bug this all exists to close.
+    #[test]
+    fn an_empty_desktop_is_a_successful_snapshot() {
+        let snap = parse_xsnapshot("v1\nfocus -\nactive -\n").expect("still a valid snapshot");
+        assert_eq!(snap.focus, None);
+        assert_eq!(snap.active, None);
+        assert!(snap.windows.is_empty());
+        // Trailing whitespace on the version line is tolerated.
+        assert!(parse_xsnapshot("v1  \n").is_some());
+        // And a snapshot with no lines at all after the version.
+        assert_eq!(parse_xsnapshot("v1"), Some(XSnapshot::default()));
+    }
+
+    /// Anything that is not a `v1` snapshot is NOT a snapshot. The helper exits
+    /// non-zero on every failure it knows about, so this is the belt to that
+    /// braces: a truncated pipe, a shell error page, a future `v2` that reused
+    /// `win` for something else must all read as "display unreadable" rather
+    /// than as an empty desktop.
+    #[test]
+    fn anything_that_is_not_v1_is_not_a_snapshot() {
+        assert_eq!(parse_xsnapshot(""), None);
+        assert_eq!(parse_xsnapshot("garbage\nwin 0x1 5\n"), None);
+        assert_eq!(parse_xsnapshot("v2\nwin 0x1 5\n"), None);
+        // Unknown line kinds and malformed lines inside a v1 snapshot are
+        // skipped, not fatal — a newer helper must degrade to fewer facts.
+        let snap = parse_xsnapshot(
+            "v1\n\
+             \n\
+             screens 2\n\
+             win\n\
+             win 0x1\n\
+             win 0x1 5 extra\n\
+             focus notanumber\n\
+             win 0x2200003 4242\n",
+        )
+        .expect("unknown lines are skipped");
+        assert_eq!(snap.focus, None);
+        assert_eq!(snap.windows, vec![("0x2200003".to_string(), Some(4242))]);
     }
 
     /// THE COUNT-ONCE RULE. Two members of the same allowance open at the same
@@ -889,6 +1154,144 @@ mod tests {
         assert!(open_bucket_ids(&[], &buckets, |_| None).is_empty());
     }
 
+    /// One bucket, one member, for the snapshot-level tests below.
+    fn play_bucket() -> charter_schedule::GrantBuckets {
+        charter_schedule::GrantBuckets {
+            v: 1,
+            buckets: vec![charter_schedule::AppBucket {
+                id: "play".into(),
+                label: "Play".into(),
+                apps: vec!["/usr/games/supertux2".into()],
+                daily_minutes: Some(60),
+                weekly_minutes: None,
+            }],
+            paused: None,
+            tz: "UTC".into(),
+            week_start: None,
+            issued_at: 1,
+        }
+    }
+
+    /// A `/proc` that knows exactly one thing: pid 10 is the game.
+    fn fake_proc(pid: u32) -> Option<FocusedProcess> {
+        (pid == 10).then(|| FocusedProcess {
+            cmdline: vec!["/usr/games/supertux2".into()],
+            exe: Some("/usr/games/supertux2".into()),
+            exe_uid: Some(0),
+            cgroup: None,
+            pid,
+        })
+    }
+
+    fn win(id: &str, pid: Option<u32>) -> (String, Option<u32>) {
+        (id.to_string(), pid)
+    }
+
+    /// The ordinary desktop: every window has a server-attributed owner, so
+    /// the answer is what the window set says and nothing else is consulted.
+    #[test]
+    fn attributed_windows_name_their_allowances_and_nothing_more() {
+        let calls = std::cell::Cell::new(0u32);
+        let ids = open_bucket_ids_for_snapshot(
+            &XSnapshot {
+                focus: Some(10),
+                active: Some(10),
+                windows: vec![win("0x1", Some(10)), win("0x2", Some(99))],
+                capped: false,
+            },
+            &play_bucket(),
+            fake_proc,
+            || {
+                calls.set(calls.get() + 1);
+                vec![10]
+            },
+            |_| None,
+        );
+        assert_eq!(ids, vec!["play"]);
+        // THE POINT: the expensive, over-charging fallback is not a default.
+        // A desktop the server can fully attribute never touches it, so the
+        // tray-resident over-charge the window test exists to avoid stays
+        // avoided.
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// A window the SERVER will not attribute — an `ssh -X` / TCP client,
+    /// whose pid is on another machine — must not be a free pass. With
+    /// evidence of one on screen, "running" counts as "open" for that tick.
+    #[test]
+    fn an_unattributable_window_falls_back_to_every_ward_process() {
+        let ids = open_bucket_ids_for_snapshot(
+            &XSnapshot {
+                focus: None,
+                active: None,
+                // The only window on screen belongs to nobody we can name,
+                // and the game's own window is not in the set at all.
+                windows: vec![win("0x1", None)],
+                capped: false,
+            },
+            &play_bucket(),
+            fake_proc,
+            || vec![10, 77],
+            |_| None,
+        );
+        assert_eq!(ids, vec!["play"]);
+    }
+
+    /// THE FLOOD BYPASS, closed. Open more windows than the helper will walk,
+    /// delete `_NET_CLIENT_LIST`, focus something worthless: every window in
+    /// the snapshot resolves, so there is no `-` to trigger the fallback, and
+    /// the app actually being used is not in the set at all. `capped` is the
+    /// only thing standing between that and a free afternoon.
+    #[test]
+    fn a_capped_snapshot_falls_back_even_with_no_unattributed_window() {
+        let ids = open_bucket_ids_for_snapshot(
+            &XSnapshot {
+                focus: Some(99),
+                active: Some(99),
+                // Every window here is attributed — to junk the ward opened
+                // to push the real one out of the walk.
+                windows: vec![win("0x1", Some(99)), win("0x2", Some(99))],
+                capped: true,
+            },
+            &play_bucket(),
+            fake_proc,
+            || vec![10, 99],
+            |_| None,
+        );
+        assert_eq!(ids, vec!["play"]);
+    }
+
+    /// And the fallback is scoped to the evidence: one unattributable window
+    /// among several attributed ones still widens the set, but a set with no
+    /// `-` in it never does.
+    #[test]
+    fn the_fallback_is_triggered_by_evidence_not_by_emptiness() {
+        let empty_but_readable = open_bucket_ids_for_snapshot(
+            &XSnapshot::default(),
+            &play_bucket(),
+            fake_proc,
+            || vec![10],
+            |_| None,
+        );
+        // Nothing open, nothing unattributable: free by absence, which is the
+        // whole promise of the named model.
+        assert!(empty_but_readable.is_empty());
+
+        let mixed = open_bucket_ids_for_snapshot(
+            &XSnapshot {
+                focus: Some(99),
+                active: Some(99),
+                windows: vec![win("0x1", Some(99)), win("0x2", None)],
+                capped: false,
+            },
+            &play_bucket(),
+            fake_proc,
+            || vec![10],
+            |_| None,
+        );
+        assert_eq!(mixed, vec!["play"]);
+    }
+
     /// The same pinned window, but one the guardian put in a costing group:
     /// it still materialises and is still resolver-pinned, and its seconds are
     /// charged like any other app.
@@ -929,23 +1332,84 @@ mod tests {
         std::collections::BTreeSet::new()
     }
 
+    /// `_NET_ACTIVE_WINDOW` contradicting the server's own focus is either an
+    /// app switch caught mid-flight or somebody aiming the meter at a free app
+    /// while using another. Both are settled the same way and in one
+    /// direction: the free credit goes, the time costs.
     #[test]
-    fn xprop_outputs_parse() {
+    fn a_focus_active_disagreement_withdraws_the_free_credit_only() {
+        let agree = XSnapshot {
+            focus: Some(10),
+            active: Some(10),
+            windows: vec![],
+            capped: false,
+        };
+        let disagree = XSnapshot {
+            focus: Some(10),
+            active: Some(11),
+            windows: vec![],
+            capped: false,
+        };
         assert_eq!(
-            parse_active_window("_NET_ACTIVE_WINDOW: window id # 0x3c00007"),
-            Some("0x3c00007".into())
+            downgrade_on_focus_mismatch(Bucket::Learning, &agree),
+            Bucket::Learning
         );
         assert_eq!(
-            parse_active_window("_NET_ACTIVE_WINDOW: window id # 0x3c00007, 0x0"),
-            Some("0x3c00007".into())
+            downgrade_on_focus_mismatch(Bucket::Learning, &disagree),
+            Bucket::Screen
+        );
+        // Screen is already the costing answer — this rule never touches it,
+        // in either direction. It can only ever REMOVE a waiver.
+        assert_eq!(
+            downgrade_on_focus_mismatch(Bucket::Screen, &disagree),
+            Bucket::Screen
+        );
+        // A desktop with no EWMH window manager has no `_NET_ACTIVE_WINDOW` to
+        // contradict the server with, so there is no disagreement to resolve —
+        // charging it every tick would punish an honest minimal session.
+        let no_wm = XSnapshot {
+            focus: Some(10),
+            active: None,
+            windows: vec![],
+            capped: false,
+        };
+        assert_eq!(
+            downgrade_on_focus_mismatch(Bucket::Learning, &no_wm),
+            Bucket::Learning
+        );
+        // Focus-follows-mouse with the pointer over the root, or a server that
+        // reports PointerRoot, legitimately has NO focus window. There is
+        // nothing for the property to contradict, so there is no
+        // disagreement — an earlier cut of this rule fired here and made free
+        // learning unreachable on every such desktop, silently.
+        let advisory_only = XSnapshot {
+            focus: None,
+            active: Some(11),
+            windows: vec![],
+            capped: false,
+        };
+        assert_eq!(foreground_pid(&advisory_only), Some(11));
+        assert_eq!(
+            downgrade_on_focus_mismatch(Bucket::Learning, &advisory_only),
+            Bucket::Learning
+        );
+        // A truncated snapshot is its own reason to withdraw the credit: "the
+        // only thing in front is a learning app" is a claim a partial read of
+        // the display has no standing to make.
+        let capped = XSnapshot {
+            focus: Some(10),
+            active: Some(10),
+            windows: vec![],
+            capped: true,
+        };
+        assert_eq!(
+            downgrade_on_focus_mismatch(Bucket::Learning, &capped),
+            Bucket::Screen
         );
         assert_eq!(
-            parse_active_window("_NET_ACTIVE_WINDOW: window id # 0x0"),
-            None
+            downgrade_on_focus_mismatch(Bucket::Screen, &capped),
+            Bucket::Screen
         );
-        assert_eq!(parse_active_window("garbage"), None);
-        assert_eq!(parse_wm_pid("_NET_WM_PID = 12345"), Some(12345));
-        assert_eq!(parse_wm_pid("_NET_WM_PID:  not found."), None);
     }
 
     /// Built from the very renderer the shim launches with, not a hand-written

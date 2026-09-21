@@ -475,6 +475,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "x11rb",
  "zbus 4.4.0",
 ]
 

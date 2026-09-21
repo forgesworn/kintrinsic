@@ -252,7 +252,7 @@ impl MultiChildEnforcer {
         unrecognised: bool,
     ) -> Vec<ChildDecision> {
         let one: Vec<String> = app_bucket.map(str::to_string).into_iter().collect();
-        self.tick_open(active_uid, now, elapsed, bucket, &one, unrecognised)
+        self.tick_open(active_uid, now, elapsed, bucket, Some(&one), unrecognised)
     }
 
     /// [`tick_attributed`](Self::tick_attributed) for a device that can have
@@ -266,16 +266,37 @@ impl MultiChildEnforcer {
     /// because wall-clock time is not duplicable and charging it twice is the
     /// single most indefensible thing a meter can do to a child.
     ///
+    /// **`None` is not `Some(&[])`.** `Some(&[])` is "we looked, and nothing
+    /// costing is open" — the free-by-absence case. `None` is "we could not
+    /// look at all": no readable display. In `Named` that distinction is the
+    /// difference between a free afternoon and an uncapped day, so it is
+    /// carried in the type rather than left to a caller to remember (a caller
+    /// that passed the empty slice for both is exactly how a Wayland seat
+    /// became an unlimited device).
+    ///
     /// # What the two models do differently here
     ///
     /// - [`TimeModel::Session`] — unchanged. The baseline charges for being at
     ///   the device, `effective_bucket` may waive it as learning, and every
-    ///   open allowance is debited alongside.
+    ///   open allowance is debited alongside. An unreadable display costs the
+    ///   baseline here already, because the baseline does not depend on the
+    ///   display.
     /// - [`TimeModel::Named`] — there is no baseline and no waiver. Seconds are
     ///   charged **only** when something costing is open, and then exactly
     ///   once no matter how many are. Nothing open costs nothing, so an idle
     ///   desktop — or one showing only apps the guardian never named — is free
-    ///   by absence rather than by a grant that has to be defended.
+    ///   by absence rather than by a grant that has to be defended. An
+    ///   unreadable display is the one exception: it charges the `Session`
+    ///   baseline (`Bucket::Screen`) and no app bucket, because a model whose
+    ///   every cap is gated on a probe must not go inert when the probe does.
+    ///
+    /// # Why the baseline, and not the last known open set
+    ///
+    /// Charging what was open a tick ago would meter an app the ward may have
+    /// closed, against a named allowance, on no evidence — a false accusation
+    /// aimed at one specific app. The baseline claims less: it says only "the
+    /// ward is at the device", which the active-session check already
+    /// established without the display's help.
     ///
     /// # The minute journal follows the model
     ///
@@ -291,7 +312,7 @@ impl MultiChildEnforcer {
         now: i64,
         elapsed: u64,
         bucket: Bucket,
-        open_buckets: &[String],
+        open_buckets: Option<&[String]>,
         unrecognised: bool,
     ) -> Vec<ChildDecision> {
         let mut out = Vec::with_capacity(self.children.len());
@@ -328,14 +349,23 @@ impl MultiChildEnforcer {
                     charter_schedule::TimeModel::Session => Some(c.effective_bucket(bucket, now)),
                     // No baseline, no waiver: something costing is open, or
                     // nothing is charged. Once, however many are open.
-                    charter_schedule::TimeModel::Named => {
-                        (!open_buckets.is_empty()).then_some(Bucket::Screen)
-                    }
+                    charter_schedule::TimeModel::Named => match open_buckets {
+                        Some(open) => (!open.is_empty()).then_some(Bucket::Screen),
+                        // The display could not be read. Fall back to the
+                        // Session baseline for this tick — see the doc above:
+                        // in this model every cap is gated on the probe, so a
+                        // probe that can never succeed is otherwise a day with
+                        // no limits at all.
+                        None => Some(Bucket::Screen),
+                    },
                 };
                 if let Some(eff) = charge {
                     c.usage.credit_bucket(now, Activity::Active, eff, elapsed);
                 }
-                for id in open_buckets {
+                // No display, no evidence about any PARTICULAR app: the
+                // baseline above is charged, but no named allowance is spent
+                // on a guess.
+                for id in open_buckets.unwrap_or_default() {
                     c.usage.credit_app_bucket(now, id, elapsed);
                 }
                 // Credited in BOTH models, and in Named even when nothing was
@@ -1163,7 +1193,7 @@ mod tests {
         fn two_costing_things_open_at_once_spend_the_clock_once() {
             let mut e = enforcer(named_child());
             let open = vec!["play".to_string(), "video".to_string()];
-            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, &open, false);
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, Some(&open), false);
             // The day: sixty seconds of wall clock, not a hundred and twenty.
             assert_eq!(e.used_today(YOUNGER, NOW), Some(60));
             // And each allowance sees its own full minute.
@@ -1177,8 +1207,31 @@ mod tests {
         #[test]
         fn an_idle_desktop_costs_nothing() {
             let mut e = enforcer(named_child());
-            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, &[], false);
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, Some(&[]), false);
             assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
+        }
+
+        /// The other half of the same distinction, and the bug it closes: a
+        /// display that could not be read is NOT an idle desktop. `Named` gates
+        /// every one of its caps on seeing what is open, so a probe that can
+        /// never succeed — a Wayland seat, a killed X server — used to mean
+        /// zero against the daily cap, zero against every bucket, forever.
+        /// `None` charges the Session baseline instead: no named allowance is
+        /// spent on a guess, but the day does run down.
+        #[test]
+        fn a_display_that_cannot_be_read_charges_the_screen_baseline() {
+            let mut e = enforcer(named_child());
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, None, false);
+            assert_eq!(e.used_today(YOUNGER, NOW), Some(60));
+            // The baseline only. Naming an allowance would be a claim about a
+            // specific app, made with no evidence about any app at all.
+            assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(0));
+            // And a Learning attribution buys nothing here either — there is
+            // no waiver in this model, unreadable display or not.
+            let mut e = enforcer(named_child());
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Learning, None, false);
+            assert_eq!(e.used_today(YOUNGER, NOW), Some(60));
+            assert_eq!(e.learning_today(YOUNGER, NOW), Some(0));
         }
 
         /// A free app is free by ABSENCE, not by a grant — which is the point.
@@ -1190,7 +1243,7 @@ mod tests {
             // `Bucket::Learning` is not even consulted in this model; pass the
             // ordinary Screen attribution to prove the result does not
             // depend on the waiver having been computed at all.
-            e.tick_open(Some(YOUNGER), NOW, 300, Bucket::Screen, &[], false);
+            e.tick_open(Some(YOUNGER), NOW, 300, Bucket::Screen, Some(&[]), false);
             assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
             // Nothing was waived either — there is no learning meter running
             // in this model, so free time leaves no trace to have to defend.
@@ -1203,9 +1256,23 @@ mod tests {
         fn the_clock_runs_only_while_something_costing_is_open() {
             let mut e = enforcer(named_child());
             let play = vec!["play".to_string()];
-            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, &play, false);
-            e.tick_open(Some(YOUNGER), NOW + 60, 60, Bucket::Screen, &[], false);
-            e.tick_open(Some(YOUNGER), NOW + 120, 60, Bucket::Screen, &play, false);
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, Some(&play), false);
+            e.tick_open(
+                Some(YOUNGER),
+                NOW + 60,
+                60,
+                Bucket::Screen,
+                Some(&[]),
+                false,
+            );
+            e.tick_open(
+                Some(YOUNGER),
+                NOW + 120,
+                60,
+                Bucket::Screen,
+                Some(&play),
+                false,
+            );
             assert_eq!(e.used_today(YOUNGER, NOW), Some(120));
             assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(120));
         }
@@ -1220,11 +1287,18 @@ mod tests {
             // A full minute with nothing costing open: the journal stays
             // EMPTY, which is what STATUS omits rather than publishing as a
             // spent minute for another device to pool against.
-            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, &[], false);
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, Some(&[]), false);
             assert_eq!(e.minutes_today_b64(YOUNGER, NOW), None);
             // The next minute, with something open, does mark.
             let play = vec!["play".to_string()];
-            e.tick_open(Some(YOUNGER), NOW + 60, 60, Bucket::Screen, &play, false);
+            e.tick_open(
+                Some(YOUNGER),
+                NOW + 60,
+                60,
+                Bucket::Screen,
+                Some(&play),
+                false,
+            );
             assert!(e.minutes_today_b64(YOUNGER, NOW).is_some());
         }
 
@@ -1235,7 +1309,7 @@ mod tests {
         #[test]
         fn unrecognised_time_is_still_reported_when_nothing_was_charged() {
             let mut e = enforcer(named_child());
-            e.tick_open(Some(YOUNGER), NOW, 90, Bucket::Screen, &[], true);
+            e.tick_open(Some(YOUNGER), NOW, 90, Bucket::Screen, Some(&[]), true);
             assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
             assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(90));
         }
@@ -1257,7 +1331,7 @@ mod tests {
             let mut e = enforcer(p);
             // Nothing costing open, and it still charges — the old meaning,
             // untouched.
-            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, &[], false);
+            e.tick_open(Some(YOUNGER), NOW, 60, Bucket::Screen, Some(&[]), false);
             assert_eq!(e.used_today(YOUNGER, NOW), Some(60));
         }
 
@@ -1274,7 +1348,7 @@ mod tests {
                 NOW,
                 60,
                 Bucket::Screen,
-                &["play".to_string()],
+                Some(&["play".to_string()]),
                 false,
             );
             assert_eq!(a.used_today(YOUNGER, NOW), b.used_today(YOUNGER, NOW));

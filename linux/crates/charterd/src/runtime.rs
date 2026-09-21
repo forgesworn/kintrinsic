@@ -1526,11 +1526,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // meter exactly (closing the lid is "not using the device"), so the
     // suspended-time delta is subtracted before the clamp.
     let mut charge = AwakeCharge::new(config.poll_interval_secs);
-    // Window id → owning pid, kept across ticks so the named model's probe
-    // costs one `xprop` per tick in the steady state rather than one per open
-    // window. Lives here, with the loop, because it is loop state and not
-    // configuration; `open_bucket_ids_tick` prunes closed windows from it.
-    let mut window_pid_cache = crate::focus::WindowPidCache::new();
+    // Whether the named model's last tick could read the display at all. Loop
+    // state, not configuration: it exists only so the transition is logged
+    // ONCE in each direction. An unreadable display charges the screen
+    // baseline every two seconds, and a line per tick would bury the one line
+    // that says when it started.
+    let mut display_unreadable = false;
     loop {
         let slow_tick = iter.is_multiple_of(slow_every);
         iter = iter.wrapping_add(1);
@@ -1909,14 +1910,23 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             .map(|(_, pol)| charter_schedule::TimeModel::of(pol.budget.as_ref()))
             .unwrap_or(charter_schedule::TimeModel::Session);
         let decisions = match active_model {
-            charter_schedule::TimeModel::Session => multi.tick_attributed(
-                active,
-                now,
-                elapsed,
-                bucket,
-                app_bucket.as_deref(),
-                unrecognised,
-            ),
+            charter_schedule::TimeModel::Session => {
+                // Nobody is metering from the display this tick (this child is
+                // on the session model, or there is no active child at all), so
+                // the Named fallback's remembered state is about a session that
+                // is no longer in front. Clear it silently — keeping it would
+                // swallow the FIRST line of the next Named child's outage,
+                // which is the one line worth having.
+                display_unreadable = false;
+                multi.tick_attributed(
+                    active,
+                    now,
+                    elapsed,
+                    bucket,
+                    app_bucket.as_deref(),
+                    unrecognised,
+                )
+            }
             // Named: every allowance with a window open, not just the focused
             // one. A second probe of the SAME display in the same tick is safe
             // here in a way a second focus probe never was — two focus probes
@@ -1930,27 +1940,47 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 {
                     Some((display, xauth)) => {
                         let b = buckets_body.clone();
-                        let mut cache = std::mem::take(&mut window_pid_cache);
-                        let (ids, cache) = tokio::task::spawn_blocking(move || {
-                            let ids = crate::focus::open_bucket_ids_tick(
+                        // Named is read off the ACTIVE child's own budget, so
+                        // `active` is Some here by construction. `u32::MAX`
+                        // owns no process, so even an impossible None can only
+                        // lose the unidentified-window fallback, never widen
+                        // it to somebody else's processes.
+                        let ward_uid = active.unwrap_or(u32::MAX);
+                        tokio::task::spawn_blocking(move || {
+                            crate::focus::open_bucket_ids_tick(
                                 &display,
                                 xauth.as_deref(),
                                 &b,
-                                &mut cache,
-                            );
-                            (ids, cache)
+                                ward_uid,
+                            )
                         })
                         .await
-                        .expect("open_bucket_ids_tick task");
-                        window_pid_cache = cache;
-                        ids
+                        .expect("open_bucket_ids_tick task")
                     }
-                    // No readable display: charge nothing. Under-charging is
-                    // the only acceptable direction for a probe failure — a
-                    // meter must never invent time a child did not spend.
-                    None => Vec::new(),
+                    // No display to resolve at all (a Wayland seat, no Xorg on
+                    // the active VT). Indistinguishable, for metering, from a
+                    // display we found and could not read.
+                    None => None,
                 };
-                multi.tick_open(active, now, elapsed, bucket, &open, unrecognised)
+                // Log the TRANSITION, not the state: this branch runs every
+                // two seconds, and the fact worth having in the journal is
+                // when the meter started falling back and when it stopped.
+                if open.is_none() != display_unreadable {
+                    display_unreadable = open.is_none();
+                    if display_unreadable {
+                        eprintln!(
+                            "charterd: warning — the active display cannot be read, so the named \
+                             time model cannot see what is open. Charging the screen baseline \
+                             each tick (named allowances are NOT being spent) until it can."
+                        );
+                    } else {
+                        eprintln!(
+                            "charterd: the active display is readable again — named allowances \
+                             are being metered normally"
+                        );
+                    }
+                }
+                multi.tick_open(active, now, elapsed, bucket, open.as_deref(), unrecognised)
             }
         };
 
