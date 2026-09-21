@@ -12,6 +12,7 @@ import {
   INSTALL_GRANT_TTL_SECS,
   pickExtendTz,
   startOfDayUnix,
+  startOfWeekUnix,
   type TimeExtendDecision,
 } from "./grant";
 
@@ -409,5 +410,42 @@ describe("appOpenWindowUnix", () => {
 
   it("refuses restOfDay with an unknown child tz — never a silent guardian-local fallback", () => {
     expect(appOpenWindowUnix("restOfDay", TS, undefined)).toBeNull();
+  });
+});
+
+describe("startOfWeekUnix", () => {
+  // Wed 2026-03-25 12:00 UTC — the UK week containing it spans no DST change;
+  // the one after (clocks go forward Sun 2026-03-29) does.
+  const WED = Date.UTC(2026, 2, 25, 12) / 1000;
+  const iso = (s: number) => new Date(s * 1000).toISOString();
+
+  it("walks back to the week's first midnight in the child's tz", () => {
+    expect(iso(startOfWeekUnix(WED, "Europe/London", "mon"))).toBe("2026-03-23T00:00:00.000Z");
+    expect(iso(startOfWeekUnix(WED, "Europe/London", "sun"))).toBe("2026-03-22T00:00:00.000Z");
+  });
+
+  it("is the same instant from the week-start day itself", () => {
+    const MON = Date.UTC(2026, 2, 23, 0, 0, 5) / 1000;
+    expect(iso(startOfWeekUnix(MON, "Europe/London", "mon"))).toBe("2026-03-23T00:00:00.000Z");
+  });
+
+  it("lands on the right midnight across a DST change inside the week", () => {
+    // Wed 2026-04-01 (BST, UTC+1): Monday's midnight is 23:00Z the day before;
+    // Sunday 2026-03-29's midnight was still GMT.
+    const APR1 = Date.UTC(2026, 3, 1, 12) / 1000;
+    expect(iso(startOfWeekUnix(APR1, "Europe/London", "mon"))).toBe("2026-03-29T23:00:00.000Z");
+    expect(iso(startOfWeekUnix(APR1, "Europe/London", "sun"))).toBe("2026-03-29T00:00:00.000Z");
+  });
+});
+
+describe("startOfDayUnix on the day the clocks change", () => {
+  const iso = (s: number) => new Date(s * 1000).toISOString();
+  it("spring forward (23-hour day): still that day's real midnight", () => {
+    const eve = Date.UTC(2026, 2, 29, 20) / 1000; // Sun 21:00 BST
+    expect(iso(startOfDayUnix(eve, "Europe/London"))).toBe("2026-03-29T00:00:00.000Z");
+  });
+  it("fall back (25-hour day): still that day's real midnight", () => {
+    const eve = Date.UTC(2026, 9, 25, 20) / 1000; // Sun 20:00 GMT
+    expect(iso(startOfDayUnix(eve, "Europe/London"))).toBe("2026-10-24T23:00:00.000Z");
   });
 });

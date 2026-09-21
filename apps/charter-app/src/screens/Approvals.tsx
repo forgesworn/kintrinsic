@@ -27,7 +27,7 @@ import {
 import { unrecognisedGuardTz, unrecognisedLine, unrecognisedRows, UNRECOGNISED_EXPLAINER } from "../domain/unrecognisedTime";
 import { identityDisplayLabel } from "../domain/launchSignatures";
 import { resolveChildTz } from "../domain/childTz";
-import { appOpenWindowUnix, startOfDayUnix, type AppOpenWindow } from "../wire/grant";
+import { appOpenWindowUnix, startOfDayUnix, startOfWeekUnix, type AppOpenWindow } from "../wire/grant";
 
 // =============================================================================
 // Approvals — the requests queue. The highest-frequency parent action.
@@ -377,6 +377,17 @@ export default function Approvals() {
                             state.activity,
                             child.id,
                             startOfDayUnix(Math.floor(now / 1000), devicePolicy.buckets.tz) * 1000,
+                          )
+                        : undefined,
+                      devicePolicy?.buckets
+                        ? groupExtrasToday(
+                            state.activity,
+                            child.id,
+                            startOfWeekUnix(
+                              Math.floor(now / 1000),
+                              devicePolicy.buckets.tz,
+                              devicePolicy.buckets.weekStart ?? "mon",
+                            ) * 1000,
                           )
                         : undefined,
                     )[0]

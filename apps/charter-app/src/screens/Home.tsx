@@ -22,7 +22,7 @@ import {
 } from "../domain/groupProgress";
 import { unrecognisedGuardTz, unrecognisedLine, unrecognisedRows, UNRECOGNISED_EXPLAINER } from "../domain/unrecognisedTime";
 import { identityDisplayLabel } from "../domain/launchSignatures";
-import { startOfDayUnix } from "../wire/grant";
+import { startOfDayUnix, startOfWeekUnix } from "../wire/grant";
 import Onboarding, { isSetUpEnough } from "./Onboarding";
 import CarrierDownload from "../carrier/CarrierDownload";
 
@@ -458,6 +458,17 @@ function ChildCard({ child }: { child: Child }) {
                   state.activity,
                   child.id,
                   startOfDayUnix(Math.floor(Date.now() / 1000), homeBuckets.tz) * 1000,
+                )
+              : undefined,
+            homeBuckets
+              ? groupExtrasToday(
+                  state.activity,
+                  child.id,
+                  startOfWeekUnix(
+                    Math.floor(Date.now() / 1000),
+                    homeBuckets.tz,
+                    homeBuckets.weekStart ?? "mon",
+                  ) * 1000,
                 )
               : undefined,
           ).map((row) => (

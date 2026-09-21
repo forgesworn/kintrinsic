@@ -164,13 +164,49 @@ export function endOfDayUnix(nowSecs: number, tz?: string): number {
  * the CHILD's day, never the guardian phone's.
  */
 export function startOfDayUnix(nowSecs: number, tz?: string): number {
-  let now: { dayKey: string; secsIntoDay: number };
-  try {
-    now = tzDayParts(nowSecs, tz);
-  } catch {
-    now = tzDayParts(nowSecs); // unknown tz → local-midnight fallback
+  const parts = (secs: number): { dayKey: string; secsIntoDay: number } => {
+    try {
+      return tzDayParts(secs, tz);
+    } catch {
+      return tzDayParts(secs); // unknown tz → local-midnight fallback
+    }
+  };
+  const now = parts(nowSecs);
+  // `secsIntoDay` is WALL-CLOCK time since midnight; on the day the clocks
+  // change it differs from the real seconds elapsed by the size of the shift,
+  // so subtracting it lands an hour off midnight. Re-read the candidate and
+  // correct once: either it is still inside today (pull back the remainder)
+  // or it overshot into yesterday (push forward to that day's end).
+  let start = nowSecs - now.secsIntoDay;
+  const at = parts(start);
+  if (at.secsIntoDay !== 0) {
+    start += at.dayKey === now.dayKey ? -at.secsIntoDay : 86_400 - at.secsIntoDay;
   }
-  return nowSecs - now.secsIntoDay;
+  return start;
+}
+
+/**
+ * Unix seconds of the START of `tz`'s calendar WEEK containing `nowSecs`, for a
+ * week beginning on `weekStart` — the week-scoped sibling of `startOfDayUnix`.
+ * Walks back a whole tz day at a time (one hour before a midnight is always
+ * the previous day, whatever DST did), never `-86400`, so a clock change
+ * inside the week can't land it on the wrong midnight.
+ */
+export function startOfWeekUnix(nowSecs: number, tz: string | undefined, weekStart: "sun" | "mon"): number {
+  const want = weekStart === "sun" ? "Sun" : "Mon";
+  const weekday = (secs: number): string => {
+    const at = new Date((secs + 12 * 3600) * 1000); // midday: clear of any DST edge
+    try {
+      return new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: tz }).format(at);
+    } catch {
+      return new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(at);
+    }
+  };
+  let day = startOfDayUnix(nowSecs, tz);
+  for (let i = 0; i < 6 && weekday(day) !== want; i++) {
+    day = startOfDayUnix(day - 3600, tz);
+  }
+  return day;
 }
 
 /** The parent's decision on one `time.extend` REQUEST, ready to become a GRANT. */

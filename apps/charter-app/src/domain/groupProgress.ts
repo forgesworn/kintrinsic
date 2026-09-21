@@ -34,6 +34,14 @@ export interface GroupProgressRow {
    * as a breach that never happened (M-2, hardware round 2026-08-03).
    */
   extraMinutesToday?: number;
+  /**
+   * The same join scoped to the group's WEEK (which includes today). The
+   * device's `weekSecs` keeps a Monday grant's spend all week, so the weekly
+   * cap has to keep the grant all week too — padding it with today's extras
+   * alone made a grant given earlier in the week read as a breach from the
+   * next day on. Present only when > 0.
+   */
+  extraMinutesThisWeek?: number;
 }
 
 /**
@@ -94,6 +102,9 @@ export function groupProgressRows(
   statusGroups: StatusGroup[] | undefined,
   buckets: AppBucketRule[] | undefined,
   extraMinutesToday?: Record<string, number>,
+  /** `groupExtrasToday` called with the start of the group's WEEK. Absent =
+   *  today's extras stand in (the week contains today). */
+  extraMinutesThisWeek?: Record<string, number>,
 ): GroupProgressRow[] {
   if (!statusGroups || statusGroups.length === 0) return [];
   const byId = new Map((buckets ?? []).map((b) => [b.id, b]));
@@ -108,6 +119,7 @@ export function groupProgressRows(
       dailyMinutes: rule?.dailyMinutes,
       weeklyMinutes: rule?.weeklyMinutes,
       extraMinutesToday: extra ? extra : undefined,
+      extraMinutesThisWeek: (extraMinutesThisWeek ?? extraMinutesToday)?.[g.id] || undefined,
     };
   });
 }
@@ -142,6 +154,8 @@ export function groupProgressLine(row: GroupProgressRow): string {
   const dayMin = row.daySecs / 60;
   const weekMin = row.weekSecs / 60;
   const extra = row.extraMinutesToday ?? 0;
+  // The week contains today, so it can never hold LESS than today's extras.
+  const weekExtra = Math.max(row.extraMinutesThisWeek ?? 0, extra);
   const uncapped = row.dailyMinutes == null && row.weeklyMinutes == null;
   const parts: string[] = [];
   if (row.dailyMinutes != null) {
@@ -150,10 +164,15 @@ export function groupProgressLine(row: GroupProgressRow): string {
     parts.push(`${fmtMinutes(dayMin)} today`);
   }
   if (row.weeklyMinutes != null) {
-    parts.push(`${fmtMinutes(weekMin)} of ${fmtMinutes(row.weeklyMinutes + extra)} this week`);
+    parts.push(`${fmtMinutes(weekMin)} of ${fmtMinutes(row.weeklyMinutes + weekExtra)} this week`);
   } else if (uncapped) {
     parts.push(`${fmtMinutes(weekMin)} this week`);
   }
   const line = `${row.label} — ${parts.join(" · ")}`;
-  return extra > 0 ? `${line} (includes ${fmtMinutes(extra)} extra you gave)` : line;
+  if (extra > 0) return `${line} (includes ${fmtMinutes(extra)} extra you gave)`;
+  // Nothing given today, but an earlier grant is still inside the weekly cap.
+  if (weekExtra > 0 && row.weeklyMinutes != null) {
+    return `${line} (includes ${fmtMinutes(weekExtra)} extra you gave this week)`;
+  }
+  return line;
 }

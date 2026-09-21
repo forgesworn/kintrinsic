@@ -215,3 +215,29 @@ describe("groupExtrasToday (M-2)", () => {
     expect(groupExtrasToday([], CHILD, TODAY_START_MS)).toEqual({});
   });
 });
+
+// B5 (review 2026-09-21): the M-2 fix padded BOTH axes with TODAY's extras, but
+// the device's `weekSecs` keeps a Monday grant's spend all week — so from
+// Tuesday on the weekly axis read "5h 30m of 5h", the exact false breach the
+// field exists to prevent, one axis over.
+describe("a grant given earlier in the week", () => {
+  const status = [{ id: "play", daySecs: 10 * 60, weekSecs: 330 * 60 }];
+  const buckets = [{ id: "play", label: "Play", apps: ["x"], dailyMinutes: 60, weeklyMinutes: 300 }];
+
+  it("still pads the WEEKLY cap the next day, and only that one", () => {
+    const row = groupProgressRows(status, buckets, {}, { play: 30 })[0];
+    expect(groupProgressLine(row)).toBe(
+      "Play — 10m of 1h today · 5h 30m of 5h 30m this week (includes 30m extra you gave this week)",
+    );
+  });
+
+  it("the week never holds less than today", () => {
+    const row = groupProgressRows(status, buckets, { play: 15 }, { play: 45 })[0];
+    expect(groupProgressLine(row)).toBe(
+      "Play — 10m of 1h 15m today · 5h 30m of 5h 45m this week (includes 15m extra you gave)",
+    );
+    // Callers that pass no weekly join keep the old same-day behaviour.
+    const legacy = groupProgressRows(status, buckets, { play: 15 })[0];
+    expect(groupProgressLine(legacy)).toContain("of 5h 15m this week");
+  });
+});
