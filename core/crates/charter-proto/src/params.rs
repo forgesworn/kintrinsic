@@ -282,9 +282,19 @@ impl GrantParams {
     pub fn parse(op: OpType, value: &serde_json::Value) -> Result<GrantParams, ProtoError> {
         let v = value.clone();
         match op {
-            OpType::InstallFlatpak => serde_json::from_value(v)
-                .map(GrantParams::InstallFlatpak)
-                .map_err(|e| ProtoError::BadParams(e.to_string())),
+            // Every arm validates HERE, at the trust boundary: a `VerifiedGrant`
+            // must never carry params outside the contract's frozen bounds, or
+            // each consumer has to remember to re-check them (one did; the
+            // others read `allow_params()` raw).
+            OpType::InstallFlatpak => serde_json::from_value::<InstallFlatpakParams>(v)
+                .map_err(|e| ProtoError::BadParams(e.to_string()))
+                .and_then(|p| {
+                    // The ref reaches a `flatpak install` argv — `FlatpakRef`
+                    // is the injection guard for exactly that string.
+                    crate::flatpak_ref::FlatpakRef::parse(&p.reference)
+                        .map_err(|_| ProtoError::BadParams("ref is not a flatpak ref".into()))?;
+                    Ok(GrantParams::InstallFlatpak(p))
+                }),
             OpType::InstallApk => serde_json::from_value::<InstallApkGrantParams>(v)
                 .map_err(|e| ProtoError::BadParams(e.to_string()))
                 .and_then(|p| {
@@ -294,9 +304,12 @@ impl GrantParams {
             OpType::ExecAllow => serde_json::from_value(v)
                 .map(GrantParams::ExecAllow)
                 .map_err(|e| ProtoError::BadParams(e.to_string())),
-            OpType::TimeExtend => serde_json::from_value(v)
-                .map(GrantParams::TimeExtend)
-                .map_err(|e| ProtoError::BadParams(e.to_string())),
+            OpType::TimeExtend => serde_json::from_value::<TimeExtendGrantParams>(v)
+                .map_err(|e| ProtoError::BadParams(e.to_string()))
+                .and_then(|p| {
+                    p.validate()?;
+                    Ok(GrantParams::TimeExtend(p))
+                }),
             OpType::AppOpen => serde_json::from_value::<AppOpenGrantParams>(v)
                 .map_err(|e| ProtoError::BadParams(e.to_string()))
                 .and_then(|p| {
@@ -563,5 +576,33 @@ mod bucket_and_app_open_tests {
 
         let missing_pkg = serde_json::json!({"minutesGranted": 30});
         assert!(GrantParams::parse(OpType::AppOpen, &missing_pkg).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parse_validates_every_op {
+    use super::*;
+
+    /// `TimeExtendGrantParams::validate` existed and nothing on the verify path
+    /// called it, so a grant for 65535 minutes came back as verified.
+    #[test]
+    fn a_time_extend_over_the_contract_cap_is_refused() {
+        let ok = serde_json::json!({ "minutesGranted": 1440, "limitHit": "budget" });
+        assert!(GrantParams::parse(OpType::TimeExtend, &ok).is_ok());
+        let over = serde_json::json!({ "minutesGranted": 1441, "limitHit": "budget" });
+        assert!(GrantParams::parse(OpType::TimeExtend, &over).is_err());
+    }
+
+    #[test]
+    fn a_flatpak_ref_is_run_through_the_injection_guard() {
+        let ok = serde_json::json!({ "ref": "org.videolan.VLC", "remote": "flathub" });
+        assert!(GrantParams::parse(OpType::InstallFlatpak, &ok).is_ok());
+        for bad in ["", "../etc/passwd", "/abs/path", "org.a//b", "--from=evil"] {
+            let v = serde_json::json!({ "ref": bad, "remote": "flathub" });
+            assert!(
+                GrantParams::parse(OpType::InstallFlatpak, &v).is_err(),
+                "{bad:?} must not verify"
+            );
+        }
     }
 }
