@@ -128,7 +128,8 @@ export interface WebPolicy {
   /** allowlist = only allowed sites; blocklist = everything except blocked. */
   posture: WebPosture;
   ageTier: WebAgeTier;
-  /** Sites the parent always allows (domains or URL prefixes). */
+  /** Sites the parent always allows — bare DOMAINS (`normalizeWebDomain`):
+   *  the wards filter at DNS, where a URL or path can match nothing. */
   allow: string[];
   /** Sites the parent always blocks — these outrank everything. */
   block: string[];

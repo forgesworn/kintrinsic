@@ -8,6 +8,7 @@ import {
   type AppSection,
 } from "../domain/deviceApps";
 import { deviceSetLimits } from "../domain/standing";
+import { normalizeWebDomain } from "../domain/webDomain";
 import {
   deliverableDevices,
   supportNote,
@@ -1603,6 +1604,12 @@ function AlwaysAvailableEditor({
   );
 }
 
+/** `normalizeWebDomain` in the shape `DomainList`'s `parse` takes. */
+function parseWebDomain(s: string): { ok: true; value: string } | { ok: false; message: string } {
+  const r = normalizeWebDomain(s);
+  return r.ok ? { ok: true, value: r.domain } : r;
+}
+
 /** Editable list of site domains — add via input, remove via chip. */
 function DomainList({
   label,
@@ -1613,6 +1620,7 @@ function DomainList({
   normalize = (s) => s.trim().toLowerCase(),
   reject,
   rejectMessage,
+  parse,
 }: {
   label: string;
   hint: string;
@@ -1626,11 +1634,26 @@ function DomainList({
    *  curated launch-signatures table — see `domain/launchSignatures.ts`). */
   reject?: (v: string) => boolean;
   rejectMessage?: string;
+  /** Canonicalize AND vet an entry, with its own message on refusal — for
+   *  lists (web domains) where a malformed entry signs fine and then silently
+   *  enforces nothing. Takes the place of `normalize` when given. */
+  parse?: (s: string) => { ok: true; value: string } | { ok: false; message: string };
 }) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const add = () => {
-    const v = normalize(input);
+    let v: string;
+    if (parse) {
+      if (!input.trim()) return;
+      const r = parse(input);
+      if (!r.ok) {
+        setError(r.message);
+        return;
+      }
+      v = r.value;
+    } else {
+      v = normalize(input);
+    }
     if (!v) return;
     if (reject?.(v)) {
       setError(rejectMessage ?? "That identifier isn't allowed here.");
@@ -1745,6 +1768,7 @@ function WebEditor({ web, onChange }: { web: WebPolicy; onChange: (w: WebPolicy)
             }
             items={web.allow}
             placeholder="wikipedia.org"
+            parse={parseWebDomain}
             onChange={(allow) => set({ allow })}
           />
           <DomainList
@@ -1752,6 +1776,7 @@ function WebEditor({ web, onChange }: { web: WebPolicy; onChange: (w: WebPolicy)
             hint="These never load — they outrank everything else."
             items={web.block}
             placeholder="youtube.com"
+            parse={parseWebDomain}
             onChange={(block) => set({ block })}
           />
           <div>

@@ -8,6 +8,7 @@
 // no-constraint clause (rather than copying `paused`), so a fresh clause always
 // supersedes any previously-cached one with the parent's true current intent.
 
+import { normalizeWebDomain } from "../domain/webDomain";
 import type { AlwaysAvailablePolicy, AppsPolicy, Budget, BucketsPolicy, LearningPolicy, Lifeline, ListeningPolicy, Policy, Schedule, ScheduleWindow, Tethering, WebPolicy } from "../domain/types";
 import type {
   AppBucket,
@@ -138,8 +139,22 @@ export function contentToGrant(web: WebPolicy, issuedAt: number): GrantContent {
   }
   g.safeSearch = web.safeSearch;
   g.youtubeRestrict = web.youtube;
-  const allow = web.allow.map((s) => s.trim()).filter(Boolean);
-  const block = web.block.map((s) => s.trim()).filter(Boolean);
+  // Entries saved before the editor vetted them (`https://www.youtube.com/…`,
+  // `*.site.com`) are canonicalised here so they start matching; one that
+  // can't be read as a domain is sent as it was, never silently dropped.
+  const canon = (list: string[]) => [
+    ...new Set(
+      list
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => {
+          const r = normalizeWebDomain(s);
+          return r.ok ? r.domain : s;
+        }),
+    ),
+  ];
+  const allow = canon(web.allow);
+  const block = canon(web.block);
   if (allow.length) g.parentAllow = allow;
   if (block.length) g.parentDeny = block;
   return g;
