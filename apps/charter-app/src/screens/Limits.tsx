@@ -2938,14 +2938,21 @@ function DeviceLimits({
   // signs. `buckets`' tz has no editor of its own (never has) — fall back to
   // the device-local zone the same way the old `buildBuckets` did, for a
   // family that has never touched it before.
+  const bucketsWeekStart = policy.buckets?.weekStart ?? policy.budget?.weekStart;
   const bucketsTzPrior: BucketsPolicy = useMemo(
     () => ({
       enabled: false,
       tz: policy.buckets?.tz || LOCAL_TZ,
       buckets: [],
-      ...(policy.buckets?.weekStart ? { weekStart: policy.buckets.weekStart } : {}),
+      // The weekly named-time pool must roll over on the SAME day as the
+      // weekly budget. Nothing ever wrote `buckets.weekStart`, so the clause
+      // omitted it and the ward defaulted to Monday, while the budget clause
+      // always says "sun" — two weekly meters resetting on different days.
+      // Feeds BOTH compiles below, so it never reads as an unsaved change; an
+      // existing clause picks it up the next time named times are saved.
+      ...(bucketsWeekStart ? { weekStart: bucketsWeekStart } : {}),
     }),
-    [policy.buckets?.tz, policy.buckets?.weekStart],
+    [policy.buckets?.tz, bucketsWeekStart],
   );
   const namedTimesCompilePrior = useMemo(
     () => ({

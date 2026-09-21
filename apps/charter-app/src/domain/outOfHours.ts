@@ -55,9 +55,10 @@ function currentWeekDayKeys(nowSecs: number, tz: string, weekStart: "sun" | "mon
   return keys;
 }
 
-/** The device-scope policy's week-start day — mirrors `Budget.weekStart`'s
- *  own default ("mon"), the same convention `BucketsPolicy.weekStart` and the
- *  weekly picture's chart already follow. */
+/** The device-scope policy's week-start day. The "mon" fallback is the WARD's
+ *  default for an absent field; in practice the editor always writes
+ *  `Budget.weekStart` ("sun" untouched), so the fallback only covers a policy
+ *  with no budget at all. */
 export function outOfHoursGuardWeekStart(policy: Policy | undefined): "sun" | "mon" {
   return policy?.budget?.weekStart ?? "mon";
 }

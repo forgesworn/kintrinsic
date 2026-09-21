@@ -224,8 +224,10 @@ export interface BucketsPolicy {
   /** IANA tz the day boundary is computed in. */
   tz: string;
   buckets: AppBucketRule[];
-  /** Week-start day for the weekly axis: 'sun' | 'mon'. Absent = 'mon' —
-   *  mirrors `Budget.weekStart`. */
+  /** Week-start day for the weekly axis: 'sun' | 'mon'. Absent = the WARD's
+   *  default, 'mon' — which is NOT the budget's (the editor always writes
+   *  `Budget.weekStart`, "sun" untouched), so Limits carries the budget's day
+   *  in here to keep the two weekly meters on one reset day. */
   weekStart?: "sun" | "mon";
 }
 
