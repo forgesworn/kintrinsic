@@ -82,6 +82,27 @@ fn prune_terminal_records(
     }
 }
 
+/// Say that a replay floor could not be read, and that the event it would have
+/// bounded is being refused because of it.
+///
+/// `Option<u64>` has no way to say "unknown": `Ok(None)` means *nothing has
+/// ever been stored for this slot*, which legitimately admits any `issuedAt`,
+/// while an `Err` means *something may well be stored and we cannot see it*.
+/// Flattening the two together handed `verify_clause` "no floor" whenever the
+/// store had an EIO, a permissions change, or a `ClauseRec` that would not
+/// parse — and no floor is exactly what a replay needs: last month's wider
+/// schedule, or a `revoked: true` budget, accepted and written down as
+/// current. So an unreadable floor refuses the event instead. A refused clause
+/// is re-offered on the next poll (the cursor lookback sees to that), so the
+/// cost of being wrong here is a delay; the cost of the other direction is a
+/// rollback that sticks.
+fn warn_unreadable_floor(slot: &str, e: charter_sys::error::SysError) {
+    eprintln!(
+        "charter: rollback floor for {slot} is unreadable ({e}) — refusing this event rather \
+         than accepting it with no replay protection"
+    );
+}
+
 /// What one brokered poll actually took in.
 ///
 /// Exists because the Android `PollResult` reported `clausesSeen: 0` and
@@ -440,12 +461,20 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 // so a hostile relay cannot revert one child's clause or replay
                 // another child's into theirs.
                 let subject_hex = subject.to_hex();
-                let prev = self
+                let prev = match self
                     .sys
                     .child_clauses()
                     .highest_issued_at(&subject_hex, store_key)
-                    .ok()
-                    .flatten();
+                {
+                    Ok(prev) => prev,
+                    Err(e) => {
+                        warn_unreadable_floor(
+                            &format!("child clause {subject_hex}/{store_key}"),
+                            e,
+                        );
+                        return false;
+                    }
+                };
                 if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
                     let body = serde_json::to_string(vc.body()).unwrap_or_default();
                     let _ = self.sys.child_clauses().put_child_clause(
@@ -459,12 +488,13 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 false
             }
             None => {
-                let prev = self
-                    .sys
-                    .clauses()
-                    .highest_issued_at(store_key)
-                    .ok()
-                    .flatten();
+                let prev = match self.sys.clauses().highest_issued_at(store_key) {
+                    Ok(prev) => prev,
+                    Err(e) => {
+                        warn_unreadable_floor(&format!("clause {store_key}"), e);
+                        return false;
+                    }
+                };
                 if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
                     let body = serde_json::to_string(vc.body()).unwrap_or_default();
                     let _ = self
@@ -489,12 +519,17 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             return;
         };
         let subject_hex = payload.subject.to_hex();
-        let prev = self
+        let prev = match self
             .sys
             .child_clauses()
             .highest_issued_at(&subject_hex, USAGE_SYNC_STORE_KEY)
-            .ok()
-            .flatten();
+        {
+            Ok(prev) => prev,
+            Err(e) => {
+                warn_unreadable_floor(&format!("usage sync {subject_hex}"), e);
+                return;
+            }
+        };
         let pinned = self.transport.pinned_guardian();
         let now = self.now();
         if let Ok(vs) = verify_usage_sync(&event, &pinned, prev, now) {

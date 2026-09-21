@@ -133,6 +133,8 @@ mod mock {
         usage: Option<String>,
         extension: Option<String>,
         pairing: Option<String>,
+        /// Fault injection — see [`MockDisk::break_clause_reads`].
+        clause_reads_fail: bool,
     }
 
     /// A shared in-memory "disk". Cloning shares the same backing state, so a
@@ -145,6 +147,36 @@ mod mock {
         pub fn new() -> Self {
             Self::default()
         }
+
+        /// Make every READ on the two clause stores fail from here on, as a
+        /// store that is there but cannot be read does: an EIO, a permissions
+        /// change, a half-written record that will not parse.
+        ///
+        /// "Missing" and "unreadable" are different events, and a caller that
+        /// collapses the second into the first silently becomes "no policy" /
+        /// "no replay floor". The only way to hold a test against that is to
+        /// be able to produce the second one, which an in-memory map otherwise
+        /// never does. Writes are left working: the point is a reader that
+        /// cannot see what is on disk, not a disk that has gone away.
+        pub fn break_clause_reads(&self) {
+            self.0.lock().expect("disk lock").clause_reads_fail = true;
+        }
+
+        /// Let the clause stores read again — so a test can break a read,
+        /// exercise the fail-safe, and then look at what was actually stored.
+        pub fn repair_clause_reads(&self) {
+            self.0.lock().expect("disk lock").clause_reads_fail = false;
+        }
+
+        fn clause_reads_broken(&self) -> bool {
+            self.0.lock().expect("disk lock").clause_reads_fail
+        }
+    }
+
+    /// The error a broken mock read returns — shaped like the real store's
+    /// wrapped IO failure so callers cannot key off the mock.
+    fn unreadable() -> crate::error::SysError {
+        crate::error::SysError::Io("read: mock store made unreadable".into())
     }
 
     /// Mock consumed-id store.
@@ -236,6 +268,9 @@ mod mock {
             Ok(true)
         }
         fn get_clause(&self, kind: u16) -> SysResult<Option<String>> {
+            if self.disk.clause_reads_broken() {
+                return Err(unreadable());
+            }
             Ok(self
                 .disk
                 .0
@@ -246,6 +281,9 @@ mod mock {
                 .map(|(_, j)| j.clone()))
         }
         fn highest_issued_at(&self, kind: u16) -> SysResult<Option<u64>> {
+            if self.disk.clause_reads_broken() {
+                return Err(unreadable());
+            }
             Ok(self
                 .disk
                 .0
@@ -319,6 +357,9 @@ mod mock {
             Ok(true)
         }
         fn get_child_clause(&self, subject_hex: &str, kind: u16) -> SysResult<Option<String>> {
+            if self.disk.clause_reads_broken() {
+                return Err(unreadable());
+            }
             Ok(self
                 .disk
                 .0
@@ -329,6 +370,9 @@ mod mock {
                 .map(|(_, j)| j.clone()))
         }
         fn highest_issued_at(&self, subject_hex: &str, kind: u16) -> SysResult<Option<u64>> {
+            if self.disk.clause_reads_broken() {
+                return Err(unreadable());
+            }
             Ok(self
                 .disk
                 .0
@@ -339,6 +383,9 @@ mod mock {
                 .map(|(t, _)| *t))
         }
         fn clauses_for(&self, subject_hex: &str) -> SysResult<Vec<(u16, String)>> {
+            if self.disk.clause_reads_broken() {
+                return Err(unreadable());
+            }
             // BTreeMap is ordered by (subject, kind), so a subject's entries come
             // out in ascending `kind` already.
             Ok(self
