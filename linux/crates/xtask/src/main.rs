@@ -347,8 +347,16 @@ fn build_deb() -> Result<(), String> {
             "usr/share/polkit-1/rules.d/49-charter.rules",
         ),
         (
+            // Shipped as a REFERENCE, not into /etc/fapolicyd/rules.d: the
+            // fragment ends in a default-deny, and the safety model says the
+            // .deb never ships one live. Nothing here loads or enables
+            // fapolicyd, but it is a Recommends (apt installs it), so a file in
+            // rules.d sat one `fagenrules --load` away from a box that cannot
+            // start a desktop. Arming is charter-setup's job, opt-in, after
+            // the VM round (HANDOFF Phase 11). dpkg removes the old rules.d
+            // copy on upgrade (it was never a conffile).
             "fapolicyd/charter.rules",
-            "etc/fapolicyd/rules.d/72-charter.rules",
+            "usr/share/charter/fapolicyd/72-charter.rules",
         ),
     ];
     for (src, dst) in assets {

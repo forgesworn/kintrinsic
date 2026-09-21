@@ -1,4 +1,8 @@
-# charter.rules — fapolicyd policy fragment (loaded from /etc/fapolicyd/rules.d).
+# charter.rules — fapolicyd policy fragment. NOT LIVE AS SHIPPED: the package
+# installs it under /usr/share/charter/fapolicyd/ as a reference. It ends in a
+# default-deny, so it only ever goes into /etc/fapolicyd/rules.d through the
+# opt-in arming step (copy -> seed trust -> `fagenrules --load` -> enable),
+# which needs a VM round first: a wrong trust list locks the session out.
 #
 # Model: default-deny execution. Only binaries charterd has approved (copied
 # into the content-addressed store and trusted by sha256) may execute from the
@@ -9,7 +13,12 @@
 # the shipped baseline.
 
 # Allow execution of trusted (charterd-approved, hash-pinned) files anywhere.
-allow perm=execute trust=1 all : all
+# Subject left of the colon, object right: "anyone may execute a TRUSTED file".
+# This read `trust=1 all : all`, which puts the attribute on the SUBJECT and
+# combines it with `all` (fapolicyd.rules(5) forbids that) — at best a parse
+# error that rejects the whole fragment, at worst "a trusted process may
+# execute anything", i.e. every shell, and no default-deny at all.
+allow perm=execute all : trust=1
 
 # Allow execution from the Charter approved-exec store (relocated approved bins).
 allow perm=execute all : dir=/var/lib/charter/approved/
