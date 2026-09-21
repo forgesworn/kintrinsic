@@ -18,6 +18,7 @@ pub mod ancestry;
 pub mod app_inventory;
 pub mod app_rules;
 pub mod apps_policy;
+pub mod atomic_file;
 #[cfg(feature = "real")]
 pub mod dbus_service;
 pub mod dbus_surface;

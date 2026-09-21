@@ -34,6 +34,7 @@ use charter_transport::{
     CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant,
 };
 
+use crate::atomic_file::atomic_write;
 use crate::broker::Broker;
 use crate::child_policy::resolve_child_policies;
 use crate::dbus_service::{
@@ -579,7 +580,7 @@ fn child_usage_path(uid: u32) -> String {
 fn load_child_usage(uid: u32) -> Option<String> {
     std::fs::read_to_string(child_usage_path(uid)).ok()
 }
-/// Write one child's day-ledger, **0600** (review 2026-08-07).
+/// Write one child's day-ledger, **0600** (review 2026-08-07), atomically.
 ///
 /// These land under the default umask, i.e. world-readable, so on a shared
 /// family box every local account could read every other child's ledger — how
@@ -589,15 +590,22 @@ fn load_child_usage(uid: u32) -> Option<String> {
 /// ledgers were never part of that decision and nothing outside this root
 /// daemon reads them.
 ///
-/// The mode is set on the FILE, after the write, rather than trusted to a
-/// umask: an existing file keeps its old permissions through a plain write, so
-/// a ledger created before this change would stay 0644 forever otherwise.
+/// The mode is carried by the write rather than trusted to a umask: an
+/// existing file keeps its old permissions through a plain write, so a ledger
+/// created before that change would stay 0644 forever otherwise.
+///
+/// This was a bare `std::fs::write` — `O_TRUNC` then write, with no fsync and
+/// no rename. It runs every slow tick (10 s by default), and a ward who holds
+/// the power button through that window leaves a truncated file behind;
+/// `restore_usage` swallows a snapshot that will not parse, so the child came
+/// back with the whole day's accrued time gone. Repeatable at will, in the
+/// fail-open direction. Now temp + fsync + rename, via [`atomic_write`].
 fn save_child_usage(uid: u32, usage: &str) {
-    let _ = std::fs::create_dir_all("/var/lib/charter/children");
-    let path = child_usage_path(uid);
-    if std::fs::write(&path, usage).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = atomic_write(&child_usage_path(uid), usage.as_bytes(), 0o600) {
+        eprintln!(
+            "charterd: could not persist the usage ledger for uid {uid} ({e}) — \
+                   the day's accrued time is still being enforced from memory"
+        );
     }
 }
 
