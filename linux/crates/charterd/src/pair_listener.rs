@@ -124,6 +124,7 @@ mod tests {
             pairing: d.join("pairing.json").to_string_lossy().into_owned(),
             limits_dir: d.join("limits.d").to_string_lossy().into_owned(),
             token: d.join("pair-token.json").to_string_lossy().into_owned(),
+            children_base: d.to_string_lossy().into_owned(),
         }
     }
 

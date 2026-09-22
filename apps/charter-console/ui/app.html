@@ -844,7 +844,17 @@ function wire(){
   if(learn) learn.onclick=()=>{ const c=currentChild(); const on=document.getElementById("learn-khan").checked; act(); send({cmd:"learning",user:c.user,khan:on}); };
   document.querySelectorAll("[data-step]").forEach(b=>b.onclick=()=>step(b.dataset.step, +b.dataset.d));
   const pair=document.getElementById("do-pair");
-  if(pair) pair.onclick=()=>{ const link=document.getElementById("pair-link").value.trim(); const subj=document.getElementById("pair-subject").value.trim(); if(!link){ showToast("Paste the pairing link","err"); return; } act(); send({cmd:"pair",link,subject:subj}); };
+  if(pair) pair.onclick=()=>{
+    const link=document.getElementById("pair-link").value.trim();
+    const subj=document.getElementById("pair-subject").value.trim();
+    if(!link){ showToast("Paste the pairing link","err"); return; }
+    // Re-pairing over an existing guardian is explicit — same confirm the
+    // typed (zenity) flow has always shown, so the headless `--link` path
+    // this button drives isn't the one route that silently overwrites.
+    if(S.paired && !confirm("This computer is already connected to a guardian. Replace it with a new one?")) return;
+    act();
+    send({cmd:"pair",link,subject:subj,replace:S.paired});
+  };
   const inv=document.getElementById("do-invite");
   if(inv) inv.onclick=()=>{ act(); send({cmd:"invite"}); };
   const rec=document.getElementById("do-recovery"); if(rec) rec.onclick=()=>{ send({cmd:"recovery"}); showToast("Opening Recovery…"); };

@@ -253,7 +253,15 @@ fn handle_command(body: &str, proxy: &tao::event_loop::EventLoopProxy<UserEvent>
         "pair" => {
             let link = msg.get("link").and_then(|v| v.as_str()).unwrap_or("");
             let subject = msg.get("subject").and_then(|v| v.as_str()).unwrap_or("");
-            Some(run_pair(link, subject).map(|_| "Phone connected."))
+            // The UI asks the parent to confirm BEFORE ever sending this
+            // (see `S.paired` in wire()'s `do-pair` handler); `replace` is
+            // that confirmation, carried across the IPC boundary. `run_pair`
+            // still only forwards it as `--replace` — the daemon-side
+            // `charter-pair` binary is the actual backstop that refuses an
+            // overwrite without it, in case the UI's belief about `paired`
+            // is stale.
+            let replace = msg.get("replace").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(run_pair(link, subject, replace).map(|_| "Phone connected."))
         }
         // Mint a fresh scan-to-pair token and show its QR. Asks for the admin
         // password, which is the point: only the parent may invite a guardian.
@@ -632,14 +640,21 @@ fn run_limits(user: &str, wake: &str, bedtime: &str, daily: u64) -> Result<(), S
     )
 }
 
-fn run_pair(link: &str, subject: &str) -> Result<(), String> {
+fn run_pair(link: &str, subject: &str, replace: bool) -> Result<(), String> {
     if !link.starts_with("bunker://") {
         return Err("That link should start with bunker://".into());
     }
     if subject.len() != 64 || !subject.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("The child's ID should be 64 letters and numbers.".into());
     }
-    pkexec("charter-pair", &["--link", link, "--subject", subject])
+    if replace {
+        pkexec(
+            "charter-pair",
+            &["--link", link, "--subject", subject, "--replace"],
+        )
+    } else {
+        pkexec("charter-pair", &["--link", link, "--subject", subject])
+    }
 }
 
 fn open_recovery() {

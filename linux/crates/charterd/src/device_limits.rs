@@ -212,6 +212,40 @@ pub fn child_limits_path(dir: &str, username: &str) -> String {
     format!("{dir}/{username}.json")
 }
 
+/// The root a guardian RELEASE purges a child's cached clauses under
+/// (`RealChildClauseStore` in `charter_sys::persistence`, `/var/lib/charter` in
+/// production). Exposed here so callers that can't always build under the
+/// `real` feature (the `charter-pair` binaries, `pair_commit`) still purge the
+/// same directory on a re-pair.
+pub const CHILD_CLAUSE_STORE_BASE: &str = "/var/lib/charter";
+
+/// Remove `subject_hex`'s per-child clause store under `base` —
+/// `<base>/children/<subject_hex>/clauses`, sanitised to lowercase hex exactly
+/// as `RealChildClauseStore::clear_for` does, so a crafted subject can never
+/// escape `base`. `charter-pair`/`pair_commit` call this on a re-pair to a NEW
+/// subject: the old subject's clauses are otherwise orphaned — cached but
+/// unreachable — which is the same state a guardian RELEASE clears via that
+/// trait method. This mirrors its logic directly rather than depending on it,
+/// since `charter_sys`'s real filesystem impls are gated behind the `real`
+/// feature and this module builds under `mock` too (`pair_commit`'s tests run
+/// there). Missing already ⇒ `Ok(())` (nothing to purge is not a failure).
+pub fn purge_subject_store(base: &str, subject_hex: &str) -> SysResult<()> {
+    let safe: String = subject_hex
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let dir = std::path::Path::new(base)
+        .join("children")
+        .join(safe)
+        .join("clauses");
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(charter_sys::SysError::Io(e.to_string())),
+    }
+}
+
 /// The system timezone (`/etc/timezone`), falling back to `UTC` — so the
 /// settings UI doesn't have to ask the parent for it.
 pub fn detect_tz() -> String {
@@ -239,6 +273,29 @@ mod tests {
                 bedtime: "21:00".into(),
             }),
         }
+    }
+
+    #[test]
+    fn purge_subject_store_removes_only_the_named_subjects_clauses_dir() {
+        let d = std::env::temp_dir().join("charter-purge-subject-test");
+        let _ = std::fs::remove_dir_all(&d);
+        let old = format!("{d}/children/{HEX64}/clauses", d = d.to_string_lossy());
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(format!("{old}/1.json"), "{}").unwrap();
+        let other_hex = "b".repeat(64);
+        let other = format!(
+            "{d}/children/{other_hex}/clauses",
+            d = d.to_string_lossy()
+        );
+        std::fs::create_dir_all(&other).unwrap();
+
+        purge_subject_store(&d.to_string_lossy(), HEX64).unwrap();
+
+        assert!(!std::path::Path::new(&old).exists(), "purged");
+        assert!(std::path::Path::new(&other).exists(), "untouched");
+        // Missing already: not an error.
+        assert!(purge_subject_store(&d.to_string_lossy(), HEX64).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

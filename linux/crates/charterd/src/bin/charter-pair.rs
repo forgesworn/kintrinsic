@@ -6,6 +6,15 @@
 //! effect. Run as root via pkexec (writes root-owned state). The validate/build
 //! logic lives in `charterd::pairing_setup` and is unit-tested; this is the
 //! zenity glue (mirrors charter-settings.rs), run on a real desktop (VM).
+//!
+//! Replacing an existing pairing is always explicit: the interactive flow
+//! confirms with a dialog, and the headless flow (`--link`, what
+//! `charter-console` calls) refuses outright unless `--replace` is passed —
+//! the console is expected to have confirmed with the parent itself before
+//! ever passing it. Either way, binding the child's subject and writing the
+//! pin are treated as one transaction (a failed pin write rolls the bind
+//! back), and a re-pair to a NEW subject purges the OLD subject's now-orphaned
+//! cached clauses.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -14,13 +23,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use charter_primitives::PubKey;
 use charterd::device_limits::{
-    load_child_configs, set_child_subject, valid_subject_hex, ChildConfig,
+    load_child_configs, purge_subject_store, set_child_subject, valid_subject_hex,
+    ChildConfig, CHILD_CLAUSE_STORE_BASE,
 };
 use charterd::pairing_setup::{build_pairing_json, map_pairing_error, read_device_pub};
 
 const DEVICE_PUB: &str = "/var/lib/charter/device.pub";
 const PAIRING: &str = "/var/lib/charter/pairing.json";
 const LIMITS_DIR: &str = "/etc/charter/limits.d";
+
+/// Whether `--replace` was passed — the explicit ask headless pairing
+/// requires before it will overwrite an existing guardian.
+fn wants_replace(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--replace")
+}
+
+/// A re-pair to a NEW subject orphans the old subject's cached clauses —
+/// purge them, the same directory a guardian RELEASE purges. Best effort and
+/// silent-on-success: the pairing already landed by the time this runs, so a
+/// purge failure must not read as the pairing having failed.
+fn purge_if_repaired_to_a_new_subject(
+    pairing_existed: bool,
+    previous_subject: Option<&str>,
+    new_subject_hex: &str,
+) {
+    if !pairing_existed {
+        return;
+    }
+    let Some(prev) = previous_subject else {
+        return;
+    };
+    if prev.eq_ignore_ascii_case(new_subject_hex) {
+        return;
+    }
+    if let Err(e) = purge_subject_store(CHILD_CLAUSE_STORE_BASE, prev) {
+        eprintln!("charter-pair: could not clear the old guardian's cached rules: {e}");
+    }
+}
 
 fn zenity(args: &[&str]) -> Option<String> {
     let out = Command::new("zenity").args(args).output().ok()?;
@@ -102,10 +141,13 @@ fn write_pairing(json: &str) -> std::io::Result<()> {
 }
 
 /// Headless pairing used by the unified `charter-console` app:
-/// `charter-pair --link <bunker://…> --subject <hex>`. Same validate → build →
-/// bind-subject → pin → reload path as the interactive flow, without dialogs.
-/// Binds the subject to the single managed child (the common family case);
-/// errors clearly when there is more than one so nothing is bound wrongly.
+/// `charter-pair --link <bunker://…> [--subject <hex>] [--replace]`. Same
+/// validate → build → bind-subject → pin → reload path as the interactive
+/// flow, without dialogs. Binds the subject to the single managed child (the
+/// common family case); errors clearly when there is more than one so nothing
+/// is bound wrongly. Refuses to overwrite an existing pairing unless
+/// `--replace` is given — the console is expected to have already confirmed
+/// with the parent before ever passing it.
 fn headless_pair(args: &[String]) -> ! {
     let get = |flag: &str| -> Option<String> {
         args.iter()
@@ -114,9 +156,17 @@ fn headless_pair(args: &[String]) -> ! {
             .cloned()
     };
     let Some(uri) = get("--link") else {
-        eprintln!("usage: charter-pair --link <bunker://…> [--subject <hex>]");
+        eprintln!("usage: charter-pair --link <bunker://…> [--subject <hex>] [--replace]");
         std::process::exit(2);
     };
+    let pairing_existed = Path::new(PAIRING).exists();
+    if pairing_existed && !wants_replace(args) {
+        eprintln!(
+            "charter-pair: this computer is already paired with a guardian — pass --replace \
+             to replace it."
+        );
+        std::process::exit(3);
+    }
     // `--subject` is OPTIONAL. Kintrinsic has no dependant pubkey to give (a
     // child's `dependantPubkey` is null and never assigned), and the broker
     // routes a subject-less clause to the pairing's sole subject — so when the
@@ -169,14 +219,27 @@ fn headless_pair(args: &[String]) -> ! {
             std::process::exit(1);
         }
     };
+    let previous_subject = children
+        .iter()
+        .find(|(u, _)| u == &child)
+        .and_then(|(_, c)| c.subject.clone());
     if let Err(e) = set_child_subject(LIMITS_DIR, &child, Some(&subject_hex)) {
         eprintln!("charter-pair: could not link {child}: {e}");
         std::process::exit(1);
     }
     if let Err(e) = write_pairing(&json) {
+        // Bind-then-write must not leave the child bound to a subject no
+        // guardian holds — restore what was there before (best effort).
+        if let Err(re) = set_child_subject(LIMITS_DIR, &child, previous_subject.as_deref()) {
+            eprintln!(
+                "charter-pair: could not roll back {child}'s subject link after a failed \
+                 save: {re}"
+            );
+        }
         eprintln!("charter-pair: could not save the pairing: {e}");
         std::process::exit(1);
     }
+    purge_if_repaired_to_a_new_subject(pairing_existed, previous_subject.as_deref(), &subject_hex);
     let _ = Command::new("systemctl")
         .args(["try-restart", "charterd.service"])
         .status();
@@ -199,7 +262,8 @@ fn main() {
     };
 
     // 2) Replacing an existing pairing is explicit.
-    if Path::new(PAIRING).exists()
+    let pairing_existed = Path::new(PAIRING).exists();
+    if pairing_existed
         && !confirm(
             "This computer is already connected to a guardian.\n\nReplace it with a new one?",
         )
@@ -265,6 +329,10 @@ fn main() {
     let Some(child) = pick_child(&children) else {
         return; // picker cancelled — link nothing, write nothing, claim nothing
     };
+    let previous_subject = children
+        .iter()
+        .find(|(u, _)| u == &child)
+        .and_then(|(_, c)| c.subject.clone());
     if let Err(e) = set_child_subject(LIMITS_DIR, &child, Some(&subject_hex)) {
         err(&format!("Could not link {child} to this guardian: {e}"));
         std::process::exit(1);
@@ -272,9 +340,18 @@ fn main() {
 
     // 7) Pin + reload.
     if let Err(e) = write_pairing(&json) {
+        // Bind-then-write must not leave the child bound to a subject no
+        // guardian holds — restore what was there before (best effort).
+        if let Err(re) = set_child_subject(LIMITS_DIR, &child, previous_subject.as_deref()) {
+            eprintln!(
+                "charter-pair: could not roll back {child}'s subject link after a failed \
+                 save: {re}"
+            );
+        }
         err(&format!("Could not save the pairing: {e}"));
         std::process::exit(1);
     }
+    purge_if_repaired_to_a_new_subject(pairing_existed, previous_subject.as_deref(), &subject_hex);
     let _ = Command::new("systemctl")
         .args(["try-restart", "charterd.service"])
         .status();
@@ -285,4 +362,43 @@ fn main() {
         "--text=Paired with your guardian. Kintrinsic will now accept limits and \
          approvals from your phone.",
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn wants_replace_only_when_the_flag_is_present() {
+        assert!(!wants_replace(&s(&["--link", "bunker://x"])));
+        assert!(wants_replace(&s(&["--link", "bunker://x", "--replace"])));
+        assert!(wants_replace(&s(&[
+            "--replace",
+            "--link",
+            "bunker://x",
+            "--subject",
+            "ab"
+        ])));
+        // Not a value to some other flag — a bare token still counts, same as
+        // every other boolean flag this binary parses.
+        assert!(!wants_replace(&s(&["--subject", "--replace-not-quite"])));
+    }
+
+    #[test]
+    fn purge_if_repaired_only_fires_on_a_genuine_re_pair_to_a_new_subject() {
+        // No prior pairing at all: never purges, whatever the subjects say.
+        purge_if_repaired_to_a_new_subject(false, Some("aa"), "bb");
+        // Same subject (case-insensitively): nothing to purge.
+        purge_if_repaired_to_a_new_subject(true, Some("AA"), "aa");
+        // No previous subject bound: nothing to purge.
+        purge_if_repaired_to_a_new_subject(true, None, "bb");
+        // These three must not touch the filesystem at all — nothing to
+        // assert beyond "did not panic"; the real purge path (base dir,
+        // sanitisation, NotFound-is-ok) is covered by
+        // `device_limits::purge_subject_store`'s own tests.
+    }
 }
