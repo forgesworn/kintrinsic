@@ -23,8 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use charter_primitives::PubKey;
 use charterd::device_limits::{
-    load_child_configs, purge_subject_store, set_child_subject, valid_subject_hex,
-    ChildConfig, CHILD_CLAUSE_STORE_BASE,
+    load_child_configs, purge_subject_store, set_child_subject, valid_subject_hex, ChildConfig,
+    CHILD_CLAUSE_STORE_BASE,
 };
 use charterd::pairing_setup::{build_pairing_json, map_pairing_error, read_device_pub};
 
@@ -32,10 +32,34 @@ const DEVICE_PUB: &str = "/var/lib/charter/device.pub";
 const PAIRING: &str = "/var/lib/charter/pairing.json";
 const LIMITS_DIR: &str = "/etc/charter/limits.d";
 
-/// Whether `--replace` was passed — the explicit ask headless pairing
-/// requires before it will overwrite an existing guardian.
+/// The headless flags that consume the following token as a value, the same
+/// set `headless_pair`'s `get` closure reads by position — kept in sync with
+/// it so `wants_replace` walks the args the same way.
+const VALUE_FLAGS: [&str; 2] = ["--link", "--subject"];
+
+/// Whether `--replace` was passed as a STANDALONE flag — the explicit ask
+/// headless pairing requires before it will overwrite an existing guardian.
+/// A bare `.any(|a| a == "--replace")` over-matches: if `--replace` happens
+/// to be the *value* of `--link` or `--subject` (e.g. a mis-typed
+/// `charter-console` invocation, or a subject hex that collided with the
+/// literal string), that token is data, not a flag, and must not be read as
+/// consent to overwrite an existing pairing. Walk the args in the same
+/// order `headless_pair`'s `get` consumes them, skipping the value slot of
+/// every value-taking flag, and only match `--replace` at a position that
+/// was never consumed as such a value.
 fn wants_replace(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--replace")
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--replace" {
+            return true;
+        }
+        if VALUE_FLAGS.contains(&args[i].as_str()) {
+            i += 2; // skip the flag and the value slot that follows it
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 /// A re-pair to a NEW subject orphans the old subject's cached clauses —
@@ -386,6 +410,16 @@ mod tests {
         // Not a value to some other flag — a bare token still counts, same as
         // every other boolean flag this binary parses.
         assert!(!wants_replace(&s(&["--subject", "--replace-not-quite"])));
+    }
+
+    #[test]
+    fn wants_replace_ignores_the_token_when_it_is_a_value_not_a_flag() {
+        // `--replace` sitting exactly where `--link`'s value belongs is that
+        // value, not the flag — must not be read as consent to overwrite.
+        assert!(!wants_replace(&s(&["--link", "--replace"])));
+        assert!(!wants_replace(&s(&["--subject", "--replace"])));
+        // A genuine standalone `--replace` AFTER a value slot still counts.
+        assert!(wants_replace(&s(&["--link", "--replace", "--replace"])));
     }
 
     #[test]

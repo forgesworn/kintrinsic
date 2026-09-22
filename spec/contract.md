@@ -156,6 +156,22 @@ absent caps unconstrained; `paused` ⇒ 0; `revoked` ⇒ no constraint. Usage co
 **Active** time only (idle / locked / suspended / charter-frozen excluded) and
 survives a daemon restart without refilling.
 
+**Residual: a forward clock jump still consumes a reset.** The boundary above
+is computed off the device's own wall clock, not a monotonic clock, because the
+reset is defined in local wall-clock time (00:00 in `tz`) and has to be. If the
+device's RTC is stepped forward across a day or week boundary — a wrong clock
+found and corrected by NTP, a battery-dead RTC catching up on next boot, a ward
+setting the date ahead by hand — the day/week rolls exactly once, same as at a
+real boundary, and the counters it carried are gone. A later NTP correction
+that steps the clock back down does **not** restore what that forward roll
+consumed: there is no journal of a boundary crossed, only the counters
+themselves, and once they have reset there is nothing to replay them from.
+This is closed in one direction only: `issuedAt` rollback protection and the
+`week_key_of` walk-back mean a clock going **backwards** cannot mint extra
+quota or re-open a bucket that already closed, but a spurious **forward** jump
+is not itself detected or corrected — it is accepted as a real boundary
+crossing, the same as `budget`'s and `buckets`' shared day/week arithmetic.
+
 `charter_set_budget` / `charter_set_default_budget` mirror the schedule methods
 `(dependantId, [...scope keys], GrantBudget | null)`; the device authenticates
 the signed clause against the pinned guardian + monotonic `issuedAt` before

@@ -456,10 +456,21 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             ));
         }
         let window_start = now.saturating_sub(SUBMIT_WINDOW_SECS);
-        let stamps = st.submits.entry(caller_uid).or_default();
-        while stamps.front().is_some_and(|t| *t < window_start) {
-            stamps.pop_front();
+        {
+            let stamps = st.submits.entry(caller_uid).or_default();
+            while stamps.front().is_some_and(|t| *t < window_start) {
+                stamps.pop_front();
+            }
         }
+        // A deque pruned down to nothing is dead weight: without this, every
+        // distinct `caller_uid` that has ever submitted keeps a permanent
+        // entry in this map for the life of the process, whether or not it
+        // is about to submit again below. Drop it now; `or_default` below
+        // recreates it if this call does go on to push a stamp.
+        if st.submits.get(&caller_uid).is_some_and(VecDeque::is_empty) {
+            st.submits.remove(&caller_uid);
+        }
+        let stamps = st.submits.entry(caller_uid).or_default();
         if stamps.len() >= MAX_SUBMITS_PER_HOUR {
             return Err(BrokerError::RateLimited(
                 "you've asked a lot recently — try again in a while".into(),
@@ -645,7 +656,21 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
 
         {
             let mut st = self.state.lock().expect("state lock");
-            st.requests.insert(key, rec);
+            // `rec` was cloned from the LIVE map before any `.await` in this
+            // function (verify/enact both suspend); a second delivery of the
+            // same grant — or the TTL sweep expiring this same reqId — can run
+            // to completion in that window and already have written a
+            // resolved record back. Re-check the live entry before writing
+            // back: if it is no longer `Pending`, someone else already
+            // resolved it, and this (now-stale) computation must not clobber
+            // that outcome.
+            let still_pending = st
+                .requests
+                .get(&key)
+                .is_some_and(|live| live.state == RequestState::Pending);
+            if still_pending {
+                st.requests.insert(key, rec);
+            }
         }
         // A grant resolves the request to a terminal state (Enacted / Denied /
         // Failed); bound the retained terminal history.
@@ -801,12 +826,19 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         let pinned = self.transport.pinned_guardian();
         let now = self.now();
         if let Ok(vs) = verify_usage_sync(&event, &pinned, prev, now) {
-            let _ = self.sys.child_clauses().put_child_clause(
+            // Same failure shape as an authenticated clause whose store write
+            // fails (see `warn_write_failed`): this WAS the guardian's sync,
+            // past the replay floor, but the write itself didn't land. Log it
+            // rather than discard it — control flow is unchanged either way,
+            // this is diagnostics only.
+            if let Err(e) = self.sys.child_clauses().put_child_clause(
                 &subject_hex,
                 USAGE_SYNC_STORE_KEY,
                 vs.ts(),
                 &vs.payload().to_json(),
-            );
+            ) {
+                warn_write_failed(&format!("usage sync {subject_hex}"), e);
+            }
         }
     }
 
