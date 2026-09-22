@@ -285,9 +285,19 @@ impl CharterInterface {
         // Fail early (before any guard work) with the friendly unpaired message.
         let broker = self.require_broker()?;
 
+        // Who asked (S8) — resolved ONCE, from the KERNEL (SO_PEERCRED via the
+        // bus), never from the request body. Both the `exec.allow` guard below
+        // and the record's ownership read this same answer, so there is no way
+        // for the two to disagree about whose request this is.
+        //
+        // `None` (an unidentifiable caller) makes the record root-only, which is
+        // the fail-closed direction: the request still travels and can still be
+        // granted, it just is not listed to a non-root reader. `exec.allow`
+        // refuses outright, having no managed tree to check the path against.
+        let caller = caller_uid(conn, &hdr).await;
+
         let (params, source_path) = if op == OpType::ExecAllow {
-            // The caller uid comes from the KERNEL, never the request body.
-            let uid = caller_uid(conn, &hdr).await.ok_or_else(|| {
+            let uid = caller.ok_or_else(|| {
                 zbus::fdo::Error::Failed("couldn't identify the requesting user".into())
             })?;
             // A caller may only admit paths under THEIR OWN managed tree.
@@ -312,12 +322,10 @@ impl CharterInterface {
             (params, None)
         };
 
-        // Record WHO asked (S8) — kernel-attested, never from the body. On a
-        // shared family box this is what lets one child's asks be theirs.
-        // `None` (an unidentifiable caller) makes the record root-only, which
-        // is the fail-closed direction: the request still travels and can
-        // still be granted, it just is not listed to a non-root reader.
-        let caller = caller_uid(conn, &hdr).await;
+        // `submit_as` enforces this caller's outstanding + per-hour caps before
+        // it generates an id or publishes anything (03-G1); the refusal is a
+        // `BrokerError::RateLimited` whose message is written to be read by the
+        // ward, so it travels verbatim.
         let req_id = broker
             .submit_as(op, params, source_path, caller)
             .await

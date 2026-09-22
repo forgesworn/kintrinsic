@@ -30,6 +30,12 @@ pub enum BrokerError {
     Invalid(String),
     #[error("not paired")]
     NotPaired,
+    /// The caller is over a per-caller submit cap (outstanding asks, or submits
+    /// per hour). Distinct from [`BrokerError::Invalid`] because nothing about
+    /// the request is wrong — the same call succeeds later, and the wording is
+    /// the ward's to read, not a developer's.
+    #[error("{0}")]
+    RateLimited(String),
     #[error("system error: {0}")]
     Sys(#[from] charter_sys::SysError),
     #[error("broker stopped")]

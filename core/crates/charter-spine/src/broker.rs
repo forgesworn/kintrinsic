@@ -4,7 +4,7 @@
 //! before any enact). In production a single task owns the broker; here it is
 //! internally synchronized so the headless tests drive it directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 use charter_primitives::{Nonce, PubKey, ReqId};
@@ -26,6 +26,15 @@ use crate::transport_facade::TransportFacade;
 struct State {
     requests: BTreeMap<String, RequestRecord>,
     cursor: u64,
+    /// Submit timestamps per caller, newest last, pruned to
+    /// [`SUBMIT_WINDOW_SECS`] on every check — the sliding window behind
+    /// [`MAX_SUBMITS_PER_HOUR`]. In memory only, deliberately: a restart is a
+    /// far heavier thing than the cap it would reset, the outstanding cap
+    /// (which IS persisted, being the record map) still holds across it, and
+    /// persisting a rate-limiter's ticks would write to disk on every ask.
+    /// Keyed by `caller_uid`, so one child's flood cannot spend a sibling's
+    /// budget; `None` (root / unidentified) is its own key.
+    submits: BTreeMap<Option<u32>, VecDeque<u64>>,
 }
 
 /// How far BEHIND wall-clock the next poll's `since` cursor sits. A guardian
@@ -47,11 +56,53 @@ const POLL_LOOKBACK_SECS: u64 = charter_transport::nip59::MAX_JITTER_SECS;
 /// the on-disk store grew without bound over a device's lifetime. We keep the
 /// most-recent `MAX_TERMINAL_RECORDS` terminal records (by `created_at`) and evict
 /// the oldest beyond that. **Non-terminal records (Pending / Enacting) are never
-/// evicted** — they carry in-flight guardian decisions and the boot-resubscribe
-/// set, so dropping one would silently strand a request. This is a generous
-/// history window for a family device; the number is a durability bound, not a
-/// UX limit.
+/// evicted BY THE CAP** — they carry in-flight guardian decisions and the
+/// boot-resubscribe set, so dropping one would silently strand a request. They
+/// leave the non-terminal set only by being *answered*, or — for Pending — by
+/// ageing out through [`PENDING_TTL_SECS`], which turns them terminal first
+/// (`Event::Expire`) so this cap then bounds them like any other history. This
+/// is a generous history window for a family device; the number is a durability
+/// bound, not a UX limit.
 const MAX_TERMINAL_RECORDS: usize = 256;
+
+/// How long a Pending request waits for its guardian before it ages out
+/// (`Event::Expire` -> `Expired`, which is terminal and therefore subject to
+/// [`MAX_TERMINAL_RECORDS`]).
+///
+/// Before this, `Event::Expire` existed in the reducer and was emitted
+/// **nowhere**: a Pending record was immortal, so a ward looping
+/// `charter ask-for-more` grew both the in-memory map and the on-disk
+/// `PendingStore` without bound, and every one of those records stayed eligible
+/// to be matched by a grant forever. A day is the right window for a
+/// human-answered ask: long enough that "I asked last night, Dad looked at it
+/// over breakfast" still works, short enough that yesterday's ask cannot be
+/// answered into effect a fortnight later.
+///
+/// **Only Pending expires.** `Enacting` is mid-enact with a consumed grant
+/// behind it; timing it out here would race the enactor. A crash leaves it to
+/// [`Broker::new`]'s M9 reconcile instead.
+const PENDING_TTL_SECS: u64 = 24 * 3600;
+
+/// How many requests one caller may have *outstanding* (Pending or Enacting) at
+/// once. Over the cap, a submit is refused before any id is generated or
+/// anything is published.
+///
+/// The number is a "how many asks can a person be genuinely waiting on"
+/// judgement, not a resource bound — the resource bound is that this, with
+/// [`MAX_SUBMITS_PER_HOUR`], is what keeps a looping ward from filling their
+/// guardian's Approvals screen (and the event sink, and the relay inbox) with
+/// the same ask ten thousand times. A guardian answering one frees a slot
+/// immediately.
+const MAX_PENDING_PER_CALLER: usize = 8;
+
+/// How many submits one caller may make inside [`SUBMIT_WINDOW_SECS`],
+/// regardless of how quickly they are answered. The outstanding cap alone would
+/// not bind a ward whose asks are auto-denied (or cancelled) as fast as they are
+/// made; this one does.
+const MAX_SUBMITS_PER_HOUR: usize = 12;
+
+/// The sliding window [`MAX_SUBMITS_PER_HOUR`] is counted over.
+const SUBMIT_WINDOW_SECS: u64 = 3600;
 
 /// Evict the oldest **terminal** records beyond `max` from both the in-memory
 /// map and the persisted store, oldest-first by `created_at` (ties broken by the
@@ -80,6 +131,55 @@ fn prune_terminal_records(
         // next prune retries — it never resurrects an evicted request.
         let _ = store.remove(&key);
     }
+}
+
+/// What one expired record still needs doing to it, outside the state lock:
+/// the key, the record as the reducer left it, and whether the reducer asked
+/// for a `Notify` / a `Persist`.
+type ExpiredRecord = (String, RequestRecord, bool, bool);
+
+/// Age out every `Pending` record whose `created_at` + [`PENDING_TTL_SECS`] has
+/// passed, by running it through the reducer's `Event::Expire`. Returns one
+/// entry per record transitioned, for the caller to carry the effects out on.
+///
+/// **Only `Pending` ages out.** `Enacting` has a consumed grant behind it and an
+/// enactor in flight; expiring it here would race that enactor and leave a
+/// half-applied change described as "never answered". Terminal states are inert
+/// by definition.
+///
+/// Pure over its inputs — no `Broker`, no clock, no IO — so the TTL rule is
+/// unit-testable directly, the same way [`prune_terminal_records`] is.
+fn expire_stale_pending_records(
+    requests: &mut BTreeMap<String, RequestRecord>,
+    now: u64,
+) -> Vec<ExpiredRecord> {
+    let mut expired = Vec::new();
+    for (key, rec) in requests.iter_mut() {
+        if rec.state != RequestState::Pending {
+            continue;
+        }
+        // `saturating_add` so a record with an absurd `created_at` (a clock that
+        // jumped, a hand-edited store) cannot wrap into the past and expire the
+        // instant it is written.
+        if rec.created_at.saturating_add(PENDING_TTL_SECS) > now {
+            continue;
+        }
+        let (next, effects) = transition(rec, Event::Expire);
+        rec.state = next;
+        let (mut notify, mut persist) = (false, false);
+        for eff in effects {
+            match eff {
+                Effect::Notify => notify = true,
+                Effect::Persist => persist = true,
+                // An expiry enacts nothing and audits nothing; a future reducer
+                // that wanted either would need the receive pipeline's
+                // machinery, not this sweep.
+                Effect::Enact(_) | Effect::Audit(_) => {}
+            }
+        }
+        expired.push((key.clone(), rec.clone(), notify, persist));
+    }
+    expired
 }
 
 /// Say that a replay floor could not be read, and that the event it would have
@@ -181,8 +281,16 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             state: Mutex::new(State {
                 requests,
                 cursor: 0,
+                submits: BTreeMap::new(),
             }),
         };
+        // A daemon that was off for a week comes up with a week-old Pending set.
+        // Age it out HERE, before anything can poll: otherwise the first poll
+        // after boot is free to match a grant against an ask from last Tuesday,
+        // and the outstanding cap is spent on requests nobody is still waiting
+        // for. (Expiring also turns them terminal, so the prune below bounds
+        // them.)
+        broker.expire_stale_pending();
         // Bound any terminal history accumulated by earlier runs (this eviction
         // is new; a device upgraded into it may hold an unbounded backlog).
         broker.prune_terminal();
@@ -225,6 +333,91 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         prune_terminal_records(&mut st.requests, self.sys.pending(), MAX_TERMINAL_RECORDS);
     }
 
+    /// Age out every Pending record past [`PENDING_TTL_SECS`] via the reducer's
+    /// `Event::Expire`, then bound the terminal history it just added to.
+    ///
+    /// Run at construction and at the **top** of every [`Broker::poll_once`] —
+    /// before the transport is asked for anything. The ordering is the point:
+    /// `on_grant` only routes to a record that is still `Pending`, so sweeping
+    /// first is what guarantees a grant delivered late (or redelivered inside
+    /// the cursor lookback) cannot land on an ask that has already aged out.
+    /// The reducer backs that up — every `(terminal, _)` pair falls through to
+    /// the inert catch-all — but the check that actually fires is the `Pending`
+    /// guard in `on_grant`, and this sweep is what makes it true in time.
+    ///
+    /// `Enacting` is deliberately untouched (see [`PENDING_TTL_SECS`]).
+    fn expire_stale_pending(&self) {
+        let now = self.now();
+        // The effects are read inside the lock and CARRIED OUT outside it, so
+        // neither a slow disk nor an event sink's channel ever holds the state
+        // mutex.
+        let expired = {
+            let mut st = self.state.lock().expect("state lock");
+            expire_stale_pending_records(&mut st.requests, now)
+        };
+        if expired.is_empty() {
+            return;
+        }
+        for (key, rec, notify, persist) in expired {
+            if persist {
+                // Best-effort: a failed write leaves an on-disk record saying
+                // Pending while memory says Expired. That is the safe way round
+                // — memory is what `on_grant` consults, so the expiry still
+                // holds for this run, and the next boot re-expires it by age.
+                let _ = self.persist(&rec);
+            }
+            if notify {
+                self.events.request_updated(&key, rec.state);
+            }
+        }
+        // Expired is terminal, so the records just produced are now the cap's
+        // business.
+        self.prune_terminal();
+    }
+
+    /// Refuse a submit that is over this caller's outstanding or per-hour cap,
+    /// and otherwise record the submit against the window.
+    ///
+    /// Called from [`Broker::submit_as`] BEFORE any id is generated, anything is
+    /// persisted, or anything is published — a refused ask must leave no trace
+    /// on disk, on the relay, or in the guardian's inbox, or the refusal would
+    /// itself be the flood it is preventing.
+    ///
+    /// Both counts are keyed by `caller_uid` and only ever consulted for that
+    /// key, so a sibling's flood cannot spend this caller's budget (nor the
+    /// reverse). `None` — root, or a caller the bus could not identify — is its
+    /// own key rather than a free pass.
+    fn check_caller_caps(&self, caller_uid: Option<u32>, now: u64) -> Result<(), BrokerError> {
+        let mut st = self.state.lock().expect("state lock");
+        let outstanding = st
+            .requests
+            .values()
+            .filter(|r| r.caller_uid == caller_uid && !r.state.is_terminal())
+            .count();
+        if outstanding >= MAX_PENDING_PER_CALLER {
+            return Err(BrokerError::RateLimited(
+                "too many requests waiting for your guardian — wait for an answer or try again \
+                 later"
+                    .into(),
+            ));
+        }
+        let window_start = now.saturating_sub(SUBMIT_WINDOW_SECS);
+        let stamps = st.submits.entry(caller_uid).or_default();
+        while stamps.front().is_some_and(|t| *t < window_start) {
+            stamps.pop_front();
+        }
+        if stamps.len() >= MAX_SUBMITS_PER_HOUR {
+            return Err(BrokerError::RateLimited(
+                "you've asked a lot recently — try again in a while".into(),
+            ));
+        }
+        // Counted here rather than after a successful publish: a submit that
+        // fails downstream still cost the work, and a caller who could retry a
+        // failing op without limit is the same flood by another door.
+        stamps.push_back(now);
+        Ok(())
+    }
+
     /// Submit a brokered request: build + publish a REQUEST, persist it Pending,
     /// and return the reqId. **Enacts nothing.**
     pub async fn submit(
@@ -252,6 +445,9 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             return Err(BrokerError::Invalid("params must be a JSON object".into()));
         }
         let now = self.now();
+        // Per-caller caps FIRST: before an id exists, before anything is
+        // written, before anything reaches the relay (03-G1).
+        self.check_caller_caps(caller_uid, now)?;
         let (req_id, nonce) = self.gen_ids();
         let payload = RequestPayload {
             v: 1,
@@ -615,6 +811,10 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
 
     /// Poll the transport once and process all delivered grants + clauses.
     pub async fn poll_once(&self) -> PollCounts {
+        // Age out stale Pending records BEFORE fetching anything: a grant
+        // delivered (or redelivered) this round must not be able to land on an
+        // ask that is already past its TTL. See `expire_stale_pending`.
+        self.expire_stale_pending();
         let now = self.now();
         let cursor = {
             let st = self.state.lock().expect("state lock");
@@ -812,9 +1012,12 @@ mod prune_tests {
     }
 
     #[test]
-    fn pending_records_are_never_evicted_even_past_the_cap() {
+    fn pending_records_are_never_evicted_by_the_cap() {
         // Ten Pending records, cap of 3: none may be evicted (only terminal
-        // records are counted against the bound).
+        // records are counted against the bound). Pending records DO leave —
+        // by ageing out through `PENDING_TTL_SECS`, which makes them Expired
+        // and so terminal first (see `ttl_and_caps_tests`) — but never here,
+        // and never while they are still Pending.
         let recs: Vec<(String, RequestState, u64)> = (0..10)
             .map(|i| (format!("p{i:02}"), RequestState::Pending, i as u64))
             .collect();
@@ -837,5 +1040,292 @@ mod prune_tests {
         prune_terminal_records(&mut map, &store, MAX_TERMINAL_RECORDS);
         assert_eq!(map.len(), 2);
         assert_eq!(store.list().unwrap().len(), 2);
+    }
+
+    /// The TTL rule itself, over the pure sweep: which states age out and which
+    /// are left alone. The broker-level behaviour (when the sweep runs, and what
+    /// a late grant then finds) is in `ttl_and_caps_tests`.
+    #[test]
+    fn only_pending_ages_out_and_only_once_past_the_ttl() {
+        let born = 1_000_000u64;
+        let mut map = BTreeMap::new();
+        for (key, state) in [
+            ("pending", RequestState::Pending),
+            ("enacting", RequestState::Enacting),
+            ("enacted", RequestState::Enacted),
+        ] {
+            map.insert(key.to_string(), rec(state, born));
+        }
+
+        // One second short of the TTL: nothing has aged out yet.
+        let expired = expire_stale_pending_records(&mut map, born + PENDING_TTL_SECS - 1);
+        assert!(expired.is_empty(), "the TTL has not elapsed yet");
+        assert_eq!(map["pending"].state, RequestState::Pending);
+
+        // Exactly at the TTL: the Pending record ages out, and ONLY it. An
+        // Enacting record has a consumed grant and an enactor behind it — the
+        // TTL must never race that.
+        let expired = expire_stale_pending_records(&mut map, born + PENDING_TTL_SECS);
+        assert_eq!(expired.len(), 1);
+        let (key, record, notify, persist) = &expired[0];
+        assert_eq!(key, "pending");
+        assert_eq!(record.state, RequestState::Expired);
+        assert!(
+            *notify && *persist,
+            "the reducer asks for both on an Expire"
+        );
+        assert_eq!(map["pending"].state, RequestState::Expired);
+        assert_eq!(
+            map["enacting"].state,
+            RequestState::Enacting,
+            "an Enacting record is never expired by the TTL"
+        );
+        assert_eq!(map["enacted"].state, RequestState::Enacted);
+
+        // A second sweep has nothing left to do: Expired is terminal and inert.
+        assert!(expire_stale_pending_records(&mut map, born + PENDING_TTL_SECS * 9).is_empty());
+    }
+}
+
+/// 03-G1: the Pending TTL and the per-caller submit caps.
+///
+/// Before these, `SubmitRequest` was unlimited and a Pending record was
+/// immortal: a ward looping `charter ask-for-more` grew charterd's map and the
+/// on-disk `PendingStore` without bound, published a relay event per call into
+/// their guardian's inbox, and flooded the event sink — a denial of the one
+/// channel a ward has to be believed on.
+#[cfg(all(test, feature = "mock"))]
+mod ttl_and_caps_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use charter_sys::MockSystem;
+    use charter_transport::ScriptedEntropy;
+    use charter_verify::test_support::{GrantBuilder, TestGuardian};
+    use charter_verify::VerifiedGrant;
+
+    use crate::enactor::{EnactOutcome, Enactor};
+    use crate::error::EnactError;
+    use crate::ports::NullEventSink;
+    use crate::transport_facade::MockTransport;
+
+    const NOW: u64 = 1_700_001_000;
+    const MIA: Option<u32> = Some(1000);
+    const ROOK: Option<u32> = Some(1001);
+
+    type TestBroker = Broker<MockSystem, MockTransport, ScriptedEntropy>;
+
+    /// Counts every enact it is handed, so "an expired ask never enacts" can be
+    /// asserted on the enactor rather than only on the record's state.
+    struct CountingEnactor {
+        enacts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Enactor for CountingEnactor {
+        fn op(&self) -> OpType {
+            OpType::InstallFlatpak
+        }
+        async fn enact(
+            &self,
+            _grant: &VerifiedGrant,
+            _ctx: &EnactContext,
+        ) -> Result<EnactOutcome, EnactError> {
+            self.enacts.fetch_add(1, Ordering::SeqCst);
+            Ok(EnactOutcome::default())
+        }
+    }
+
+    fn broker_over(sys: MockSystem, guardian: &TestGuardian) -> (TestBroker, Arc<AtomicUsize>) {
+        let enacts = Arc::new(AtomicUsize::new(0));
+        let mut reg = EnactorRegistry::new();
+        reg.register(Box::new(CountingEnactor {
+            enacts: enacts.clone(),
+        }));
+        let b = Broker::new(
+            sys,
+            MockTransport::new(guardian.pubkey(), PubKey::from_bytes([0x42; 32])),
+            ScriptedEntropy::new(1),
+            reg,
+            Box::new(NullEventSink),
+            PubKey::from_bytes([0xBB; 32]),
+        );
+        (b, enacts)
+    }
+
+    fn broker(guardian: &TestGuardian) -> (TestBroker, Arc<AtomicUsize>) {
+        broker_over(MockSystem::new(NOW), guardian)
+    }
+
+    async fn ask(b: &TestBroker, uid: Option<u32>) -> Result<ReqId, BrokerError> {
+        b.submit_as(
+            OpType::TimeExtend,
+            serde_json::json!({"minutes": 10}),
+            None,
+            uid,
+        )
+        .await
+    }
+
+    fn state_of(b: &TestBroker, hex: &str) -> RequestState {
+        b.status(hex).pop().expect("record").state
+    }
+
+    fn assert_rate_limited(e: BrokerError, expect: &str) {
+        match e {
+            BrokerError::RateLimited(msg) => assert!(
+                msg.contains(expect),
+                "expected a message containing {expect:?}, got {msg:?}"
+            ),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_ask_expires_once_past_its_ttl_and_not_before() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        let hex = ask(&b, MIA).await.expect("submitted").to_hex();
+
+        // One second short of a day: still waiting. A guardian who looks at it
+        // over breakfast must still find it there.
+        b.sys().mock_clock().advance_secs(PENDING_TTL_SECS - 1);
+        b.poll_once().await;
+        assert_eq!(state_of(&b, &hex), RequestState::Pending);
+
+        // Past the TTL: aged out, in memory and on disk.
+        b.sys().mock_clock().advance_secs(1);
+        b.poll_once().await;
+        assert_eq!(state_of(&b, &hex), RequestState::Expired);
+        let stored = b.sys().pending().list().expect("list");
+        let (_, json) = stored.iter().find(|(k, _)| *k == hex).expect("persisted");
+        let rec: RequestRecord = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            rec.state,
+            RequestState::Expired,
+            "the expiry must reach the persisted store, not just memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_loaded_older_than_the_ttl_comes_up_expired() {
+        // A daemon that was off for a week must not come back up holding a
+        // week-old ask as live.
+        let g = TestGuardian::new();
+        let (first, _) = broker(&g);
+        let hex = ask(&first, MIA).await.expect("submitted").to_hex();
+        let disk = first.sys().disk();
+        assert_eq!(state_of(&first, &hex), RequestState::Pending);
+        drop(first);
+
+        // The daemon comes back up a week later over the SAME disk. The ask must
+        // already be Expired by the time anything can poll — the boot sweep runs
+        // inside `Broker::new`, before a grant could ever be matched to it.
+        let sys = MockSystem::over_disk(NOW + PENDING_TTL_SECS + 7 * 86_400, disk);
+        let (rebooted, _) = broker_over(sys, &g);
+        assert_eq!(
+            state_of(&rebooted, &hex),
+            RequestState::Expired,
+            "a week-old ask must not come back up live"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_for_an_expired_ask_never_enacts() {
+        let g = TestGuardian::new();
+        let (b, enacts) = broker(&g);
+        let req = b
+            .submit(
+                OpType::InstallFlatpak,
+                serde_json::json!({"ref": "org.req.X", "remote": "flathub"}),
+                None,
+            )
+            .await
+            .expect("submitted");
+        let hex = req.to_hex();
+        let rec = b.status(&hex).pop().expect("record");
+
+        // The ask ages out, and only THEN does the guardian's grant arrive —
+        // the late-delivery case a relay's store-and-forward makes routine.
+        b.sys().mock_clock().advance_secs(PENDING_TTL_SECS + 60);
+        let grant = GrantBuilder::install_allow(rec.req_id, rec.nonce)
+            .params(serde_json::json!({"ref": "org.grant.App", "remote": "flathub"}))
+            .build(&g);
+        b.transport().deliver_grant(grant, g.pubkey());
+        b.poll_once().await;
+
+        assert_eq!(
+            state_of(&b, &hex),
+            RequestState::Expired,
+            "a late grant must not revive an expired ask"
+        );
+        assert_eq!(
+            enacts.load(Ordering::SeqCst),
+            0,
+            "an expired ask must never enact"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_callers_outstanding_asks_are_capped_but_a_siblings_are_their_own() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        let mut hexes = Vec::new();
+        for _ in 0..MAX_PENDING_PER_CALLER {
+            hexes.push(ask(&b, MIA).await.expect("under the cap").to_hex());
+        }
+
+        let published = b.transport().published().len();
+        let err = ask(&b, MIA).await.expect_err("over the outstanding cap");
+        assert_rate_limited(err, "waiting for your guardian");
+        assert_eq!(
+            b.transport().published().len(),
+            published,
+            "a refused ask must never reach the relay"
+        );
+        assert_eq!(
+            b.status("").len(),
+            MAX_PENDING_PER_CALLER,
+            "a refused ask must leave no record behind"
+        );
+
+        // One child's flood does not spend their sibling's budget.
+        ask(&b, ROOK).await.expect("a sibling is unaffected");
+        // Nor root's / an unidentified caller's, which is its own key.
+        ask(&b, None).await.expect("None is its own key");
+
+        // A guardian answering one (here: the ward withdrawing it) frees a slot.
+        assert!(b.cancel(&hexes[0]));
+        ask(&b, MIA).await.expect("a freed slot is usable again");
+    }
+
+    #[tokio::test]
+    async fn the_submit_rate_is_capped_per_hour_and_the_window_slides() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        // Withdraw each ask straight away, so the OUTSTANDING cap never binds
+        // and what is under test is purely the hourly rate.
+        for _ in 0..MAX_SUBMITS_PER_HOUR {
+            let hex = ask(&b, MIA).await.expect("under the rate").to_hex();
+            assert!(b.cancel(&hex));
+        }
+
+        let published = b.transport().published().len();
+        let err = ask(&b, MIA).await.expect_err("over the hourly rate");
+        assert_rate_limited(err, "asked a lot recently");
+        assert_eq!(
+            b.transport().published().len(),
+            published,
+            "a rate-refused ask must never reach the relay"
+        );
+        // A sibling's budget is untouched by this one's spending.
+        ask(&b, ROOK).await.expect("a sibling is unaffected");
+
+        // The window slides: once the oldest submits fall out of the hour, the
+        // caller may ask again.
+        b.sys().mock_clock().advance_secs(SUBMIT_WINDOW_SECS + 1);
+        ask(&b, MIA).await.expect("the window has slid");
     }
 }
