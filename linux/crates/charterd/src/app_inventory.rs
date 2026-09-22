@@ -14,10 +14,10 @@
 //! user-installed identity is still allowed (restrictive is self-harm only).
 //!
 //! `pkg` carries the attribution identity `focus::classify` will match: the
-//! resolved absolute binary path, the flatpak app id, or — for a dotted Exec
-//! token neither of those matched — an explicit [`UNRESOLVED_PREFIX`] form
-//! that intentionally matches no real process (see [`resolve_exec`]), kept
-//! only so the guardian can still see the app and tick it exists.
+//! resolved absolute binary path or the flatpak app id. An Exec token that is
+//! neither is dropped from the inventory and logged once (see
+//! [`resolve_exec`]) — an identity nothing can match is not a control the
+//! guardian should be shown.
 
 use charter_proto::status::AppRef;
 
@@ -128,50 +128,33 @@ fn looks_like_flatpak_id(pkg: &str) -> bool {
         })
 }
 
-/// The explicit spelling of an Exec token this machine could not resolve to
-/// anything — never emitted for a bare, undotted name (that stays dropped;
-/// see [`resolve_exec`]), only for a DOTTED one that also failed the
-/// [`looks_like_flatpak_id`] shape test. Chosen so it can never collide with
-/// a real identity: it is neither an absolute path (doesn't start with `/`)
-/// nor flatpak-shaped (the `:` fails [`looks_like_flatpak_id`]'s
-/// alphanumeric/`_`/`-`-only rule, and its own `app_rules::is_flatpak_id`
-/// twin), and its full text is exact-path/basename-compared against a real
-/// process's kernel-resolved `exe`/`argv0` in `app_rules::matches_pkg`,
-/// which no real binary is ever named. That is what makes it safe to KEEP
-/// this entry (so the guardian can see it and tick it) rather than drop it:
-/// it can never be mistaken for, or matched against, an existing executable
-/// by anything that enforces.
-pub const UNRESOLVED_PREFIX: &str = "unresolved:";
-
-/// Whether `pkg` is one of this module's own [`UNRESOLVED_PREFIX`] markers
-/// rather than a real resolved identity.
-pub fn is_unresolved(pkg: &str) -> bool {
-    pkg.starts_with(UNRESOLVED_PREFIX)
-}
-
 /// Resolve a non-absolute Exec token to an absolute path via `exists`.
-/// Absolute tokens pass through; an unresolvable BARE (undotted) token is
-/// dropped (an identity we can't verify is not offered for picking), but an
-/// unresolvable DOTTED token is kept, explicitly flagged — see
-/// [`UNRESOLVED_PREFIX`].
+/// Absolute tokens pass through; a token nothing on this machine answers for,
+/// and that is not shaped like a flatpak app id, is DROPPED — an identity we
+/// cannot verify is not offered for picking.
 ///
 /// Order matters, and it changed (03b-B5): a bare name is looked for on disk
 /// FIRST, and only a name that no binary directory answers for — and that has
 /// the shape of a reverse-DNS app id — is taken as a flatpak identity. A real
 /// binary on this machine is the better answer than a guess about a flatpak
-/// that, in the misrouting case, does not exist at all.
+/// that, in the misrouting case, does not exist at all. `gimp-2.10` and
+/// `lua5.4` are ordinary commands with a version in the name and still resolve
+/// through `BIN_DIRS`; they were never flatpak ids.
 ///
-/// # Why dotted-but-unresolved is kept, not dropped
+/// # Why an unresolvable Exec is dropped again
 ///
-/// A two-segment (or otherwise not-quite-reverse-DNS-shaped) dotted Exec
-/// that no `BIN_DIR` answers for — `code.oss` in `/snap/bin`, say, which
-/// `BIN_DIRS` doesn't cover — used to vanish from the inventory entirely.
-/// Not merely unlisted: UNSEEABLE, so under the `apps` clause's allowlist
-/// posture the guardian could never even tick it, with no sign it was ever
-/// installed. It is very likely a real binary this machine simply doesn't
-/// have on a scanned path, not junk, so it is kept and flagged
-/// [`UNRESOLVED_PREFIX`] instead of guessed at as a path we've never
-/// checked.
+/// A release kept these, under an `unresolved:` prefix, so the guardian could
+/// at least SEE an app that `BIN_DIRS` does not cover (`code.oss`, in
+/// `/snap/bin`). But the prefix was chosen precisely so that nothing could ever
+/// match it — `app_rules::matches_pkg` compares a pkg against a real process's
+/// kernel-resolved `exe`/`argv0`, and no process is ever named
+/// `unresolved:code.oss`. So the entry was inert in BOTH directions: a rule the
+/// guardian ticked against it matched no process, and the real binary, when it
+/// ran, matched no pkg. The guardian was shown a control that does nothing —
+/// worse than not being shown it, because it reads as enforcement that isn't
+/// there. Until such a token can be resolved to something an enforcer can
+/// match, it is dropped and the drop is LOGGED, so the fix is a directory to
+/// add to [`BIN_DIRS`] rather than a phantom row in the guardian's list.
 pub fn resolve_exec(pkg: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
     if pkg.starts_with('/') {
         return exists(pkg).then(|| pkg.to_string());
@@ -186,29 +169,30 @@ pub fn resolve_exec(pkg: &str, exists: impl Fn(&str) -> bool) -> Option<String> 
         // A flatpak app id (org.foo.Bar) — identity as-is.
         return Some(pkg.to_string());
     }
-    if is_two_segment_dotted(pkg) {
-        return Some(format!("{UNRESOLVED_PREFIX}{pkg}"));
-    }
     None
 }
 
-/// Exactly two non-empty dot-separated segments — the `code.oss` / `lua5.4` /
-/// `gimp-2.10` shape.
+/// Say ONCE, per Exec token, that a launcher named something this machine has
+/// no resolvable binary for.
 ///
-/// This is deliberately NARROW. "Contains a dot" would also keep the malformed
-/// three-and-more-segment strings the app-id shape test rejects (`a..b.c`,
-/// `x.y.z!`, `2go.foo.bar`): a token with an empty segment or a character an
-/// identity may not contain is not a binary this machine happens not to have on
-/// a scanned path, it is junk out of a malformed `.desktop` file, and showing a
-/// guardian junk to tick is worse than showing them nothing. Two segments is
-/// where real unresolvable binaries actually live, so that is where the keep
-/// applies.
-fn is_two_segment_dotted(pkg: &str) -> bool {
-    let mut segs = pkg.split('.');
-    let (Some(a), Some(b), None) = (segs.next(), segs.next(), segs.next()) else {
-        return false;
+/// Once, because the inventory is rescanned on a cadence and an unresolvable
+/// launcher is a standing condition, not an event: logging it every scan would
+/// bury the journal. The token is the useful part — it is what a
+/// [`BIN_DIRS`] entry would have to cover — and it is a launcher's `Exec`
+/// field, not a path the ward chose.
+fn log_unresolved_once(pkg: &str) {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<BTreeSet<String>>> = Mutex::new(None);
+    let Ok(mut guard) = SEEN.lock() else {
+        return; // a poisoned log-dedup set is not worth a panic
     };
-    !a.is_empty() && !b.is_empty()
+    if guard
+        .get_or_insert_with(BTreeSet::new)
+        .insert(pkg.to_string())
+    {
+        eprintln!("charterd: not listed: no resolvable binary for {pkg}");
+    }
 }
 
 /// Build the deduped, sorted inventory from `(filename, content, user_installed)`
@@ -228,6 +212,7 @@ pub fn build_inventory<'a>(
             continue;
         };
         let Some(resolved) = resolve_exec(&app.pkg, &exists) else {
+            log_unresolved_once(&app.pkg);
             continue;
         };
         app.pkg = resolved;
@@ -544,12 +529,11 @@ mod tests {
 
     /// A dotted Exec no `BIN_DIR` answers for, and that doesn't have the
     /// reverse-DNS shape of a flatpak id (two segments, here) — `code.oss`
-    /// in `/snap/bin`, say — must not vanish from the inventory the way a
-    /// bare unresolvable name does: it is kept, flagged `UNRESOLVED_PREFIX`,
-    /// so the guardian can still see it exists and tick it under the
-    /// allowlist posture.
+    /// in `/snap/bin`, say — is DROPPED, not listed under a marker nothing can
+    /// match. The marker made the row inert in both directions: no process ever
+    /// matched it, so the guardian was shown a control that enforced nothing.
     #[test]
-    fn a_dotted_unresolved_exec_is_kept_and_flagged_not_dropped() {
+    fn a_dotted_unresolvable_exec_is_dropped_not_listed_inert() {
         let fixtures = vec![entry(
             "code-oss.desktop",
             "[Desktop Entry]\nType=Application\nName=Code OSS\nExec=code.oss %F\n",
@@ -557,15 +541,8 @@ mod tests {
         // Nothing on this machine answers for it — no `BIN_DIR` candidate,
         // no absolute path.
         let inv = build_inventory(fixtures.into_iter(), |_| false);
-        assert_eq!(inv.len(), 1, "must be kept, not dropped: {inv:?}");
-        assert_eq!(inv[0].pkg, "unresolved:code.oss");
-        assert!(is_unresolved(&inv[0].pkg));
-        assert_eq!(inv[0].label, "Code OSS");
-        // An unresolved entry must never be indistinguishable from a real
-        // resolved path/flatpak-id to anything downstream that enforces.
-        assert!(resolve_exec("code.oss", |_| false)
-            .unwrap()
-            .starts_with(UNRESOLVED_PREFIX));
+        assert!(inv.is_empty(), "must be dropped, not listed: {inv:?}");
+        assert_eq!(resolve_exec("code.oss", |_| false), None);
     }
 
     /// The same dotted token IS found on disk: resolved normally, not
@@ -951,23 +928,24 @@ mod safety_tests {
         }
     }
 
-    /// A two-segment dotted Exec that no `BIN_DIR` answers for is KEPT and
-    /// flagged, not dropped. `code.oss` lives in `/snap/bin`, which `BIN_DIRS`
-    /// does not cover — dropping it made a real installed app UNSEEABLE, so
-    /// under the `apps` clause's allowlist posture the guardian could not tick
-    /// it and had no sign it existed.
+    /// A dotted Exec that no `BIN_DIR` answers for is dropped — but the FIRST
+    /// question asked of it is still the disk, so `gimp-2.10` and friends
+    /// resolve normally wherever they actually live (03b-B5: they are ordinary
+    /// commands with a version in the name, never flatpak ids).
     #[test]
-    fn a_two_segment_unresolvable_exec_is_kept_flagged_rather_than_dropped() {
+    fn an_unresolvable_dotted_exec_is_dropped_but_bin_dirs_answer_first() {
         for name in ["code.oss", "gimp-2.10", "lua5.4", "foo.bar"] {
-            let resolved = resolve_exec(name, |_| false).expect("kept, not dropped");
-            assert_eq!(resolved, format!("{UNRESOLVED_PREFIX}{name}"));
-            assert!(is_unresolved(&resolved), "{name} is flagged unresolved");
+            assert_eq!(
+                resolve_exec(name, |_| false),
+                None,
+                "{name} must be dropped when nothing answers for it"
+            );
+            assert_eq!(
+                resolve_exec(name, |p| p == format!("/usr/bin/{name}")),
+                Some(format!("/usr/bin/{name}")),
+                "{name} must resolve when it IS on a scanned path"
+            );
         }
-        // And a name that DOES resolve is not flagged: the flag means "we
-        // looked and could not find it", never "we did not look".
-        let found = resolve_exec("code.oss", |p| p == "/usr/bin/code.oss").expect("found");
-        assert_eq!(found, "/usr/bin/code.oss");
-        assert!(!is_unresolved(&found));
     }
 
     /// A bare name now also resolves out of `/usr/local/bin`, which a locally

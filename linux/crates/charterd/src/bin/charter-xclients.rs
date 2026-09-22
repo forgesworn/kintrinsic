@@ -32,10 +32,22 @@
 //! v1
 //! capped                     (only when a budget below truncated the answer)
 //! dpms <on|standby|suspend|off|unknown>
+//! idle_ms <n>                (omitted when the server would not say)
 //! focus <pid|->
 //! active <pid|->
 //! win <0xhexid> <pid|->
 //! ```
+//!
+//! The `idle_ms` line is how long the X **server** says it has been since it
+//! last saw real user input (XScreenSaver `QueryInfo.ms_since_user_input`). It
+//! is here because DPMS alone is a level the ward can move: `xset dpms force
+//! off; sleep .05; xset dpms force on` in a loop blanks the monitor for 50 ms
+//! at a time — the screen stays perfectly usable — and about half of charterd's
+//! 2 s samples then read `off`. Input time is reset by the very keystrokes and
+//! pointer motion that driving such a loop requires, so the two facts together
+//! cost the ward the trick while still costing an honestly-off monitor nothing.
+//! Omitted entirely when the extension is missing or the request errored;
+//! charterd reads a missing line as "charge".
 //!
 //! The `dpms` line is the display's POWER state, and it is here because it is
 //! the only "is the ward actually at this machine?" signal on a Linux desktop
@@ -60,6 +72,7 @@ use x11rb::cookie::Cookie;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::dpms::{self, ConnectionExt as _, InfoReply};
 use x11rb::protocol::res::{self, ClientIdMask, ClientIdSpec, ConnectionExt as _};
+use x11rb::protocol::screensaver::{self, ConnectionExt as _, QueryInfoReply};
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, InputFocus, MapState, WindowClass};
 use x11rb::rust_connection::RustConnection;
 
@@ -131,6 +144,7 @@ fn run() -> Result<String, Box<dyn Error>> {
     // with it instead of waiting behind it.
     conn.prefetch_extension_information(res::X11_EXTENSION_NAME)?;
     conn.prefetch_extension_information(dpms::X11_EXTENSION_NAME)?;
+    conn.prefetch_extension_information(screensaver::X11_EXTENSION_NAME)?;
     let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?;
     let list_atom = conn.intern_atom(true, b"_NET_CLIENT_LIST")?;
     let focus = conn.get_input_focus()?;
@@ -155,6 +169,9 @@ fn run() -> Result<String, Box<dyn Error>> {
     // instead hand a ward with a DPMS-less server a display charterd cannot
     // read, which is strictly worse for everything else in this snapshot.
     let dpms = conn.dpms_info().ok();
+    // Same rules as DPMS: issued here so it rides the round trip, and a server
+    // without the extension costs the meter a fact rather than the snapshot.
+    let idle = conn.screensaver_query_info(root).ok();
 
     let active_atom = active_atom.reply()?.atom;
     let list_atom = list_atom.reply()?.atom;
@@ -194,6 +211,9 @@ fn run() -> Result<String, Box<dyn Error>> {
         out.push_str("capped\n");
     }
     let _ = writeln!(out, "dpms {}", dpms_level(dpms));
+    if let Some(ms) = idle_ms(idle) {
+        let _ = writeln!(out, "idle_ms {ms}");
+    }
     let _ = writeln!(out, "focus {}", field(pid_of(focus_win)));
     let _ = writeln!(out, "active {}", field(pid_of(active_win)));
     for (win, pid) in &pids {
@@ -230,6 +250,19 @@ fn dpms_level(info: Option<Cookie<'_, impl Connection, InfoReply>>) -> &'static 
         3 => "off",
         _ => "unknown",
     }
+}
+
+/// Milliseconds since the X server last saw real user input, or `None` when it
+/// would not say (no XScreenSaver extension, a request that would not even
+/// serialise, an X error in the reply).
+///
+/// `None` PRINTS NOTHING rather than printing a zero: charterd's idle rule
+/// requires a positively-known, long-enough idle time, and a line saying `0`
+/// and a line that is absent must not become the same thing if that rule is
+/// ever inverted. The absent line is read as "charge", like every other
+/// unanswered question in this snapshot.
+fn idle_ms(info: Option<Cookie<'_, impl Connection, QueryInfoReply>>) -> Option<u32> {
+    Some(info?.reply().ok()?.ms_since_user_input)
 }
 
 /// `-` is "the server would not tell us", which charterd reads as evidence of a

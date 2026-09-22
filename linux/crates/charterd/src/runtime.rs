@@ -1852,6 +1852,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // transition is logged once in each direction rather than every tick —
     // same reasoning as `display_unreadable` above.
     let mut last_activity = charter_schedule::Activity::Active;
+    // G1 (DPMS toggle): the per-tick history the Idle decision is folded over.
+    // One instantaneous DPMS sample per tick was gameable by a 50 ms
+    // off/on loop — see `focus::ActivityHistory`, which holds the rule.
+    let mut activity_history = crate::focus::ActivityHistory::default();
     // 04-G6: was this machine running WITHOUT a warden before now? The stamp
     // below is written every tick; a hole in it bigger than a restart is the
     // cheap half of tamper-evidence — a live USB, a GRUB `init=/bin/bash`, an
@@ -1943,6 +1947,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                         STATUS_HEARTBEAT_SECS,
                     ) {
                         stx.emit_status(&cur.to_json(), now as u64).await;
+                        // One relay round trip PER CHILD, awaited, with the
+                        // watchdog's clock running: a family of four on a relay
+                        // that has gone quiet spends four timeouts inside one
+                        // pass of this loop, and a paused daemon killed by the
+                        // watchdog is thawed by `ExecStopPost` exactly like a
+                        // running one (04-G5). The main path pings after every
+                        // emit for this reason; the paused path must too.
+                        crate::watchdog::ping();
                         *last = cur;
                     }
                 }
@@ -2239,9 +2251,17 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         // was never charged. They are not read anywhere in this daemon now.
         // No snapshot (no display, Wayland, a helper that failed, an X server
         // with no DPMS extension) is `Active`: fail toward charging.
-        let activity = xsnap
-            .as_ref()
-            .map_or(charter_schedule::Activity::Active, |s| s.activity());
+        //
+        // And it takes MORE than one sample. A single DPMS reading per tick was
+        // gameable by a 50 ms `off`/`on` loop that left the screen perfectly
+        // usable and half the ticks uncharged; the history below requires the
+        // same powered-down level on three consecutive ticks AND an X server
+        // that has seen no input for 6 s. A tick with no snapshot feeds it
+        // `None`, which resets the streak — exactly as a powered-on tick does.
+        let activity = activity_history.observe(
+            xsnap.as_ref().and_then(|s| s.dpms_level()),
+            xsnap.as_ref().and_then(|s| s.idle_ms()),
+        );
         // Log the TRANSITION, not the state — same discipline as the Named
         // model's `display_unreadable` line below: this branch runs every
         // couple of seconds, and the fact worth having in the journal is

@@ -107,14 +107,17 @@ fn dns_plan_default_path() -> String {
 /// marker to say so).
 const KINTRINSIC_MARKER_KEY: &str = "_kintrinsic";
 
-/// Header comment stamped as the first line of every DNS plan charterd writes,
-/// from the release that added the marker onward. `plan.json` is otherwise
-/// consumed as an opaque blob (see [`DnsFilterOps`] and `RealDnsFilterOps`'s
-/// doc comment) — nothing in this repo parses it back as strict JSON — so a
-/// leading comment line costs nothing and gives the DNS half of 03-B7's
-/// fingerprint the same kind of explicit, can't-collide-with-an-owner's-own-
-/// file signal the JSON `_kintrinsic` key gives the Firefox half.
-const DNS_PLAN_FINGERPRINT_HEADER: &str =
+/// The header comment one release stamped as the first line of every DNS plan.
+///
+/// It is READ, never written: a `//` line makes the document invalid JSON, and
+/// "nothing in this repo parses it back" is a fact about this repo today, not
+/// about the DNS responder on the other side of the file or about the next
+/// person to write a tool against it. The fingerprint now travels as a
+/// `_kintrinsic` key INSIDE the object — the same marker, the same
+/// can't-collide-with-an-owner's-own-file property, and the file stays
+/// parseable. This constant stays so a plan written by that one release is
+/// still recognised as ours on upgrade.
+const LEGACY_DNS_PLAN_COMMENT_HEADER: &str =
     "// kintrinsic-managed: charterd owns this file, do not edit it by hand";
 
 /// 03-B7's fingerprint for `policies.json`: true iff this content is almost
@@ -159,14 +162,16 @@ fn firefox_policies_is_ours(content: &str) -> bool {
         && doh_locked
 }
 
-/// 03-B7's fingerprint for the DNS plan file: true iff the
-/// [`DNS_PLAN_FINGERPRINT_HEADER`] comment is present (every version from now
-/// on), or — the legacy case — the whole file parses as JSON carrying exactly
-/// the field names `render_dns_filter`'s `DnsFilterPlan` has always
-/// serialized (every pre-marker install's file has no comment at all, just
-/// that object). Pure for the same reason as [`firefox_policies_is_ours`].
+/// 03-B7's fingerprint for the DNS plan file. Three ways to be ours, newest
+/// first: the explicit `_kintrinsic.managed` key inside the object (every
+/// version from now on); the [`LEGACY_DNS_PLAN_COMMENT_HEADER`] line, from the
+/// one release that stamped a comment; or — the oldest case — the whole file
+/// parses as JSON carrying exactly the field names `render_dns_filter`'s
+/// `DnsFilterPlan` has always serialized (a pre-marker install's file has no
+/// marker at all, just that object). Pure for the same reason as
+/// [`firefox_policies_is_ours`].
 fn dns_plan_is_ours(content: &str) -> bool {
-    if content.starts_with(DNS_PLAN_FINGERPRINT_HEADER) {
+    if content.starts_with(LEGACY_DNS_PLAN_COMMENT_HEADER) {
         return true;
     }
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(content) else {
@@ -175,6 +180,14 @@ fn dns_plan_is_ours(content: &str) -> bool {
     let Some(obj) = doc.as_object() else {
         return false;
     };
+    if obj
+        .get(KINTRINSIC_MARKER_KEY)
+        .and_then(|k| k.get("managed"))
+        .and_then(|m| m.as_bool())
+        == Some(true)
+    {
+        return true;
+    }
     [
         "mode",
         "allowDomains",
@@ -187,6 +200,29 @@ fn dns_plan_is_ours(content: &str) -> bool {
     ]
     .iter()
     .all(|k| obj.contains_key(*k))
+}
+
+/// Which of the two documents a materialize is allowed to write.
+///
+/// Enacting writes both. A RETRACTION on a box with no durable marker writes
+/// only the ones whose own fingerprint says we wrote them — see
+/// [`WebContentEnforcer::on_disk_fingerprints`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WriteTargets {
+    policies: bool,
+    dns: bool,
+}
+
+impl WriteTargets {
+    fn both() -> Self {
+        WriteTargets {
+            policies: true,
+            dns: true,
+        }
+    }
+    fn any(self) -> bool {
+        self.policies || self.dns
+    }
 }
 
 /// Stateful enforcer: remembers the last-applied policy for change-detection.
@@ -256,18 +292,29 @@ impl WebContentEnforcer {
         dns_plan_default_path()
     }
 
-    /// 03-B7: does whatever is currently on disk look like our own
-    /// handwriting? Reads are best-effort — a missing file reads as empty
-    /// content, which neither fingerprint matches, so an unconfigured host
-    /// (nothing there at all) correctly comes back `false`. Either file
-    /// matching is enough: the failure this closes is a stranded restriction
-    /// on a pre-marker upgrade, and requiring *both* files to match would let
-    /// one going missing (say, an owner who already deleted the Firefox doc
-    /// by hand) strand whatever the other still enforces.
-    fn on_disk_fingerprint_is_ours(&self) -> bool {
+    /// 03-B7: which of the two documents on disk look like our own
+    /// handwriting, asked SEPARATELY of each. Reads are best-effort — a missing
+    /// file reads as empty content, which neither fingerprint matches, so an
+    /// unconfigured host (nothing there at all) correctly comes back
+    /// `(false, false)`.
+    ///
+    /// Per file, not one verdict for both. Either file matching is enough to
+    /// know that SOME earlier run of ours configured this box — the failure
+    /// 03-B7 closes is a stranded restriction on a pre-marker upgrade, and
+    /// requiring both to match would let one going missing strand whatever the
+    /// other still enforces. But "we wrote one of these" is not "we wrote both
+    /// of these", and the retraction that follows OVERWRITES what it touches.
+    /// A box where a hardening baseline someone else owns sits at
+    /// `policies.json` and only our DNS plan is ours would otherwise have that
+    /// baseline silently replaced with an unrestricted document, by a daemon
+    /// whose whole rule at this point is "hands off what isn't ours".
+    fn on_disk_fingerprints(&self) -> WriteTargets {
         let policies = std::fs::read_to_string(self.firefox_policies_path()).unwrap_or_default();
         let plan = std::fs::read_to_string(self.dns_plan_path()).unwrap_or_default();
-        firefox_policies_is_ours(&policies) || dns_plan_is_ours(&plan)
+        WriteTargets {
+            policies: firefox_policies_is_ours(&policies),
+            dns: dns_plan_is_ours(&plan),
+        }
     }
 
     /// Have we ever materialised a policy that is still in force? In-memory
@@ -284,6 +331,19 @@ impl WebContentEnforcer {
         sys: &S,
         policy: EffectiveWebPolicy,
     ) -> WebReconcile {
+        self.materialize_to(sys, policy, WriteTargets::both()).await
+    }
+
+    /// [`materialize`](Self::materialize), writing only the documents `targets`
+    /// names. Everything but the retraction path passes `both`: a policy we are
+    /// ENACTING is ours by definition, and both halves of it have to land or
+    /// the browser and the resolver disagree about what is allowed.
+    async fn materialize_to<S: SystemLayer>(
+        &mut self,
+        sys: &S,
+        policy: EffectiveWebPolicy,
+        targets: WriteTargets,
+    ) -> WebReconcile {
         // Stamp our fingerprint into both documents as we write them — the
         // `_kintrinsic` key here and the header comment below are what
         // `firefox_policies_is_ours` / `dns_plan_is_ours` look for on a later
@@ -294,20 +354,32 @@ impl WebContentEnforcer {
         }
         let policies_json = policies_doc.to_string();
         let plan = charter_webpolicy::render_dns_filter(&policy);
-        let plan_json = match serde_json::to_string(&plan) {
-            Ok(s) => format!("{DNS_PLAN_FINGERPRINT_HEADER}\n{s}"),
+        // The marker rides INSIDE the object, so the plan stays valid JSON for
+        // whatever reads it next. `_kintrinsic` is not a `DnsFilterPlan` field,
+        // so it is added to the serialized value rather than to the struct.
+        let plan_json = match serde_json::to_value(&plan) {
+            Ok(mut v) => {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert(
+                        KINTRINSIC_MARKER_KEY.to_string(),
+                        serde_json::json!({ "managed": true }),
+                    );
+                }
+                v.to_string()
+            }
             Err(_) => return WebReconcile::Failed,
         };
 
-        if sys
-            .web_policy()
-            .write_policies(&policies_json)
-            .await
-            .is_err()
+        if targets.policies
+            && sys
+                .web_policy()
+                .write_policies(&policies_json)
+                .await
+                .is_err()
         {
             return WebReconcile::Failed;
         }
-        if sys.dns_filter().apply_plan(&plan_json).await.is_err() {
+        if targets.dns && sys.dns_filter().apply_plan(&plan_json).await.is_err() {
             return WebReconcile::Failed;
         }
 
@@ -334,6 +406,10 @@ impl WebContentEnforcer {
         if self.last_applied.as_ref() == Some(&unrestricted) {
             return WebReconcile::Absent; // already retracted this run
         }
+        // Which documents this retraction is allowed to overwrite. With a
+        // marker on disk it is both: that marker is this daemon's own record
+        // that it wrote both of them.
+        let mut targets = WriteTargets::both();
         if !self.has_live_policy() {
             // 03-B7: an install upgraded from *before* the durable marker
             // existed has no marker file even though an earlier run really
@@ -342,13 +418,31 @@ impl WebContentEnforcer {
             // daemon is down. Recognise our own handwriting still on disk
             // and backfill the marker once, so the retraction below runs
             // exactly as it would have if the marker had always been there.
-            if self.on_disk_fingerprint_is_ours() {
-                let _ = crate::atomic_file::atomic_write(&self.marker(), b"1\n", 0o600);
-            } else {
+            //
+            // But only over the files whose OWN fingerprint says they are ours.
+            // Without the marker there is nothing else vouching for them, and
+            // an unrestricted document written over a file we did not write is
+            // not a retraction, it is a deletion of somebody else's policy.
+            let found = self.on_disk_fingerprints();
+            if !found.any() {
                 return WebReconcile::Absent; // genuinely never configured — hands off
             }
+            let _ = crate::atomic_file::atomic_write(&self.marker(), b"1\n", 0o600);
+            if !found.policies {
+                eprintln!(
+                    "charterd: retracting the web-content restrictions, but the browser policy \
+                     file on this machine carries no Kintrinsic marker — leaving it untouched"
+                );
+            }
+            if !found.dns {
+                eprintln!(
+                    "charterd: retracting the web-content restrictions, but the DNS plan file on \
+                     this machine carries no Kintrinsic marker — leaving it untouched"
+                );
+            }
+            targets = found;
         }
-        match self.materialize(sys, unrestricted).await {
+        match self.materialize_to(sys, unrestricted, targets).await {
             WebReconcile::Enacted { .. } => {
                 let _ = std::fs::remove_file(self.marker());
                 eprintln!(
@@ -764,8 +858,17 @@ mod tests {
     }
 
     #[test]
-    fn dns_plan_is_ours_recognizes_the_header_comment() {
-        let content = format!("{DNS_PLAN_FINGERPRINT_HEADER}\n{{\"mode\":\"locked\"}}");
+    fn dns_plan_is_ours_recognizes_the_marker_key() {
+        let doc = r#"{"mode":"locked","_kintrinsic":{"managed":true}}"#;
+        assert!(dns_plan_is_ours(doc));
+        // …and the plan carrying it is still valid JSON, which the `//` header
+        // it replaced was not.
+        assert!(serde_json::from_str::<serde_json::Value>(doc).is_ok());
+    }
+
+    #[test]
+    fn dns_plan_is_ours_still_recognizes_the_one_release_that_wrote_a_comment() {
+        let content = format!("{LEGACY_DNS_PLAN_COMMENT_HEADER}\n{{\"mode\":\"locked\"}}");
         assert!(dns_plan_is_ours(&content));
     }
 
@@ -872,6 +975,89 @@ mod tests {
         assert!(
             !std::path::Path::new(&m).exists(),
             "no marker must be backfilled for a fingerprint that isn't ours"
+        );
+    }
+
+    /// The mixed box, and the reason the backfill verdict is taken PER FILE.
+    /// Kintrinsic's DNS plan is on disk (so this machine genuinely was
+    /// configured by an earlier run, and the retraction must happen), but
+    /// `policies.json` belongs to somebody else — an enterprise Firefox
+    /// hardening baseline, a distro package, an admin's own file. A single
+    /// "either matched" verdict would write our unrestricted document over
+    /// that baseline and silently undo it.
+    #[tokio::test]
+    async fn a_retraction_leaves_a_foreign_file_alone_and_still_retracts_ours() {
+        let (m, policies_path, plan_path) = fingerprint_fixture("mixed");
+        // Not ours: a real hardening posture, none of our marker and none of
+        // our exact block.
+        std::fs::write(
+            &policies_path,
+            r#"{"policies":{"DisableAppUpdate":true,"DisableTelemetry":true,
+                "Extensions":{"Locked":["ublock@example"]}}}"#,
+        )
+        .unwrap();
+        // Ours: the legacy `DnsFilterPlan` shape a pre-marker run wrote.
+        std::fs::write(
+            &plan_path,
+            r#"{"mode":"allowlist","allowDomains":["kids.example"],"blockDomains":[],
+                "blockCategories":[],"allowExceptions":[],"safeSearch":true,
+                "youtubeRestrict":"off","rewrites":[]}"#,
+        )
+        .unwrap();
+
+        let sys = MockSystem::new(1000);
+        let mut e = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
+        assert_eq!(
+            e.reconcile(&sys).await,
+            WebReconcile::Retracted,
+            "our DNS plan is ours, so the retraction must still run"
+        );
+        assert!(
+            sys.web_policy().last_policies().is_none(),
+            "the foreign browser policy must not be overwritten by the retraction"
+        );
+        let plan = sys
+            .dns_filter()
+            .last_plan()
+            .expect("our own DNS plan is retracted");
+        assert!(
+            !plan.contains("kids.example"),
+            "the DNS plan must have been retracted to unrestricted: {plan}"
+        );
+    }
+
+    /// And the mirror image, so neither file is privileged over the other.
+    #[tokio::test]
+    async fn a_retraction_leaves_a_foreign_dns_plan_alone_and_still_retracts_ours() {
+        let (m, policies_path, plan_path) = fingerprint_fixture("mixed-dns");
+        std::fs::write(
+            &policies_path,
+            r#"{"policies":{
+                "BlockAboutConfig":true,"DisablePrivateBrowsing":true,
+                "DisableDeveloperTools":true,"DisableSafeMode":true,
+                "DisableTelemetry":true,"DisableFirefoxStudies":true,
+                "DisableEncryptedClientHello":true,
+                "DNSOverHTTPS":{"Enabled":false,"Locked":true},
+                "WebsiteFilter":{"Block":["<all_urls>"]}
+            }}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &plan_path,
+            r#"{"someOtherResolver":{"upstream":"1.1.1.1"}}"#,
+        )
+        .unwrap();
+
+        let sys = MockSystem::new(1000);
+        let mut e = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
+        assert_eq!(e.reconcile(&sys).await, WebReconcile::Retracted);
+        assert!(
+            sys.dns_filter().last_plan().is_none(),
+            "the foreign DNS plan must not be overwritten by the retraction"
+        );
+        assert!(
+            sys.web_policy().last_policies().is_some(),
+            "our own browser policy is still retracted"
         );
     }
 }

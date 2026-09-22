@@ -66,13 +66,106 @@ pub struct XSnapshot {
     /// unknowns mean the same thing here, and [`activity_from_dpms`] says what
     /// that is.
     dpms: Option<String>,
+    /// Milliseconds since the X server last saw real user input, from the
+    /// XScreenSaver extension (`QueryInfo.ms_since_user_input`), or `None` when
+    /// the helper said nothing — no extension, an older helper, a failed probe.
+    /// `None` is charged, like every other unanswered question here.
+    idle_ms: Option<u64>,
 }
 
 impl XSnapshot {
-    /// Whether this tick counts as screen time, decided from the display's own
-    /// power state. See [`activity_from_dpms`] for why this and nothing else.
-    pub fn activity(&self) -> charter_schedule::Activity {
-        activity_from_dpms(self.dpms.as_deref())
+    /// The display's DPMS power level as the helper read it, verbatim.
+    pub fn dpms_level(&self) -> Option<&str> {
+        self.dpms.as_deref()
+    }
+    /// Milliseconds since the X server last saw user input, if known.
+    pub fn idle_ms(&self) -> Option<u64> {
+        self.idle_ms
+    }
+}
+
+/// How many CONSECUTIVE ticks must read the same powered-down DPMS level
+/// before this daemon will stop charging. At the 2 s tick, three ticks is
+/// 4–6 s of the monitor genuinely being off.
+pub const IDLE_CONSECUTIVE_TICKS: u32 = 3;
+
+/// How long the X server must have seen no input at all, on the tick that
+/// declares Idle. Comfortably longer than the tick, so a single sample landing
+/// in a gap between keystrokes cannot clear it.
+pub const IDLE_MIN_MS: u64 = 6_000;
+
+/// The per-tick history behind the Idle decision — the DPMS-toggle fix.
+///
+/// # Why one sample was not enough
+///
+/// [`activity_from_dpms`] reads one instantaneous DPMS level per 2 s tick, and
+/// the ward can move that level whenever they like:
+///
+/// ```text
+/// while :; do xset dpms force off; sleep .05; xset dpms force on; done
+/// ```
+///
+/// The monitor is blanked for 50 ms at a time — imperceptible, the screen stays
+/// entirely usable — and roughly half the daemon's samples land in an `off`
+/// window. Half the ward's screen time simply is not charged, from a one-line
+/// shell loop, which is precisely the class of bypass the move off logind's
+/// `IdleHint` was meant to end.
+///
+/// # The shape of the fix
+///
+/// Two independent facts, both from the X server, both required:
+///
+/// * **the level must be STEADY.** A tick whose DPMS level differs from the
+///   previous tick's is Active, whatever it reads, and the streak restarts. A
+///   toggle loop never produces [`IDLE_CONSECUTIVE_TICKS`] identical
+///   powered-down samples in a row, so it never stops the clock — while a
+///   monitor that is actually off reads `off` every tick for as long as it is
+///   off.
+/// * **the server must have seen no INPUT.** `ms_since_user_input` is X server
+///   state, reset by real keyboard and pointer events; a ward driving a toggle
+///   loop is by definition at the machine using it, so their idle time keeps
+///   resetting. An unknown or missing idle time is Active — the charging
+///   direction, as everywhere else in this file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityHistory {
+    /// The normalised DPMS level the previous tick read, or `None` for "no
+    /// display / the helper said nothing", which is itself a level for the
+    /// purposes of the "did it change?" test.
+    last_level: Option<String>,
+    /// Consecutive ticks that have read the SAME powered-down level, this one
+    /// included. Zeroed by any powered-on or unknown tick.
+    powered_down_ticks: u32,
+}
+
+impl ActivityHistory {
+    /// Fold one tick's display evidence in and answer whether this tick is
+    /// charged. Pure apart from the history it carries, so the whole rule is
+    /// unit-testable without a display.
+    pub fn observe(
+        &mut self,
+        dpms: Option<&str>,
+        idle_ms: Option<u64>,
+    ) -> charter_schedule::Activity {
+        let level = dpms.map(|s| s.trim().to_ascii_lowercase());
+        let powered_down = activity_from_dpms(level.as_deref()) == charter_schedule::Activity::Idle;
+        let changed = level != self.last_level;
+        self.last_level = level;
+        if !powered_down {
+            self.powered_down_ticks = 0;
+            return charter_schedule::Activity::Active;
+        }
+        self.powered_down_ticks = if changed {
+            1
+        } else {
+            self.powered_down_ticks.saturating_add(1)
+        };
+        if self.powered_down_ticks >= IDLE_CONSECUTIVE_TICKS
+            && idle_ms.is_some_and(|ms| ms >= IDLE_MIN_MS)
+        {
+            charter_schedule::Activity::Idle
+        } else {
+            charter_schedule::Activity::Active
+        }
     }
 }
 
@@ -102,6 +195,27 @@ impl XSnapshot {
 /// Anything that is not positively a powered-down monitor — `on`, `unknown`, a
 /// helper that failed, a Wayland seat with no X server to ask — is `Active`.
 /// Failing toward charging is the direction every probe in this daemon fails.
+///
+/// # This answers ONE sample; the decision needs [`ActivityHistory`]
+///
+/// On its own this mapping was gameable by a `xset dpms force off; sleep .05;
+/// xset dpms force on` loop — see [`ActivityHistory`], which is what the
+/// daemon actually charges from. This function survives as the single-sample
+/// predicate that fold uses, and as the definition of which levels count as
+/// powered down.
+///
+/// # The residual the pair still leaves
+///
+/// A ward who views their **own X display remotely** — `x11vnc` against this
+/// session from another machine, with the local panel powered off and no local
+/// input — reads as a monitor that is off with no user input, and is not
+/// charged. It is the same class as the X-proxy residual (03b-B2): everything
+/// this daemon knows about "is someone using this seat" is asked of the X
+/// server, and a remote viewer is a use of the session the X server does not
+/// distinguish from nobody being there. Closing it means moving to the
+/// process-table model of activity (what is running and doing work, not what
+/// the display says), which is a product call, not a patch — it changes what
+/// screen time MEANS for every family, including the honest ones.
 pub fn activity_from_dpms(level: Option<&str>) -> charter_schedule::Activity {
     match level.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("standby") | Some("suspend") | Some("off") => charter_schedule::Activity::Idle,
@@ -128,6 +242,7 @@ pub fn parse_xsnapshot(out: &str) -> Option<XSnapshot> {
         match (f.next(), f.next(), f.next(), f.next()) {
             (Some("capped"), None, _, _) => snap.capped = true,
             (Some("dpms"), Some(level), None, _) => snap.dpms = Some(level.to_string()),
+            (Some("idle_ms"), Some(ms), None, _) => snap.idle_ms = ms.parse().ok(),
             (Some("focus"), Some(pid), None, _) => snap.focus = parse_pid_field(pid),
             (Some("active"), Some(pid), None, _) => snap.active = parse_pid_field(pid),
             (Some("win"), Some(id), Some(pid), None) => {
@@ -1112,20 +1227,134 @@ mod tests {
     /// daemon degrades to "we do not know", i.e. to charging.
     #[test]
     fn the_dpms_line_rides_in_the_snapshot() {
-        use charter_schedule::Activity;
-        let snap = parse_xsnapshot("v1\ndpms off\nfocus 7\nactive 7\n").expect("parses");
-        assert_eq!(snap.dpms.as_deref(), Some("off"));
-        assert_eq!(snap.activity(), Activity::Idle);
-        // No `dpms` line at all: charge.
+        let snap =
+            parse_xsnapshot("v1\ndpms off\nidle_ms 9000\nfocus 7\nactive 7\n").expect("parses");
+        assert_eq!(snap.dpms_level(), Some("off"));
+        assert_eq!(snap.idle_ms(), Some(9000));
+        // No `dpms` / `idle_ms` line at all: both unknown, and unknown charges.
         let snap = parse_xsnapshot("v1\nfocus 7\nactive 7\n").expect("parses");
-        assert_eq!(snap.dpms, None);
-        assert_eq!(snap.activity(), Activity::Active);
+        assert_eq!(snap.dpms_level(), None);
+        assert_eq!(snap.idle_ms(), None);
         // `dpms` takes exactly one argument; a line carrying two is an unknown
         // line kind, not a power level — same discipline as `capped`.
         assert_eq!(
             parse_xsnapshot("v1\ndpms off now\n").expect("parses").dpms,
             None
         );
+        // And the same for `idle_ms`, including a value that is not a number:
+        // an unparseable idle time is an unknown one, never a zero.
+        assert_eq!(
+            parse_xsnapshot("v1\nidle_ms 1 2\n")
+                .expect("parses")
+                .idle_ms,
+            None
+        );
+        assert_eq!(
+            parse_xsnapshot("v1\nidle_ms soon\n")
+                .expect("parses")
+                .idle_ms,
+            None
+        );
+    }
+
+    // ---- G1 (DPMS toggle): the Idle decision is folded over ticks ----
+
+    /// Feed a run of ticks through one history and collect the verdicts.
+    fn run_ticks(ticks: &[(Option<&str>, Option<u64>)]) -> Vec<charter_schedule::Activity> {
+        let mut h = ActivityHistory::default();
+        ticks.iter().map(|(d, i)| h.observe(*d, *i)).collect()
+    }
+
+    /// THE BYPASS. `xset dpms force off; sleep .05; xset dpms force on` in a
+    /// loop: the screen is usable throughout and about half the samples read
+    /// `off`. Every tick's level differs from the last, so the streak never
+    /// reaches three and NOTHING here is ever free.
+    #[test]
+    fn a_dpms_toggle_loop_stays_charged() {
+        use charter_schedule::Activity;
+        let ticks: Vec<(Option<&str>, Option<u64>)> = (0..12)
+            .map(|i| (Some(if i % 2 == 0 { "off" } else { "on" }), Some(60_000)))
+            .collect();
+        assert!(
+            run_ticks(&ticks).iter().all(|a| *a == Activity::Active),
+            "a toggling display is a display in use"
+        );
+        // Even a lopsided toggle — two off, one on — never gets three in a row.
+        let ticks: Vec<(Option<&str>, Option<u64>)> = (0..12)
+            .map(|i| (Some(if i % 3 == 2 { "on" } else { "off" }), Some(60_000)))
+            .collect();
+        assert!(run_ticks(&ticks).iter().all(|a| *a == Activity::Active));
+    }
+
+    /// A monitor that is genuinely off, with an X server that has seen no
+    /// input: charged for the first two ticks (the evidence is not in yet),
+    /// free from the third.
+    #[test]
+    fn a_steady_off_display_with_a_real_idle_time_goes_idle_on_the_third_tick() {
+        use charter_schedule::Activity;
+        let ticks = vec![(Some("off"), Some(6_000)); 5];
+        assert_eq!(
+            run_ticks(&ticks),
+            vec![
+                Activity::Active,
+                Activity::Active,
+                Activity::Idle,
+                Activity::Idle,
+                Activity::Idle,
+            ]
+        );
+        // `standby` and `suspend` are powered-down levels too — but the level
+        // must be the SAME one three times; drifting between them is a change.
+        let drift = vec![
+            (Some("standby"), Some(60_000)),
+            (Some("suspend"), Some(60_000)),
+            (Some("off"), Some(60_000)),
+        ];
+        assert!(run_ticks(&drift).iter().all(|a| *a == Activity::Active));
+    }
+
+    /// The other half of the pair. A ward who blanks the monitor and keeps
+    /// typing — a script pressing a key, a held-down modifier, a wiggling
+    /// mouse — has a steady `off` level and an idle time that keeps resetting.
+    /// Input is use; it is charged.
+    #[test]
+    fn a_steady_off_display_with_fresh_input_stays_charged() {
+        use charter_schedule::Activity;
+        let ticks = vec![(Some("off"), Some(0)); 6];
+        assert!(run_ticks(&ticks).iter().all(|a| *a == Activity::Active));
+        // Just under the floor is still input, not idleness.
+        let ticks = vec![(Some("off"), Some(IDLE_MIN_MS - 1)); 6];
+        assert!(run_ticks(&ticks).iter().all(|a| *a == Activity::Active));
+    }
+
+    /// An unanswered idle time is never taken as idleness, however long the
+    /// display has been off — an older helper, a server with no XScreenSaver
+    /// extension, a probe that failed. Fail toward charging.
+    #[test]
+    fn a_missing_idle_time_is_charged_however_steady_the_display() {
+        use charter_schedule::Activity;
+        let ticks = vec![(Some("off"), None); 8];
+        assert!(run_ticks(&ticks).iter().all(|a| *a == Activity::Active));
+    }
+
+    /// A powered-on tick, an unknown level, or no snapshot at all resets the
+    /// streak: three off ticks have to be three IN A ROW.
+    #[test]
+    fn any_powered_on_or_unknown_tick_resets_the_streak() {
+        use charter_schedule::Activity;
+        for interrupt in [Some("on"), Some("unknown"), None] {
+            let ticks = vec![
+                (Some("off"), Some(60_000)),
+                (Some("off"), Some(60_000)),
+                (interrupt, Some(60_000)),
+                (Some("off"), Some(60_000)),
+                (Some("off"), Some(60_000)),
+            ];
+            assert!(
+                run_ticks(&ticks).iter().all(|a| *a == Activity::Active),
+                "interrupted by {interrupt:?}"
+            );
+        }
     }
 
     /// The helper says when one of its budgets bit. Without this line a flood
@@ -1349,6 +1578,7 @@ mod tests {
                 windows: vec![win("0x1", Some(10)), win("0x2", Some(99))],
                 capped: false,
                 dpms: None,
+                idle_ms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1380,6 +1610,7 @@ mod tests {
                 windows: vec![win("0x1", None)],
                 capped: false,
                 dpms: None,
+                idle_ms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1405,6 +1636,7 @@ mod tests {
                 windows: vec![win("0x1", Some(99)), win("0x2", Some(99))],
                 capped: true,
                 dpms: None,
+                idle_ms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1437,6 +1669,7 @@ mod tests {
                 windows: vec![win("0x1", Some(99)), win("0x2", None)],
                 capped: false,
                 dpms: None,
+                idle_ms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1498,6 +1731,7 @@ mod tests {
             windows: vec![],
             capped: false,
             dpms: None,
+            idle_ms: None,
         };
         let disagree = XSnapshot {
             focus: Some(10),
@@ -1505,6 +1739,7 @@ mod tests {
             windows: vec![],
             capped: false,
             dpms: None,
+            idle_ms: None,
         };
         assert_eq!(
             downgrade_on_focus_mismatch(Bucket::Learning, &agree),
@@ -1529,6 +1764,7 @@ mod tests {
             windows: vec![],
             capped: false,
             dpms: None,
+            idle_ms: None,
         };
         assert_eq!(
             downgrade_on_focus_mismatch(Bucket::Learning, &no_wm),
@@ -1545,6 +1781,7 @@ mod tests {
             windows: vec![],
             capped: false,
             dpms: None,
+            idle_ms: None,
         };
         assert_eq!(foreground_pid(&advisory_only), Some(11));
         assert_eq!(
@@ -1560,6 +1797,7 @@ mod tests {
             windows: vec![],
             capped: true,
             dpms: None,
+            idle_ms: None,
         };
         assert_eq!(
             downgrade_on_focus_mismatch(Bucket::Learning, &capped),

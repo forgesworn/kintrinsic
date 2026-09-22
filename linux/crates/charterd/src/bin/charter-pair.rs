@@ -32,34 +32,69 @@ const DEVICE_PUB: &str = "/var/lib/charter/device.pub";
 const PAIRING: &str = "/var/lib/charter/pairing.json";
 const LIMITS_DIR: &str = "/etc/charter/limits.d";
 
-/// The headless flags that consume the following token as a value, the same
-/// set `headless_pair`'s `get` closure reads by position — kept in sync with
-/// it so `wants_replace` walks the args the same way.
+/// The headless flags that consume the following token as a value.
 const VALUE_FLAGS: [&str; 2] = ["--link", "--subject"];
+
+/// argv, parsed ONCE, the same way for every question asked of it.
+///
+/// There used to be two readers with two different ideas of what a token is.
+/// `wants_replace` walked the args skipping each value-taking flag's value
+/// slot, while the value lookup was `args.iter().position(|a| a == flag)` —
+/// a search with no notion of slots at all. So `--link --subject --replace`
+/// read as: `--link`'s value is `--subject`, and then the `position` search
+/// found `--subject` anyway (as `--link`'s VALUE) and handed back `--replace`
+/// as the subject. Two readers, two answers, from one argv — which is the
+/// shape of bug that eventually lets one of them see consent the other does
+/// not. One pass, one answer.
+///
+/// Position, not search: the token after a value-taking flag is that flag's
+/// value and nothing else, even when it is spelled like a flag.
+struct Flags {
+    values: std::collections::BTreeMap<String, String>,
+    present: std::collections::BTreeSet<String>,
+}
+
+fn parse_flags(args: &[String]) -> Flags {
+    let mut values = std::collections::BTreeMap::new();
+    let mut present = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while i < args.len() {
+        if VALUE_FLAGS.contains(&args[i].as_str()) {
+            // First wins, as the old `position` lookup did.
+            if let Some(v) = args.get(i + 1) {
+                values.entry(args[i].clone()).or_insert_with(|| v.clone());
+            }
+            i += 2; // the flag AND the value slot that follows it
+        } else {
+            present.insert(args[i].clone());
+            i += 1;
+        }
+    }
+    Flags { values, present }
+}
+
+impl Flags {
+    /// The value given to `flag`, or `None` when it was not passed (or was
+    /// passed with nothing after it).
+    fn get(&self, flag: &str) -> Option<String> {
+        self.values.get(flag).cloned()
+    }
+    /// Whether `flag` appeared as a STANDALONE token — never as some other
+    /// flag's value.
+    fn has(&self, flag: &str) -> bool {
+        self.present.contains(flag)
+    }
+}
 
 /// Whether `--replace` was passed as a STANDALONE flag — the explicit ask
 /// headless pairing requires before it will overwrite an existing guardian.
 /// A bare `.any(|a| a == "--replace")` over-matches: if `--replace` happens
-/// to be the *value* of `--link` or `--subject` (e.g. a mis-typed
-/// `charter-console` invocation, or a subject hex that collided with the
-/// literal string), that token is data, not a flag, and must not be read as
-/// consent to overwrite an existing pairing. Walk the args in the same
-/// order `headless_pair`'s `get` consumes them, skipping the value slot of
-/// every value-taking flag, and only match `--replace` at a position that
-/// was never consumed as such a value.
+/// to be the *value* of `--link` or `--subject` (a mis-typed
+/// `charter-console` invocation, a subject hex that collided with the literal
+/// string), that token is data, not a flag, and must not be read as consent
+/// to overwrite an existing pairing.
 fn wants_replace(args: &[String]) -> bool {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--replace" {
-            return true;
-        }
-        if VALUE_FLAGS.contains(&args[i].as_str()) {
-            i += 2; // skip the flag and the value slot that follows it
-        } else {
-            i += 1;
-        }
-    }
-    false
+    parse_flags(args).has("--replace")
 }
 
 /// A re-pair to a NEW subject orphans the old subject's cached clauses —
@@ -173,17 +208,17 @@ fn write_pairing(json: &str) -> std::io::Result<()> {
 /// `--replace` is given — the console is expected to have already confirmed
 /// with the parent before ever passing it.
 fn headless_pair(args: &[String]) -> ! {
-    let get = |flag: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
+    // ONE parse, shared with `wants_replace` below: the token that is
+    // `--link`'s value must not also be readable as a flag in its own right.
+    let flags = parse_flags(args);
+    let get = |flag: &str| -> Option<String> { flags.get(flag) };
     let Some(uri) = get("--link") else {
         eprintln!("usage: charter-pair --link <bunker://…> [--subject <hex>] [--replace]");
         std::process::exit(2);
     };
     let pairing_existed = Path::new(PAIRING).exists();
+    // Same parser as `get` above — that is the whole point: one reading of
+    // argv, so the token that is `--link`'s value can never also be consent.
     if pairing_existed && !wants_replace(args) {
         eprintln!(
             "charter-pair: this computer is already paired with a guardian — pass --replace \
@@ -420,6 +455,37 @@ mod tests {
         assert!(!wants_replace(&s(&["--subject", "--replace"])));
         // A genuine standalone `--replace` AFTER a value slot still counts.
         assert!(wants_replace(&s(&["--link", "--replace", "--replace"])));
+    }
+
+    /// The two readers agreed on nothing. `["--subject","--link","--replace"]`:
+    /// `--subject` takes `--link` as its value, which leaves `--replace` a
+    /// standalone flag — and the OLD value lookup, a bare `position` search
+    /// with no notion of value slots, found `--link` anyway and read
+    /// `--replace` as the bunker URI. One parse now answers both questions the
+    /// same way.
+    #[test]
+    fn one_parse_answers_both_questions_about_the_same_argv() {
+        let a = s(&["--subject", "--link", "--replace"]);
+        let f = parse_flags(&a);
+        assert_eq!(f.get("--subject").as_deref(), Some("--link"));
+        assert_eq!(f.get("--link"), None, "`--link` was consumed as a VALUE");
+        assert!(f.has("--replace"), "and `--replace` is then a real flag");
+        assert_eq!(f.has("--replace"), wants_replace(&a));
+
+        // The mirror: `--replace` in `--link`'s value slot is data, and the
+        // value lookup and the flag lookup say so together.
+        let a = s(&["--link", "--replace", "--subject", "ab"]);
+        let f = parse_flags(&a);
+        assert_eq!(f.get("--link").as_deref(), Some("--replace"));
+        assert_eq!(f.get("--subject").as_deref(), Some("ab"));
+        assert!(!f.has("--replace"));
+        assert!(!wants_replace(&a));
+
+        // A value-taking flag with nothing after it consumes nothing and
+        // yields nothing — it must not read the flag itself as its own value.
+        let f = parse_flags(&s(&["--replace", "--link"]));
+        assert!(f.has("--replace"));
+        assert_eq!(f.get("--link"), None);
     }
 
     #[test]

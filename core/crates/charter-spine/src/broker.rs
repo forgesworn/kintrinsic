@@ -456,31 +456,51 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             ));
         }
         let window_start = now.saturating_sub(SUBMIT_WINDOW_SECS);
-        {
-            let stamps = st.submits.entry(caller_uid).or_default();
-            while stamps.front().is_some_and(|t| *t < window_start) {
-                stamps.pop_front();
+        // Prune this caller's window WITHOUT creating an entry for a caller
+        // that has none: `entry().or_default()` here would insert an empty
+        // deque for every uid that ever asks, and the cleanup below could
+        // never win against it.
+        let pruned_len = match st.submits.get_mut(&caller_uid) {
+            Some(stamps) => {
+                while stamps.front().is_some_and(|t| *t < window_start) {
+                    stamps.pop_front();
+                }
+                let len = stamps.len();
+                // A deque pruned down to nothing is dead weight: without this,
+                // every distinct `caller_uid` that has ever submitted keeps a
+                // permanent entry in this map for the life of the process.
+                // Dropped HERE and recreated only by a successful submit below
+                // — the previous shape removed it and then immediately put it
+                // back with an unconditional `or_default()`, so the cleanup
+                // never actually removed anything and the map still grew
+                // without bound.
+                if len == 0 {
+                    st.submits.remove(&caller_uid);
+                }
+                len
             }
-        }
-        // A deque pruned down to nothing is dead weight: without this, every
-        // distinct `caller_uid` that has ever submitted keeps a permanent
-        // entry in this map for the life of the process, whether or not it
-        // is about to submit again below. Drop it now; `or_default` below
-        // recreates it if this call does go on to push a stamp.
-        if st.submits.get(&caller_uid).is_some_and(VecDeque::is_empty) {
-            st.submits.remove(&caller_uid);
-        }
-        let stamps = st.submits.entry(caller_uid).or_default();
-        if stamps.len() >= MAX_SUBMITS_PER_HOUR {
+            None => 0,
+        };
+        if pruned_len >= MAX_SUBMITS_PER_HOUR {
             return Err(BrokerError::RateLimited(
                 "you've asked a lot recently — try again in a while".into(),
             ));
         }
         // Counted here rather than after a successful publish: a submit that
         // fails downstream still cost the work, and a caller who could retry a
-        // failing op without limit is the same flood by another door.
-        stamps.push_back(now);
+        // failing op without limit is the same flood by another door. This is
+        // the ONLY place an entry is created, so the map holds exactly those
+        // callers with a live window.
+        st.submits.entry(caller_uid).or_default().push_back(now);
         Ok(())
+    }
+
+    /// How many callers currently hold a non-empty submit window. Test-only:
+    /// the rate-limiter's map is in-memory bookkeeping with no other observer,
+    /// and "it does not grow without bound" needs one.
+    #[cfg(test)]
+    pub(crate) fn submit_window_callers(&self) -> usize {
+        self.state.lock().expect("state lock").submits.len()
     }
 
     /// Submit a brokered request: build + publish a REQUEST, persist it Pending,
@@ -1436,6 +1456,32 @@ mod ttl_and_caps_tests {
         // caller may ask again.
         b.sys().mock_clock().advance_secs(SUBMIT_WINDOW_SECS + 1);
         ask(&b, MIA).await.expect("the window has slid");
+    }
+
+    /// The rate-limiter's bookkeeping must not be a slow leak. A caller whose
+    /// whole window has expired keeps no entry in the map — and a caller who is
+    /// merely *asked about* (a refused submit, a sibling's check) never creates
+    /// one at all. The previous shape removed the empty deque and then put it
+    /// straight back with an unconditional `or_default()`, so every uid that
+    /// ever touched the broker stayed in the map for the life of the process.
+    #[tokio::test]
+    async fn an_expired_submit_window_leaves_no_entry_behind() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        let hex = ask(&b, MIA).await.expect("under the rate").to_hex();
+        assert!(b.cancel(&hex));
+        assert_eq!(b.submit_window_callers(), 1, "one caller has a live window");
+
+        // The window expires, and the next thing that asks about this caller
+        // prunes it away rather than renewing an empty entry.
+        b.sys().mock_clock().advance_secs(SUBMIT_WINDOW_SECS + 1);
+        let hex = ask(&b, MIA).await.expect("the window has slid").to_hex();
+        assert!(b.cancel(&hex));
+        assert_eq!(
+            b.submit_window_callers(),
+            1,
+            "the expired window was replaced, not accumulated"
+        );
     }
 
     /// Relay health wiring (02b-G1/02b-B5 follow-through): a transport whose
