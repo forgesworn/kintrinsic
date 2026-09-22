@@ -353,16 +353,67 @@ fn build_broker(
     Broker::new(sys, transport, RealEntropy, registry, events, subject)
 }
 
-/// The uid of the active (foreground) session on the seat, via `loginctl`
-/// (`CHARTER_SEAT` overrides `seat0`). The only user whose time is charged.
-/// Degrades to `None` (nobody charged this tick) if logind is unresponsive —
-/// see `loginctl_value` for why that must never block.
-fn active_session_uid() -> Option<u32> {
+/// The active (foreground) session on the seat (`CHARTER_SEAT` overrides
+/// `seat0`), as `(uid, session id)`. Both [`active_session_uid`] and
+/// [`session_activity`] need the session id — resolving it once here and
+/// reusing it avoids a second `show-seat` round trip per tick. Degrades to
+/// `None` if logind is unresponsive — see `loginctl_value` for why that must
+/// never block.
+fn active_session() -> Option<(u32, String)> {
     let seat = std::env::var("CHARTER_SEAT").unwrap_or_else(|_| "seat0".into());
     let sid = loginctl_value(&["show-seat", &seat, "--property=ActiveSession"])?;
-    loginctl_value(&["show-session", &sid, "--property=User"])?
+    let uid = loginctl_value(&["show-session", &sid, "--property=User"])?
         .parse()
-        .ok()
+        .ok()?;
+    Some((uid, sid))
+}
+
+/// The uid of the active (foreground) session on the seat. The only user
+/// whose time is charged.
+fn active_session_uid() -> Option<u32> {
+    active_session().map(|(uid, _)| uid)
+}
+
+/// G1 (03b-linux-charterd-bins-matching): "screen time" means the screen is
+/// ON and UNLOCKED, not merely that the ward's uid owns the active session —
+/// a child who locks the screen (or whose screensaver blanks it) must stop
+/// being charged. logind's own session hints carry exactly this: desktops
+/// set `LockedHint` when the screensaver/lock engages, and `IdleHint` follows
+/// input idleness but is INHIBITED by anything that counts as "using the
+/// machine" (a fullscreen video player, a game) — so it does not charge a
+/// child watching a film as idle the way raw input-idle would.
+/// `LockedHint` wins over `IdleHint` (a locked-but-not-yet-idle screen is
+/// still locked). Fails toward `Active` (today's behaviour, and the
+/// direction every other probe in this file fails) when the probe itself
+/// cannot answer — an idle/locked classification must be POSITIVELY
+/// evidenced, never assumed from silence.
+fn session_activity(sid: &str) -> charter_schedule::Activity {
+    match loginctl_value(&["show-session", sid, "--property=LockedHint", "--property=IdleHint"]) {
+        Some(out) => activity_from_hints(&out),
+        None => charter_schedule::Activity::Active,
+    }
+}
+
+/// Parse `loginctl show-session --property=LockedHint --property=IdleHint
+/// --value`'s output: one "yes"/"no" line per property, in the order
+/// requested (LockedHint first, IdleHint second) — confirmed on this machine
+/// (`loginctl show-session <sid> -p LockedHint -p IdleHint --value` prints
+/// two lines). Pure so it is unit-tested without a live logind; case and
+/// stray whitespace come from loginctl, not from us (see
+/// `display_protocol_note`'s test for the same discipline elsewhere in this
+/// file). Anything short of two readable lines, or two "no"s, is Active —
+/// the fail-toward-charging direction.
+fn activity_from_hints(output: &str) -> charter_schedule::Activity {
+    let mut lines = output.lines().map(|l| l.trim().to_ascii_lowercase());
+    let locked = lines.next().is_some_and(|l| l == "yes");
+    if locked {
+        return charter_schedule::Activity::Locked;
+    }
+    let idle = lines.next().is_some_and(|l| l == "yes");
+    if idle {
+        return charter_schedule::Activity::Idle;
+    }
+    charter_schedule::Activity::Active
 }
 
 /// The active (foreground) session's `DISPLAY` + `XAUTHORITY`, read from its
@@ -1571,6 +1622,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // baseline every two seconds, and a line per tick would bury the one line
     // that says when it started.
     let mut display_unreadable = false;
+    // G1: the last probed session activity, so a lock/unlock (or idle/active)
+    // transition is logged once in each direction rather than every tick —
+    // same reasoning as `display_unreadable` above.
+    let mut last_activity = charter_schedule::Activity::Active;
     loop {
         let slow_tick = iter.is_multiple_of(slow_every);
         iter = iter.wrapping_add(1);
@@ -1842,9 +1897,27 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         // stalled probe can't occupy this worker and starve the D-Bus serve
         // task. Ordering is preserved: uid first, then (only when some
         // identity clause is live) the X probe, then the focus classification.
-        let active = tokio::task::spawn_blocking(active_session_uid)
-            .await
-            .expect("active_session_uid task");
+        let (active, activity) = tokio::task::spawn_blocking(|| match active_session() {
+            Some((uid, sid)) => (Some(uid), session_activity(&sid)),
+            None => (None, charter_schedule::Activity::Active),
+        })
+        .await
+        .expect("active_session task");
+        // Log the TRANSITION, not the state — same discipline as the Named
+        // model's `display_unreadable` line below: this branch runs every
+        // couple of seconds, and the fact worth having in the journal is
+        // when the meter stopped charging and when it started again.
+        if activity != last_activity {
+            if activity != charter_schedule::Activity::Active {
+                eprintln!(
+                    "charterd: the active session is {activity:?} — screen-time charging is \
+                     paused until it is unlocked and active again"
+                );
+            } else {
+                eprintln!("charterd: the active session is active again — charging resumed");
+            }
+            last_activity = activity;
+        }
         let learning_apps = active
             .map(|uid| multi.learning_apps(uid))
             .unwrap_or_default();
@@ -1957,7 +2030,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 // swallow the FIRST line of the next Named child's outage,
                 // which is the one line worth having.
                 display_unreadable = false;
-                multi.tick_attributed(
+                multi.tick_attributed_with(
+                    activity,
                     active,
                     now,
                     elapsed,
@@ -2019,7 +2093,15 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                         );
                     }
                 }
-                multi.tick_open(active, now, elapsed, bucket, open.as_deref(), unrecognised)
+                multi.tick_open_with(
+                    activity,
+                    active,
+                    now,
+                    elapsed,
+                    bucket,
+                    open.as_deref(),
+                    unrecognised,
+                )
             }
         };
 
@@ -2791,6 +2873,24 @@ mod tests {
         assert!(super::display_protocol_note(Some("x11")).is_none());
         assert!(super::display_protocol_note(Some("tty")).is_none());
         assert!(super::display_protocol_note(None).is_none());
+    }
+
+    /// G1 (03b-linux-charterd-bins-matching): parses
+    /// `loginctl show-session <sid> -p LockedHint -p IdleHint --value`'s
+    /// two-line output. `LockedHint` (line 1) wins over `IdleHint` (line 2);
+    /// anything short of a "yes" on either line, including empty/unreadable
+    /// output, is Active — the fail-toward-charging direction every other
+    /// probe in this file takes.
+    #[test]
+    fn activity_from_hints_parses_the_two_loginctl_lines() {
+        use charter_schedule::Activity;
+        assert_eq!(super::activity_from_hints("yes\nno"), Activity::Locked);
+        assert_eq!(super::activity_from_hints("no\nyes"), Activity::Idle);
+        assert_eq!(super::activity_from_hints("no\nno"), Activity::Active);
+        assert_eq!(super::activity_from_hints(""), Activity::Active);
+        // Case and stray whitespace come from loginctl, not from us — same
+        // discipline as `display_protocol_note` above.
+        assert_eq!(super::activity_from_hints("YES\n no "), Activity::Locked);
     }
 
     #[test]

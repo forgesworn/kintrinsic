@@ -290,8 +290,37 @@ impl MultiChildEnforcer {
         app_bucket: Option<&str>,
         unrecognised: bool,
     ) -> Vec<ChildDecision> {
+        self.tick_attributed_with(
+            Activity::Active,
+            active_uid,
+            now,
+            elapsed,
+            bucket,
+            app_bucket,
+            unrecognised,
+        )
+    }
+
+    /// [`tick_attributed`](Self::tick_attributed) with an explicit session
+    /// [`Activity`] — Linux's charging path, which (unlike
+    /// [`tick_attributed`](Self::tick_attributed)'s `Active`-only callers,
+    /// including android/jni's own `tick`, which cannot be rebuilt here and so
+    /// keeps calling the old signature) can actually tell a locked or idle
+    /// screen apart from one being played on. See
+    /// [`tick_open_with`](Self::tick_open_with) for what changes when
+    /// `activity` does not count.
+    pub fn tick_attributed_with(
+        &mut self,
+        activity: Activity,
+        active_uid: Option<u32>,
+        now: i64,
+        elapsed: u64,
+        bucket: Bucket,
+        app_bucket: Option<&str>,
+        unrecognised: bool,
+    ) -> Vec<ChildDecision> {
         let one: Vec<String> = app_bucket.map(str::to_string).into_iter().collect();
-        self.tick_open(active_uid, now, elapsed, bucket, Some(&one), unrecognised)
+        self.tick_open_with(activity, active_uid, now, elapsed, bucket, Some(&one), unrecognised)
     }
 
     /// [`tick_attributed`](Self::tick_attributed) for a device that can have
@@ -345,8 +374,44 @@ impl MultiChildEnforcer {
     /// arriving from a different device entirely. In `Named` the journal is
     /// therefore only touched on the costing path, which falls out of charging
     /// through the same call rather than needing its own rule to remember.
+    ///
+    /// # Locked and idle screens (Linux's `Activity` probe)
+    ///
+    /// This entry point always charges as `Activity::Active` — see
+    /// [`tick_open_with`](Self::tick_open_with), which takes the session's
+    /// `Activity` and, when it is `Idle` or `Locked`, credits
+    /// nothing this tick — no `Screen`/`Learning` seconds, no named-bucket
+    /// seconds, no unrecognised seconds — while still rolling the ledger,
+    /// burning any schedule extension, and returning a decision, exactly as
+    /// an `Active` tick does. An app left open behind a locked screen costs
+    /// nothing: the guardian's "Minecraft 1 hour" means an hour of playing
+    /// Minecraft, not an hour of the session merely existing while the ward
+    /// is at football.
     pub fn tick_open(
         &mut self,
+        active_uid: Option<u32>,
+        now: i64,
+        elapsed: u64,
+        bucket: Bucket,
+        open_buckets: Option<&[String]>,
+        unrecognised: bool,
+    ) -> Vec<ChildDecision> {
+        self.tick_open_with(
+            Activity::Active,
+            active_uid,
+            now,
+            elapsed,
+            bucket,
+            open_buckets,
+            unrecognised,
+        )
+    }
+
+    /// [`tick_open`](Self::tick_open) with an explicit session [`Activity`] —
+    /// see the doc section above it ("Locked and idle screens") for the rule.
+    pub fn tick_open_with(
+        &mut self,
+        activity: Activity,
         active_uid: Option<u32>,
         now: i64,
         elapsed: u64,
@@ -398,14 +463,24 @@ impl MultiChildEnforcer {
                         None => Some(Bucket::Screen),
                     },
                 };
+                // `credit_bucket`/`credit_unrecognised` always run (their
+                // internal `roll` is what actually advances the day/week keys
+                // at local midnight) but only ADD seconds when `activity`
+                // counts — a locked or idle tick still rolls the ledger, it
+                // just books nothing. `credit_app_bucket` has no `Activity` of
+                // its own, so it is gated explicitly here instead.
                 if let Some(eff) = charge {
-                    c.usage.credit_bucket(now, Activity::Active, eff, elapsed);
+                    c.usage.credit_bucket(now, activity, eff, elapsed);
                 }
                 // No display, no evidence about any PARTICULAR app: the
                 // baseline above is charged, but no named allowance is spent
-                // on a guess.
-                for id in open_buckets.unwrap_or_default() {
-                    c.usage.credit_app_bucket(now, id, elapsed);
+                // on a guess. Gated on `activity.counts()`: an app left open
+                // behind a locked screen must not spend its named allowance
+                // either — "Minecraft 1 hour" means an hour of playing it.
+                if activity.counts() {
+                    for id in open_buckets.unwrap_or_default() {
+                        c.usage.credit_app_bucket(now, id, elapsed);
+                    }
                 }
                 // Credited in BOTH models, and in Named even when nothing was
                 // charged. That is the point of it here: "something ran and
@@ -414,9 +489,10 @@ impl MultiChildEnforcer {
                 // out-of-date list the system's characteristic failure. A
                 // counter that went quiet precisely when nothing was charged
                 // would report a full cost list at the moment it was least
-                // true.
+                // true. Still gated on `activity`: a locked/idle screen is not
+                // "something ran" either.
                 if unrecognised {
-                    c.usage.credit_unrecognised(now, Activity::Active, elapsed);
+                    c.usage.credit_unrecognised(now, activity, elapsed);
                 }
             }
             // Out-of-window, a granted schedule extension burns wall-clock —
@@ -1380,6 +1456,73 @@ mod tests {
         assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(90));
     }
 
+    /// G1 fix (03b-linux-charterd-bins-matching, finding G1): "screen time"
+    /// means the screen is ON and UNLOCKED — a locked or idle session must
+    /// not be charged, in ANY of the three meters `tick_attributed_with`
+    /// feeds (Screen, the named app bucket, unrecognised), even though it is
+    /// still the foreground/active child. The tick must otherwise behave
+    /// exactly as normal: a decision comes back, and the child is reported
+    /// `active` (at the machine) though nothing was banked. `Active` still
+    /// charges as before — this is the regression guard for the wrapper
+    /// (`tick_attributed`) that keeps hardcoding it.
+    #[test]
+    fn idle_and_locked_ticks_credit_nothing_in_the_session_model() {
+        let policy = EffectivePolicy {
+            schedule: None,
+            budget: None,
+            learning: None,
+            source: PolicySource::DeviceOnly,
+        };
+        const NOW: i64 = 1_704_499_200; // 2024-01-06 12:00 UTC
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, policy)], NOW, |_| (None, None));
+
+        let d = e.tick_attributed_with(
+            Activity::Idle,
+            Some(YOUNGER),
+            NOW,
+            600,
+            Bucket::Screen,
+            Some("play"),
+            true,
+        );
+        assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
+        assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(0));
+        assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(0));
+        // Still a real decision for a real (foreground) child.
+        let this = dec(&d, YOUNGER);
+        assert!(this.active);
+        assert!(!this.locked);
+
+        let d = e.tick_attributed_with(
+            Activity::Locked,
+            Some(YOUNGER),
+            NOW,
+            600,
+            Bucket::Screen,
+            Some("play"),
+            true,
+        );
+        assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
+        assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(0));
+        assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(0));
+        assert!(dec(&d, YOUNGER).active);
+
+        // Active still charges, exactly as `tick_attributed` always has.
+        e.tick_attributed_with(
+            Activity::Active,
+            Some(YOUNGER),
+            NOW,
+            600,
+            Bucket::Screen,
+            Some("play"),
+            true,
+        );
+        assert_eq!(e.used_today(YOUNGER, NOW), Some(600));
+        assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(600));
+        assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(600));
+    }
+
     // ---- The named-costs time model ---------------------------------------
 
     mod named_model {
@@ -1576,6 +1719,61 @@ mod tests {
                 a.app_bucket_today(YOUNGER, "play", NOW),
                 b.app_bucket_today(YOUNGER, "play", NOW)
             );
+        }
+
+        /// The Named-model twin of the Session test above: `tick_open_with`
+        /// must credit nothing — not the Screen baseline, not the named
+        /// bucket, not unrecognised — while the screen is locked or idle,
+        /// even with something costing open, and still return a decision.
+        /// `Active` credits exactly as `tick_open` always has.
+        #[test]
+        fn idle_and_locked_ticks_credit_nothing_in_the_named_model() {
+            let mut e = enforcer(named_child());
+            let play = vec!["play".to_string()];
+
+            let d = e.tick_open_with(
+                Activity::Idle,
+                Some(YOUNGER),
+                NOW,
+                600,
+                Bucket::Screen,
+                Some(&play),
+                true,
+            );
+            assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
+            assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(0));
+            assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(0));
+            // A real decision still comes back for the still-foreground child
+            // (locked/unlocked is the schedule+cap fixture's own business,
+            // not this fix's — only that the tick did not short-circuit).
+            assert!(dec(&d, YOUNGER).active);
+
+            let d = e.tick_open_with(
+                Activity::Locked,
+                Some(YOUNGER),
+                NOW,
+                600,
+                Bucket::Screen,
+                Some(&play),
+                true,
+            );
+            assert_eq!(e.used_today(YOUNGER, NOW), Some(0));
+            assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(0));
+            assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(0));
+            assert!(dec(&d, YOUNGER).active);
+
+            e.tick_open_with(
+                Activity::Active,
+                Some(YOUNGER),
+                NOW,
+                600,
+                Bucket::Screen,
+                Some(&play),
+                true,
+            );
+            assert_eq!(e.used_today(YOUNGER, NOW), Some(600));
+            assert_eq!(e.app_bucket_today(YOUNGER, "play", NOW), Some(600));
+            assert_eq!(e.unrecognised_today(YOUNGER, NOW), Some(600));
         }
     }
 }
