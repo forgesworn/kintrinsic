@@ -33,9 +33,26 @@ RestartSec=2
 # observed live — is a live process to systemd, so nothing restarted it and
 # everything quietly stopped being enforced. The enforcement tick itself sends
 # WATCHDOG=1 (`watchdog::ping`), so what is being vouched for is the loop that
-# actually does the work, not merely a process that still exists. 60s is ~30
-# fast ticks: far beyond any legitimate stall, far short of an afternoon.
-WatchdogSec=60
+# actually does the work, not merely a process that still exists.
+#
+# 04-G5 — THE BUDGET, and why this is 180 and not 60. The slow tick's network
+# section is the long pole: every relay operation carries its own ~8 s timeout,
+# and the tick runs one per operation per configured relay. A subscribe + a
+# publish across four unreachable relays is already ~64 s of perfectly correct,
+# perfectly expected waiting, and a 60 s watchdog killed the daemon for it. That
+# kill is not a harmless restart: `ExecStopPost=charter-recovery --thaw-all`
+# runs on the way out and unfreezes every managed child, so a bad Wi-Fi night
+# became a new fail-open — the exact failure the watchdog exists to prevent,
+# caused by the watchdog. 180 s covers the worst realistic network section with
+# room to spare while still being far short of an afternoon.
+#
+# The ceiling is only half of it: `watchdog::ping()` is also sent BEFORE and
+# AFTER the network section and between each relay operation inside it
+# (`runtime.rs`), so a tick that is merely waiting on relays keeps vouching for
+# itself and only a tick that is genuinely STUCK runs the clock out. Raise the
+# per-operation timeout or add relays and this number has to be re-derived:
+# worst case ≈ (relay timeout) × (relays) × (operations per tick).
+WatchdogSec=180
 # The keep-alive comes from the main process. (Type=simple does not imply this
 # the way Type=notify would, and the unit's Type= is deliberately unchanged.)
 NotifyAccess=main
