@@ -114,8 +114,15 @@ impl RealMachineSigner {
 
     /// Load the key from `path`. A missing or invalid key is **fail-safe**
     /// (`secret = None`), never an error — the broker boots and degrades closed.
+    /// A key whose mode or ownership no longer protects it is refused the same
+    /// way (loudly) rather than used — see [`check_key_file_perms`].
     pub fn with_key_path(path: impl AsRef<std::path::Path>) -> Self {
-        let secret = std::fs::read_to_string(path.as_ref())
+        let path = path.as_ref();
+        if let Err(e) = check_key_file_perms(path) {
+            eprintln!("charter: {e}");
+            return Self { secret: None };
+        }
+        let secret = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| decode_hex32(s.trim()))
             .and_then(validate_secret);
@@ -137,6 +144,11 @@ impl RealMachineSigner {
     /// only the in-process daemon assembly calls it.
     pub fn load_or_create_secret(path: impl AsRef<std::path::Path>) -> SysResult<[u8; 32]> {
         let path = path.as_ref();
+        // Before a single byte is read: is the file that is sitting there still
+        // protected? A key that is group/world readable, or owned by someone
+        // else, is as compromised as one printed on a wall — and it is NOT
+        // repaired here, nor replaced. See `check_key_file_perms`.
+        check_key_file_perms(path)?;
         // "Absent" and "present but unusable" are different events and must not
         // collapse into one: the machine key has no backup by design and the
         // guardian's pairing is pinned to its pubkey, so minting over a key we
@@ -208,6 +220,75 @@ impl MachineSigner for RealMachineSigner {
     }
 }
 
+/// The pure half of the on-load key-file guard: given a `stat`, is this file
+/// still protecting the key? `None` = yes, `Some(reason)` = refuse it.
+///
+/// `mode` is the raw `st_mode` (file-type bits included, they are masked off).
+#[cfg(any(feature = "real-relay", feature = "real-os"))]
+fn key_perms_error(mode: u32, owner_uid: u32, process_uid: u32) -> Option<String> {
+    if mode & 0o077 != 0 {
+        return Some(format!(
+            "mode {:04o} grants group/other access",
+            mode & 0o7777
+        ));
+    }
+    if owner_uid != process_uid {
+        return Some(format!(
+            "owned by uid {owner_uid}, not this process's uid {process_uid}"
+        ));
+    }
+    None
+}
+
+/// `stat` the machine key before it is read, and refuse it if the file no
+/// longer protects it: any group/other bit set, or an owner that is not this
+/// process.
+///
+/// The failure is handled exactly like the "present but unreadable" branch of
+/// `load_or_create_secret` — **fail, touch nothing, say so loudly**:
+///   * NOT `chmod`-and-continue. The secrecy is already gone (a key restored
+///     from a backup, copied by an operator, or written by an older build has
+///     been readable for however long it sat there); tightening the mode hides
+///     that and leaves the device signing STATUS and sealing the guardian
+///     channel with a key someone else may hold.
+///   * NOT re-provision. The guardian's pairing is pinned to this pubkey and
+///     the key has no backup, so minting over it orphans the device for good.
+///
+/// A human decides which — re-pair, or restore the key properly.
+///
+/// A **missing** file is `Ok(())`: "absent" is the caller's business (it is
+/// the provisioning path), and only what is actually there can be misprotected.
+#[cfg(any(feature = "real-relay", feature = "real-os"))]
+fn check_key_file_perms(path: &std::path::Path) -> SysResult<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(crate::error::SysError::Io(format!(
+                "machine key at {} cannot be stat'ed ({e}); refusing to use or replace it",
+                path.display()
+            )))
+        }
+    };
+    if !meta.is_file() {
+        return Err(crate::error::SysError::Io(format!(
+            "machine key at {} is not a regular file; refusing to use or replace it",
+            path.display()
+        )));
+    }
+    // SAFETY: `geteuid` is always-succeeds, no arguments, no allocation.
+    let process_uid = unsafe { libc::geteuid() } as u32;
+    match key_perms_error(meta.permissions().mode(), meta.uid(), process_uid) {
+        None => Ok(()),
+        Some(why) => Err(crate::error::SysError::Io(format!(
+            "machine key at {} is not protected ({why}); refusing to use it — \
+             the key must be restored 0600 and owner-only, or the device re-paired",
+            path.display()
+        ))),
+    }
+}
+
 /// `Some(secret)` iff it is a valid x-only signing scalar, else `None`.
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
 fn validate_secret(secret: [u8; 32]) -> Option<[u8; 32]> {
@@ -254,12 +335,22 @@ fn generate_secret() -> SysResult<[u8; 32]> {
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
 fn persist_key(path: &std::path::Path, secret: &[u8; 32]) -> SysResult<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
     let dir = path
         .parent()
         .ok_or_else(|| crate::error::SysError::Io("key path has no parent".into()))?;
-    std::fs::create_dir_all(dir)
-        .map_err(|e| crate::error::SysError::Io(format!("create key dir: {e}")))?;
+    // 0700 EXPLICITLY, not `create_dir_all`'s `0777 & ~umask`: the daemon's
+    // umask is not ours to assume, and a 0755 key directory lets anyone list
+    // (and, with the file mode wrong, read) the device identity. Existing
+    // directories are left exactly as they are — this only sets the mode of
+    // what we create.
+    if !dir.as_os_str().is_empty() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| crate::error::SysError::Io(format!("create key dir: {e}")))?;
+    }
 
     let mut hex = String::with_capacity(64);
     for b in secret {
@@ -322,6 +413,21 @@ mod real_tests {
         p
     }
 
+    /// Write a key file the way a correctly provisioned one looks: 0600. Plain
+    /// `fs::write` lands at `0666 & ~umask` (usually 0644), which the on-load
+    /// guard now — rightly — refuses, so every test about the file's CONTENT
+    /// has to get the mode right first or it stops testing what it means to.
+    fn write_key(path: &std::path::Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, contents).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
     #[test]
     fn from_secret_signs_verifiably() {
         let mut secret = [0u8; 32];
@@ -343,7 +449,7 @@ mod real_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("machine.key");
         // One flipped character: no longer a key, but still worth a post-mortem.
-        std::fs::write(&path, "zz".repeat(32)).unwrap();
+        write_key(&path, &"zz".repeat(32));
         let s = RealMachineSigner::load_or_create(&path).unwrap();
         assert!(
             s.is_provisioned(),
@@ -379,7 +485,7 @@ mod real_tests {
         let dir = tmp("empty");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("machine.key");
-        std::fs::write(&path, "\n").unwrap();
+        write_key(&path, "\n");
         assert!(RealMachineSigner::load_or_create(&path)
             .unwrap()
             .is_provisioned());
@@ -417,12 +523,76 @@ mod real_tests {
         assert!(s.sign(&[1u8; 32]).is_err());
     }
 
+    // ---- G3: the key file's mode + ownership are checked on LOAD ---------
+
+    #[test]
+    fn key_perms_error_names_what_is_wrong() {
+        // Owner-only and ours: fine.
+        assert_eq!(key_perms_error(0o100600, 0, 0), None);
+        assert_eq!(key_perms_error(0o100400, 1000, 1000), None);
+        // Any group or other bit at all — read, write or execute.
+        for mode in [0o100640, 0o100604, 0o100660, 0o100644, 0o100601] {
+            let why = key_perms_error(mode, 0, 0).expect("refused");
+            assert!(why.contains("group/other"), "mode {mode:o}: {why}");
+        }
+        // Right mode, wrong owner: a key someone else can replace under us.
+        let why = key_perms_error(0o100600, 1000, 0).expect("refused");
+        assert!(why.contains("uid 1000"), "{why}");
+    }
+
+    #[test]
+    fn a_world_readable_key_is_refused_and_never_repaired_or_replaced() {
+        // The case this pins: a key restored from a backup / copied by an
+        // operator lands 0644 and used to be loaded without a word. It must
+        // now FAIL — and the bytes on disk must be untouched, because both
+        // "chmod and carry on" (the secrecy is already gone) and "mint a new
+        // one" (the pairing is pinned to this pubkey) are the wrong repair.
+        let dir = tmp("world-readable");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("machine.key");
+        let key = "11".repeat(32);
+        write_key(&path, &key);
+        // Provisioned fine while it is 0600.
+        assert!(RealMachineSigner::with_key_path(&path).is_provisioned());
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // The fail-safe loader degrades closed rather than using it.
+        let s = RealMachineSigner::with_key_path(&path);
+        assert!(!s.is_provisioned(), "a misprotected key is not loaded");
+        assert!(s.sign(&[1u8; 32]).is_err());
+
+        // The provisioning loader errors — and touches nothing.
+        assert!(RealMachineSigner::load_or_create(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), key, "same bytes");
+        assert_eq!(mode_of(&path), 0o644, "not chmod'ed behind our back");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "nothing set aside, no new key minted"
+        );
+    }
+
+    #[test]
+    fn provisioning_creates_the_key_dir_0700_and_the_file_0600() {
+        // `create_dir_all` used to leave the directory at `0777 & ~umask`.
+        let dir = tmp("modes").join("nested");
+        let path = dir.join("machine.key");
+        assert!(RealMachineSigner::load_or_create(&path)
+            .unwrap()
+            .is_provisioned());
+        assert_eq!(mode_of(&dir), 0o700, "key directory is owner-only");
+        assert_eq!(mode_of(&path), 0o600, "key file is owner-only");
+        // And the guard it just satisfied lets the reload straight through.
+        assert!(RealMachineSigner::with_key_path(&path).is_provisioned());
+    }
+
     #[test]
     fn corrupt_key_file_is_fail_safe() {
         let dir = tmp("corrupt");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("machine.key");
-        std::fs::write(&path, "not-hex").unwrap();
+        write_key(&path, "not-hex");
         let s = RealMachineSigner::with_key_path(&path);
         assert!(!s.is_provisioned());
     }
