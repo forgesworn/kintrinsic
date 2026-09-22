@@ -156,16 +156,41 @@ impl UsageLedger {
         self.tz.parse().unwrap_or(chrono_tz::UTC)
     }
 
+    /// Whether the ledger's day has ADVANCED past the one its counters belong
+    /// to — the reader's half of [`roll`](Self::roll)'s high-water rule. Every
+    /// day-keyed reader answers zero on this and only this: a clock that has
+    /// gone backwards leaves `false`, so today's spent seconds stay spent
+    /// instead of reading as "a different day, nothing used".
+    fn day_has_rolled(&self, now_unix: i64) -> bool {
+        day_key_of(&local(now_unix, self.tz())) > self.day_key
+    }
+
+    /// The week-keyed twin of [`day_has_rolled`](Self::day_has_rolled).
+    fn week_has_rolled(&self, now_unix: i64) -> bool {
+        week_key_of(&local(now_unix, self.tz()), self.week_start) > self.week_key
+    }
+
     /// Roll the day/week keys at `now`, resetting the matching counters when the
-    /// local calendar day/week changes. (Clock-manipulation quota resets are out
-    /// of scope here — defended by the Phase-9 polkit `timedate1` deny-set, per
-    /// the design; a monotonic guard here would instead strand the quota when an
-    /// RTC reads a future date and NTP later corrects it backward.)
+    /// local calendar day/week **advances**.
+    ///
+    /// The stored keys are a HIGH-WATER MARK: the roll takes
+    /// `max(latest seen, computed)`, so a wall clock that moves backwards can
+    /// never roll the day back and hand a spent quota out again. The polkit
+    /// `timedate1` deny-set only covers the in-OS path; the named top adversary
+    /// is a child with physical access, and setting the RTC in UEFI setup (or
+    /// booting single-user) goes round it entirely. A forward step behaves
+    /// exactly as it always did — including an NTP correction forward — so the
+    /// only thing given up is the ability to REVERSE a roll that already
+    /// happened. That is the residual: an RTC that reads a future date rolls
+    /// the day once, and the correction back does not restore it.
+    ///
+    /// Day keys are `YYYY-MM-DD` and week keys are the start-of-week date in
+    /// the same shape, so lexicographic order IS chronological order.
     fn roll(&mut self, now_unix: i64) {
         let dt = local(now_unix, self.tz());
         let dk = day_key_of(&dt);
         let wk = week_key_of(&dt, self.week_start);
-        if dk != self.day_key {
+        if dk > self.day_key {
             self.day_key = dk;
             self.used_today_secs = 0;
             self.learning_today_secs = 0;
@@ -174,7 +199,7 @@ impl UsageLedger {
             self.minutes_today = MinuteSet::default();
             self.bucket_today_secs.clear();
         }
-        if wk != self.week_key {
+        if wk > self.week_key {
             self.week_key = wk;
             self.used_week_secs = 0;
             self.out_of_hours_week_secs = 0;
@@ -238,8 +263,7 @@ impl UsageLedger {
     /// Unrecognised-time seconds today (0 once the local calendar day
     /// changed) — the twin of [`learning_today_secs`](Self::learning_today_secs).
     pub fn unrecognised_today_secs(&self, now_unix: i64) -> u64 {
-        let dt = local(now_unix, self.tz());
-        if day_key_of(&dt) != self.day_key {
+        if self.day_has_rolled(now_unix) {
             0
         } else {
             self.unrecognised_today_secs
@@ -308,8 +332,7 @@ impl UsageLedger {
     /// Seconds spent in one app bucket today (0 once the calendar day changed,
     /// so a stale ledger can never keep an allowance spent into tomorrow).
     pub fn app_bucket_today_secs(&self, now_unix: i64, bucket_id: &str) -> u64 {
-        let dt = local(now_unix, self.tz());
-        if day_key_of(&dt) != self.day_key {
+        if self.day_has_rolled(now_unix) {
             0
         } else {
             self.bucket_today_secs.get(bucket_id).copied().unwrap_or(0)
@@ -320,8 +343,7 @@ impl UsageLedger {
     /// changed, so a stale ledger can never keep an allowance spent into next
     /// week). The week-keyed twin of [`app_bucket_today_secs`].
     pub fn app_bucket_week_secs(&self, now_unix: i64, bucket_id: &str) -> u64 {
-        let dt = local(now_unix, self.tz());
-        if week_key_of(&dt, self.week_start) != self.week_key {
+        if self.week_has_rolled(now_unix) {
             0
         } else {
             self.bucket_week_secs.get(bucket_id).copied().unwrap_or(0)
@@ -330,8 +352,7 @@ impl UsageLedger {
 
     /// Learning-bucket seconds today (0 once the local calendar day changed).
     pub fn learning_today_secs(&self, now_unix: i64) -> u64 {
-        let dt = local(now_unix, self.tz());
-        if day_key_of(&dt) != self.day_key {
+        if self.day_has_rolled(now_unix) {
             0
         } else {
             self.learning_today_secs
@@ -340,20 +361,34 @@ impl UsageLedger {
 
     /// The CURRENT local day key (`YYYY-MM-DD`) at `now` in the ledger's tz —
     /// what a USAGE_SYNC view's `dayKey` must match to count (B3).
+    ///
+    /// Monotonic, like the counters it keys: the later of the local calendar
+    /// day and the latest day the ledger has already seen. Otherwise a
+    /// backwards clock step would announce yesterday's key while the ledger
+    /// still held today's seconds, and a guardian's view of today would stop
+    /// matching the device that produced it.
     pub fn current_day_key(&self, now_unix: i64) -> String {
-        day_key_of(&local(now_unix, self.tz()))
+        if self.day_has_rolled(now_unix) {
+            day_key_of(&local(now_unix, self.tz()))
+        } else {
+            self.day_key.clone()
+        }
     }
 
-    /// The CURRENT local week key at `now` in the ledger's tz.
+    /// The CURRENT local week key at `now` in the ledger's tz — monotonic for
+    /// the same reason as [`current_day_key`](Self::current_day_key).
     pub fn current_week_key(&self, now_unix: i64) -> String {
-        week_key_of(&local(now_unix, self.tz()), self.week_start)
+        if self.week_has_rolled(now_unix) {
+            week_key_of(&local(now_unix, self.tz()), self.week_start)
+        } else {
+            self.week_key.clone()
+        }
     }
 
     /// Today's active-minutes journal (empty once the local day has changed,
     /// mirroring [`used_today`]).
     pub fn minutes_today(&self, now_unix: i64) -> MinuteSet {
-        let dt = local(now_unix, self.tz());
-        if day_key_of(&dt) != self.day_key {
+        if self.day_has_rolled(now_unix) {
             MinuteSet::default()
         } else {
             self.minutes_today.clone()
@@ -362,8 +397,7 @@ impl UsageLedger {
 
     /// Seconds used today (0 once the local calendar day has changed).
     pub fn used_today(&self, now_unix: i64) -> u64 {
-        let dt = local(now_unix, self.tz());
-        if day_key_of(&dt) != self.day_key {
+        if self.day_has_rolled(now_unix) {
             0
         } else {
             self.used_today_secs
@@ -372,8 +406,7 @@ impl UsageLedger {
 
     /// Seconds used this week (0 once the local week key has changed).
     pub fn used_week(&self, now_unix: i64) -> u64 {
-        let dt = local(now_unix, self.tz());
-        if week_key_of(&dt, self.week_start) != self.week_key {
+        if self.week_has_rolled(now_unix) {
             0
         } else {
             self.used_week_secs
@@ -622,6 +655,56 @@ mod tests {
         assert_eq!(u.used_today(next_day), 60);
         // Week total still accumulates within the same week.
         assert_eq!(u.used_week(next_day), 3660);
+    }
+
+    /// 03-G6: a firmware clock rollback must not reset the day's quota. The
+    /// polkit `timedate1` deny-set only covers the in-OS path — the RTC in
+    /// UEFI setup goes round it — so the ledger's day key is a high-water
+    /// mark.
+    #[test]
+    fn a_backwards_clock_step_never_rolls_the_day_back() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit(NOON, Activity::Active, 3600);
+        assert_eq!(u.used_today(NOON), 3600);
+
+        // The clock steps back a day. The reader must still answer 3600…
+        let yesterday = NOON - 24 * 3600;
+        assert_eq!(u.used_today(yesterday), 3600, "quota is not handed back");
+        assert_eq!(u.current_day_key(yesterday), u.current_day_key(NOON));
+        // …and a credit at the rolled-back instant ADDS rather than resetting.
+        u.credit(yesterday, Activity::Active, 600);
+        assert_eq!(u.used_today(yesterday), 4200);
+        assert_eq!(u.used_today(NOON), 4200);
+
+        // A whole week back is the same answer, and so is the week meter.
+        let last_week = NOON - 7 * 24 * 3600;
+        assert_eq!(u.used_today(last_week), 4200);
+        assert_eq!(u.used_week(last_week), 4200);
+
+        // Then forward past the real boundary: the day rolls ONCE, as always.
+        let tomorrow = NOON + 24 * 3600;
+        assert_eq!(u.used_today(tomorrow), 0);
+        u.credit(tomorrow, Activity::Active, 60);
+        assert_eq!(u.used_today(tomorrow), 60);
+        assert_eq!(u.used_week(tomorrow), 4260, "same week keeps accumulating");
+        // …and the new day is itself now the floor.
+        assert_eq!(u.used_today(NOON), 60);
+    }
+
+    /// The day-keyed side meters follow the same floor — otherwise a rollback
+    /// would zero the journal and the learning/unrecognised counters while the
+    /// scalar held, and the two would disagree about the same day.
+    #[test]
+    fn the_side_meters_hold_across_a_backwards_clock_step_too() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit_bucket(NOON, Activity::Active, Bucket::Learning, 300);
+        u.credit_unrecognised(NOON, Activity::Active, 120);
+        u.credit_app_bucket(NOON, "play", 180);
+        let yesterday = NOON - 24 * 3600;
+        assert_eq!(u.learning_today_secs(yesterday), 300);
+        assert_eq!(u.unrecognised_today_secs(yesterday), 120);
+        assert_eq!(u.app_bucket_today_secs(yesterday, "play"), 180);
+        assert_eq!(u.minutes_today(yesterday).count(), 5);
     }
 
     #[test]
