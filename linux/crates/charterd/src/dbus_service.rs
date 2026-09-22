@@ -419,7 +419,7 @@ impl CharterInterface {
             Some(uid) => self
                 .snapshots
                 .lock()
-                .expect("snapshots lock")
+                .unwrap_or_else(|e| e.into_inner())
                 .get(&uid)
                 .cloned()
                 .unwrap_or_else(TimeLeftView::unknown),

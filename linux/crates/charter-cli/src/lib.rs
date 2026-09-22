@@ -4,7 +4,6 @@
 //! over [`dispatch`].
 
 pub mod dispatch;
-pub mod pairing;
 pub mod render;
 
 pub use dispatch::{
