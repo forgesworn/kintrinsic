@@ -436,7 +436,10 @@ pub fn governed_pkgs(
 /// ordinary use — Kintrinsic's OWN lock shade, a shell-wrapper browser (`exec`s
 /// a different real binary than its `.desktop` `Exec=`), a multi-process
 /// suite (`soffice.bin`, `nemo-desktop`), or a snap/`/usr/local` app not
-/// scanned at all would ALL have accrued hours of "Kintrinsic couldn't identify
+/// scanned at all (03b-G3 has since added both to the scan set, but the
+/// argument does not depend on any particular gap in it — `XDG_DATA_DIRS` on
+/// somebody's machine will always name a dir we did not think of) would ALL
+/// have accrued hours of "Kintrinsic couldn't identify
 /// this" about a child's completely ordinary afternoon — and it was forgeable
 /// in the SUPPRESSING direction (a ward-writable `.desktop` naming
 /// `~/.local/bin/java` zeroed the counter forever). This definition is a

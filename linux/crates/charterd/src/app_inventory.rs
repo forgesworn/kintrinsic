@@ -82,22 +82,71 @@ pub fn parse_desktop_entry(filename: &str, content: &str) -> Option<AppRef> {
     })
 }
 
+/// The binary directories a bare `Exec` name is looked up in, in order. The
+/// first four are `/usr/share/applications`' own working assumption; `/bin` and
+/// `/sbin` are usually symlinks to their `/usr` twins on a merged-`/usr`
+/// system, and cost one `stat` each where they are not.
+const BIN_DIRS: [&str; 6] = [
+    "/usr/bin",
+    "/usr/games",
+    "/usr/local/bin",
+    "/usr/local/games",
+    "/bin",
+    "/opt/bin",
+];
+
+/// Does `pkg` have the SHAPE of a flatpak application id — reverse-DNS, as
+/// `org.mozilla.firefox` or `com.valvesoftware.Steam`?
+///
+/// # Why shape, and not "has a dot" (03b-B5)
+///
+/// `contains('.') && !contains('/')` is true of `gimp-2.10` and `lua5.4` —
+/// ordinary native commands with a version in the name. A launcher carrying
+/// `Exec=gimp-2.10 %U` therefore entered the inventory as the flatpak app id
+/// `gimp-2.10`, and `matches_pkg` then looked for `flatpak-gimp-2.10-` in the
+/// process's cgroup, which a native process can never carry. The guardian's
+/// block, the app's allowed hours, its bucket membership and the allowlist's
+/// implied block were all silently inert for that app: a rule the guardian
+/// believes is armed, failing open in total silence.
+///
+/// At least three dot-separated segments, each non-empty and starting with an
+/// ASCII LETTER, and no character outside `[A-Za-z0-9_-]` — which `gimp-2.10`
+/// (two segments, second starts with a digit) and `lua5.4` both fail.
+fn looks_like_flatpak_id(pkg: &str) -> bool {
+    if pkg.contains('/') {
+        return false;
+    }
+    let segs: Vec<&str> = pkg.split('.').collect();
+    segs.len() >= 3
+        && segs.iter().all(|s| {
+            s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+}
+
 /// Resolve a non-absolute Exec token to an absolute path via `exists`.
 /// Absolute tokens pass through; unresolvable tokens are dropped (an identity
 /// we can't verify is not offered for picking).
+///
+/// Order matters, and it changed (03b-B5): a bare name is looked for on disk
+/// FIRST, and only a name that no binary directory answers for — and that has
+/// the shape of a reverse-DNS app id — is taken as a flatpak identity. A real
+/// binary on this machine is the better answer than a guess about a flatpak
+/// that, in the misrouting case, does not exist at all.
 pub fn resolve_exec(pkg: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
     if pkg.starts_with('/') {
         return exists(pkg).then(|| pkg.to_string());
     }
-    if pkg.contains('.') && !pkg.contains('/') {
-        // A flatpak app id (org.foo.Bar) — identity as-is.
-        return Some(pkg.to_string());
-    }
-    for dir in ["/usr/bin", "/usr/games"] {
+    for dir in BIN_DIRS {
         let candidate = format!("{dir}/{pkg}");
         if exists(&candidate) {
             return Some(candidate);
         }
+    }
+    if looks_like_flatpak_id(pkg) {
+        // A flatpak app id (org.foo.Bar) — identity as-is.
+        return Some(pkg.to_string());
     }
     None
 }
@@ -134,11 +183,22 @@ pub fn build_inventory<'a>(
 }
 
 /// The root-owned launcher dirs — scanned unflagged.
+///
+/// 03b-G3: snap and `/usr/local` were missing, and under the allowlist posture
+/// that is fail-open in the most visible way there is — Ubuntu/Mint ship
+/// Firefox, Chromium, Thunderbird and Steam as snaps, and an app that is not in
+/// `inventory_pkgs` is never in the blocked set, so "only these apps are
+/// allowed" permits it. Worse, the guardian cannot even SEE it to tick it.
 #[cfg(feature = "real")]
-const ROOT_DIRS: [&str; 2] = [
+const ROOT_DIRS: [&str; 4] = [
     "/usr/share/applications",
     // System-installed flatpaks export here (root-owned).
     "/var/lib/flatpak/exports/share/applications",
+    // Every installed snap's launchers (root-owned, and where Ubuntu's default
+    // Firefox actually lives).
+    "/var/lib/snapd/desktop/applications",
+    // Locally installed software, by the FHS and by `XDG_DATA_DIRS`' default.
+    "/usr/local/share/applications",
 ];
 
 /// The ward-writable dirs, relative to a managed user's home — scanned
@@ -149,17 +209,73 @@ const USER_DIR_SUFFIXES: [&str; 2] = [
     ".local/share/flatpak/exports/share/applications",
 ];
 
+/// Is `dir` owned by root? Only root-owned launcher dirs are scanned
+/// UNFLAGGED; anything a non-root account owns is a dir that account can write,
+/// so its entries carry `user_installed` exactly as the per-home mirrors do.
+///
+/// Unreadable / missing ⇒ `false`: the cautious answer is the flagged one, and
+/// a dir that cannot be stat'ed yields no entries anyway.
+#[cfg(feature = "real")]
+fn is_root_owned(dir: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir)
+        .map(|m| m.uid() == 0)
+        .unwrap_or(false)
+}
+
+/// The `applications/` dir under each `XDG_DATA_DIRS` entry, paired with
+/// whether its entries are `user_installed` (03b-G3).
+///
+/// `XDG_DATA_DIRS` is how a distro, a site admin or a third-party installer
+/// says "there are launchers over here too" — Nix, Homebrew-on-Linux and
+/// several vendor packages all use it, and none of them were being read. It is
+/// also environment, i.e. whatever charterd's own unit inherited: root-owned
+/// entries are trusted like the fixed roots, the rest are flagged.
+#[cfg(feature = "real")]
+fn xdg_data_dirs() -> Vec<(String, bool)> {
+    match std::env::var("XDG_DATA_DIRS") {
+        Ok(raw) => xdg_dirs_from(&raw),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// [`xdg_data_dirs`] over an explicit value — the env var is process-global,
+/// and tests that set it race each other.
+#[cfg(feature = "real")]
+fn xdg_dirs_from(raw: &str) -> Vec<(String, bool)> {
+    raw.split(':')
+        .map(str::trim)
+        .filter(|p| p.starts_with('/'))
+        .map(|p| {
+            let dir = format!("{}/applications", p.trim_end_matches('/'));
+            let root_owned = is_root_owned(&dir);
+            (dir, !root_owned)
+        })
+        .collect()
+}
+
 /// Every dir this device's inventory scans, root dirs FIRST (so `build_inventory`'s
 /// first-wins dedup lets a root identity always win over a same-identity user
 /// copy), each paired with whether entries from it are `user_installed`.
+///
+/// Deduped by path, first spelling wins — `XDG_DATA_DIRS` routinely repeats
+/// `/usr/share` and `/usr/local/share`, and scanning either twice would only
+/// cost `stat`s and risk a flagged duplicate shadowing the unflagged original.
 #[cfg(feature = "real")]
 fn all_scan_dirs(home_dirs: &[String]) -> Vec<(String, bool)> {
     let mut dirs: Vec<(String, bool)> = ROOT_DIRS.iter().map(|d| (d.to_string(), false)).collect();
+    // Root-owned XDG entries rank with the fixed roots; flagged ones rank with
+    // the per-home mirrors, after them.
+    let xdg = xdg_data_dirs();
+    dirs.extend(xdg.iter().filter(|(_, f)| !f).cloned());
     for home in home_dirs {
         for suffix in USER_DIR_SUFFIXES {
             dirs.push((format!("{home}/{suffix}"), true));
         }
     }
+    dirs.extend(xdg.into_iter().filter(|(_, f)| *f));
+    let mut seen = std::collections::BTreeSet::new();
+    dirs.retain(|(d, _)| seen.insert(d.clone()));
     dirs
 }
 
@@ -388,11 +504,11 @@ mod tests {
             ),
             user_entry(
                 "prismlauncher.desktop",
-                "[Desktop Entry]\nType=Application\nName=Prism Launcher\nExec=/home/kid/.local/bin/prismlauncher\n",
+                "[Desktop Entry]\nType=Application\nName=Prism Launcher\nExec=/managed/ward/.local/bin/prismlauncher\n",
             ),
         ];
         let inv = build_inventory(fixtures.into_iter(), |p| {
-            p == "/usr/bin/sysapp" || p == "/home/kid/.local/bin/prismlauncher"
+            p == "/usr/bin/sysapp" || p == "/managed/ward/.local/bin/prismlauncher"
         });
         let sys = inv.iter().find(|a| a.label == "System App").unwrap();
         let prism = inv.iter().find(|a| a.label == "Prism Launcher").unwrap();
@@ -439,7 +555,10 @@ mod tests {
             "org.prismlauncher.PrismLauncher.desktop",
             "[Desktop Entry]\nType=Application\nName=Prism Launcher\nExec=/usr/bin/flatpak run org.prismlauncher.PrismLauncher\nX-Flatpak=org.prismlauncher.PrismLauncher\n",
         )];
-        let inv = build_inventory(fixtures.into_iter(), |_| true);
+        // A realistic `exists`: no machine has a `/usr/bin/<flatpak app id>`.
+        // (`|_| true` used to pass here, but a blanket-yes probe now answers
+        // the binary-dir lookup that runs FIRST — see `resolve_exec`, 03b-B5.)
+        let inv = build_inventory(fixtures.into_iter(), |p| p == "/usr/bin/flatpak");
         assert_eq!(inv.len(), 1);
         assert_eq!(inv[0].pkg, "org.prismlauncher.PrismLauncher");
         assert_eq!(inv[0].user_installed, Some(true));
@@ -657,5 +776,184 @@ mod safety_tests {
             "a --user flatpak export (a symlink) must land in user_installed_ids, got {ids:?}"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ---- 03b-B5: a versioned command name is not a flatpak app id ----
+
+    /// The finding. `Exec=gimp-2.10 %U` has a dot and no slash, so the old
+    /// branch handed it back as a flatpak app id, unverified — and every rule
+    /// naming that app then looked for a `flatpak-gimp-2.10-` cgroup no native
+    /// process can carry.
+    #[test]
+    fn a_versioned_command_name_resolves_to_its_binary_not_a_flatpak_id() {
+        for (name, dir) in [
+            ("gimp-2.10", "/usr/bin"),
+            ("lua5.4", "/usr/bin"),
+            ("openttd-1.2", "/usr/games"),
+        ] {
+            let full = format!("{dir}/{name}");
+            let got = resolve_exec(name, |p| p == full);
+            assert_eq!(
+                got.as_deref(),
+                Some(full.as_str()),
+                "{name} is a binary on this machine, not an app id"
+            );
+        }
+    }
+
+    /// A real flatpak app id still resolves as one — nothing on disk answers
+    /// for it, and it has the reverse-DNS shape.
+    #[test]
+    fn a_real_flatpak_app_id_still_resolves_as_itself() {
+        for id in [
+            "org.tuxpaint.Tuxpaint",
+            "com.valvesoftware.Steam",
+            "org.gnome.gedit",
+            "io.github.some_app.Thing",
+        ] {
+            assert_eq!(
+                resolve_exec(id, |_| false).as_deref(),
+                Some(id),
+                "{id} has the shape of an app id"
+            );
+        }
+    }
+
+    /// A binary on disk WINS over the app-id reading, which is the reorder
+    /// that actually closes the finding.
+    #[test]
+    fn a_binary_on_disk_beats_the_app_id_reading() {
+        assert_eq!(
+            resolve_exec("org.foo.Bar", |p| p == "/usr/bin/org.foo.Bar").as_deref(),
+            Some("/usr/bin/org.foo.Bar")
+        );
+    }
+
+    /// Unresolvable stays dropped — an identity we cannot verify is still not
+    /// offered for picking, and the shape check must not become a way to mint
+    /// one from any dotted string.
+    #[test]
+    fn a_dotted_name_that_is_neither_a_binary_nor_app_id_shaped_is_dropped() {
+        for name in [
+            "gimp-2.10", // two segments, second starts with a digit
+            "lua5.4",
+            "foo.bar",     // only two segments
+            "2go.foo.bar", // a segment starting with a digit
+            "a..b.c",      // an empty segment
+            "x.y.z!",      // a character an app id may not contain
+        ] {
+            assert_eq!(
+                resolve_exec(name, |_| false),
+                None,
+                "{name} must be dropped"
+            );
+        }
+    }
+
+    /// A bare name now also resolves out of `/usr/local/bin`, which a locally
+    /// built launcher routinely points at.
+    #[test]
+    fn a_bare_name_resolves_from_the_wider_binary_path() {
+        assert_eq!(
+            resolve_exec("mything", |p| p == "/usr/local/bin/mything").as_deref(),
+            Some("/usr/local/bin/mything")
+        );
+    }
+
+    // ---- 03b-G3: the scan set ----
+
+    /// snap and `/usr/local` are where Ubuntu/Mint actually keep Firefox,
+    /// Chromium, Thunderbird and Steam. Missing them is fail-OPEN under the
+    /// allowlist posture, and invisible to the guardian besides.
+    #[test]
+    fn the_scan_set_includes_snap_and_usr_local() {
+        let dirs = all_scan_dirs(&[]);
+        let paths: Vec<&str> = dirs.iter().map(|(d, _)| d.as_str()).collect();
+        for want in [
+            "/usr/share/applications",
+            "/var/lib/flatpak/exports/share/applications",
+            "/var/lib/snapd/desktop/applications",
+            "/usr/local/share/applications",
+        ] {
+            assert!(
+                paths.contains(&want),
+                "{want} must be scanned, got {paths:?}"
+            );
+            assert_eq!(
+                dirs.iter().filter(|(d, _)| d == want).count(),
+                1,
+                "{want} is scanned exactly once"
+            );
+            assert_eq!(
+                dirs.iter().find(|(d, _)| d == want).map(|(_, f)| *f),
+                Some(false),
+                "{want} is a root dir, so its entries are unflagged"
+            );
+        }
+        let home_dir = "/managed/ward/.local/share/applications";
+        let with_home = all_scan_dirs(&["/managed/ward".to_string()]);
+        assert_eq!(
+            with_home
+                .iter()
+                .find(|(d, _)| d == home_dir)
+                .map(|(_, f)| *f),
+            Some(true),
+            "a per-home mirror is still flagged"
+        );
+    }
+
+    /// A non-root-owned `XDG_DATA_DIRS` entry is scanned but FLAGGED, exactly
+    /// as a per-home mirror is — it is writable by somebody who is not root,
+    /// so its entries are not an inventory the ward cannot have altered.
+    #[test]
+    fn an_xdg_data_dir_is_scanned_and_a_non_root_one_is_flagged() {
+        let d = tmp_dir("xdg-scan");
+        let owned = d.join("mine");
+        std::fs::create_dir_all(owned.join("applications")).expect("create");
+        // Read from an explicit value, not the process-global env var — this
+        // suite runs in parallel and several of these would race on it.
+        let dirs = xdg_dirs_from(&format!("{}:/usr/share:relative:", owned.display()));
+
+        let mine = format!("{}/applications", owned.display());
+        assert_eq!(
+            dirs.iter().find(|(p, _)| *p == mine).map(|(_, f)| *f),
+            Some(true),
+            "a dir this test's own (non-root) user owns is flagged: {dirs:?}"
+        );
+        assert_eq!(
+            dirs.iter()
+                .find(|(p, _)| p == "/usr/share/applications")
+                .map(|(_, f)| *f),
+            Some(false),
+            "a root-owned XDG entry ranks with the fixed roots"
+        );
+        assert!(
+            dirs.iter().all(|(p, _)| p.starts_with('/')),
+            "a relative or empty XDG entry is not a path and is dropped: {dirs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An XDG entry repeating a fixed root must not be scanned twice — the
+    /// default value contains `/usr/share` and `/usr/local/share`.
+    #[test]
+    fn an_xdg_entry_repeating_a_fixed_root_is_deduped() {
+        let xdg = xdg_dirs_from("/usr/local/share:/usr/share");
+        assert_eq!(xdg.len(), 2);
+        // `all_scan_dirs` dedupes by path, so the fixed roots keep their
+        // (unflagged, first-seen) place whatever XDG repeats.
+        let dirs = all_scan_dirs(&[]);
+        assert_eq!(
+            dirs.iter()
+                .filter(|(p, _)| p == "/usr/share/applications")
+                .count(),
+            1
+        );
+    }
+
+    /// No `XDG_DATA_DIRS` value at all adds nothing.
+    #[test]
+    fn an_absent_xdg_data_dirs_adds_nothing() {
+        assert!(xdg_dirs_from("").is_empty());
     }
 }

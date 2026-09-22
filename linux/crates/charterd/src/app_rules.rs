@@ -56,11 +56,47 @@ fn basename(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 
-/// Whether `pkg` names a flatpak app rather than a native exec path: a flatpak
-/// app-id has no path separator and at least one dot (`org.mozilla.firefox`),
-/// whereas a native exec is an absolute path or a bare command name.
+/// The explicit spelling of a flatpak identity — `flatpak:org.mozilla.firefox`.
+const FLATPAK_PREFIX: &str = "flatpak:";
+
+/// Whether `pkg` names a flatpak app rather than a native exec path.
+///
+/// # Explicit first, heuristic second (03b-B5)
+///
+/// The original rule was `!contains('/') && contains('.')`, which is a guess,
+/// and it guesses wrong for an ordinary versioned command name: `gimp-2.10`
+/// and `lua5.4` have a dot and no slash, so every rule naming one went looking
+/// for a `flatpak-gimp-2.10-` cgroup a native process can never carry, and the
+/// guardian's block, hours, bucket and allowlist were all silently inert for
+/// that app. The inventory no longer MINTS such an identity
+/// ([`crate::app_inventory::resolve_exec`]), but rules written before that are
+/// on disk and on guardians' phones.
+///
+/// So: an explicit `flatpak:` prefix is believed outright, and the dot
+/// heuristic stays as the fallback for every rule already written — now
+/// narrowed to the reverse-DNS SHAPE a real app id has (at least three
+/// segments, each starting with a letter), which is exactly what `gimp-2.10`
+/// and `lua5.4` do not.
 fn is_flatpak_id(pkg: &str) -> bool {
-    !pkg.contains('/') && pkg.contains('.')
+    if pkg.starts_with(FLATPAK_PREFIX) {
+        return true;
+    }
+    if pkg.contains('/') {
+        return false;
+    }
+    let segs: Vec<&str> = pkg.split('.').collect();
+    segs.len() >= 3
+        && segs.iter().all(|s| {
+            s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+}
+
+/// The bare app id inside a `pkg` that [`is_flatpak_id`] accepted — the
+/// explicit prefix stripped, or the id itself.
+fn flatpak_app_id(pkg: &str) -> &str {
+    pkg.strip_prefix(FLATPAK_PREFIX).unwrap_or(pkg)
 }
 
 /// Whether a running process — identified by its resolved `exe` path (the
@@ -76,18 +112,24 @@ fn is_flatpak_id(pkg: &str) -> bool {
 ///   single space — this is the process's OWN command line, so it names the
 ///   game (`net.minecraft.client.main.Main`) regardless of which launcher, if
 ///   any, started it. Checked FIRST, before every other form — see below.
-/// - A flatpak app-id matches when the process's cgroup carries that app's
-///   systemd scope (`app-flatpak-<id>-<instance>.scope`); the trailing
-///   delimiter is required so `org.foo.Bar` never matches `org.foo.BarBaz`.
+/// - A flatpak app-id — spelled `flatpak:<id>`, or bare and reverse-DNS
+///   shaped — matches when the process's cgroup carries that app's systemd
+///   scope (`app-flatpak-<id>-<instance>.scope`); the trailing delimiter is
+///   required so `org.foo.Bar` never matches `org.foo.BarBaz`.
 /// - A native `pkg` (absolute path or bare name) matches on an exact path
 ///   equality or a binary-name equality, against EITHER the resolved exe or
 ///   argv0 — so a wrapper/symlink launch of the same binary is still caught.
 ///
 /// # Why `is_cmdline_id` must be checked before `is_flatpak_id`
 ///
-/// [`is_flatpak_id`] is `!contains('/') && contains('.')` — a heuristic that
-/// ALSO returns true for `cmdline:net.minecraft.client.main.Main` (no slash,
-/// has dots). Testing the flatpak branch first would silently misroute every
+/// [`is_flatpak_id`] used to be `!contains('/') && contains('.')`, which is
+/// ALSO true of `cmdline:net.minecraft.client.main.Main` (no slash, has dots).
+/// Its fallback limb is now a reverse-DNS shape test that happens to reject a
+/// `:` as well (03b-B5), but that is a second line of defence and not the
+/// rule: the ORDER is. A future spelling of a prefixed identity that did pass
+/// the shape test would otherwise be silently misrouted, so the prefix forms
+/// are decided first, by name, and the flatpak arm never sees them. Testing
+/// the flatpak branch first would silently misroute every
 /// `cmdline:` rule into cgroup matching, where it can never match anything: a
 /// rule the guardian believes is armed would fail open in total silence,
 /// exactly the class of bug this identity form exists to close. See
@@ -264,9 +306,10 @@ fn matches_pkg(
             });
     }
     if is_flatpak_id(pkg) {
+        let id = flatpak_app_id(pkg);
         return trust == Trust::Wide
             && cgroup.is_some_and(|c| {
-                c.contains(&format!("flatpak-{pkg}-")) || c.contains(&format!("flatpak-{pkg}."))
+                c.contains(&format!("flatpak-{id}-")) || c.contains(&format!("flatpak-{id}."))
             });
     }
     let names_pkg = |candidate: &str| {
@@ -881,6 +924,114 @@ mod tests {
             &cmdline,
             &joined,
             None
+        ));
+    }
+
+    // ---- 03b-B5: a versioned command name is not a flatpak app id ----
+
+    /// The finding, on the matching side. `gimp-2.10` has a dot and no slash,
+    /// so the old `is_flatpak_id` sent every rule naming it into the cgroup
+    /// arm, where a native process can never match — the guardian's block, the
+    /// app's hours and its bucket all silently inert.
+    #[test]
+    fn a_versioned_native_command_matches_on_its_binary_not_a_cgroup() {
+        let cmdline = vec!["/usr/bin/gimp-2.10".to_string()];
+        let joined = cmdline.join(" ");
+        assert!(
+            pkg_matches_process(
+                "/usr/bin/gimp-2.10",
+                Some("/usr/bin/gimp-2.10"),
+                Some("gimp-2.10"),
+                &cmdline,
+                &joined,
+                Some("0::/user.slice/user-1001.slice/session-2.scope"),
+            ),
+            "an absolute native path must match its own process"
+        );
+        assert!(
+            pkg_matches_process(
+                "gimp-2.10",
+                Some("/usr/bin/gimp-2.10"),
+                Some("gimp-2.10"),
+                &cmdline,
+                &joined,
+                Some("0::/user.slice/user-1001.slice/session-2.scope"),
+            ),
+            "a BARE versioned name must match by binary name, not look for a flatpak cgroup"
+        );
+        assert!(!is_flatpak_id("gimp-2.10"));
+        assert!(!is_flatpak_id("lua5.4"));
+        assert!(!is_flatpak_id("foo.bar"), "two segments is not an app id");
+    }
+
+    /// The explicit spelling is believed outright, prefix stripped before the
+    /// cgroup is consulted — so a guardian can name a flatpak whose id would
+    /// not pass the heuristic, and nothing has to guess.
+    #[test]
+    fn an_explicit_flatpak_prefix_matches_the_apps_cgroup() {
+        let cmdline = vec!["/app/bin/thing".to_string()];
+        let joined = cmdline.join(" ");
+        let cgroup = "0::/user.slice/app-flatpak-org.foo.Bar-12345.scope";
+        assert!(is_flatpak_id("flatpak:org.foo.Bar"));
+        assert!(pkg_matches_process(
+            "flatpak:org.foo.Bar",
+            Some("/app/bin/thing"),
+            Some("thing"),
+            &cmdline,
+            &joined,
+            Some(cgroup),
+        ));
+        // Still delimiter-anchored: org.foo.Bar must not match org.foo.BarBaz.
+        assert!(!pkg_matches_process(
+            "flatpak:org.foo.BarBaz",
+            Some("/app/bin/thing"),
+            Some("thing"),
+            &cmdline,
+            &joined,
+            Some(cgroup),
+        ));
+        // The prefix does not leak into a native comparison.
+        assert!(!pkg_matches_process(
+            "flatpak:org.foo.Bar",
+            Some("/app/bin/thing"),
+            Some("thing"),
+            &cmdline,
+            &joined,
+            None,
+        ));
+    }
+
+    /// The heuristic stays as the fallback, so every rule already written
+    /// against a bare app id keeps working.
+    #[test]
+    fn a_bare_reverse_dns_app_id_still_matches_as_before() {
+        let cmdline = vec!["/app/bin/firefox".to_string()];
+        let joined = cmdline.join(" ");
+        assert!(pkg_matches_process(
+            "org.mozilla.firefox",
+            Some("/app/bin/firefox"),
+            Some("firefox"),
+            &cmdline,
+            &joined,
+            Some("0::/user.slice/app-flatpak-org.mozilla.firefox-901.scope"),
+        ));
+    }
+
+    /// `cmdline:` and `site:` are still checked BEFORE the flatpak arm — the
+    /// narrowed heuristic must not be read as making that ordering unnecessary
+    /// (`cmdline:net.minecraft.client.main.Main` is reverse-DNS shaped after
+    /// its prefix, and `flatpak:` is a fourth prefix in the same namespace).
+    #[test]
+    fn the_prefix_forms_are_still_ordered_ahead_of_the_flatpak_arm() {
+        let cmdline = minecraft_jvm_cmdline();
+        let joined = cmdline.join(" ");
+        assert!(pkg_matches_process(
+            "cmdline:net.minecraft.client.main.Main",
+            Some("/usr/lib/jvm/java-21-openjdk/bin/java"),
+            Some("java"),
+            &cmdline,
+            &joined,
+            None,
         ));
     }
 }
