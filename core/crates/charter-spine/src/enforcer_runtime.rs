@@ -71,11 +71,14 @@ impl EnforcerRuntime {
     }
 
     fn load_schedule<S: SystemLayer>(&self, sys: &S) -> Option<GrantSchedule> {
-        let json = sys
-            .clauses()
-            .get_clause(ClauseKind::Schedule.store_key())
-            .ok()
-            .flatten()?;
+        // A store we cannot READ is the same event as a clause we cannot
+        // parse — not "absent". `.ok().flatten()` folded an EIO into no
+        // policy at all.
+        let json = match sys.clauses().get_clause(ClauseKind::Schedule.store_key()) {
+            Ok(Some(j)) => j,
+            Ok(None) => return None,
+            Err(_) => return Some(fail_safe_schedule(&self.tz)),
+        };
         match serde_json::from_str::<GrantSchedule>(&json) {
             Ok(s) => Some(s),
             // Fail-SAFE: an authenticated-but-unparseable schedule locks.
@@ -95,11 +98,11 @@ impl EnforcerRuntime {
     /// is enough to get there. Absent still means `None`: a guardian who set
     /// no budget has not lost one.
     fn load_budget<S: SystemLayer>(&self, sys: &S) -> Option<GrantBudget> {
-        let json = sys
-            .clauses()
-            .get_clause(ClauseKind::Budget.store_key())
-            .ok()
-            .flatten()?;
+        let json = match sys.clauses().get_clause(ClauseKind::Budget.store_key()) {
+            Ok(Some(j)) => j,
+            Ok(None) => return None,
+            Err(_) => return Some(fail_safe_budget(&self.tz)),
+        };
         match serde_json::from_str::<GrantBudget>(&json) {
             Ok(b) => Some(b),
             Err(_) => Some(fail_safe_budget(&self.tz)),
@@ -237,18 +240,22 @@ pub fn time_extend_eod<S: SystemLayer>(sys: &S, now_unix: i64) -> i64 {
     // it is in `load_schedule`/`load_budget`: it stands in as its fail-safe,
     // so the enactor's end-of-day agrees with what the enforcer is about to
     // do rather than silently pretending the clause is absent.
-    let schedule: Option<GrantSchedule> = sys
-        .clauses()
-        .get_clause(ClauseKind::Schedule.store_key())
-        .ok()
-        .flatten()
-        .map(|j| serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_schedule(FAIL_SAFE_TZ)));
-    let budget: Option<GrantBudget> = sys
-        .clauses()
-        .get_clause(ClauseKind::Budget.store_key())
-        .ok()
-        .flatten()
-        .map(|j| serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_budget(FAIL_SAFE_TZ)));
+    let schedule: Option<GrantSchedule> =
+        match sys.clauses().get_clause(ClauseKind::Schedule.store_key()) {
+            Ok(Some(j)) => {
+                Some(serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_schedule(FAIL_SAFE_TZ)))
+            }
+            Ok(None) => None,
+            Err(_) => Some(fail_safe_schedule(FAIL_SAFE_TZ)),
+        };
+    let budget: Option<GrantBudget> = match sys.clauses().get_clause(ClauseKind::Budget.store_key())
+    {
+        Ok(Some(j)) => {
+            Some(serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_budget(FAIL_SAFE_TZ)))
+        }
+        Ok(None) => None,
+        Err(_) => Some(fail_safe_budget(FAIL_SAFE_TZ)),
+    };
     // The extension is dimension-isolated, but the grant `exp` may legitimately
     // be the end-of-day in EITHER clause's tz (a schedule extension uses the
     // schedule tz, a budget extension the budget tz). Cap at the LATER of the two
@@ -417,6 +424,22 @@ mod tests {
             !rem.locked,
             "absent is not malformed — nothing was ever set"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "mock")]
+    fn a_store_that_cannot_be_read_locks_like_a_clause_that_cannot_be_parsed() {
+        // `.ok().flatten()` folded an EIO into "absent" — no policy — on the
+        // one path where a parse failure had just been made fail-safe.
+        let (sys, rt) = budget_only_runtime(Some(
+            r#"{"v":1,"tz":"Europe/London","dailyMinutes":120,"issuedAt":100}"#,
+        ));
+        sys.disk().break_clause_reads();
+        let rem = rt.time_left(&sys);
+        assert_eq!(rem.budget_secs, 0);
+        assert!(rem.locked, "unreadable is not absent");
+        sys.disk().repair_clause_reads();
+        assert!(!rt.time_left(&sys).locked);
     }
 
     #[test]
