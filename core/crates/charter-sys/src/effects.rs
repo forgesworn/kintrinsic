@@ -760,14 +760,93 @@ mod real {
     const CHARTER_BASE: &str = "/var/lib/charter";
     const FIREFOX_POLICY_DIR: &str = "/etc/firefox/policies";
 
-    /// Read a file's bytes, mapping "not found" to [`SysError::NotFound`] (the
-    /// source-missing signal the exec enactor treats as terminal).
-    fn read_bytes(path: &Path) -> SysResult<Vec<u8>> {
-        match fs::read(path) {
-            Ok(b) => Ok(b),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(SysError::NotFound),
-            Err(e) => Err(io_err("read", e)),
+    /// Hard ceiling on a candidate binary handed to `inspect` / `admit`.
+    ///
+    /// Both used to `fs::read` the whole file to hash it, with no size check
+    /// anywhere before the read — `InspectResult.size` was computed *from* the
+    /// buffer, after the fact. A managed child needed only
+    /// `fallocate -l 64G ~/big.bin && charter run ~/big.bin`: the file is
+    /// regular, inside their own home and readable by them, so every
+    /// confused-deputy guard passes and **root** charterd allocates 64 GiB on
+    /// the request path, before any guardian approval is involved. The OOM
+    /// killer then takes the enforcer. 512 MiB is far above any real desktop
+    /// binary and is now refused outright rather than allocated.
+    const MAX_CANDIDATE_BYTES: u64 = 512 * 1024 * 1024;
+
+    /// The streaming buffer. The point of the fix: the file is never resident.
+    const CANDIDATE_CHUNK_BYTES: usize = 64 * 1024;
+
+    /// `stat` a candidate before a byte of it is read. Missing is
+    /// [`SysError::NotFound`] (terminal: "the file could not be read"); over
+    /// the ceiling is [`SysError::Unsupported`], which the exec enactor also
+    /// treats as terminal — a 64 GiB candidate is never going to get smaller
+    /// on a retry.
+    fn candidate_size(path: &Path) -> SysResult<u64> {
+        let meta = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SysError::NotFound),
+            Err(e) => return Err(io_err("stat candidate", e)),
+        };
+        if meta.len() > MAX_CANDIDATE_BYTES {
+            return Err(too_large(meta.len()));
         }
+        Ok(meta.len())
+    }
+
+    fn too_large(len: u64) -> SysError {
+        SysError::Unsupported(format!(
+            "candidate is {len} bytes, over the {MAX_CANDIDATE_BYTES}-byte ceiling"
+        ))
+    }
+
+    /// Stream `path` through sha256 in [`CANDIDATE_CHUNK_BYTES`] chunks,
+    /// optionally writing each chunk into `sink` as it goes, and return
+    /// `(sha256_hex, bytes_read)`. Peak memory is one chunk, whatever the file.
+    ///
+    /// The ceiling is re-checked *as we read*, not only at the `stat`: a file
+    /// that grows between the two (the child appending while we copy) must not
+    /// get an unbounded read through the back door.
+    fn stream_file(path: &Path, mut sink: Option<&mut fs::File>) -> SysResult<(String, u64)> {
+        use sha2::{Digest as _, Sha256};
+        use std::io::{Read as _, Write as _};
+        let mut f = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SysError::NotFound),
+            Err(e) => return Err(io_err("open candidate", e)),
+        };
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; CANDIDATE_CHUNK_BYTES];
+        let mut total: u64 = 0;
+        loop {
+            let n = f.read(&mut buf).map_err(|e| io_err("read candidate", e))?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            if total > MAX_CANDIDATE_BYTES {
+                return Err(too_large(total));
+            }
+            hasher.update(&buf[..n]);
+            if let Some(w) = sink.as_deref_mut() {
+                w.write_all(&buf[..n])
+                    .map_err(|e| io_err("write candidate", e))?;
+            }
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
+        Ok((hex_bytes(&digest), total))
+    }
+
+    /// A staging path no concurrent admit can collide with (pid + a process-
+    /// local counter). It lives in the store dir so the final `rename` stays on
+    /// one filesystem, and it is removed on every failure path.
+    fn staging_path(store_dir: &Path) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        store_dir.join(format!(
+            ".admit-{}-{}.tmp",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
     // ---- OS-query ports (pure parse/interpret core + thin IO) -------------
@@ -1189,11 +1268,13 @@ mod real {
         }
 
         fn inspect_impl(&self, src_path: &str) -> SysResult<InspectResult> {
-            let bytes = read_bytes(Path::new(src_path))?;
-            Ok(InspectResult {
-                sha256: hex_bytes(&charter_crypto::sha256(&bytes)),
-                size: bytes.len() as u64,
-            })
+            let path = Path::new(src_path);
+            // The ceiling is checked from the INODE, before the file is opened
+            // — the old code derived `size` from a buffer it had already
+            // allocated, which is exactly one allocation too late.
+            candidate_size(path)?;
+            let (sha256, size) = stream_file(path, None)?;
+            Ok(InspectResult { sha256, size })
         }
         fn contains_impl(&self, sha256_hex: &str) -> SysResult<bool> {
             Ok(self.bin_path(sha256_hex).is_file())
@@ -1209,13 +1290,54 @@ mod real {
                 .map_err(|_| SysError::Conflict("invalid display name".into()))?;
             // Copy the bytes NOW and re-hash exactly what we will store (TOCTOU
             // close: a later mutation of the source cannot affect stored bytes).
-            let bytes = read_bytes(Path::new(src_path))?;
-            let actual = hex_bytes(&charter_crypto::sha256(&bytes));
+            // Streamed, not buffered — and, as in `inspect`, refused on size
+            // before the file is opened. The old code held the whole candidate
+            // TWICE over (the read buffer plus `atomic_write`'s copy).
+            let src = Path::new(src_path);
+            candidate_size(src)?;
+            let store_dir = self.store_dir();
+            fs::create_dir_all(&store_dir).map_err(|e| io_err("create_dir_all approved", e))?;
+            // Stage the copy under the store dir (same filesystem as the final
+            // path, so the rename is atomic) and hash it as it lands.
+            let staging = staging_path(&store_dir);
+            let actual = {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                // 0600 from the moment it exists — the staged copy is a
+                // not-yet-verified binary and must never be reachable, however
+                // briefly, by anyone but us.
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&staging)
+                    .map_err(|e| io_err("create admit staging", e))?;
+                match stream_file(src, Some(&mut f)).and_then(|(sha, _)| {
+                    f.sync_all().map_err(|e| io_err("fsync admit staging", e))?;
+                    Ok(sha)
+                }) {
+                    Ok(sha) => sha,
+                    Err(e) => {
+                        drop(f);
+                        let _ = fs::remove_file(&staging);
+                        return Err(e);
+                    }
+                }
+            };
             if actual != expected_sha256 {
-                return Err(SysError::Conflict("hash mismatch".into())); // nothing stored
+                let _ = fs::remove_file(&staging); // nothing stored
+                return Err(SysError::Conflict("hash mismatch".into()));
             }
             let dst = self.bin_path(&actual);
-            atomic_write(&dst, &bytes)?;
+            if let Some(parent) = dst.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    let _ = fs::remove_file(&staging);
+                    return Err(io_err("create_dir_all approved", e));
+                }
+            }
+            if let Err(e) = fs::rename(&staging, &dst) {
+                let _ = fs::remove_file(&staging);
+                return Err(io_err("rename admitted binary", e));
+            }
             // Root-only hardening: owner read+exec only, then immutable.
             if self.harden {
                 use std::os::unix::fs::PermissionsExt;
@@ -1630,6 +1752,118 @@ mod real {
             let stored = base.join("approved").join(&inspect.sha256).join("run");
             assert_eq!(fs::read(&stored).unwrap(), bytes);
             assert_eq!(block_on(ops.list()).unwrap(), vec![inspect.sha256.clone()]);
+        }
+
+        // ---- B6: the candidate is streamed, and bounded ------------------
+
+        #[test]
+        fn a_candidate_over_the_ceiling_is_refused_without_being_read() {
+            // The attack: `fallocate -l 64G ~/big.bin && charter run ~/big.bin`.
+            // Every confused-deputy guard passes (regular file, own home,
+            // readable) and root charterd used to allocate the lot on the
+            // REQUEST path, before any guardian approval. A sparse `set_len`
+            // file is the same inode to `stat` and costs no disk here.
+            let base = tmp("exec-huge");
+            let ops = RealApprovedExecStore::with_base(&base);
+            fs::create_dir_all(&base).unwrap();
+            let src = base.join("huge.bin");
+            let f = fs::File::create(&src).unwrap();
+            f.set_len(MAX_CANDIDATE_BYTES + 1).unwrap();
+            drop(f);
+            assert_eq!(
+                fs::metadata(&src).unwrap().len(),
+                MAX_CANDIDATE_BYTES + 1,
+                "the sparse file really is over the ceiling"
+            );
+
+            let err = block_on(ops.inspect(src.to_str().unwrap())).unwrap_err();
+            assert!(
+                matches!(&err, SysError::Unsupported(m) if m.contains("over the")),
+                "inspect: {err:?}"
+            );
+            let meta = AdmitMeta {
+                name: "Huge".into(),
+                size: MAX_CANDIDATE_BYTES + 1,
+                origin: None,
+            };
+            let err =
+                block_on(ops.admit(src.to_str().unwrap(), &"aa".repeat(32), &meta)).unwrap_err();
+            assert!(
+                matches!(&err, SysError::Unsupported(m) if m.contains("over the")),
+                "admit: {err:?}"
+            );
+            // And nothing was staged or stored on the way out.
+            assert!(block_on(ops.list()).unwrap().is_empty());
+            let staged: Vec<_> = fs::read_dir(base.join("approved"))
+                .map(|rd| rd.flatten().map(|e| e.file_name()).collect())
+                .unwrap_or_default();
+            assert!(staged.is_empty(), "staging left behind: {staged:?}");
+
+            // Exactly at the ceiling is allowed through the `stat` guard (the
+            // boundary, checked directly — actually streaming 512 MiB of holes
+            // would only be measuring the page cache).
+            let ok = base.join("ok.bin");
+            let f = fs::File::create(&ok).unwrap();
+            f.set_len(MAX_CANDIDATE_BYTES).unwrap();
+            drop(f);
+            assert_eq!(candidate_size(&ok).unwrap(), MAX_CANDIDATE_BYTES);
+            assert!(candidate_size(&src).is_err(), "one byte over is refused");
+        }
+
+        #[test]
+        fn the_streamed_hash_equals_the_old_whole_read_hash() {
+            // The fix must not change the identity of anything already stored:
+            // a chunked sha256 is byte-for-byte the single-shot one, including
+            // across a chunk boundary and for an empty file.
+            let base = tmp("exec-stream-hash");
+            let ops = RealApprovedExecStore::with_base(&base);
+            fs::create_dir_all(&base).unwrap();
+            for (name, bytes) in [
+                ("empty", Vec::new()),
+                ("tiny", b"#!/bin/sh\necho hi\n".to_vec()),
+                // Straddles the 64 KiB buffer: more than one `update` call.
+                (
+                    "multi",
+                    (0..(CANDIDATE_CHUNK_BYTES * 2 + 7))
+                        .map(|i| i as u8)
+                        .collect(),
+                ),
+            ] {
+                let src = base.join(name);
+                fs::write(&src, &bytes).unwrap();
+                let got = block_on(ops.inspect(src.to_str().unwrap())).unwrap();
+                assert_eq!(got.sha256, sha_hex(&bytes), "{name}: hash");
+                assert_eq!(got.size, bytes.len() as u64, "{name}: size");
+            }
+        }
+
+        #[test]
+        fn a_streamed_admit_stores_the_exact_bytes_across_chunks() {
+            let base = tmp("exec-stream-admit");
+            let ops = RealApprovedExecStore::with_base(&base);
+            fs::create_dir_all(&base).unwrap();
+            let bytes: Vec<u8> = (0..(CANDIDATE_CHUNK_BYTES * 3 + 11))
+                .map(|i| (i % 251) as u8)
+                .collect();
+            let src = base.join("big.bin");
+            fs::write(&src, &bytes).unwrap();
+            let inspect = block_on(ops.inspect(src.to_str().unwrap())).unwrap();
+            let meta = AdmitMeta {
+                name: "Big".into(),
+                size: inspect.size,
+                origin: None,
+            };
+            block_on(ops.admit(src.to_str().unwrap(), &inspect.sha256, &meta)).unwrap();
+            let stored = base.join("approved").join(&inspect.sha256).join("run");
+            assert_eq!(fs::read(&stored).unwrap(), bytes);
+            // No staging file survives a success either.
+            let leftovers: Vec<_> = fs::read_dir(base.join("approved"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(".admit-"))
+                .collect();
+            assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
         }
 
         #[test]
