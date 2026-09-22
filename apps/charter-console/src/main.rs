@@ -260,7 +260,10 @@ fn handle_command(body: &str, proxy: &tao::event_loop::EventLoopProxy<UserEvent>
             // `charter-pair` binary is the actual backstop that refuses an
             // overwrite without it, in case the UI's belief about `paired`
             // is stale.
-            let replace = msg.get("replace").and_then(|v| v.as_bool()).unwrap_or(false);
+            let replace = msg
+                .get("replace")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             Some(run_pair(link, subject, replace).map(|_| "Phone connected."))
         }
         // Mint a fresh scan-to-pair token and show its QR. Asks for the admin
@@ -640,10 +643,29 @@ fn run_limits(user: &str, wake: &str, bedtime: &str, daily: u64) -> Result<(), S
     )
 }
 
+/// Accept both the bare `bunker://…` pairing link and the https App Link
+/// form a guardian's QR actually encodes
+/// (`https://charter.mysignet.app/pair#bunker://…`) — a parent who copies
+/// the link out of their phone's browser pastes the latter. Routes through
+/// `charter_transport::validate_and_normalize`, the ONE grammar shared with
+/// charterd's `pin_from_connect` (B7), so this cannot drift from what the
+/// daemon actually accepts, and normalises to the bare `bunker://…` string
+/// `charter-pair --link` expects on argv.
 fn run_pair(link: &str, subject: &str, replace: bool) -> Result<(), String> {
-    if !link.starts_with("bunker://") {
-        return Err("That link should start with bunker://".into());
-    }
+    let link = charter_transport::validate_and_normalize(link).map_err(|e| {
+        use charter_transport::PairingError::*;
+        match e {
+            NotBunkerUri => {
+                "That link should start with bunker:// (or be the pairing link from your \
+                 phone)."
+                    .to_string()
+            }
+            BadGuardianPubkey => "That link's guardian ID doesn't look right.".to_string(),
+            MissingRelays => "That link is missing a relay to connect through.".to_string(),
+            NonCharterKind => "That doesn't look like a Kintrinsic pairing link.".to_string(),
+        }
+    })?;
+    let link = link.as_str();
     if subject.len() != 64 || !subject.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("The child's ID should be 64 letters and numbers.".into());
     }

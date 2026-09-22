@@ -20,6 +20,12 @@ wry = "0.55"
 tao = "0.35"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The ONE shared pairing-link grammar (bare `bunker://…` or the https App
+# Link wrapper) — see `validate_and_normalize` in
+# `core/crates/charter-transport/src/pairing.rs` (B7). Pulled in with only
+# the lightweight `mock` feature (its default): the console never needs a
+# live relay or real OS effects, just the pure parser.
+charter-transport = { path = "../../core/crates/charter-transport" }
 
 [profile.release]
 strip = true

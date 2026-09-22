@@ -29,26 +29,36 @@ pub enum PairingError {
     NonCharterKind,
 }
 
-/// Parse + validate a `bunker://<guardian-pubkey>?relay=wss://..&kind=charter`
-/// URI, producing a pairing pinned to the given machine + subject.
-pub fn pin_from_connect(
-    bunker_uri: &str,
-    machine: PubKey,
-    subject_pubkey: PubKey,
-    now: u64,
-) -> Result<Pairing, PairingError> {
-    // The QR-scannable form is the https App Link with the bunker URI in its
-    // #fragment (`https://charter.mysignet.app/pair#bunker://…`). A scan that
-    // lands in a browser instead of the app leaves the ward holding that whole
-    // URL, so accept it here and pin from the fragment. Trust is unchanged:
-    // the link was always attacker-supplyable, and the SAS check on the ward's
-    // screen is what defends it, not the scheme it arrived under.
-    let bunker_uri = match bunker_uri.strip_prefix("https://") {
-        Some(_) => bunker_uri
+/// Strip the https App Link wrapper if present, and validate the underlying
+/// `bunker://<guardian-pubkey>?relay=wss://..&kind=charter` URI's grammar —
+/// a valid guardian pubkey, at least one `wss://` relay, `kind=charter` —
+/// without needing a machine, subject or timestamp to pin against. Returns
+/// the bare, normalised `bunker://…` string: what `charter-pair --link`
+/// (and every other command-line consumer) expects on its argv.
+///
+/// The QR-scannable form is the https App Link with the bunker URI in its
+/// `#fragment` (`https://charter.mysignet.app/pair#bunker://…`). A scan that
+/// lands in a browser instead of the app leaves the ward (or the parent,
+/// pasting into the console) holding that whole URL, so this accepts it too
+/// and pins from the fragment. Trust is unchanged: the link was always
+/// attacker-supplyable, and the SAS check on the ward's screen is what
+/// defends it, not the scheme it arrived under.
+///
+/// This is [`pin_from_connect`]'s parse+validate step, factored out so a
+/// caller that only has a pasted link — no machine/subject/now yet, e.g. a
+/// console or CLI validating what the parent just pasted before shelling out
+/// to the privileged pairing helper — can run the *identical* check.
+/// `pin_from_connect` calls this too, so the surfaces that accept a pairing
+/// link (charterd, `charter-console`, `charter pair`) cannot drift on what
+/// counts as a valid one again — see B7,
+/// `internal/reviews/2026-09-21/04-linux-lock-tray-cli-packaging.md`.
+pub fn validate_and_normalize(link: &str) -> Result<String, PairingError> {
+    let bunker_uri = match link.strip_prefix("https://") {
+        Some(_) => link
             .split_once('#')
             .map(|(_, frag)| frag)
             .ok_or(PairingError::NotBunkerUri)?,
-        None => bunker_uri,
+        None => link,
     };
     let rest = bunker_uri
         .strip_prefix("bunker://")
@@ -57,12 +67,10 @@ pub fn pin_from_connect(
         Some((p, q)) => (p, q),
         None => (rest, ""),
     };
-    let guardian_pubkey =
-        PubKey::from_hex(pubkey_hex).map_err(|_| PairingError::BadGuardianPubkey)?;
+    PubKey::from_hex(pubkey_hex).map_err(|_| PairingError::BadGuardianPubkey)?;
 
-    let mut relays = Vec::new();
+    let mut has_relay = false;
     let mut kind_charter = false;
-    let mut audit_transparency = false;
     for pair in query.split('&').filter(|s| !s.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         // Values are percent-decoded BEFORE interpretation: browser guardians
@@ -74,23 +82,61 @@ pub fn pin_from_connect(
         match k {
             "relay" => {
                 if v.starts_with("wss://") {
-                    relays.push(v);
+                    has_relay = true;
                 } else {
                     // A non-wss relay is rejected as a missing valid relay.
                     return Err(PairingError::MissingRelays);
                 }
             }
             "kind" => kind_charter = v == "charter",
-            "audit" => audit_transparency = v == "1" || v == "true",
             _ => {}
         }
     }
 
-    if relays.is_empty() {
+    if !has_relay {
         return Err(PairingError::MissingRelays);
     }
     if !kind_charter {
         return Err(PairingError::NonCharterKind);
+    }
+
+    Ok(bunker_uri.to_string())
+}
+
+/// Parse + validate a `bunker://<guardian-pubkey>?relay=wss://..&kind=charter`
+/// URI (bare, or wrapped in the https App Link form — see
+/// [`validate_and_normalize`]), producing a pairing pinned to the given
+/// machine + subject.
+pub fn pin_from_connect(
+    bunker_uri: &str,
+    machine: PubKey,
+    subject_pubkey: PubKey,
+    now: u64,
+) -> Result<Pairing, PairingError> {
+    let normalized = validate_and_normalize(bunker_uri)?;
+    // `validate_and_normalize` has already confirmed this parses — the
+    // `expect`s below re-derive fields it already checked, not new fallible
+    // parses.
+    let rest = normalized
+        .strip_prefix("bunker://")
+        .expect("validate_and_normalize returns a bare bunker:// URI");
+    let (pubkey_hex, query) = match rest.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (rest, ""),
+    };
+    let guardian_pubkey =
+        PubKey::from_hex(pubkey_hex).expect("validate_and_normalize already checked the pubkey");
+
+    let mut relays = Vec::new();
+    let mut audit_transparency = false;
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let v = percent_decode(v);
+        match k {
+            "relay" => relays.push(v),
+            "audit" => audit_transparency = v == "1" || v == "true",
+            _ => {}
+        }
     }
 
     Ok(Pairing {
@@ -234,5 +280,74 @@ mod tests {
             pin_from_connect(&uri, machine(), subject(), 0),
             Err(PairingError::MissingRelays)
         );
+    }
+
+    // ---- validate_and_normalize (B7: the console/CLI-facing entry point,
+    // no machine/subject/now needed) ----------------------------------------
+
+    #[test]
+    fn validate_and_normalize_passes_a_bare_bunker_uri_through_unchanged() {
+        let uri = good_uri();
+        assert_eq!(validate_and_normalize(&uri).unwrap(), uri);
+    }
+
+    #[test]
+    fn validate_and_normalize_strips_the_https_app_link_wrapper() {
+        let uri = format!("https://charter.mysignet.app/pair#{}", good_uri());
+        assert_eq!(validate_and_normalize(&uri).unwrap(), good_uri());
+    }
+
+    #[test]
+    fn validate_and_normalize_rejects_garbage() {
+        for garbage in [
+            "not-a-link-at-all",
+            "nostrconnect://x",
+            "https://charter.mysignet.app/pair",
+            "https://charter.mysignet.app/pair#nostrconnect://x",
+        ] {
+            assert_eq!(
+                validate_and_normalize(garbage),
+                Err(PairingError::NotBunkerUri),
+                "garbage input: {garbage}"
+            );
+        }
+        // Well-formed scheme, but fails validation further in — still
+        // rejected, just with a more specific reason.
+        let bad_pubkey = "bunker://zzzz?relay=wss://r&kind=charter";
+        assert_eq!(
+            validate_and_normalize(bad_pubkey),
+            Err(PairingError::BadGuardianPubkey)
+        );
+    }
+
+    /// `pin_from_connect` and `validate_and_normalize` must agree on every
+    /// input — the whole point of factoring one through the other. Fuzz a
+    /// handful of shapes rather than trust that by inspection alone.
+    #[test]
+    fn pin_from_connect_and_validate_and_normalize_agree() {
+        let cases = [
+            good_uri(),
+            format!("https://charter.mysignet.app/pair#{}", good_uri()),
+            "bunker://zzzz?relay=wss://r&kind=charter".to_string(),
+            format!("bunker://{}?kind=charter", "11".repeat(32)),
+            format!(
+                "bunker://{}?relay=ws://insecure&kind=charter",
+                "11".repeat(32)
+            ),
+            format!("bunker://{}?relay=wss://r", "11".repeat(32)),
+            "nostrconnect://x".to_string(),
+        ];
+        for uri in cases {
+            let norm = validate_and_normalize(&uri);
+            let pin = pin_from_connect(&uri, machine(), subject(), 0);
+            assert_eq!(
+                norm.is_ok(),
+                pin.is_ok(),
+                "disagreement on {uri}: normalize={norm:?} pin={pin:?}"
+            );
+            if let (Err(a), Err(b)) = (&norm, &pin) {
+                assert_eq!(a, b, "different rejection reason for {uri}");
+            }
+        }
     }
 }

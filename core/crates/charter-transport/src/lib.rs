@@ -11,7 +11,7 @@ pub mod pairing;
 pub mod transport;
 
 pub use curator::{list_id, parse_curator_list};
-pub use pairing::{pin_from_connect, Pairing, PairingError};
+pub use pairing::{pin_from_connect, validate_and_normalize, Pairing, PairingError};
 pub use transport::{
     CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant, ScriptedEntropy,
 };
