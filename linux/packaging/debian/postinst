@@ -22,6 +22,27 @@ case "$1" in
         fi
         # Refresh the menu so the "Kintrinsic" entry appears now.
         update-desktop-database -q 2>/dev/null || true
+        # Every systemd call above is `|| true` on purpose (chroot/container
+        # builds have no running systemd to talk to), but that means a REAL
+        # failure — the new binary refusing to start, `enable` failing — was
+        # silently swallowed and we still printed "installed" (04-B11). Check
+        # the outcome, only when systemd is actually running, and warn loudly
+        # (non-fatal: apt must still finish so a later `dpkg --configure -a`
+        # or reinstall can fix it).
+        if [ -d /run/systemd/system ]; then
+            enabled_ok=1
+            active_ok=1
+            systemctl is-enabled --quiet charterd.service 2>/dev/null || enabled_ok=0
+            systemctl is-active --quiet charterd.service 2>/dev/null || active_ok=0
+            if [ "$enabled_ok" -eq 0 ] || [ "$active_ok" -eq 0 ]; then
+                echo "kintrinsic: WARNING — charterd did not come up cleanly after install:" >&2
+                [ "$enabled_ok" -eq 0 ] && echo "kintrinsic:   - charterd.service is NOT enabled (won't start at boot)" >&2
+                [ "$active_ok" -eq 0 ] && echo "kintrinsic:   - charterd.service is NOT active (no enforcement is running right now)" >&2
+                echo "kintrinsic:   Screen-time limits are NOT being enforced until this is fixed. Run:" >&2
+                echo "kintrinsic:     systemctl status charterd.service" >&2
+                echo "kintrinsic:     journalctl -u charterd.service -b" >&2
+            fi
+        fi
         echo "kintrinsic: installed. Open \"Kintrinsic\" from the menu to choose the child's account and finish."
         ;;
 esac
