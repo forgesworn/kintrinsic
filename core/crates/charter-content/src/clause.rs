@@ -29,6 +29,10 @@ pub enum YoutubeRestrict {
     Strict,
 }
 
+/// The frozen `content` clause body version — the highest this build
+/// implements. See [`GrantContent::is_supported_version`].
+pub const CONTENT_VERSION: u32 = 1;
+
 /// The runtime-canonical, **device-enforced** content clause.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +64,20 @@ pub struct GrantContent {
 }
 
 impl GrantContent {
+    /// Whether this build knows what the body MEANS.
+    ///
+    /// Serde drops unknown fields, so a `v: 2` body — a future shape whose
+    /// fields may mean something else entirely — otherwise deserialises
+    /// cleanly into the v1 struct and is evaluated as if it were v1, with the
+    /// failure direction decided by whatever the bump changed. An unknown
+    /// version is therefore treated exactly as an UNREADABLE content clause:
+    /// [`evaluate_content`](crate::evaluate_content) answers
+    /// [`EffectiveWebPolicy::locked`](crate::EffectiveWebPolicy::locked), the
+    /// same fail-CLOSED state an unparseable clause already gets.
+    pub fn is_supported_version(&self) -> bool {
+        self.v <= CONTENT_VERSION
+    }
+
     /// Curators required to admit a domain into an allowlist. Default 2, floored at 1.
     pub fn effective_quorum(&self) -> u32 {
         self.quorum_n.unwrap_or(2).max(1)

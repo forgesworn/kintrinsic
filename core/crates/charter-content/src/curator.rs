@@ -26,6 +26,20 @@ pub struct CuratorList {
     pub entries: Vec<CuratorEntry>,
 }
 
+/// Canonicalise a curator pubkey for comparison: lowercase hex, exactly 64
+/// characters. `None` for anything else (S11, review 2026-09-21 02-G3) —
+/// `spec/contract.md:191` specifies "Curator pubkeys (hex)", so there is a
+/// canonical form, and comparing raw strings means a clause's `curators`
+/// list and a verified `CuratorList.curator` written in different case never
+/// match, which in allowlist posture is a silent, total web lockout.
+pub fn normalize_curator(id: &str) -> Option<String> {
+    if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(id.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
