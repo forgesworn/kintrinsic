@@ -388,7 +388,12 @@ fn active_session_uid() -> Option<u32> {
 /// cannot answer — an idle/locked classification must be POSITIVELY
 /// evidenced, never assumed from silence.
 fn session_activity(sid: &str) -> charter_schedule::Activity {
-    match loginctl_value(&["show-session", sid, "--property=LockedHint", "--property=IdleHint"]) {
+    match loginctl_value(&[
+        "show-session",
+        sid,
+        "--property=LockedHint",
+        "--property=IdleHint",
+    ]) {
         Some(out) => activity_from_hints(&out),
         None => charter_schedule::Activity::Active,
     }
@@ -699,9 +704,49 @@ fn pause_flag_path() -> String {
     std::env::var("CHARTER_PAUSE_FLAG").unwrap_or_else(|_| "/run/charter/paused".into())
 }
 
-/// True while an admin has paused enforcement via the Recovery tool.
+/// How long a recovery pause may last before it lapses on its own (03-G5).
+///
+/// A pause is a recovery tool: "let me at this machine for a bit". It had no
+/// expiry at all, so it self-healed only on reboot (`/run` is a
+/// `RuntimeDirectory`) — and on a box nobody reboots, one click left a child
+/// with no limits indefinitely, with the guardian's app still showing the last
+/// pre-pause numbers as though they were live. Four hours is longer than any
+/// genuine repair session and short enough that a forgotten pause is an
+/// afternoon, not a term.
+///
+/// Re-issuing is one click in the Recovery tool, and re-issuing REFRESHES the
+/// window (the flag file's mtime is what ages).
+const PAUSE_MAX_SECS: i64 = 4 * 3600;
+
+/// True while an admin has paused enforcement via the Recovery tool, with a
+/// pause older than [`PAUSE_MAX_SECS`] lapsing here — once, loudly.
+///
+/// The age is the flag file's mtime, so "re-issue the pause" is simply
+/// "rewrite the flag", which is what the Recovery tool already does. An
+/// unreadable mtime is treated as a LIVE pause, not a lapsed one: the failure
+/// direction that silently re-freezes a box somebody is in the middle of
+/// repairing is the worse of the two, and the next reboot clears it regardless.
 fn enforcement_paused() -> bool {
-    std::path::Path::new(&pause_flag_path()).exists()
+    let path = pause_flag_path();
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return false;
+    };
+    let age = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|d| d.as_secs() as i64);
+    if age.is_some_and(|a| a > PAUSE_MAX_SECS) {
+        eprintln!(
+            "charterd: the recovery pause has been in force for over {}h — it has \
+             LAPSED and enforcement is resuming. Re-issue it from Recovery if the \
+             machine still needs it.",
+            PAUSE_MAX_SECS / 3600
+        );
+        let _ = std::fs::remove_file(&path);
+        return false;
+    }
+    true
 }
 
 /// Make the box usable again: thaw every managed child's app.slice, drop the
@@ -867,7 +912,10 @@ async fn heal_stranded_vt(sys: &RealSystem) -> VtHeal {
         (active, vts)
     })
     .await
-    .expect("heal_stranded_vt probe task");
+    // B6: `None` = no answer this tick, never a panic out of the loop. A
+    // probe that blew up is indistinguishable, here, from a greeter that is
+    // not up yet — and the next tick is two seconds away.
+    .unwrap_or((None, Vec::new()));
     let active = match active {
         Some(s) => s,
         None => return VtHeal::Healthy, // no VT console (headless) — nothing to heal
@@ -997,7 +1045,8 @@ async fn apply_child_decisions(
             if let EnforcerEffect::Warn(level) = eff {
                 let (display, _) = tokio::task::spawn_blocking(active_session_x)
                     .await
-                    .expect("active_session_x task")
+                    .ok()
+                    .flatten()
                     .unwrap_or_else(|| {
                         (
                             std::env::var("CHARTER_DISPLAY").unwrap_or_else(|_| ":0".into()),
@@ -1058,7 +1107,8 @@ async fn apply_child_decisions(
                 // ~/.Xauthority only if the session env is unreadable.
                 let (display, session_xauth) = match tokio::task::spawn_blocking(active_session_x)
                     .await
-                    .expect("active_session_x task")
+                    .ok()
+                    .flatten()
                 {
                     Some((disp, xa)) => (disp, xa),
                     None => (
@@ -1106,7 +1156,8 @@ async fn apply_child_decisions(
                 let xorg_auth =
                     tokio::task::spawn_blocking(move || xorg_auth_for_display(&display_for_auth))
                         .await
-                        .expect("xorg_auth_for_display task");
+                        .ok()
+                        .flatten();
                 let xauth = xorg_auth
                     .or(session_xauth)
                     .or_else(|| home_for_uid(passwd, d.uid).map(|h| format!("{h}/.Xauthority")));
@@ -1626,6 +1677,22 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // transition is logged once in each direction rather than every tick —
     // same reasoning as `display_unreadable` above.
     let mut last_activity = charter_schedule::Activity::Active;
+    // 04-G6: was this machine running WITHOUT a warden before now? The stamp
+    // below is written every tick; a hole in it bigger than a restart is the
+    // cheap half of tamper-evidence — a live USB, a GRUB `init=/bin/bash`, an
+    // afternoon of crash-looping and an afternoon switched off all leave the
+    // same hole, and the honest reading is "nothing was enforced for N
+    // seconds", not an accusation. Computed ONCE, at startup, and carried on
+    // every state file this run publishes.
+    let enforcement_gap_secs = crate::watchdog::gap_secs(sys.clock().now_utc() as i64);
+    if let Some(gap) = enforcement_gap_secs {
+        eprintln!(
+            "charterd: no warden was running on this machine for {gap}s before this start              — nothing was enforced during that time (reported to the guardian)"
+        );
+    }
+    // Tell systemd we are up before the first tick, so `WatchdogSec` starts
+    // counting from a daemon that is actually looping.
+    crate::watchdog::ping();
     loop {
         let slow_tick = iter.is_multiple_of(slow_every);
         iter = iter.wrapping_add(1);
@@ -1650,6 +1717,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 "charterd: /etc/passwd or /etc/group unreadable this tick — \
                  preserving enforcement state"
             );
+            // Alive and looping, so the watchdog must not kill us over a
+            // transient identity-DB read — but NOT `record`ed: enforcement did
+            // not actually run this tick, and the stamp means what it says.
+            crate::watchdog::ping();
             tokio::time::sleep(fast).await;
             continue;
         }
@@ -1660,6 +1731,19 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         // the slow cadence).
         if enforcement_paused() {
             thaw_all(&sys, &roster, &mut lock).await;
+            // 03-G5: a pause used to `continue` past the state-file publish, so
+            // the ward's console and the guardian's view simply stopped moving
+            // — indistinguishable from a daemon that had died, and the two want
+            // opposite reactions. Keep publishing, and say plainly that this is
+            // a pause. (The STATUS wire carries no flag for it; see the module
+            // note above `run`.)
+            for user in crate::state_file::published_users() {
+                crate::state_file::mark_paused(&user, now);
+            }
+            // The tick is alive and doing its job — a pause is not a hang, and
+            // the watchdog must not kill a deliberately idle daemon.
+            crate::watchdog::ping();
+            crate::watchdog::record(now);
             if slow_tick {
                 if let Some(b) = &broker {
                     b.poll_once().await;
@@ -1675,7 +1759,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         //    `sys`) are authoritative; the local device-only limits are the
         //    fallback for a child the guardian hasn't set. Filtered to lockable
         //    children so a stray limits.d file can never enroll an admin/root.
-        let configs = load_child_configs(&config.child_limits_dir);
+        let mut configs = load_child_configs(&config.child_limits_dir);
+        // 02b-G8: a guardian subject claimed by two children is dropped from
+        // BOTH before anything reads it — not just before policy resolution,
+        // but before the bucket reads, the STATUS addressing and the extension
+        // routing below, every one of which keys off `cfg.subject`.
+        crate::child_policy::drop_duplicate_subjects(&mut configs);
+        let configs = configs;
         let policies: Vec<_> = resolve_child_policies(&sys, &passwd, &configs)
             .into_iter()
             .filter(|(uid, _)| {
@@ -1798,7 +1888,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 .and_then(|(u, _)| uid_for_user(&passwd, u))
         }) {
             let pending =
-                std::mem::take(&mut *extension_inbox.lock().expect("extension inbox lock"));
+                std::mem::take(&mut *extension_inbox.lock().unwrap_or_else(|e| e.into_inner()));
             for p in pending {
                 // A per-group grant (`bucket_id` set) credits that bucket's
                 // own pool; the ordinary whole-device routing credits the
@@ -1902,7 +1992,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             None => (None, charter_schedule::Activity::Active),
         })
         .await
-        .expect("active_session task");
+        // B6: no answer this tick — nobody is charged, nothing is thawed, and
+        // the next tick asks again. A panicking probe must not be a crash-loop
+        // that thaws the box on every exit.
+        .unwrap_or((None, charter_schedule::Activity::Active));
         // Log the TRANSITION, not the state — same discipline as the Named
         // model's `display_unreadable` line below: this branch runs every
         // couple of seconds, and the fact worth having in the journal is
@@ -1978,7 +2071,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         } else {
             let session_x = tokio::task::spawn_blocking(active_session_x)
                 .await
-                .expect("active_session_x task");
+                .ok()
+                .flatten();
             match session_x {
                 Some((display, xauth)) => {
                     let b = buckets_body.clone();
@@ -2009,7 +2103,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                         )
                     })
                     .await
-                    .expect("attribute_tick task")
+                    // No attribution this tick: the plain screen baseline, the
+                    // same answer an unreadable display already gives.
+                    .unwrap_or((
+                        charter_schedule::Bucket::Screen,
+                        None,
+                        false,
+                    ))
                 }
                 None => (charter_schedule::Bucket::Screen, None, false),
             }
@@ -2049,7 +2149,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             charter_schedule::TimeModel::Named => {
                 let open = match tokio::task::spawn_blocking(active_session_x)
                     .await
-                    .expect("active_session_x task")
+                    .ok()
+                    .flatten()
                 {
                     Some((display, xauth)) => {
                         let b = buckets_body.clone();
@@ -2068,7 +2169,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                             )
                         })
                         .await
-                        .expect("open_bucket_ids_tick task")
+                        // `None` already means "this display could not be
+                        // read", which is exactly what a probe that did not
+                        // answer amounts to — and it charges the Session
+                        // baseline rather than nothing.
+                        .unwrap_or(None)
                     }
                     // No display to resolve at all (a Wayland seat, no Xorg on
                     // the active VT). Indistinguishable, for metering, from a
@@ -2111,7 +2216,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         //     (see `state_file`: D-Bus answers for the CALLER, which is no use
         //     to a guardian asking about their child).
         {
-            let mut snap = time_left_snapshots.lock().expect("snapshots lock");
+            // B6: a poisoned lock is recovered, never re-panicked. A panic
+            // anywhere in the tick while this was held used to poison it and
+            // take `TimeLeft()` down inside the D-Bus handler too.
+            let mut snap = time_left_snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             snap.clear();
             for (uid, pol) in &policies {
                 if let Some(r) = multi.remaining(*uid, now) {
@@ -2176,6 +2286,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                             local_adjust_minutes: crate::local_adjust::AdjustRecord::load(*uid)
                                 .net_minutes_since(now - 24 * 3600),
                             paired,
+                            paused_by_admin: false,
+                            enforcement_gap_secs,
                         });
                     }
                     snap.insert(*uid, view);
@@ -2372,7 +2484,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 let acted =
                     tokio::task::spawn_blocking(move || terminate_blocked_processes(&map, &sites))
                         .await
-                        .expect("terminate_blocked_processes task");
+                        .unwrap_or_default();
                 for (uid, pkg, pid) in acted {
                     eprintln!(
                         "charterd: per-app rule — terminated blocked {pkg} (pid {pid}) for uid {uid}"
@@ -2395,6 +2507,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
 
         // Fast iterations end here — everything below is network/disk work on
         // the slow cadence.
+        // The enforcement tick got all the way through: freeze/thaw reconciled,
+        // lock driven, meters charged, state published. THAT is what the
+        // watchdog keep-alive vouches for — a daemon that is merely still a
+        // process is exactly the failure `WatchdogSec` exists to catch — and
+        // what the stamp records for the next start to compare against.
+        crate::watchdog::ping();
+        crate::watchdog::record(now);
+
         if !slow_tick {
             tokio::time::sleep(fast).await;
             continue;
@@ -3715,5 +3835,91 @@ mod inventory_budget_tests {
             crate::focus::classify(&impostor, &learning, known_empty.as_ref()),
             charter_schedule::Bucket::Learning
         );
+    }
+
+    // ---- 03-G5: a recovery pause expires ----
+
+    /// Back-date a file's mtime by `secs`, so the pause can be aged without
+    /// waiting four hours for it.
+    fn age_file(path: &str, secs: i64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs as u64);
+        let unix = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as libc::time_t;
+        let tv = libc::timeval {
+            tv_sec: unix,
+            tv_usec: 0,
+        };
+        let times = [tv, tv];
+        let c = std::ffi::CString::new(path).expect("path");
+        // SAFETY: a NUL-terminated path and a two-element `timeval` array,
+        // exactly as `utimes(2)` wants.
+        let rc = unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
+        assert_eq!(rc, 0, "utimes failed on {path}");
+    }
+
+    /// A pause had no expiry at all: it self-healed only on reboot, so on a
+    /// box nobody reboots, one click left a child with no limits indefinitely
+    /// while the guardian's app kept showing the last pre-pause numbers.
+    ///
+    /// One test, because `CHARTER_PAUSE_FLAG` is process-global.
+    #[test]
+    fn a_recovery_pause_is_honoured_then_lapses_and_can_be_reissued() {
+        let dir = std::env::temp_dir().join(format!("charterd-pause-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create");
+        let flag = dir.join("paused").to_string_lossy().into_owned();
+        std::env::set_var("CHARTER_PAUSE_FLAG", &flag);
+
+        assert!(!enforcement_paused(), "no flag, no pause");
+
+        std::fs::write(&flag, "").expect("write flag");
+        assert!(enforcement_paused(), "a fresh pause is honoured");
+
+        // Just inside the window.
+        age_file(&flag, PAUSE_MAX_SECS - 60);
+        assert!(enforcement_paused(), "a pause under 4h is still in force");
+        assert!(std::path::Path::new(&flag).exists());
+
+        // Past it: the pause lapses AND the flag is cleared, so it cannot
+        // quietly re-assert itself on the next tick.
+        age_file(&flag, PAUSE_MAX_SECS + 60);
+        assert!(!enforcement_paused(), "a pause over 4h has lapsed");
+        assert!(
+            !std::path::Path::new(&flag).exists(),
+            "the lapsed flag is removed, not merely ignored"
+        );
+        assert!(!enforcement_paused(), "and it stays lapsed");
+
+        // Re-issuing is one click, and it refreshes the whole window.
+        std::fs::write(&flag, "").expect("re-issue");
+        assert!(enforcement_paused());
+
+        std::env::remove_var("CHARTER_PAUSE_FLAG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 03-B6: a poisoned shared mutex must not take the daemon down ----
+
+    /// The two shared mutexes in the loop used to be `.expect()`ed. A panic
+    /// anywhere in the tick while `time_left_snapshots` was held poisoned the
+    /// lock, after which `TimeLeft()` panicked inside the D-Bus handler too —
+    /// so one input-dependent panic became a crash on every later read. This
+    /// pins the recovery, which is the whole of the decision.
+    #[test]
+    fn a_poisoned_lock_is_recovered_rather_than_re_panicked() {
+        use std::sync::{Arc, Mutex};
+        let m: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![1]));
+        let m2 = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("a probe blew up while holding the lock");
+        })
+        .join();
+        assert!(m.lock().is_err(), "the lock really is poisoned");
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(*g, vec![1], "and the data behind it is intact");
+        g.push(2);
     }
 }

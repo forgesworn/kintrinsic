@@ -41,6 +41,7 @@ pub mod runtime;
 pub mod site_app;
 pub mod state_file;
 pub mod version;
+pub mod watchdog;
 pub mod web_content;
 
 pub use charter_spine::{

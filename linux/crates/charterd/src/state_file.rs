@@ -45,6 +45,25 @@ pub struct PublishedState {
     /// Whether a guardian's phone is bound to this child. `false` is the
     /// standalone case — the console is the only management surface there is.
     pub paired: bool,
+    /// An administrator has PAUSED enforcement on this machine (the Recovery
+    /// tool). Nothing is being enforced against this child right now, and the
+    /// numbers above are frozen where the pause found them.
+    ///
+    /// Published rather than implied by a stale `at`: a paused stretch used to
+    /// look exactly like a daemon that had stopped ticking, and the two want
+    /// opposite reactions from whoever is reading. (03-G5)
+    #[serde(default)]
+    pub paused_by_admin: bool,
+    /// Seconds this machine went WITHOUT a running warden before the daemon
+    /// came back — `None` when there was no such gap, never `0`.
+    ///
+    /// The box cannot witness its own absence, but it can write down when it
+    /// was last awake and notice the hole on the way back up: a live USB, a
+    /// GRUB `init=/bin/bash`, a crash-loop, an afternoon powered off with the
+    /// disk in another machine. A FACT, not an accusation — a long holiday
+    /// produces one too. (04-G6)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_gap_secs: Option<i64>,
 }
 
 pub const STATE_VERSION: u32 = 1;
@@ -84,6 +103,48 @@ fn set_world_readable(path: &str) {
 #[cfg(not(unix))]
 fn set_world_readable(_path: &str) {}
 
+/// Keep publishing while an admin pause is in force (03-G5).
+///
+/// The loop thaws everything and goes idle during a pause, which used to mean
+/// it skipped the state-file publish entirely: the ward's console and the
+/// guardian's view simply stopped updating, showing the last pre-pause numbers
+/// as though they were current. Silence is the one failure neither of them can
+/// see. So the last published snapshot is re-stamped with a fresh `at` and an
+/// explicit `paused_by_admin`, which says the thing the frozen numbers cannot:
+/// nothing is being enforced right now, ON PURPOSE.
+///
+/// Only ever re-stamps a file that already exists — there are no live numbers
+/// to invent for a child who has none, and a pause is not the moment to start
+/// guessing.
+pub fn mark_paused(user: &str, at: i64) {
+    let path = format!("{}/{user}.json", state_dir());
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut state) = serde_json::from_str::<PublishedState>(&text) else {
+        return;
+    };
+    if state.paused_by_admin && state.at == at {
+        return;
+    }
+    state.at = at;
+    state.paused_by_admin = true;
+    publish(&state);
+}
+
+/// Every child this machine is currently publishing state for.
+pub fn published_users() -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(state_dir()) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            Some(name.strip_suffix(".json")?.to_string())
+        })
+        .collect()
+}
+
 /// Remove the state file for a child who is no longer managed, so a console
 /// can never render limits for an account that has been released.
 pub fn retract(user: &str) {
@@ -121,6 +182,8 @@ mod tests {
             time_left: view(),
             local_adjust_minutes: -20,
             paired: false,
+            paused_by_admin: false,
+            enforcement_gap_secs: None,
         }
     }
 
@@ -176,9 +239,59 @@ mod tests {
         // No temp file is left behind for a console to trip over.
         assert!(!dir.join("robin.json.tmp").exists());
 
+        // 03-G5: a pause keeps the file MOVING, and says why the numbers are
+        // frozen — a state file that simply stops updating is indistinguishable
+        // from a daemon that has died, and the two want opposite reactions.
+        publish(&state("robin"));
+        mark_paused("robin", 1_782_738_000);
+        let paused: PublishedState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(paused.paused_by_admin, "the pause is stated, not implied");
+        assert_eq!(paused.at, 1_782_738_000, "and the snapshot is fresh");
+        assert_eq!(
+            paused.time_left.used_today_seconds,
+            Some(5400),
+            "the numbers are carried through untouched, frozen where the pause found them"
+        );
+        assert_eq!(published_users(), vec!["robin".to_string()]);
+
+        // A child with no published state is not invented during a pause.
+        mark_paused("nobody", 1_782_738_000);
+        assert!(!dir.join("nobody.json").exists());
+
         retract("robin");
         assert!(!path.exists());
+        assert!(published_users().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
         std::env::remove_var("CHARTER_STATE_DIR");
+    }
+
+    /// An older state file (written before these fields existed) must still
+    /// load — a console reading it mid-upgrade sees "not paused, no gap",
+    /// which is the truthful default, not a parse failure.
+    #[test]
+    fn a_pre_existing_state_file_without_the_new_fields_still_parses() {
+        let s = state("robin");
+        let mut v = serde_json::to_value(&s).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("pausedByAdmin");
+        o.remove("enforcementGapSecs");
+        let back: PublishedState = serde_json::from_value(v).unwrap();
+        assert!(!back.paused_by_admin);
+        assert_eq!(back.enforcement_gap_secs, None);
+    }
+
+    /// The gap is absent-or-a-number, never a zero: "0 seconds unwarded" is a
+    /// line no surface should ever grow, and coercing absent to 0 would claim
+    /// a clean bill of health from a device that has simply never reported.
+    #[test]
+    fn the_enforcement_gap_is_omitted_when_there_is_none() {
+        let mut s = state("robin");
+        assert!(!serde_json::to_string(&s)
+            .unwrap()
+            .contains("enforcementGap"));
+        s.enforcement_gap_secs = Some(4 * 3600);
+        let wire = serde_json::to_string(&s).unwrap();
+        assert!(wire.contains("\"enforcementGapSecs\":14400"), "{wire}");
     }
 }

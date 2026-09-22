@@ -10,12 +10,35 @@ Documentation=https://kintrinsic.app
 # to enforce.
 After=dbus.service
 Before=display-manager.service
+# With Restart=always + RestartSec=2, systemd's default start limit (5 starts
+# in 10s) would give up on a persistently crashing charterd and leave the
+# service dead — i.e. leave the box permanently thawed by ExecStopPost, which
+# is the exact failure Restart=always is here to prevent. Keep retrying; the
+# "last enforced at" stamp (see ExecStopPost) is what makes a crash-loop
+# VISIBLE to the guardian rather than silent.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=/usr/sbin/charterd
-Restart=on-failure
-RestartSec=5
+# G5: `Restart=on-failure` does not cover a CLEAN exit, and systemd counts
+# SIGTERM as clean — so `kill -TERM` (or anything that sends one during a
+# shutdown race) simply left the daemon down, with `ExecStopPost` below having
+# thawed the box on the way out. `always` is the only setting that matches what
+# the stop hook implies. Two seconds rather than five because every second of
+# that window is unenforced desktop.
+Restart=always
+RestartSec=2
+# G5: a charterd that HANGS — a deadlocked executor, a wedged logind call, both
+# observed live — is a live process to systemd, so nothing restarted it and
+# everything quietly stopped being enforced. The enforcement tick itself sends
+# WATCHDOG=1 (`watchdog::ping`), so what is being vouched for is the loop that
+# actually does the work, not merely a process that still exists. 60s is ~30
+# fast ticks: far beyond any legitimate stall, far short of an afternoon.
+WatchdogSec=60
+# The keep-alive comes from the main process. (Type=simple does not imply this
+# the way Type=notify would, and the unit's Type= is deliberately unchanged.)
+NotifyAccess=main
 # Lock-out safety: every stop (incl. crash, `systemctl stop`, prerm, the Recovery
 # "turn off" action) thaws every managed child's app.slice and re-enables VT
 # switching, so a stopped/removed Charter never leaves the box frozen.
