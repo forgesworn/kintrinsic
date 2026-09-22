@@ -60,6 +60,53 @@ pub struct XSnapshot {
     /// like an unattributable window: it widens the process set and withdraws
     /// the free-learning credit, never the reverse.
     capped: bool,
+    /// The display's DPMS power level as the helper read it off the X server
+    /// (`on`/`standby`/`suspend`/`off`/`unknown`), or `None` when the helper
+    /// said nothing at all — an older build against a newer daemon. Both
+    /// unknowns mean the same thing here, and [`activity_from_dpms`] says what
+    /// that is.
+    dpms: Option<String>,
+}
+
+impl XSnapshot {
+    /// Whether this tick counts as screen time, decided from the display's own
+    /// power state. See [`activity_from_dpms`] for why this and nothing else.
+    pub fn activity(&self) -> charter_schedule::Activity {
+        activity_from_dpms(self.dpms.as_deref())
+    }
+}
+
+/// G1 (03b-linux-charterd-bins-matching): **screen time is time the screen is
+/// powered on.** A ward cannot use a monitor that is off, and a monitor that is
+/// off is the one thing about a desktop session the ward cannot fake: turning
+/// it off means actually turning it off.
+///
+/// This replaces logind's `IdleHint`/`LockedHint`, which the meter used to
+/// trust and which are **ward-settable**. Any process in the session can set
+/// them over the system bus with no polkit prompt — verified:
+///
+/// ```text
+/// busctl --system call org.freedesktop.login1 \
+///     /org/freedesktop/login1/session/self \
+///     org.freedesktop.login1.Session SetIdleHint b true
+/// ```
+///
+/// A ward looping that was never charged a second. logind's hints are not used
+/// anywhere in this daemon any more, and must not come back.
+///
+/// The residual is the same one [`crate::focus`] already carries for
+/// attribution (03b-B2): a ward who puts an X **proxy** between their apps and
+/// the real server can lie to this probe about DPMS exactly as they can lie
+/// about window ownership. That is one hole, already named, not a new one.
+///
+/// Anything that is not positively a powered-down monitor — `on`, `unknown`, a
+/// helper that failed, a Wayland seat with no X server to ask — is `Active`.
+/// Failing toward charging is the direction every probe in this daemon fails.
+pub fn activity_from_dpms(level: Option<&str>) -> charter_schedule::Activity {
+    match level.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("standby") | Some("suspend") | Some("off") => charter_schedule::Activity::Idle,
+        _ => charter_schedule::Activity::Active,
+    }
 }
 
 /// Parse `charter-xclients` stdout. Pure, so the whole wire format is tested
@@ -80,6 +127,7 @@ pub fn parse_xsnapshot(out: &str) -> Option<XSnapshot> {
         let mut f = line.split_whitespace();
         match (f.next(), f.next(), f.next(), f.next()) {
             (Some("capped"), None, _, _) => snap.capped = true,
+            (Some("dpms"), Some(level), None, _) => snap.dpms = Some(level.to_string()),
             (Some("focus"), Some(pid), None, _) => snap.focus = parse_pid_field(pid),
             (Some("active"), Some(pid), None, _) => snap.active = parse_pid_field(pid),
             (Some("win"), Some(id), Some(pid), None) => {
@@ -502,6 +550,20 @@ const XCLIENTS_BIN: &str = "/usr/bin/charter-xclients";
 /// could not connect, the server has no XRes 1.2, or it was killed by the
 /// timeout. That is a different fact from "nothing is open", and every caller
 /// here keeps the two apart.
+/// **The one probe a tick is allowed.** `runtime.rs` takes this once per tick
+/// and hands the result to everything that needs it: the activity decision
+/// (DPMS), the focused-window attribution ([`attribute_snapshot`]) and the
+/// named model's open-window set ([`open_bucket_ids_snapshot`]).
+///
+/// Sharing it is not only an optimisation. Two probes of the same display in
+/// one tick can straddle an app switch and disagree about what was on screen —
+/// and once the activity decision reads off the same snapshot as attribution,
+/// a disagreement would mean charging a bucket for a second the meter had
+/// already decided was screen-off. One probe, one answer, one tick.
+pub fn snapshot_tick(display: &str, xauth: Option<&str>) -> Option<XSnapshot> {
+    xsnapshot(display, xauth)
+}
+
 fn xsnapshot(display: &str, xauth: Option<&str>) -> Option<XSnapshot> {
     let bin = std::env::var("CHARTER_XCLIENTS_BIN").unwrap_or_else(|_| XCLIENTS_BIN.to_string());
     let mut cmd = Command::new("timeout");
@@ -715,23 +777,35 @@ pub fn attribute_tick(
     user_installed: Option<&std::collections::BTreeSet<String>>,
     governed: &[String],
 ) -> (Bucket, Option<String>, bool) {
-    let probe = || -> Option<(XSnapshot, FocusedProcess)> {
-        let snap = xsnapshot(display, xauth)?;
-        let p = focused_process(foreground_pid(&snap)?)?;
-        Some((snap, p))
-    };
-    match probe() {
+    match xsnapshot(display, xauth) {
         // Fail-safe on ALL THREE counts: no probe means Screen (an error must
         // never make time free), no bucket (an error must never spend an
         // allowance the ward wasn't using), and NOT unrecognised — an error
         // reading the window is not evidence of unrecognised software, and
         // this counter must never claim a finding it has no basis for.
         None => (Bucket::Screen, None, false),
-        Some((snap, p)) => {
-            let (bucket, id, unrecognised) = attribute(&p, apps, buckets, user_installed, governed);
-            (downgrade_on_focus_mismatch(bucket, &snap), id, unrecognised)
-        }
+        Some(snap) => attribute_snapshot(&snap, apps, buckets, user_installed, governed),
     }
+}
+
+/// [`attribute_tick`] against a snapshot the caller already has, so the tick
+/// loop spends ONE `charter-xclients` run on activity and attribution together
+/// rather than one each. The `/proc` read of the focused process still happens
+/// here — it is cheap, local, and must be as fresh as the decision it feeds.
+pub fn attribute_snapshot(
+    snap: &XSnapshot,
+    apps: &[LearningApp],
+    buckets: &charter_schedule::GrantBuckets,
+    user_installed: Option<&std::collections::BTreeSet<String>>,
+    governed: &[String],
+) -> (Bucket, Option<String>, bool) {
+    // No foreground window, or a foreground pid whose `/proc` entry has
+    // already gone: the same fail-safe triple as an unreadable display.
+    let Some(p) = foreground_pid(snap).and_then(focused_process) else {
+        return (Bucket::Screen, None, false);
+    };
+    let (bucket, id, unrecognised) = attribute(&p, apps, buckets, user_installed, governed);
+    (downgrade_on_focus_mismatch(bucket, snap), id, unrecognised)
 }
 
 /// Probe + classify the current foreground window. `apps` empty → `Screen`
@@ -819,6 +893,32 @@ pub fn open_bucket_ids_tick(
     let snap = xsnapshot(display, xauth)?;
     Some(open_bucket_ids_for_snapshot(
         &snap,
+        buckets,
+        focused_process,
+        || ward_pids(ward_uid),
+        crate::ancestry::read_proc,
+    ))
+}
+
+/// [`open_bucket_ids_tick`] against a snapshot the caller already has — the
+/// named model's half of the one-probe-per-tick rule (see [`snapshot_tick`]).
+///
+/// `snap` is `None` when the display could not be read at all, and that stays
+/// `None` here: the whole point of the distinction is that "unreadable" and
+/// "read fine, nothing costing open" are charged differently.
+pub fn open_bucket_ids_snapshot(
+    snap: Option<&XSnapshot>,
+    buckets: &charter_schedule::GrantBuckets,
+    ward_uid: u32,
+) -> Option<Vec<String>> {
+    if buckets.is_paused() || !buckets.is_valid() || buckets.buckets.is_empty() {
+        // Same reasoning as `open_bucket_ids_tick`, and it holds even when the
+        // display was unreadable: a family with no buckets clause is not a
+        // family whose display is broken.
+        return Some(Vec::new());
+    }
+    Some(open_bucket_ids_for_snapshot(
+        snap?,
         buckets,
         focused_process,
         || ward_pids(ward_uid),
@@ -978,6 +1078,53 @@ mod tests {
                 // triggers the ward-process fallback downstream.
                 ("0x3c00007".to_string(), None),
             ]
+        );
+    }
+
+    /// G1: the mapping from the helper's `dpms` field to whether this tick is
+    /// charged at all. The whole point of the change is that the ONLY answer
+    /// that stops the clock is a monitor the server says is powered down —
+    /// every other answer, including every way of not answering, keeps
+    /// charging. If this table ever drifts toward "silence means idle", a ward
+    /// gets free time by breaking the probe.
+    #[test]
+    fn the_dpms_field_maps_to_activity() {
+        use charter_schedule::Activity;
+        // Powered down, in any of the three ways a monitor can be.
+        assert_eq!(super::activity_from_dpms(Some("standby")), Activity::Idle);
+        assert_eq!(super::activity_from_dpms(Some("suspend")), Activity::Idle);
+        assert_eq!(super::activity_from_dpms(Some("off")), Activity::Idle);
+        // On, and every flavour of "we do not know".
+        assert_eq!(super::activity_from_dpms(Some("on")), Activity::Active);
+        assert_eq!(super::activity_from_dpms(Some("unknown")), Activity::Active);
+        // A helper that never printed the line (an older build), a value this
+        // daemon has never heard of, and an empty value are all "we do not
+        // know" and therefore all charge.
+        assert_eq!(super::activity_from_dpms(None), Activity::Active);
+        assert_eq!(super::activity_from_dpms(Some("dozing")), Activity::Active);
+        assert_eq!(super::activity_from_dpms(Some("")), Activity::Active);
+        // Case and stray whitespace come from the helper's output, not from us.
+        assert_eq!(super::activity_from_dpms(Some(" OFF ")), Activity::Idle);
+    }
+
+    /// The `dpms` line rides in the same snapshot as everything else, and a
+    /// snapshot without one still parses — an older helper against a newer
+    /// daemon degrades to "we do not know", i.e. to charging.
+    #[test]
+    fn the_dpms_line_rides_in_the_snapshot() {
+        use charter_schedule::Activity;
+        let snap = parse_xsnapshot("v1\ndpms off\nfocus 7\nactive 7\n").expect("parses");
+        assert_eq!(snap.dpms.as_deref(), Some("off"));
+        assert_eq!(snap.activity(), Activity::Idle);
+        // No `dpms` line at all: charge.
+        let snap = parse_xsnapshot("v1\nfocus 7\nactive 7\n").expect("parses");
+        assert_eq!(snap.dpms, None);
+        assert_eq!(snap.activity(), Activity::Active);
+        // `dpms` takes exactly one argument; a line carrying two is an unknown
+        // line kind, not a power level — same discipline as `capped`.
+        assert_eq!(
+            parse_xsnapshot("v1\ndpms off now\n").expect("parses").dpms,
+            None
         );
     }
 
@@ -1201,6 +1348,7 @@ mod tests {
                 active: Some(10),
                 windows: vec![win("0x1", Some(10)), win("0x2", Some(99))],
                 capped: false,
+                dpms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1231,6 +1379,7 @@ mod tests {
                 // and the game's own window is not in the set at all.
                 windows: vec![win("0x1", None)],
                 capped: false,
+                dpms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1255,6 +1404,7 @@ mod tests {
                 // to push the real one out of the walk.
                 windows: vec![win("0x1", Some(99)), win("0x2", Some(99))],
                 capped: true,
+                dpms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1286,6 +1436,7 @@ mod tests {
                 active: Some(99),
                 windows: vec![win("0x1", Some(99)), win("0x2", None)],
                 capped: false,
+                dpms: None,
             },
             &play_bucket(),
             fake_proc,
@@ -1346,12 +1497,14 @@ mod tests {
             active: Some(10),
             windows: vec![],
             capped: false,
+            dpms: None,
         };
         let disagree = XSnapshot {
             focus: Some(10),
             active: Some(11),
             windows: vec![],
             capped: false,
+            dpms: None,
         };
         assert_eq!(
             downgrade_on_focus_mismatch(Bucket::Learning, &agree),
@@ -1375,6 +1528,7 @@ mod tests {
             active: None,
             windows: vec![],
             capped: false,
+            dpms: None,
         };
         assert_eq!(
             downgrade_on_focus_mismatch(Bucket::Learning, &no_wm),
@@ -1390,6 +1544,7 @@ mod tests {
             active: Some(11),
             windows: vec![],
             capped: false,
+            dpms: None,
         };
         assert_eq!(foreground_pid(&advisory_only), Some(11));
         assert_eq!(
@@ -1404,6 +1559,7 @@ mod tests {
             active: Some(10),
             windows: vec![],
             capped: true,
+            dpms: None,
         };
         assert_eq!(
             downgrade_on_focus_mismatch(Bucket::Learning, &capped),

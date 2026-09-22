@@ -22,7 +22,6 @@ real = [
     "charter-ipc/real",
     "charter-spine/real",
     "dep:zbus",
-    "dep:libc",
     "dep:reqwest",
 ]
 
@@ -51,13 +50,20 @@ tokio = { workspace = true }
 # QueryClientIds) instead of believing `_NET_WM_PID`, which any client on the
 # display can delete or rewrite. Pure-Rust wire protocol, no libxcb/Xlib C deps
 # — same version and style as charter-lock, so it builds on the headless gate.
-x11rb = { version = "0.13", default-features = false, features = ["res"] }
+x11rb = { version = "0.13", default-features = false, features = ["res", "dpms"] }
 # real-only: the live org.forgesworn.Charter1 zbus server.
 zbus = { version = "4.4", optional = true, default-features = false, features = [
     "tokio",
 ] }
-# real-only: SIGTERM a ward's blocked per-app processes (POSIX kill(2)).
-libc = { version = "0.2", optional = true }
+# NOT optional: the exec.allow confused-deputy guard opens every candidate with
+# `openat2(2)` under RESOLVE_BENEATH in EVERY build, mock included — the guard's
+# containment rule is not a thing we compile out. (Also real-only: SIGTERM a
+# ward's blocked per-app processes, POSIX kill(2).)
+libc = { version = "0.2" }
+# The guardian↔machine NIP-44 conversation key is held here for the lifetime of
+# the daemon (it answers every offline unlock), so it is held in `Zeroizing` and
+# wiped on drop rather than left in freed heap.
+zeroize = { workspace = true }
 # real-only (D2): download release-event-named deb blobs from Blossom mirrors.
 # rustls-only, reusing the TLS stack the relay websocket already links — the
 # first (and only) HTTP client in the linux tree.

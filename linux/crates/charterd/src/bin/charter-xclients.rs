@@ -31,10 +31,22 @@
 //! ```text
 //! v1
 //! capped                     (only when a budget below truncated the answer)
+//! dpms <on|standby|suspend|off|unknown>
 //! focus <pid|->
 //! active <pid|->
 //! win <0xhexid> <pid|->
 //! ```
+//!
+//! The `dpms` line is the display's POWER state, and it is here because it is
+//! the only "is the ward actually at this machine?" signal on a Linux desktop
+//! that the ward cannot set. logind's `IdleHint`/`LockedHint` — which the meter
+//! used to trust — are writable by the session's own user with no polkit prompt
+//! at all (`busctl --system call org.freedesktop.login1 \
+//! /org/freedesktop/login1/session/self org.freedesktop.login1.Session \
+//! SetIdleHint b true`), so a ward could loop that and never be charged a
+//! second. The X server's DPMS power level is server state: setting it means
+//! actually powering the monitor down, which is indistinguishable from not
+//! using the machine because it IS not using the machine.
 //!
 //! Exit 0 with that on stdout, or non-zero with nothing on stdout. Anything the
 //! server says is treated as data: no indexing, no `unwrap`, no panic path.
@@ -44,7 +56,9 @@ use std::error::Error;
 use std::fmt::Write as _;
 
 use x11rb::connection::{Connection, RequestConnection as _};
+use x11rb::cookie::Cookie;
 use x11rb::errors::ReplyError;
+use x11rb::protocol::dpms::{self, ConnectionExt as _, InfoReply};
 use x11rb::protocol::res::{self, ClientIdMask, ClientIdSpec, ConnectionExt as _};
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, InputFocus, MapState, WindowClass};
 use x11rb::rust_connection::RustConnection;
@@ -116,6 +130,7 @@ fn run() -> Result<String, Box<dyn Error>> {
     // `res::` call, so the atom interning and the focus/tree queries ride along
     // with it instead of waiting behind it.
     conn.prefetch_extension_information(res::X11_EXTENSION_NAME)?;
+    conn.prefetch_extension_information(dpms::X11_EXTENSION_NAME)?;
     let active_atom = conn.intern_atom(true, b"_NET_ACTIVE_WINDOW")?;
     let list_atom = conn.intern_atom(true, b"_NET_CLIENT_LIST")?;
     let focus = conn.get_input_focus()?;
@@ -132,6 +147,14 @@ fn run() -> Result<String, Box<dyn Error>> {
         )
         .into());
     }
+
+    // Issued here so it rides the same round trip as the replies read below.
+    // Unlike XRes, a missing DPMS extension is NOT fatal: it costs the meter a
+    // fact it would like, and the caller's mapping treats "unknown" exactly as
+    // it treats "on" — the charging direction. Refusing to answer at all would
+    // instead hand a ward with a DPMS-less server a display charterd cannot
+    // read, which is strictly worse for everything else in this snapshot.
+    let dpms = conn.dpms_info().ok();
 
     let active_atom = active_atom.reply()?.atom;
     let list_atom = list_atom.reply()?.atom;
@@ -170,12 +193,43 @@ fn run() -> Result<String, Box<dyn Error>> {
     if capped.0 {
         out.push_str("capped\n");
     }
+    let _ = writeln!(out, "dpms {}", dpms_level(dpms));
     let _ = writeln!(out, "focus {}", field(pid_of(focus_win)));
     let _ = writeln!(out, "active {}", field(pid_of(active_win)));
     for (win, pid) in &pids {
         let _ = writeln!(out, "win 0x{win:x} {}", field(*pid));
     }
     Ok(out)
+}
+
+/// The monitor's power level, as `DPMSInfo` reports it.
+///
+/// `unknown` covers every way the question can go unanswered — no DPMS
+/// extension on this server, a request that could not even be serialised, an X
+/// error in the reply — and charterd maps it the same way it maps `on`: keep
+/// charging. An idle classification must be POSITIVELY evidenced, exactly as
+/// every other probe in this tree fails toward the costing direction.
+///
+/// `state` (DPMS ENABLED) is deliberately folded in ahead of `power_level`: a
+/// server with DPMS disabled does no power management at all, so whatever
+/// `power_level` it reports is stale bookkeeping rather than a monitor that is
+/// off. `xset -dpms` therefore reads as `on` — the ward has turned off the only
+/// thing that could ever stop their clock, which costs them time rather than
+/// saving it.
+fn dpms_level(info: Option<Cookie<'_, impl Connection, InfoReply>>) -> &'static str {
+    let Some(reply) = info.and_then(|c| c.reply().ok()) else {
+        return "unknown";
+    };
+    if !reply.state {
+        return "on";
+    }
+    match u16::from(reply.power_level) {
+        0 => "on",
+        1 => "standby",
+        2 => "suspend",
+        3 => "off",
+        _ => "unknown",
+    }
 }
 
 /// `-` is "the server would not tell us", which charterd reads as evidence of a

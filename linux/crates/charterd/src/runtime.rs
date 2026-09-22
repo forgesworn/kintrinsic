@@ -401,72 +401,22 @@ fn build_broker(
     Broker::new(sys, transport, RealEntropy, registry, events, subject)
 }
 
-/// The active (foreground) session on the seat (`CHARTER_SEAT` overrides
-/// `seat0`), as `(uid, session id)`. Both [`active_session_uid`] and
-/// [`session_activity`] need the session id — resolving it once here and
-/// reusing it avoids a second `show-seat` round trip per tick. Degrades to
-/// `None` if logind is unresponsive — see `loginctl_value` for why that must
-/// never block.
-fn active_session() -> Option<(u32, String)> {
+/// The uid of the active (foreground) session on the seat (`CHARTER_SEAT`
+/// overrides `seat0`). The only user whose time is charged. Degrades to `None`
+/// if logind is unresponsive — see `loginctl_value` for why that must never
+/// block.
+///
+/// This is now ALL logind is asked for on the metering path. The session id it
+/// used to return alongside the uid existed to feed `session_activity`, which
+/// read logind's `IdleHint`/`LockedHint` — and those are ward-settable (see
+/// [`crate::focus::activity_from_dpms`]). Activity comes from the X server's
+/// DPMS power state instead, so there is nothing left to resolve a sid for.
+fn active_session_uid() -> Option<u32> {
     let seat = std::env::var("CHARTER_SEAT").unwrap_or_else(|_| "seat0".into());
     let sid = loginctl_value(&["show-seat", &seat, "--property=ActiveSession"])?;
-    let uid = loginctl_value(&["show-session", &sid, "--property=User"])?
+    loginctl_value(&["show-session", &sid, "--property=User"])?
         .parse()
-        .ok()?;
-    Some((uid, sid))
-}
-
-/// The uid of the active (foreground) session on the seat. The only user
-/// whose time is charged.
-fn active_session_uid() -> Option<u32> {
-    active_session().map(|(uid, _)| uid)
-}
-
-/// G1 (03b-linux-charterd-bins-matching): "screen time" means the screen is
-/// ON and UNLOCKED, not merely that the ward's uid owns the active session —
-/// a child who locks the screen (or whose screensaver blanks it) must stop
-/// being charged. logind's own session hints carry exactly this: desktops
-/// set `LockedHint` when the screensaver/lock engages, and `IdleHint` follows
-/// input idleness but is INHIBITED by anything that counts as "using the
-/// machine" (a fullscreen video player, a game) — so it does not charge a
-/// child watching a film as idle the way raw input-idle would.
-/// `LockedHint` wins over `IdleHint` (a locked-but-not-yet-idle screen is
-/// still locked). Fails toward `Active` (today's behaviour, and the
-/// direction every other probe in this file fails) when the probe itself
-/// cannot answer — an idle/locked classification must be POSITIVELY
-/// evidenced, never assumed from silence.
-fn session_activity(sid: &str) -> charter_schedule::Activity {
-    match loginctl_value(&[
-        "show-session",
-        sid,
-        "--property=LockedHint",
-        "--property=IdleHint",
-    ]) {
-        Some(out) => activity_from_hints(&out),
-        None => charter_schedule::Activity::Active,
-    }
-}
-
-/// Parse `loginctl show-session --property=LockedHint --property=IdleHint
-/// --value`'s output: one "yes"/"no" line per property, in the order
-/// requested (LockedHint first, IdleHint second) — confirmed on this machine
-/// (`loginctl show-session <sid> -p LockedHint -p IdleHint --value` prints
-/// two lines). Pure so it is unit-tested without a live logind; case and
-/// stray whitespace come from loginctl, not from us (see
-/// `display_protocol_note`'s test for the same discipline elsewhere in this
-/// file). Anything short of two readable lines, or two "no"s, is Active —
-/// the fail-toward-charging direction.
-fn activity_from_hints(output: &str) -> charter_schedule::Activity {
-    let mut lines = output.lines().map(|l| l.trim().to_ascii_lowercase());
-    let locked = lines.next().is_some_and(|l| l == "yes");
-    if locked {
-        return charter_schedule::Activity::Locked;
-    }
-    let idle = lines.next().is_some_and(|l| l == "yes");
-    if idle {
-        return charter_schedule::Activity::Idle;
-    }
-    charter_schedule::Activity::Active
+        .ok()
 }
 
 /// The active (foreground) session's `DISPLAY` + `XAUTHORITY`, read from its
@@ -766,35 +716,113 @@ fn pause_flag_path() -> String {
 /// window (the flag file's mtime is what ages).
 const PAUSE_MAX_SECS: i64 = 4 * 3600;
 
+/// How far into the FUTURE a pause flag's mtime may sit before it stops being
+/// clock skew and becomes a bogus stamp (03-G5).
+///
+/// An hour covers every ordinary way a stamp legitimately reads ahead of the
+/// clock: a timezone-confused RTC read at boot, an NTP step that has not landed
+/// yet, a filesystem mounted from a machine a few minutes fast.
+const PAUSE_FUTURE_SLACK_SECS: i64 = 3600;
+
+/// Why a pause flag is no longer in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseLapse {
+    /// Older than [`PAUSE_MAX_SECS`] — the ordinary four-hour expiry.
+    Expired,
+    /// Stamped more than [`PAUSE_FUTURE_SLACK_SECS`] in the FUTURE (03-G5).
+    FutureStamp,
+}
+
+/// Whether a pause flag whose mtime is `age_secs` old is still in force.
+///
+/// `age_secs` is SIGNED and that is the whole point: positive is a stamp in the
+/// past, NEGATIVE is a stamp in the future, and `None` is an mtime that could
+/// not be read at all.
+///
+/// 03-G5: this used to be computed with `SystemTime::elapsed()`, which returns
+/// `Err` for a future mtime — collapsing "stamped next year" into the same
+/// `None` as "unreadable", which is treated as a live pause. A pause flag
+/// stamped in the future therefore never aged and never lapsed: `touch -d
+/// "next year" /run/charter/paused` disabled enforcement until reboot. A stamp
+/// that far ahead is not a pause somebody issued, it is a bogus stamp, and it
+/// lapses.
+///
+/// An UNREADABLE mtime is still a LIVE pause. That is deliberate and unchanged:
+/// silently re-freezing a box somebody is in the middle of repairing is the
+/// worse of the two failure directions, and the next reboot clears it
+/// regardless (`/run` is a `RuntimeDirectory`).
+fn pause_lapse(age_secs: Option<i64>) -> Option<PauseLapse> {
+    match age_secs {
+        Some(a) if a > PAUSE_MAX_SECS => Some(PauseLapse::Expired),
+        Some(a) if a < -PAUSE_FUTURE_SLACK_SECS => Some(PauseLapse::FutureStamp),
+        _ => None,
+    }
+}
+
+/// The STATUS a PAUSED device publishes for one child: last tick's payload,
+/// re-stamped `now`, with `pausedByAdmin` set and nothing locked.
+///
+/// The numbers are deliberately frozen. They are the last ones enforcement
+/// actually produced, and a pause means no enforcement pass ran to produce new
+/// ones — so moving them would be inventing usage the device did not meter.
+/// What DOES change is the two things that are no longer true: `locked` (the
+/// pause thawed everything) and the timestamp.
+///
+/// Pure, so the freeze rule is tested without a relay.
+fn paused_status(last: &charter_proto::StatusPayload, now: u64) -> charter_proto::StatusPayload {
+    let mut cur = last.clone();
+    cur.ts = now;
+    cur.paused_by_admin = Some(true);
+    // `thaw_all` has just run: nothing on this device is locked while the pause
+    // is in force, and a `locked` that stayed true would have the guardian
+    // looking at a lock screen that is not there.
+    cur.locked = false;
+    cur.lock_reason = None;
+    cur
+}
+
 /// True while an admin has paused enforcement via the Recovery tool, with a
-/// pause older than [`PAUSE_MAX_SECS`] lapsing here — once, loudly.
+/// pause older than [`PAUSE_MAX_SECS`] — or stamped in the future — lapsing
+/// here, once and loudly. The verdict itself is [`pause_lapse`].
 ///
 /// The age is the flag file's mtime, so "re-issue the pause" is simply
-/// "rewrite the flag", which is what the Recovery tool already does. An
-/// unreadable mtime is treated as a LIVE pause, not a lapsed one: the failure
-/// direction that silently re-freezes a box somebody is in the middle of
-/// repairing is the worse of the two, and the next reboot clears it regardless.
+/// "rewrite the flag", which is what the Recovery tool already does.
 fn enforcement_paused() -> bool {
     let path = pause_flag_path();
     let Ok(meta) = std::fs::metadata(&path) else {
         return false;
     };
+    // Signed seconds: `duration_since` succeeds for a past mtime and hands back
+    // the forward distance in its error for a future one, which is exactly the
+    // case `elapsed()` threw away.
     let age = meta
         .modified()
         .ok()
-        .and_then(|m| m.elapsed().ok())
-        .map(|d| d.as_secs() as i64);
-    if age.is_some_and(|a| a > PAUSE_MAX_SECS) {
-        eprintln!(
-            "charterd: the recovery pause has been in force for over {}h — it has \
-             LAPSED and enforcement is resuming. Re-issue it from Recovery if the \
-             machine still needs it.",
-            PAUSE_MAX_SECS / 3600
-        );
-        let _ = std::fs::remove_file(&path);
-        return false;
+        .map(|m| match std::time::SystemTime::now().duration_since(m) {
+            Ok(d) => d.as_secs() as i64,
+            Err(e) => -(e.duration().as_secs() as i64),
+        });
+    match pause_lapse(age) {
+        None => true,
+        Some(why) => {
+            match why {
+                PauseLapse::Expired => eprintln!(
+                    "charterd: the recovery pause has been in force for over {}h — it has \
+                     LAPSED and enforcement is resuming. Re-issue it from Recovery if the \
+                     machine still needs it.",
+                    PAUSE_MAX_SECS / 3600
+                ),
+                PauseLapse::FutureStamp => eprintln!(
+                    "charterd: the recovery pause flag is stamped in the FUTURE — it cannot \
+                     age out, so it is being treated as LAPSED and enforcement is resuming. \
+                     Check this machine's clock, then re-issue the pause from Recovery if it \
+                     is still needed."
+                ),
+            }
+            let _ = std::fs::remove_file(&path);
+            false
+        }
     }
-    true
 }
 
 /// Make the box usable again: thaw every managed child's app.slice, drop the
@@ -1038,7 +1066,13 @@ struct LockSpawnCtx<'a> {
     paired: bool,
     /// `Some` (paired) → derive a per-lock challenge + expected code and hand
     /// both to `charter-lock`; `None` (device-only) → no offline unlock.
-    unlock_conv_key: Option<[u8; 32]>,
+    ///
+    /// Borrowed rather than copied: the owner is a [`zeroize::Zeroizing`] in
+    /// [`run`], and copying it out per tick would scatter plaintext copies of
+    /// the key that nothing wipes. This is the key that answers every offline
+    /// unlock on the device — it must live in exactly one place and be wiped
+    /// when that place drops.
+    unlock_conv_key: Option<&'a [u8; 32]>,
 }
 
 /// Apply each child's freeze/thaw to **their** app.slice, and show/kill the
@@ -1191,7 +1225,7 @@ async fn apply_child_decisions(
                 // challenge).
                 if let Some(conv_key) = ctx.unlock_conv_key {
                     if let Some(challenge) = random_challenge() {
-                        let expected = charter_crypto::unlock::unlock_code(&conv_key, &challenge);
+                        let expected = charter_crypto::unlock::unlock_code(conv_key, &challenge);
                         cmd.env("CHARTER_LOCK_CHALLENGE", &challenge)
                             .env("CHARTER_LOCK_UNLOCK_EXPECT", expected);
                     }
@@ -1478,16 +1512,51 @@ fn managed_home_dirs(passwd: &str, roster: &ManagedRoster) -> Vec<String> {
         .collect()
 }
 
+/// 02b-G3: what an unloadable machine key means for this run — the key to use
+/// (`None`: there is no usable identity, so nothing that needs one runs) and
+/// the message to log once, if any.
+///
+/// Split out of [`run`] purely so the decision is testable: `run` itself has no
+/// harness (it takes over the process), and the property worth pinning is that
+/// a key error yields a degraded run rather than an `Err` out of `run`, which
+/// `Restart=always` turns into a crash loop with no enforcement at all.
+fn machine_key_outcome(
+    loaded: charter_sys::SysResult<[u8; 32]>,
+) -> (Option<[u8; 32]>, Option<String>) {
+    match loaded {
+        Ok(secret) => (Some(secret), None),
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
 /// Provision identity, (optionally) stand up the guardian broker, and run the
 /// per-child enforce loop forever. Returns only on a fatal setup error.
 pub async fn run(config: DaemonConfig) -> Result<(), String> {
-    let secret = RealMachineSigner::load_or_create_secret(&config.key_path)
-        .map_err(|e| format!("machine key: {e}"))?;
+    // 02b-G3: a machine key that will not load is NOT a reason to exit. `run()`
+    // used to `?` this straight out of the process, and with `Restart=always`
+    // in the unit that is a crash loop in which NOTHING is enforced — a
+    // loose-mode or foreign-owned key file (exactly the condition 02b-G3's own
+    // check added) would therefore hand the ward an unlimited machine. It takes
+    // the same path 01-B4 opened for a transport that will not construct: say
+    // so once, at error level, mark the transport unavailable, stand up no
+    // broker, and keep enforcing every clause already cached on disk.
+    let (secret, key_error) =
+        machine_key_outcome(RealMachineSigner::load_or_create_secret(&config.key_path));
+    if let Some(e) = &key_error {
+        eprintln!(
+            "charterd: ERROR — machine key: {e}. No guardian transport, no pairing and no \
+             device pairing code this run; cached clauses are STILL enforced from disk. Fix \
+             the key file's owner/mode and restart charterd."
+        );
+    }
 
     // Surface this device's pairing code (its pubkey) so the parent can enter it
     // in Kintrinsic to address guardian clauses to THIS device. The pubkey is
     // public — write it world-readable and log it for the setup flow to show.
-    if let Some(code) = crate::device_code::device_pairing_code(&secret) {
+    if let Some(code) = secret
+        .as_ref()
+        .and_then(crate::device_code::device_pairing_code)
+    {
         let _ = std::fs::write("/var/lib/charter/device.pub", format!("{code}\n"));
         eprintln!("charterd: device pairing code (enter in Kintrinsic): {code}");
     }
@@ -1605,14 +1674,19 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // construction below can fail independently (each is its own transport),
     // and either failing sets this — see `transport_unavailable` on
     // `PublishedState`/`StatusPayload`.
-    let mut transport_unavailable = false;
+    //
+    // G3 folds the machine key itself into the same flag: with no usable key
+    // there is no identity to sign or encrypt with, so every transport below is
+    // unavailable before it is even attempted, and the guardian is told so
+    // through the one field that already means exactly this.
+    let mut transport_unavailable = secret.is_none();
 
     // A dedicated transport handle for the STATUS feed (paired only) — a second
     // stateless relay handle, so publishing status never contends with the
     // broker's own transport. `status_last` throttles per-child re-publishes.
     let (status_tx, status_machine): (Option<RealTransportFacade>, Option<PubKey>) =
-        match pairing_opt.as_ref() {
-            Some(p) => {
+        match (pairing_opt.as_ref(), secret) {
+            (Some(p), Some(secret)) => {
                 match RealTransportFacade::try_new(secret, p.guardian_pubkey, p.relays.clone()) {
                     Ok(tx) => {
                         let m = tx.machine;
@@ -1627,7 +1701,9 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                     }
                 }
             }
-            None => (None, None),
+            // Unpaired, or paired with no usable machine key (G3 — already
+            // logged at error level above).
+            _ => (None, None),
         };
     let mut status_last: std::collections::HashMap<u32, charter_proto::StatusPayload> =
         std::collections::HashMap::new();
@@ -1638,9 +1714,18 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // freed by the guardian answering from Kintrinsic — no network, clock, or
     // memorized secret. `None` (unpaired, or a key that won't derive) leaves the
     // lock's device-only escape untouched.
-    let unlock_conv_key: Option<[u8; 32]> = pairing_opt.as_ref().and_then(|p| {
-        charter_transport::nip44::conversation_key(&secret, p.guardian_pubkey.as_bytes()).ok()
-    });
+    //
+    // Held in `Zeroizing` so it is wiped when the daemon drops it: this key is
+    // the guardian↔machine shared secret, and a plaintext copy of it left in
+    // freed heap is a copy of the thing every offline unlock is answered
+    // against.
+    let unlock_conv_key: Option<zeroize::Zeroizing<[u8; 32]>> = pairing_opt
+        .as_ref()
+        .zip(secret.as_ref())
+        .and_then(|(p, s)| {
+            charter_transport::nip44::conversation_key_zeroizing(s, p.guardian_pubkey.as_bytes())
+                .ok()
+        });
 
     // If paired, stand up the broker for guardian grants (install/exec) + its
     // signal channel. Per-child screen-time enforcement runs either way — a
@@ -1648,8 +1733,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // to construct, B4) still leaves every cached clause on disk enforced by
     // the rest of this loop, which reads them straight from `sys`, not
     // through the broker.
-    let (broker, signal_rx): (Option<Arc<RealBroker>>, Option<_>) = match pairing_opt {
-        Some(pairing) => {
+    let (broker, signal_rx): (Option<Arc<RealBroker>>, Option<_>) = match (pairing_opt, secret) {
+        // G3: paired, but no usable machine key. There is nothing to sign with,
+        // so there is no broker and no pair listener — and, exactly as in the
+        // B4 branch below, every clause already cached on disk goes on being
+        // enforced by the rest of this loop. The error was logged once at the
+        // top of `run`; repeating it here every restart would bury it.
+        (Some(_), None) | (None, None) => (None, None),
+        (Some(pairing), Some(secret)) => {
             let enforcer = Arc::new(Mutex::new(EnforcerRuntime::new(&sys, "UTC")));
             match RealTransportFacade::try_new(
                 secret,
@@ -1680,7 +1771,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 }
             }
         }
-        None => {
+        (None, Some(secret)) => {
             eprintln!(
                 "charterd: not paired — per-child device-only enforcement (limits in {})",
                 config.child_limits_dir
@@ -1824,10 +1915,37 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             // the ward's console and the guardian's view simply stopped moving
             // — indistinguishable from a daemon that had died, and the two want
             // opposite reactions. Keep publishing, and say plainly that this is
-            // a pause. (The STATUS wire carries no flag for it; see the module
-            // note above `run`.)
+            // a pause.
             for user in crate::state_file::published_users() {
                 crate::state_file::mark_paused(&user, now);
+            }
+            // …and the same on the GUARDIAN's wire, which is where 03-G5's
+            // point actually lands: the phone is the only place a parent looks.
+            // The tick below that builds a fresh STATUS is skipped during a
+            // pause (every number it reads comes from an enforcement pass that
+            // is not running), so re-publish the LAST payload with its numbers
+            // frozen, `pausedByAdmin` set and nothing locked — which is the
+            // truth, `thaw_all` having just run. `should_emit_status` gives it
+            // the ordinary cadence: once when the pause starts (nothing is
+            // locked any more — a displayable state change) and then on the
+            // heartbeat, so a pause is neither a flood nor a silence.
+            //
+            // A device paused since before charterd started has no last
+            // payload to freeze and so publishes nothing: there are no numbers
+            // to report and inventing some would be worse than the state file's
+            // own account, which is published above regardless.
+            if let Some(stx) = &status_tx {
+                for last in status_last.values_mut() {
+                    let cur = paused_status(last, now as u64);
+                    if crate::status_emit::should_emit_status(
+                        Some(last),
+                        &cur,
+                        STATUS_HEARTBEAT_SECS,
+                    ) {
+                        stx.emit_status(&cur.to_json(), now as u64).await;
+                        *last = cur;
+                    }
+                }
             }
             // The tick is alive and doing its job — a pause is not a hang, and
             // the watchdog must not kill a deliberately idle daemon.
@@ -1836,6 +1954,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             if slow_tick {
                 if let Some(b) = &broker {
                     b.poll_once().await;
+                    // 04-G5: relays can take minutes to time out, and a paused
+                    // daemon killed by the watchdog is thawed by ExecStopPost
+                    // exactly like a running one.
+                    crate::watchdog::ping();
                 }
             }
             tokio::time::sleep(fast).await;
@@ -2071,20 +2193,55 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         //    traffic; an appRules-only family must still probe, since that's
         //    exactly the family whose renamed-binary bypass §2.3 exists for).
         // Session detection + focus-window attribution shell out to
-        // loginctl/xprop and scan /proc — all synchronous, and on a wedged
-        // X/logind each blocks up to ~2s. Run them on the blocking pool so a
-        // stalled probe can't occupy this worker and starve the D-Bus serve
-        // task. Ordering is preserved: uid first, then (only when some
-        // identity clause is live) the X probe, then the focus classification.
-        let (active, activity) = tokio::task::spawn_blocking(|| match active_session() {
-            Some((uid, sid)) => (Some(uid), session_activity(&sid)),
-            None => (None, charter_schedule::Activity::Active),
-        })
-        .await
-        // B6: no answer this tick — nobody is charged, nothing is thawed, and
-        // the next tick asks again. A panicking probe must not be a crash-loop
-        // that thaws the box on every exit.
-        .unwrap_or((None, charter_schedule::Activity::Active));
+        // loginctl/charter-xclients and scan /proc — all synchronous, and on a
+        // wedged X/logind each blocks up to ~2s. Run them on the blocking pool
+        // so a stalled probe can't occupy this worker and starve the D-Bus
+        // serve task. Ordering is preserved: uid first, then the X probe, then
+        // the focus classification.
+        let active = tokio::task::spawn_blocking(active_session_uid)
+            .await
+            // B6: no answer this tick — nobody is charged, nothing is thawed,
+            // and the next tick asks again. A panicking probe must not be a
+            // crash-loop that thaws the box on every exit.
+            .unwrap_or(None);
+
+        // 2-pre) ONE `charter-xclients` run for the whole tick (G1 + the
+        //     one-probe rule in `focus::snapshot_tick`). It answers three
+        //     separate questions that used to cost a probe each:
+        //       * is this tick screen time at all (DPMS power level);
+        //       * which meter/bucket the foreground window is (Session model);
+        //       * which named allowances have a window open (Named model).
+        //     Skipped entirely when NOTHING is metered on this box, so an
+        //     unconfigured host still never pays for an X probe — the I5
+        //     inert-until-clause property, now keyed on "is any child governed"
+        //     rather than on which clause kinds are live, because the activity
+        //     question is asked for every governed child regardless of clause.
+        let session_x = if policies.is_empty() {
+            None
+        } else {
+            tokio::task::spawn_blocking(active_session_x)
+                .await
+                .ok()
+                .flatten()
+        };
+        let xsnap = match session_x {
+            Some((display, xauth)) => tokio::task::spawn_blocking(move || {
+                crate::focus::snapshot_tick(&display, xauth.as_deref())
+            })
+            .await
+            .ok()
+            .flatten(),
+            None => None,
+        };
+        // G1: screen time is time the SCREEN IS ON. logind's `IdleHint`/
+        // `LockedHint` used to answer this and are settable by the ward's own
+        // session with no polkit prompt — a ward who looped `SetIdleHint true`
+        // was never charged. They are not read anywhere in this daemon now.
+        // No snapshot (no display, Wayland, a helper that failed, an X server
+        // with no DPMS extension) is `Active`: fail toward charging.
+        let activity = xsnap
+            .as_ref()
+            .map_or(charter_schedule::Activity::Active, |s| s.activity());
         // Log the TRANSITION, not the state — same discipline as the Named
         // model's `display_unreadable` line below: this branch runs every
         // couple of seconds, and the fact worth having in the journal is
@@ -2092,11 +2249,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         if activity != last_activity {
             if activity != charter_schedule::Activity::Active {
                 eprintln!(
-                    "charterd: the active session is {activity:?} — screen-time charging is \
-                     paused until it is unlocked and active again"
+                    "charterd: the screen is powered down ({activity:?}) — screen-time charging \
+                     is paused until the display comes back on"
                 );
             } else {
-                eprintln!("charterd: the active session is active again — charging resumed");
+                eprintln!("charterd: the screen is on again — charging resumed");
             }
             last_activity = activity;
         }
@@ -2147,10 +2304,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             .filter(|g| !g.is_paused())
             .map(|g| g.blocked.into_iter().chain(g.allowed).collect())
             .unwrap_or_default();
-        // One X probe answers ALL THREE questions (which meter, which bucket,
-        // unrecognised) — two probes could straddle an app switch and credit
-        // one app's second to another app's allowance. Skipped entirely when
-        // NOTHING governs this child, so an unconfigured host never pays for it.
+        // The tick's ONE snapshot (taken at 2-pre) answers ALL THREE questions
+        // here — which meter, which bucket, unrecognised — and the activity
+        // decision above besides. Two probes could straddle an app switch and
+        // credit one app's second to another app's allowance. Classification is
+        // skipped entirely when NOTHING governs this child, so a governed box
+        // with an ungoverned child still pays only for the probe the activity
+        // decision already needed.
         let (bucket, app_bucket, unrecognised) = if learning_apps.is_empty()
             && buckets_body.buckets.is_empty()
             && app_rule_pkgs.is_empty()
@@ -2158,12 +2318,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         {
             (charter_schedule::Bucket::Screen, None, false)
         } else {
-            let session_x = tokio::task::spawn_blocking(active_session_x)
-                .await
-                .ok()
-                .flatten();
-            match session_x {
-                Some((display, xauth)) => {
+            match xsnap.clone() {
+                Some(snap) => {
                     let b = buckets_body.clone();
                     // C-C: `None` while the inventory has never answered —
                     // `classify` then refuses the free-time grant that
@@ -2182,9 +2338,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                     // scopes itself to ward-owned EXECUTABLES, which
                     // `exe_uid` settles on its own.
                     tokio::task::spawn_blocking(move || {
-                        crate::focus::attribute_tick(
-                            &display,
-                            xauth.as_deref(),
+                        crate::focus::attribute_snapshot(
+                            &snap,
                             &learning_apps,
                             &b,
                             user_installed.as_ref(),
@@ -2230,44 +2385,30 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 )
             }
             // Named: every allowance with a window open, not just the focused
-            // one. A second probe of the SAME display in the same tick is safe
-            // here in a way a second focus probe never was — two focus probes
-            // could straddle an app switch and credit one app's second to
-            // another's allowance, whereas the open-window set is what it is
-            // regardless of which member of it happens to be in front.
+            // one. Read off the SAME snapshot as the focused-window path and
+            // the activity decision — the tick's one probe. `None` there covers
+            // both "no display to resolve at all" (a Wayland seat, no Xorg on
+            // the active VT) and "found it, could not read it": indistinguish-
+            // able for metering, and charged the same.
             charter_schedule::TimeModel::Named => {
-                let open = match tokio::task::spawn_blocking(active_session_x)
+                let open = {
+                    let b = buckets_body.clone();
+                    // Named is read off the ACTIVE child's own budget, so
+                    // `active` is Some here by construction. `u32::MAX`
+                    // owns no process, so even an impossible None can only
+                    // lose the unidentified-window fallback, never widen
+                    // it to somebody else's processes.
+                    let ward_uid = active.unwrap_or(u32::MAX);
+                    let snap = xsnap.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::focus::open_bucket_ids_snapshot(snap.as_ref(), &b, ward_uid)
+                    })
                     .await
-                    .ok()
-                    .flatten()
-                {
-                    Some((display, xauth)) => {
-                        let b = buckets_body.clone();
-                        // Named is read off the ACTIVE child's own budget, so
-                        // `active` is Some here by construction. `u32::MAX`
-                        // owns no process, so even an impossible None can only
-                        // lose the unidentified-window fallback, never widen
-                        // it to somebody else's processes.
-                        let ward_uid = active.unwrap_or(u32::MAX);
-                        tokio::task::spawn_blocking(move || {
-                            crate::focus::open_bucket_ids_tick(
-                                &display,
-                                xauth.as_deref(),
-                                &b,
-                                ward_uid,
-                            )
-                        })
-                        .await
-                        // `None` already means "this display could not be
-                        // read", which is exactly what a probe that did not
-                        // answer amounts to — and it charges the Session
-                        // baseline rather than nothing.
-                        .unwrap_or(None)
-                    }
-                    // No display to resolve at all (a Wayland seat, no Xorg on
-                    // the active VT). Indistinguishable, for metering, from a
-                    // display we found and could not read.
-                    None => None,
+                    // `None` already means "this display could not be
+                    // read", which is exactly what a probe that did not
+                    // answer amounts to — and it charges the Session
+                    // baseline rather than nothing.
+                    .unwrap_or(None)
                 };
                 // Log the TRANSITION, not the state: this branch runs every
                 // two seconds, and the fact worth having in the journal is
@@ -2552,7 +2693,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                     lock_bin: &lock_bin,
                     infos: &lock_infos,
                     paired: broker.is_some(),
-                    unlock_conv_key,
+                    unlock_conv_key: unlock_conv_key.as_deref(),
                 },
                 &roster,
                 &mut lock,
@@ -2667,9 +2808,26 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             }
         }
 
+        // 04-G5: the network section starts here, and it is the only part of a
+        // tick that can legitimately take minutes. Every relay operation below
+        // carries its own ~8s timeout and the tick runs one per operation per
+        // relay, so a slow tick against several unreachable relays is ordinary
+        // correct behaviour — but to `WatchdogSec` it was indistinguishable
+        // from a deadlock, and the kill it triggered ran `ExecStopPost=
+        // charter-recovery --thaw-all`, unfreezing every managed child. A bad
+        // Wi-Fi night became a fail-open.
+        //
+        // So the tick vouches for itself ACROSS the wait rather than only
+        // after it: once here, once between each relay operation, and once
+        // when the section is done. `ping` only says "this loop is alive";
+        // `record` — which is the stamp enforcement is judged by — is
+        // deliberately NOT repeated, because no enforcement happens down here.
+        crate::watchdog::ping();
+
         // 5) If paired: subscribe -> verify -> enact guardian grants (install/exec).
         if let Some(b) = &broker {
             let poll = b.poll_once().await;
+            crate::watchdog::ping();
             if poll.relays_unreachable {
                 consecutive_unreachable = consecutive_unreachable.saturating_add(1);
             } else {
@@ -2733,8 +2891,21 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 // limit would discard them wholesale. Read with `source`, these
                 // tell the guardian both the rule and who set it.
                 if let Some(b) = pol.budget.as_ref() {
-                    status.daily_minutes = b.daily_minutes;
-                    status.weekly_minutes = b.weekly_minutes;
+                    if b.is_supported_version() {
+                        status.daily_minutes = b.daily_minutes;
+                        status.weekly_minutes = b.weekly_minutes;
+                    } else {
+                        // A body version this build does not implement enforces
+                        // ZERO (`quota_parts_signed_pooled` checks the version
+                        // before anything else, precisely so serde silently
+                        // dropping renamed fields cannot read as "no caps").
+                        // Reporting the raw v1-named fields here would have told
+                        // the guardian "two hours a day" while the device
+                        // allowed none — the readout disagreeing with the
+                        // enforcer about the one number a parent reads.
+                        status.daily_minutes = Some(0);
+                        status.weekly_minutes = Some(0);
+                    }
                 }
                 if pol.learning.as_ref().is_some_and(|l| !l.is_paused()) {
                     status.learning_today_secs = multi.learning_today(*uid, now);
@@ -2810,6 +2981,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                     STATUS_HEARTBEAT_SECS,
                 ) {
                     stx.emit_status(&status.to_json(), now as u64).await;
+                    // 04-G5: one relay round trip per child, each with its own
+                    // timeout — a family of four on four dead relays is minutes
+                    // of correct waiting, so vouch between them.
+                    crate::watchdog::ping();
                     status_last.insert(*uid, status);
                 }
             }
@@ -2842,6 +3017,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             let _ = web.force_lock(&sys).await;
         }
 
+        // 04-G5: the network section is done. Whatever it waited on, this loop
+        // came out the other side — say so before the sleep, so the next tick
+        // starts with the full watchdog window ahead of it rather than with
+        // whatever the relays left of it.
+        crate::watchdog::ping();
         tokio::time::sleep(fast).await;
     }
 }
@@ -3099,24 +3279,6 @@ mod tests {
         assert!(super::display_protocol_note(Some("x11")).is_none());
         assert!(super::display_protocol_note(Some("tty")).is_none());
         assert!(super::display_protocol_note(None).is_none());
-    }
-
-    /// G1 (03b-linux-charterd-bins-matching): parses
-    /// `loginctl show-session <sid> -p LockedHint -p IdleHint --value`'s
-    /// two-line output. `LockedHint` (line 1) wins over `IdleHint` (line 2);
-    /// anything short of a "yes" on either line, including empty/unreadable
-    /// output, is Active — the fail-toward-charging direction every other
-    /// probe in this file takes.
-    #[test]
-    fn activity_from_hints_parses_the_two_loginctl_lines() {
-        use charter_schedule::Activity;
-        assert_eq!(super::activity_from_hints("yes\nno"), Activity::Locked);
-        assert_eq!(super::activity_from_hints("no\nyes"), Activity::Idle);
-        assert_eq!(super::activity_from_hints("no\nno"), Activity::Active);
-        assert_eq!(super::activity_from_hints(""), Activity::Active);
-        // Case and stray whitespace come from loginctl, not from us — same
-        // discipline as `display_protocol_note` above.
-        assert_eq!(super::activity_from_hints("YES\n no "), Activity::Locked);
     }
 
     #[test]
@@ -3946,9 +4108,16 @@ mod inventory_budget_tests {
     // ---- 03-G5: a recovery pause expires ----
 
     /// Back-date a file's mtime by `secs`, so the pause can be aged without
-    /// waiting four hours for it.
+    /// waiting four hours for it. A NEGATIVE `secs` dates it FORWARD, which is
+    /// how the future-stamp case (03-G5) is reached without touching the
+    /// machine's clock.
     fn age_file(path: &str, secs: i64) {
-        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs as u64);
+        let now = std::time::SystemTime::now();
+        let when = if secs >= 0 {
+            now - std::time::Duration::from_secs(secs as u64)
+        } else {
+            now + std::time::Duration::from_secs(secs.unsigned_abs())
+        };
         let unix = when
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -4002,8 +4171,132 @@ mod inventory_budget_tests {
         std::fs::write(&flag, "").expect("re-issue");
         assert!(enforcement_paused());
 
+        // 03-G5 follow-up: a flag stamped in the FUTURE used to read as
+        // age=None (`SystemTime::elapsed` errors on a future mtime) and
+        // age=None is a LIVE pause — so `touch -d "next year"` produced a
+        // pause that could never age out. It lapses, and the flag is cleared.
+        age_file(&flag, -(PAUSE_FUTURE_SLACK_SECS + 600));
+        assert!(
+            !enforcement_paused(),
+            "a pause stamped in the future is a bogus stamp, not an immortal pause"
+        );
+        assert!(
+            !std::path::Path::new(&flag).exists(),
+            "the bogus flag is removed, not merely ignored"
+        );
+
+        // …but ordinary clock skew is NOT a bogus stamp: a stamp a few minutes
+        // ahead (an NTP step that has not landed, an RTC read at boot) is still
+        // an honest pause somebody issued.
+        std::fs::write(&flag, "").expect("re-issue");
+        age_file(&flag, -600);
+        assert!(
+            enforcement_paused(),
+            "a stamp inside the future slack is clock skew, and the pause holds"
+        );
+
         std::env::remove_var("CHARTER_PAUSE_FLAG");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 03-G5: the pure verdict behind the test above, including the boundaries
+    /// the filesystem test cannot hit exactly.
+    #[test]
+    fn a_pause_lapses_when_it_is_too_old_or_stamped_in_the_future() {
+        // In force.
+        assert_eq!(pause_lapse(Some(0)), None);
+        assert_eq!(pause_lapse(Some(PAUSE_MAX_SECS)), None);
+        // Too old.
+        assert_eq!(
+            pause_lapse(Some(PAUSE_MAX_SECS + 1)),
+            Some(PauseLapse::Expired)
+        );
+        // Future, within slack: clock skew, still in force.
+        assert_eq!(pause_lapse(Some(-1)), None);
+        assert_eq!(pause_lapse(Some(-PAUSE_FUTURE_SLACK_SECS)), None);
+        // Future, beyond slack: a bogus stamp that could never age out.
+        assert_eq!(
+            pause_lapse(Some(-PAUSE_FUTURE_SLACK_SECS - 1)),
+            Some(PauseLapse::FutureStamp)
+        );
+        // Unreadable mtime stays a LIVE pause — the fail direction that does
+        // not re-freeze a machine somebody is repairing.
+        assert_eq!(pause_lapse(None), None);
+    }
+
+    /// 02b-G3: an unloadable machine key degrades the run; it does not end it.
+    /// `run()` used to `?` this straight out of the process, which
+    /// `Restart=always` turned into a crash loop enforcing nothing at all —
+    /// with `ExecStopPost=charter-recovery --thaw-all` thawing the box on every
+    /// cycle. The key that WON'T load is exactly the loose-mode/foreign-owned
+    /// case 02b-G3's own check added, so the check would have caused the
+    /// bypass it was written to close.
+    #[test]
+    fn an_unloadable_machine_key_degrades_the_run_rather_than_ending_it() {
+        let (secret, err) = machine_key_outcome(Ok([7u8; 32]));
+        assert_eq!(secret, Some([7u8; 32]));
+        assert!(err.is_none());
+
+        let (secret, err) = machine_key_outcome(Err(charter_sys::SysError::Io(
+            "refusing a world-readable key".into(),
+        )));
+        assert_eq!(secret, None, "no identity, so nothing that needs one runs");
+        assert!(
+            err.is_some_and(|e| e.contains("world-readable")),
+            "and the reason reaches the journal rather than being swallowed"
+        );
+    }
+
+    /// 03-G5: a paused device keeps publishing STATUS. The numbers freeze
+    /// (no enforcement pass ran to produce new ones), `pausedByAdmin` is set,
+    /// and `locked` goes false because `thaw_all` has just run — a guardian
+    /// staring at a lock screen that is not there is the readout this fixes.
+    #[test]
+    fn a_paused_device_publishes_frozen_numbers_and_says_it_is_paused() {
+        let mut last = charter_proto::StatusPayload::from_json(
+            &crate::status_emit::build_status(
+                charter_primitives::PubKey::from_hex(&"11".repeat(32)).expect("subject"),
+                charter_primitives::PubKey::from_hex(&"22".repeat(32)).expect("machine"),
+                1000,
+                &charter_schedule::Remaining {
+                    schedule_secs: 60,
+                    budget_secs: 120,
+                    effective_secs: 60,
+                    extension_secs: 0,
+                    locked: true,
+                    reason: Some(charter_schedule::LockReason::Budget),
+                    next_open_secs: None,
+                    budget_day_secs: 120,
+                    budget_week_secs: -1,
+                },
+                4242,
+                None,
+                "2026-09-22".into(),
+                None,
+                charter_spine::child_policy::PolicySource::Guardian,
+            )
+            .to_json(),
+        )
+        .expect("round trips");
+        last.daily_minutes = Some(120);
+
+        let cur = paused_status(&last, 2000);
+        assert_eq!(cur.ts, 2000, "re-stamped, so the heartbeat still fires");
+        assert_eq!(cur.paused_by_admin, Some(true));
+        assert!(!cur.locked, "the pause thawed everything");
+        assert_eq!(cur.lock_reason, None);
+        // Frozen: every metered number is last tick's.
+        assert_eq!(cur.used_today_secs, last.used_today_secs);
+        assert_eq!(cur.quota_left_secs, last.quota_left_secs);
+        assert_eq!(cur.effective_secs, last.effective_secs);
+        assert_eq!(cur.daily_minutes, Some(120));
+        // And it emits: `locked` changing is a displayable state change, so the
+        // guardian hears about the pause at once rather than on a heartbeat.
+        assert!(crate::status_emit::should_emit_status(
+            Some(&last),
+            &cur,
+            STATUS_HEARTBEAT_SECS
+        ));
     }
 
     // ---- 03-B6: a poisoned shared mutex must not take the daemon down ----

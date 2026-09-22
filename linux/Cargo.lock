@@ -480,6 +480,7 @@ dependencies = [
  "tokio",
  "x11rb",
  "zbus 4.4.0",
+ "zeroize",
 ]
 
 [[package]]

@@ -49,4 +49,7 @@ pub use charter_spine::{
     Enactor, EnactorRegistry, Event, EventSink, MockTransport, RequestRecord, RequestState,
     TimeLeftProvider, TimeLeftSnapshot, TimeLeftState, TransportFacade,
 };
-pub use exec_guard::{validate_exec_candidate, ExecPathError, FileKind, ProbeExec};
+pub use exec_guard::{
+    validate_exec_candidate, validate_exec_candidate_open, ExecPathError, FileKind, ProbeExec,
+    ValidatedExec,
+};
