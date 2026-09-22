@@ -105,6 +105,43 @@ async fn a_per_child_clause_is_accepted_when_its_floor_is_merely_absent() {
 }
 
 #[tokio::test]
+async fn a_per_child_clause_whose_store_write_fails_is_write_failed_not_accepted() {
+    // B10: a full disk / read-only /var/lib/charter / EIO on the *write*
+    // (distinct from the *read* the two tests above exercise) must not be
+    // folded into `clauses_accepted` — the guardian would otherwise be told
+    // the clause landed while the device keeps enforcing the old one.
+    let guardian = TestGuardian::new();
+    let b = broker(&guardian);
+    b.sys().disk().break_clause_writes();
+
+    let clause = ClauseBuilder::schedule(100).subject(ALICE).build(&guardian);
+    b.transport().deliver_clause(clause, guardian.pubkey());
+    let counts = b.poll_once().await;
+
+    assert_eq!(
+        counts.clauses_seen, 1,
+        "the clause wrap was seen and authenticated"
+    );
+    assert_eq!(
+        counts.clauses_accepted, 0,
+        "a clause whose store write failed must not be reported as accepted"
+    );
+    assert_eq!(
+        counts.clauses_write_failed, 1,
+        "the write failure must be counted, not silently dropped"
+    );
+    b.sys().disk().repair_clause_writes();
+    assert_eq!(
+        b.sys()
+            .child_clauses()
+            .get_child_clause(&ALICE.to_hex(), ClauseKind::Schedule.store_key())
+            .unwrap(),
+        None,
+        "and nothing was actually stored"
+    );
+}
+
+#[tokio::test]
 async fn a_single_child_clause_is_refused_when_its_floor_cannot_be_read() {
     // `content` is machine-wide and keeps the single-child `ClauseStore` path,
     // which reads its own floor and had the same flatten.

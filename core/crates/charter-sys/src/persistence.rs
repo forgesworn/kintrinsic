@@ -192,6 +192,8 @@ mod mock {
         pairing: Option<String>,
         /// Fault injection — see [`MockDisk::break_clause_reads`].
         clause_reads_fail: bool,
+        /// Fault injection — see [`MockDisk::break_clause_writes`].
+        clause_writes_fail: bool,
         /// Fault injection — see [`MockDisk::make_unreadable`].
         unreadable_kinds: std::collections::BTreeSet<u16>,
     }
@@ -227,6 +229,20 @@ mod mock {
             self.0.lock().expect("disk lock").clause_reads_fail = false;
         }
 
+        /// Make every WRITE (`put_clause` / `put_child_clause`) on the two
+        /// clause stores fail from here on, as a full disk, a read-only
+        /// `/var/lib/charter`, or an EIO does. Reads are left working — the
+        /// mirror image of [`MockDisk::break_clause_reads`]: the point here
+        /// is a write that cannot land, not a store nobody can see.
+        pub fn break_clause_writes(&self) {
+            self.0.lock().expect("disk lock").clause_writes_fail = true;
+        }
+
+        /// Let the clause stores write again.
+        pub fn repair_clause_writes(&self) {
+            self.0.lock().expect("disk lock").clause_writes_fail = false;
+        }
+
         /// Make one already-stored per-child clause kind read back as
         /// present-but-unreadable, the way a truncated `<kind>.json` does on a
         /// real disk. The slot stays stored (the file IS there — that is the
@@ -243,12 +259,22 @@ mod mock {
         fn clause_reads_broken(&self) -> bool {
             self.0.lock().expect("disk lock").clause_reads_fail
         }
+
+        fn clause_writes_broken(&self) -> bool {
+            self.0.lock().expect("disk lock").clause_writes_fail
+        }
     }
 
     /// The error a broken mock read returns — shaped like the real store's
     /// wrapped IO failure so callers cannot key off the mock.
     fn unreadable() -> crate::error::SysError {
         crate::error::SysError::Io("read: mock store made unreadable".into())
+    }
+
+    /// The error a broken mock write returns — shaped like a real store's
+    /// wrapped IO failure (full disk, read-only filesystem, EIO).
+    fn unwritable() -> crate::error::SysError {
+        crate::error::SysError::Io("write: mock store made unwritable".into())
     }
 
     /// Mock consumed-id store.
@@ -329,6 +355,9 @@ mod mock {
     }
     impl ClauseStore for MockClauseStore {
         fn put_clause(&self, kind: u16, issued_at: u64, json: &str) -> SysResult<bool> {
+            if self.disk.clause_writes_broken() {
+                return Err(unwritable());
+            }
             let mut g = self.disk.0.lock().expect("disk lock");
             if let Some(&high) = g.clause_high.get(&kind) {
                 if issued_at <= high {
@@ -418,6 +447,9 @@ mod mock {
             issued_at: u64,
             json: &str,
         ) -> SysResult<bool> {
+            if self.disk.clause_writes_broken() {
+                return Err(unwritable());
+            }
             let mut g = self.disk.0.lock().expect("disk lock");
             let key = (subject_hex.to_string(), kind);
             if let Some((prev, _)) = g.child_clauses.get(&key) {

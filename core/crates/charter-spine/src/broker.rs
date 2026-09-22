@@ -203,6 +203,41 @@ fn warn_unreadable_floor(slot: &str, e: charter_sys::error::SysError) {
     );
 }
 
+/// Say that an authenticated clause's store write itself failed — distinct
+/// from `warn_unreadable_floor`, which is about the *read* that gates
+/// acceptance. This is logged at error level because it is exactly the
+/// failure [`PollCounts`]'s doc comment describes: the guardian is told the
+/// clause landed while the device keeps enforcing whatever was there before.
+fn warn_write_failed(slot: &str, e: charter_sys::error::SysError) {
+    eprintln!(
+        "charter: clause for {slot} authenticated but the store write failed ({e}) — the \
+         device will keep enforcing the previous clause until this is retried"
+    );
+}
+
+/// What became of a delivered clause after authentication was attempted.
+///
+/// Deliberately distinct from a `bool`: folding `Refused` (unparseable,
+/// wrong guardian, or below the replay floor — see `on_clause`'s doc
+/// comment) and `WriteFailed` (authenticated, but the store write itself
+/// returned `Ok(false)`'s sibling error — a full disk, a read-only
+/// `/var/lib/charter`, an EIO) into the same "not accepted" bit is exactly
+/// what let a write failure report as "delivered and applied" to the
+/// guardian while the device kept enforcing the previous clause. See B10,
+/// `internal/reviews/2026-09-21/02-core-schedule-spine-policy.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseOutcome {
+    /// Authenticated and durably stored.
+    Stored,
+    /// Not authenticated (unparseable payload, wrong/unpinned guardian, or
+    /// `issuedAt` at/below the replay floor — the store's `put_*` returned
+    /// `Ok(false)`), or the replay floor itself could not be read.
+    Refused,
+    /// Authenticated — this WAS the guardian's clause, past the replay floor
+    /// — but the store write failed. Must never be reported as accepted.
+    WriteFailed,
+}
+
 /// What one brokered poll actually took in.
 ///
 /// Exists because the Android `PollResult` reported `clausesSeen: 0` and
@@ -219,6 +254,15 @@ pub struct PollCounts {
     pub clauses_seen: u32,
     /// …of those, the ones that authenticated and were stored.
     pub clauses_accepted: u32,
+    /// …of the ones that authenticated, the ones whose store write itself
+    /// failed (a full disk, a read-only `/var/lib/charter`, an EIO) — see
+    /// [`ClauseOutcome::WriteFailed`]. NOT folded into `clauses_accepted`:
+    /// a write failure means the device keeps enforcing the previous clause
+    /// while the guardian believes the new one is live, which is the exact
+    /// silent-fail-open [`ClauseOutcome`]'s doc comment exists to end. Logged
+    /// at error level as it happens (see `warn_write_failed`) as well as
+    /// counted here, so it survives even if nobody is polling `PollCounts`.
+    pub clauses_write_failed: u32,
     /// A guardian-signed RELEASE authenticated and was applied this round: the
     /// pairing and every stored clause are GONE from disk (S7).
     ///
@@ -612,14 +656,16 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// never freeze/lock anyone (a silent fail-open). `content` stays on the
     /// single-child `ClauseStore`: web filtering is machine-wide and the web-
     /// content enforcer reads that store directly.
-    /// Returns whether the clause was authenticated and stored — the input to
-    /// the `clausesAccepted` diagnostic. A `false` means seen-but-refused
-    /// (unparseable, wrong guardian, or below the replay floor), which is a
-    /// very different fault from nothing arriving at all.
-    pub async fn on_clause(&self, received: ReceivedClause) -> bool {
+    /// Returns what became of the clause — the input to the
+    /// `clausesAccepted` / `clausesWriteFailed` diagnostics. See
+    /// [`ClauseOutcome`]: `Refused` means seen-but-refused (unparseable,
+    /// wrong guardian, or below the replay floor), which is a very different
+    /// fault from nothing arriving at all; `WriteFailed` means it WAS the
+    /// guardian's clause and must not be reported as accepted.
+    pub async fn on_clause(&self, received: ReceivedClause) -> ClauseOutcome {
         let payload = match ClausePayload::from_json(&received.clause.content) {
             Ok(p) => p,
-            Err(_) => return false,
+            Err(_) => return ClauseOutcome::Refused,
         };
         let store_key = payload.kind.store_key();
         let pinned = self.transport.pinned_guardian();
@@ -668,38 +714,54 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                             &format!("child clause {subject_hex}/{store_key}"),
                             e,
                         );
-                        return false;
+                        return ClauseOutcome::Refused;
                     }
                 };
                 if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
                     let body = serde_json::to_string(vc.body()).unwrap_or_default();
-                    let _ = self.sys.child_clauses().put_child_clause(
+                    return match self.sys.child_clauses().put_child_clause(
                         &subject_hex,
                         store_key,
                         vc.issued_at(),
                         &body,
-                    );
-                    return true;
+                    ) {
+                        Ok(true) => ClauseOutcome::Stored,
+                        Ok(false) => ClauseOutcome::Refused,
+                        Err(e) => {
+                            warn_write_failed(
+                                &format!("child clause {subject_hex}/{store_key}"),
+                                e,
+                            );
+                            ClauseOutcome::WriteFailed
+                        }
+                    };
                 }
-                false
+                ClauseOutcome::Refused
             }
             None => {
                 let prev = match self.sys.clauses().highest_issued_at(store_key) {
                     Ok(prev) => prev,
                     Err(e) => {
                         warn_unreadable_floor(&format!("clause {store_key}"), e);
-                        return false;
+                        return ClauseOutcome::Refused;
                     }
                 };
                 if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
                     let body = serde_json::to_string(vc.body()).unwrap_or_default();
-                    let _ = self
+                    return match self
                         .sys
                         .clauses()
-                        .put_clause(store_key, vc.issued_at(), &body);
-                    return true;
+                        .put_clause(store_key, vc.issued_at(), &body)
+                    {
+                        Ok(true) => ClauseOutcome::Stored,
+                        Ok(false) => ClauseOutcome::Refused,
+                        Err(e) => {
+                            warn_write_failed(&format!("clause {store_key}"), e);
+                            ClauseOutcome::WriteFailed
+                        }
+                    };
                 }
-                false
+                ClauseOutcome::Refused
             }
         }
     }
@@ -833,8 +895,10 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         }
         for clause in self.transport.poll_clauses(cursor, now).await {
             counts.clauses_seen += 1;
-            if self.on_clause(clause).await {
-                counts.clauses_accepted += 1;
+            match self.on_clause(clause).await {
+                ClauseOutcome::Stored => counts.clauses_accepted += 1,
+                ClauseOutcome::WriteFailed => counts.clauses_write_failed += 1,
+                ClauseOutcome::Refused => {}
             }
         }
         for (event, _seal_author) in self.transport.poll_usage_syncs(cursor, now).await {
