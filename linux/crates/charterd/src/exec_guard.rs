@@ -166,7 +166,17 @@ fn open_beneath(real_root: &Path, real: &Path) -> Result<File, ExecPathError> {
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(real_root)
         .map_err(|_| ExecPathError::OutsideManagedTree)?;
-    match openat2(&dir, rel) {
+    // `openat2(2)` documents `EAGAIN` as a RETRYABLE race: the resolve walk
+    // saw a rename or a mount change underneath it and gave up rather than
+    // return a possibly-wrong answer. Refusing outright would turn an ordinary
+    // `apt` upgrade or a package's atomic-rename install, happening at the
+    // instant a ward asks, into "that isn't a regular file". One retry — never
+    // a loop, which is a ward-driven spin on the request path — then refuse.
+    let mut attempt = openat2(&dir, rel);
+    if matches!(attempt, OpenAttempt::Errno(libc::EAGAIN)) {
+        attempt = openat2(&dir, rel);
+    }
+    match attempt {
         OpenAttempt::Opened(f) => Ok(f),
         // EXDEV is openat2's "that would have left the root": the escape the
         // whole check exists for, so it gets the escape's error.
@@ -268,6 +278,51 @@ pub fn validate_exec_candidate_open(
         file,
         resolved: real,
     })
+}
+
+/// Re-open, at ENACT time, the candidate a request BOUND — the
+/// [`ValidatedExec::resolved`] path the confused-deputy guard produced at
+/// submit, never the raw name the ward typed.
+///
+/// # Why the enactor may not just open the name
+///
+/// A grant arrives minutes or hours after the request. In between, the ward
+/// owns every component of their own home: the name they submitted can by now
+/// be a symlink, a directory, a device node — or a FIFO, whose blocking
+/// `open(2)` parks the enactor's tick until `WatchdogSec` kills charterd and
+/// `ExecStopPost --thaw-all` unfreezes every managed child. So the enactor
+/// re-opens through this door, which is the request-time door:
+///
+/// * the same `openat2(2)` walk, under `RESOLVE_NO_SYMLINKS |
+///   RESOLVE_NO_MAGICLINKS`, so a symlink swapped into ANY component since the
+///   request is refused rather than followed;
+/// * the same `O_NOFOLLOW | O_NONBLOCK` flags, so a FIFO returns instantly
+///   instead of waiting for a writer;
+/// * the same `fstat`-on-the-descriptor regular-file check, which no swap of
+///   the name can race.
+///
+/// The root the walk is anchored at is `/`, not the ward's managed root, and
+/// that is deliberate: the enactor is not handed the caller's home (the reqId
+/// binding carries a path, not an identity), and it does not need it. The bound
+/// path is already the canonical one the guard resolved and proved beneath that
+/// home, and `RESOLVE_NO_SYMLINKS` means no component of it can be re-pointed
+/// to somewhere else afterwards. Containment is therefore still enforced — by
+/// the path being fixed and unfollowable rather than by a second `RESOLVE_
+/// BENEATH` — and the hash in the signed grant remains the only authority over
+/// the BYTES, so a real file genuinely substituted at that location (a rename
+/// the ward can perform inside their own tree) fails the re-hash and stores
+/// nothing.
+pub fn open_bound_candidate(resolved: &Path) -> Result<File, ExecPathError> {
+    if !resolved.is_absolute() {
+        // The binding is written by `validate_exec_candidate_open` and is
+        // always absolute; a relative one is a corrupted record, not a file.
+        return Err(ExecPathError::OutsideManagedTree);
+    }
+    let file = open_beneath(Path::new("/"), resolved)?;
+    match file.metadata() {
+        Ok(md) if md.is_file() => Ok(file),
+        _ => Err(ExecPathError::SpecialFile),
+    }
 }
 
 /// [`validate_exec_candidate_open`] for callers that only want the verdict.
@@ -634,6 +689,72 @@ mod tests {
 
         // And the in-tree file through the same door still opens.
         assert!(open_beneath(&home, &home.join("bin/mine")).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- the ENACT-time re-open of a bound candidate ----
+
+    /// The bound path still holding the ordinary file it held at submit opens,
+    /// and reads the file's bytes.
+    #[test]
+    fn a_bound_candidate_that_is_still_a_regular_file_re_opens() {
+        use std::io::Read as _;
+        let d = real_tree("bound-ok");
+        let home = std::fs::canonicalize(d.join("home")).unwrap();
+        let mut f = open_bound_candidate(&home.join("bin/mine")).expect("still a regular file");
+        let mut got = String::new();
+        f.read_to_string(&mut got).unwrap();
+        assert_eq!(got, "#!/bin/sh\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The BLOCKER: a FIFO left where the bound candidate was. `open(2)` on a
+    /// FIFO with no writer blocks forever; this call must RETURN, refusing.
+    #[test]
+    fn a_fifo_at_the_bound_path_is_refused_and_does_not_block() {
+        let d = real_tree("bound-fifo");
+        let home = std::fs::canonicalize(d.join("home")).unwrap();
+        let p = home.join("bin/swapped");
+        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: plain `mkfifo(3)` on a path in our own throwaway tree.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        assert_eq!(
+            open_bound_candidate(&p).unwrap_err(),
+            ExecPathError::SpecialFile,
+            "a FIFO is refused, and the call comes back at all"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A symlink swapped in at the bound path AFTER the request — the TOCTOU
+    /// the re-open exists to close. `RESOLVE_NO_SYMLINKS` refuses it whatever
+    /// it points at, and `O_NOFOLLOW` refuses it on the fallback path too.
+    #[test]
+    fn a_symlink_swapped_in_after_submit_is_refused() {
+        let d = real_tree("bound-swap");
+        let home = std::fs::canonicalize(d.join("home")).unwrap();
+        let bound = home.join("bin/later");
+        // Points at a perfectly ordinary readable file, inside the tree even.
+        std::os::unix::fs::symlink(home.join("bin/mine"), &bound).unwrap();
+        assert_eq!(
+            open_bound_candidate(&bound).unwrap_err(),
+            ExecPathError::SpecialFile,
+            "the bound path must not be followed through a symlink"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A directory swapped in where the binary was is refused by the `fstat`.
+    #[test]
+    fn a_directory_at_the_bound_path_is_refused() {
+        let d = real_tree("bound-dir");
+        let home = std::fs::canonicalize(d.join("home")).unwrap();
+        let bound = home.join("bin/nowadir");
+        std::fs::create_dir_all(&bound).unwrap();
+        assert_eq!(
+            open_bound_candidate(&bound).unwrap_err(),
+            ExecPathError::SpecialFile
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

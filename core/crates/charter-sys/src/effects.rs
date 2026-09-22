@@ -830,21 +830,51 @@ mod real {
     /// The streaming buffer. The point of the fix: the file is never resident.
     const CANDIDATE_CHUNK_BYTES: usize = 64 * 1024;
 
-    /// `stat` a candidate before a byte of it is read. Missing is
-    /// [`SysError::NotFound`] (terminal: "the file could not be read"); over
-    /// the ceiling is [`SysError::Unsupported`], which the exec enactor also
-    /// treats as terminal — a 64 GiB candidate is never going to get smaller
-    /// on a retry.
-    fn candidate_size(path: &Path) -> SysResult<u64> {
-        let meta = match fs::metadata(path) {
-            Ok(m) => m,
+    /// Open a candidate named by PATH, so that nothing about it can block and
+    /// nothing about it can be a non-regular file.
+    ///
+    /// # Why the open, and not a `stat`
+    ///
+    /// The old shape was `fs::metadata(path)` (which FOLLOWS a symlink, and
+    /// reports `len == 0` for a FIFO, so the ceiling check waved it through)
+    /// and then a plain `File::open`. Opening a FIFO read-only **blocks until a
+    /// writer appears** — forever, if none ever does — and every caller of this
+    /// is synchronous inside an async tick. A FIFO at the candidate path was
+    /// therefore enough to park the enforcer's tick until `WatchdogSec` killed
+    /// it, and `ExecStopPost --thaw-all` then unfroze every managed child: a
+    /// ward-reachable path from `mkfifo` to "enforcement off".
+    ///
+    /// So the open comes FIRST, with `O_NONBLOCK` (a FIFO opens instantly
+    /// instead of waiting for a writer; a device node does not run its blocking
+    /// open path either) and `O_CLOEXEC`, and the kind question is then asked of
+    /// the DESCRIPTOR — `fstat`, which cannot be raced by a swap of the name.
+    /// Only a regular file survives, and for a regular file `O_NONBLOCK` is a
+    /// no-op. Missing is [`SysError::NotFound`] (terminal: "the file could not
+    /// be read"); anything else non-regular, and anything over the ceiling, is
+    /// [`SysError::Unsupported`], which the exec enactor also treats as
+    /// terminal — a FIFO, a directory and a 64 GiB candidate are none of them
+    /// going to get better on a retry.
+    fn open_candidate(path: &Path) -> SysResult<fs::File> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let f = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+        {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SysError::NotFound),
-            Err(e) => return Err(io_err("stat candidate", e)),
+            Err(e) => return Err(io_err("open candidate", e)),
         };
+        let meta = f.metadata().map_err(|e| io_err("fstat candidate", e))?;
+        if !meta.is_file() {
+            return Err(SysError::Unsupported(
+                "candidate is not a regular file".into(),
+            ));
+        }
         if meta.len() > MAX_CANDIDATE_BYTES {
             return Err(too_large(meta.len()));
         }
-        Ok(meta.len())
+        Ok(f)
     }
 
     fn too_large(len: u64) -> SysError {
@@ -853,9 +883,13 @@ mod real {
         ))
     }
 
-    /// [`candidate_size`] answered from an **already-open** descriptor
-    /// (`fstat`), so the ceiling and the bytes are about one file. A candidate
-    /// opened by the confused-deputy guard arrives here, never a path.
+    /// The ceiling asked of an **already-open** descriptor (`fstat`), so the
+    /// ceiling and the bytes are about one file. A candidate opened by the
+    /// confused-deputy guard arrives here, never a path.
+    ///
+    /// The regular-file question is NOT re-asked: every descriptor that reaches
+    /// here came either from [`open_candidate`] or from the exec guard's
+    /// `openat2`, and both `fstat` it before handing it on.
     fn candidate_size_fd(f: &fs::File) -> SysResult<u64> {
         let meta = f.metadata().map_err(|e| io_err("fstat candidate", e))?;
         if meta.len() > MAX_CANDIDATE_BYTES {
@@ -864,8 +898,10 @@ mod real {
         Ok(meta.len())
     }
 
-    /// Stream an already-open candidate from byte 0, exactly as
-    /// [`stream_file`] streams a path.
+    /// Stream an already-open candidate from byte 0 through sha256 in
+    /// [`CANDIDATE_CHUNK_BYTES`] chunks, optionally writing each chunk into
+    /// `sink` as it goes, and return `(sha256_hex, bytes_read)`. Peak memory is
+    /// one chunk, whatever the file.
     fn stream_open_file(f: &fs::File, sink: Option<&mut fs::File>) -> SysResult<(String, u64)> {
         use std::io::{Seek as _, SeekFrom};
         // `&File` is both Read and Seek; rewinding leaves the CALLER's handle
@@ -874,18 +910,6 @@ mod real {
         r.seek(SeekFrom::Start(0))
             .map_err(|e| io_err("rewind candidate", e))?;
         stream_reader(r, sink)
-    }
-
-    /// Stream `path` through sha256 in [`CANDIDATE_CHUNK_BYTES`] chunks,
-    /// optionally writing each chunk into `sink` as it goes, and return
-    /// `(sha256_hex, bytes_read)`. Peak memory is one chunk, whatever the file.
-    fn stream_file(path: &Path, sink: Option<&mut fs::File>) -> SysResult<(String, u64)> {
-        let f = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SysError::NotFound),
-            Err(e) => return Err(io_err("open candidate", e)),
-        };
-        stream_reader(f, sink)
     }
 
     /// The streaming loop itself, over whatever the bytes come from.
@@ -919,19 +943,6 @@ mod real {
         }
         let digest: [u8; 32] = hasher.finalize().into();
         Ok((hex_bytes(&digest), total))
-    }
-
-    /// Where `admit` takes the candidate's bytes from.
-    ///
-    /// `Fd` is the 03-B8 path: the confused-deputy guard opened the candidate
-    /// under `openat2(RESOLVE_BENEATH)` and the store copies from *that*
-    /// descriptor, so nothing between the check and the copy can substitute a
-    /// different file. `Path` is the older route, kept for callers that only
-    /// ever had a name (the enactor, which runs long after the guard and
-    /// re-hashes against the granted sha256 anyway).
-    enum AdmitSource<'a> {
-        Path(&'a Path),
-        Fd(&'a fs::File),
     }
 
     /// A staging path no concurrent admit can collide with (pid + a process-
@@ -1365,14 +1376,13 @@ mod real {
             let _ = Command::new("chattr").arg(flag).arg(path).status();
         }
 
+        /// The path-taking route. It goes through [`open_candidate`], which
+        /// opens `O_NONBLOCK` and refuses anything the `fstat` says is not a
+        /// regular file, so a FIFO cannot park this call — and the ceiling is
+        /// answered off that same descriptor, before a byte is read.
         fn inspect_impl(&self, src_path: &str) -> SysResult<InspectResult> {
-            let path = Path::new(src_path);
-            // The ceiling is checked from the INODE, before the file is opened
-            // — the old code derived `size` from a buffer it had already
-            // allocated, which is exactly one allocation too late.
-            candidate_size(path)?;
-            let (sha256, size) = stream_file(path, None)?;
-            Ok(InspectResult { sha256, size })
+            let f = open_candidate(Path::new(src_path))?;
+            self.inspect_from_file_impl(&f)
         }
         /// [`inspect_impl`](Self::inspect_impl) over the descriptor the
         /// confused-deputy guard opened, so the file that was checked is the
@@ -1391,15 +1401,16 @@ mod real {
             expected_sha256: &str,
             meta: &AdmitMeta,
         ) -> SysResult<()> {
-            self.admit_from(
-                AdmitSource::Path(Path::new(src_path)),
-                expected_sha256,
-                meta,
-            )
+            let f = open_candidate(Path::new(src_path))?;
+            self.admit_from(&f, expected_sha256, meta)
         }
+        /// The one admit body. Its source is ALWAYS a descriptor: either the
+        /// one the exec guard opened under `openat2(RESOLVE_BENEATH)`, or the
+        /// one [`open_candidate`] opened for a path-taking caller. There is no
+        /// route through here that opens a name while it copies.
         fn admit_from(
             &self,
-            src: AdmitSource<'_>,
+            src: &fs::File,
             expected_sha256: &str,
             meta: &AdmitMeta,
         ) -> SysResult<()> {
@@ -1409,12 +1420,9 @@ mod real {
             // Copy the bytes NOW and re-hash exactly what we will store (TOCTOU
             // close: a later mutation of the source cannot affect stored bytes).
             // Streamed, not buffered — and, as in `inspect`, refused on size
-            // before the file is opened. The old code held the whole candidate
+            // before a byte is read. The old code held the whole candidate
             // TWICE over (the read buffer plus `atomic_write`'s copy).
-            match src {
-                AdmitSource::Path(p) => candidate_size(p)?,
-                AdmitSource::Fd(f) => candidate_size_fd(f)?,
-            };
+            candidate_size_fd(src)?;
             let store_dir = self.store_dir();
             fs::create_dir_all(&store_dir).map_err(|e| io_err("create_dir_all approved", e))?;
             // Stage the copy under the store dir (same filesystem as the final
@@ -1431,10 +1439,7 @@ mod real {
                     .mode(0o600)
                     .open(&staging)
                     .map_err(|e| io_err("create admit staging", e))?;
-                let streamed = match src {
-                    AdmitSource::Path(p) => stream_file(p, Some(&mut f)),
-                    AdmitSource::Fd(open) => stream_open_file(open, Some(&mut f)),
-                };
+                let streamed = stream_open_file(src, Some(&mut f));
                 match streamed.and_then(|(sha, _)| {
                     f.sync_all().map_err(|e| io_err("fsync admit staging", e))?;
                     Ok(sha)
@@ -1541,7 +1546,7 @@ mod real {
             expected_sha256: &str,
             meta: &AdmitMeta,
         ) -> SysResult<()> {
-            self.admit_from(AdmitSource::Fd(src), expected_sha256, meta)
+            self.admit_from(src, expected_sha256, meta)
         }
         async fn launcher(&self, sha256_hex: &str, name: &str) -> SysResult<()> {
             self.launcher_impl(sha256_hex, name)
@@ -2025,15 +2030,72 @@ mod real {
                 .unwrap_or_default();
             assert!(staged.is_empty(), "staging left behind: {staged:?}");
 
-            // Exactly at the ceiling is allowed through the `stat` guard (the
-            // boundary, checked directly — actually streaming 512 MiB of holes
-            // would only be measuring the page cache).
+            // Exactly at the ceiling is allowed through the open+fstat guard
+            // (the boundary, checked directly — actually streaming 512 MiB of
+            // holes would only be measuring the page cache).
             let ok = base.join("ok.bin");
             let f = fs::File::create(&ok).unwrap();
             f.set_len(MAX_CANDIDATE_BYTES).unwrap();
             drop(f);
-            assert_eq!(candidate_size(&ok).unwrap(), MAX_CANDIDATE_BYTES);
-            assert!(candidate_size(&src).is_err(), "one byte over is refused");
+            assert_eq!(
+                candidate_size_fd(&open_candidate(&ok).unwrap()).unwrap(),
+                MAX_CANDIDATE_BYTES
+            );
+            assert!(open_candidate(&src).is_err(), "one byte over is refused");
+        }
+
+        /// The BLOCKER this shape exists for: a FIFO where a candidate binary
+        /// is named. `fs::metadata` follows the name, reports `len == 0` and
+        /// waves it past every ceiling; the `File::open` that used to follow
+        /// then blocks until a writer appears — which, inside a synchronous
+        /// `admit` called from the async tick, is the enforcer parked until
+        /// `WatchdogSec` kills it and `ExecStopPost --thaw-all` unfreezes every
+        /// child. The open must RETURN, and it must return a refusal.
+        #[test]
+        fn a_fifo_candidate_is_refused_instead_of_blocking_forever() {
+            let base = tmp("exec-fifo");
+            fs::create_dir_all(&base).unwrap();
+            let fifo = base.join("candidate");
+            let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: an ordinary `mkfifo(3)` on a path inside our own temp dir.
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+
+            // No writer exists and none ever will; without O_NONBLOCK this
+            // call never comes back and the test times out instead of failing.
+            let err = open_candidate(&fifo).expect_err("a FIFO is not a candidate");
+            assert!(
+                matches!(&err, SysError::Unsupported(m) if m.contains("regular file")),
+                "{err:?}"
+            );
+
+            // And through the public surface, which is where the tick calls it.
+            let ops = RealApprovedExecStore::with_base(&base);
+            let meta = AdmitMeta {
+                name: "Fifo".into(),
+                size: 0,
+                origin: None,
+            };
+            assert!(block_on(ops.inspect(fifo.to_str().unwrap())).is_err());
+            assert!(
+                block_on(ops.admit(fifo.to_str().unwrap(), &"aa".repeat(32), &meta)).is_err(),
+                "admit must refuse a FIFO, not wait on one"
+            );
+            let _ = fs::remove_dir_all(&base);
+        }
+
+        /// A directory named as a candidate opens fine and is refused by the
+        /// `fstat`, not by a read error half way through.
+        #[test]
+        fn a_directory_candidate_is_refused_by_the_fstat() {
+            let base = tmp("exec-dir-candidate");
+            let dir = base.join("notabinary");
+            fs::create_dir_all(&dir).unwrap();
+            let err = open_candidate(&dir).expect_err("a directory is not a candidate");
+            assert!(
+                matches!(&err, SysError::Unsupported(m) if m.contains("regular file")),
+                "{err:?}"
+            );
+            let _ = fs::remove_dir_all(&base);
         }
 
         #[test]

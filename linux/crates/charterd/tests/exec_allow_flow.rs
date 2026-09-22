@@ -58,20 +58,42 @@ fn ctx(path: &str) -> EnactContext {
     }
 }
 
+/// A real file on disk, plus the mock store's in-memory copy of its bytes.
+///
+/// The enactor now RE-OPENS the bound path before it admits anything
+/// (`openat2`, `O_NOFOLLOW | O_NONBLOCK`, `fstat`-regular-file), so a made-up
+/// path string is no longer enactable — which is the whole point of the fix.
+/// The mock store still answers from its own map, so the bytes it hashes and
+/// the bytes on disk can be made to disagree where a test wants that.
+fn real_source(store: &MockApprovedExecStore, name: &str, bytes: &[u8]) -> String {
+    let dir = tree(name);
+    let p = dir.join("app.bin");
+    std::fs::write(&p, bytes).unwrap();
+    let s = p.to_str().expect("utf-8 temp path").to_string();
+    store.put_source(&s, bytes);
+    s
+}
+
+/// A throwaway directory for one test, removed and recreated on entry so a
+/// crashed previous run cannot leak into this one.
+fn tree(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("charterd-exec-flow-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
 #[tokio::test]
 async fn admit_hashes_copied_bytes_not_source_reread() {
     let store = Arc::new(MockApprovedExecStore::new());
-    store.put_source("/home/managed/g.bin", b"v1");
+    let path = real_source(&store, "tamper", b"v1");
     let trust = Arc::new(MockTrustDb::new());
     let enactor = ExecAllowEnactor::new(store.clone(), trust.clone());
     let grant = exec_grant("Game", &sha_hex(b"v1"), 2);
     // The source is swapped between inspect and admit — the copied bytes now
     // hash differently, so admit refuses and stores NOTHING.
-    store.mutate_source("/home/managed/g.bin", b"v2-tampered");
-    let err = enactor
-        .enact(&grant, &ctx("/home/managed/g.bin"))
-        .await
-        .unwrap_err();
+    store.mutate_source(&path, b"v2-tampered");
+    let err = enactor.enact(&grant, &ctx(&path)).await.unwrap_err();
     assert!(err.is_terminal());
     assert!(store.list().await.unwrap().is_empty());
     assert!(trust.trusted().is_empty());
@@ -80,15 +102,12 @@ async fn admit_hashes_copied_bytes_not_source_reread() {
 #[tokio::test]
 async fn admit_stores_under_sha_filename_and_escapes_name() {
     let store = Arc::new(MockApprovedExecStore::new());
-    store.put_source("/home/managed/g.bin", b"the binary");
+    let path = real_source(&store, "sha-name", b"the binary");
     let trust = Arc::new(MockTrustDb::new());
     let enactor = ExecAllowEnactor::new(store.clone(), trust.clone());
     let sha = sha_hex(b"the binary");
     let grant = exec_grant("Super Game", &sha, 10);
-    enactor
-        .enact(&grant, &ctx("/home/managed/g.bin"))
-        .await
-        .unwrap();
+    enactor.enact(&grant, &ctx(&path)).await.unwrap();
 
     assert_eq!(store.list().await.unwrap(), vec![sha.clone()]);
     assert_eq!(trust.trusted(), vec![sha.clone()]);
@@ -99,20 +118,17 @@ async fn admit_stores_under_sha_filename_and_escapes_name() {
     assert_eq!(lname, "Super Game");
     // Exec points at the store sha path, NOT the display name.
     assert!(desktop.contains(&format!("/var/lib/charter/approved/{sha}/run")));
-    assert!(!desktop.contains("g.bin"));
+    assert!(!desktop.contains("app.bin"));
 }
 
 #[tokio::test]
 async fn name_traversal_rejected() {
     let store = Arc::new(MockApprovedExecStore::new());
-    store.put_source("/home/managed/g.bin", b"x");
+    let path = real_source(&store, "badname", b"x");
     let trust = Arc::new(MockTrustDb::new());
     let enactor = ExecAllowEnactor::new(store.clone(), trust.clone());
     let grant = exec_grant("../../etc/cron.d/evil", &sha_hex(b"x"), 1);
-    let err = enactor
-        .enact(&grant, &ctx("/home/managed/g.bin"))
-        .await
-        .unwrap_err();
+    let err = enactor.enact(&grant, &ctx(&path)).await.unwrap_err();
     assert!(err.is_terminal());
     assert!(
         store.list().await.unwrap().is_empty(),
@@ -123,19 +139,86 @@ async fn name_traversal_rejected() {
 #[tokio::test]
 async fn trust_failure_leaves_binary_untrusted() {
     let store = Arc::new(MockApprovedExecStore::new());
-    store.put_source("/home/managed/g.bin", b"x");
+    let path = real_source(&store, "untrusted", b"x");
     let trust = Arc::new(MockTrustDb::new());
     trust.set_fail(true);
     let enactor = ExecAllowEnactor::new(store.clone(), trust.clone());
     let grant = exec_grant("Game", &sha_hex(b"x"), 1);
-    let err = enactor
-        .enact(&grant, &ctx("/home/managed/g.bin"))
-        .await
-        .unwrap_err();
+    let err = enactor.enact(&grant, &ctx(&path)).await.unwrap_err();
     // Fail-closed: stored but UNTRUSTED (cannot execute); transient (retryable).
     assert!(matches!(err, charterd::error::EnactError::Transient(_)));
     assert_eq!(store.list().await.unwrap().len(), 1);
     assert!(trust.trusted().is_empty());
+}
+
+/// THE BLOCKER. A FIFO where the bound candidate was is the cheapest way a
+/// ward has of wedging the enforcer: `fs::metadata` follows the name and calls
+/// it zero bytes, and the `File::open` that used to follow blocks until a
+/// writer appears — inside a synchronous admit, on the tick. `WatchdogSec`
+/// then kills charterd and `ExecStopPost --thaw-all` unfreezes every managed
+/// child, so "mkfifo" is "enforcement off". The enact must COME BACK, and
+/// come back refusing.
+///
+/// The timeout is the assertion: without the fix this test does not fail, it
+/// hangs.
+#[tokio::test]
+async fn a_fifo_at_the_bound_path_fails_the_enact_instead_of_wedging_the_tick() {
+    let store = Arc::new(MockApprovedExecStore::new());
+    let dir = tree("fifo");
+    let path = dir.join("app.bin");
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: plain `mkfifo(3)` on a path in this test's own throwaway dir.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+    let path = path.to_str().unwrap().to_string();
+    // The store would happily hand over bytes for it; the enactor never gets
+    // that far, because the file it re-opens is not a regular file.
+    store.put_source(&path, b"never read");
+
+    let trust = Arc::new(MockTrustDb::new());
+    let enactor = ExecAllowEnactor::new(store.clone(), trust.clone());
+    let grant = exec_grant("Game", &sha_hex(b"never read"), 10);
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        enactor.enact(&grant, &ctx(&path)),
+    )
+    .await
+    .expect("the enact must return inside the tick, not block on the FIFO")
+    .unwrap_err();
+
+    assert!(err.is_terminal(), "{err:?}");
+    assert!(store.list().await.unwrap().is_empty());
+    assert!(trust.trusted().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A symlink swapped in at the bound path between the request and the grant —
+/// the TOCTOU the enact-time re-open closes. It points at a perfectly ordinary
+/// readable file, and it is still refused: the bound path is re-opened under
+/// `RESOLVE_NO_SYMLINKS`, so no component of it can be re-pointed after the
+/// guard walked it.
+#[tokio::test]
+async fn a_symlink_swapped_in_after_submit_is_refused_at_enact() {
+    let store = Arc::new(MockApprovedExecStore::new());
+    let dir = tree("swap");
+    let real = dir.join("elsewhere.bin");
+    std::fs::write(&real, b"other bytes").unwrap();
+    let bound = dir.join("app.bin");
+    std::os::unix::fs::symlink(&real, &bound).unwrap();
+    let path = bound.to_str().unwrap().to_string();
+    store.put_source(&path, b"other bytes");
+
+    let trust = Arc::new(MockTrustDb::new());
+    let enactor = ExecAllowEnactor::new(store.clone(), trust.clone());
+    let grant = exec_grant("Game", &sha_hex(b"other bytes"), 11);
+    let err = enactor.enact(&grant, &ctx(&path)).await.unwrap_err();
+
+    assert!(err.is_terminal(), "{err:?}");
+    assert!(
+        store.list().await.unwrap().is_empty(),
+        "nothing is admitted through a swapped symlink"
+    );
+    assert!(trust.trusted().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -186,9 +269,8 @@ async fn submit_binds_the_real_source_path_not_none() {
     // hands the descriptor to `inspect_from_file`, so the candidate and its
     // managed root have to be real files on a real filesystem — a made-up path
     // string is no longer admissible, which is the point of the fix.
-    let tree = std::env::temp_dir().join(format!("charterd-exec-plan-{}", std::process::id()));
+    let tree = tree("plan");
     let managed_root = tree.join("ward");
-    let _ = std::fs::remove_dir_all(&tree);
     std::fs::create_dir_all(&managed_root).unwrap();
     let real_path = managed_root.join("game.AppImage");
     std::fs::write(&real_path, b"appimage bytes").unwrap(); // 14 bytes
@@ -212,10 +294,13 @@ async fn submit_binds_the_real_source_path_not_none() {
     .await
     .expect("a readable in-tree regular file passes the guard + inspect");
 
-    // The bound source path is the REAL path — this is exactly the None bug.
+    // The bound source path is the REAL path — this is exactly the None bug —
+    // and specifically the guard's RESOLVED path, not the raw string the ward
+    // sent, so the enactor re-opens something charterd itself walked.
     assert_eq!(
-        source_path, path,
-        "source_path must be bound, not None/empty"
+        source_path,
+        std::fs::canonicalize(&real_path).unwrap().to_str().unwrap(),
+        "source_path must be bound (resolved), not None/empty"
     );
     // The published params are the SERVER-inspected ExecAllowParams (name +
     // sha256 + size) — never the client's raw {"path": ...}.
@@ -304,8 +389,7 @@ fn ids(broker: &ExecBroker, hex: &str) -> (ReqId, Nonce) {
 #[tokio::test]
 async fn flow_b_golden() {
     let store = Arc::new(MockApprovedExecStore::new());
-    let path = "/home/managed/stk.AppImage";
-    store.put_source(path, b"appimage bytes");
+    let path = real_source(&store, "golden", b"appimage bytes");
     let trust = Arc::new(MockTrustDb::new());
     let (broker, guardian) = build_loop(store.clone(), trust.clone());
 
@@ -314,7 +398,7 @@ async fn flow_b_golden() {
         .submit(
             OpType::ExecAllow,
             serde_json::json!({"name": "STK", "sha256": sha, "size": 14}),
-            Some(path.to_string()),
+            Some(path.clone()),
         )
         .await
         .unwrap();
@@ -337,8 +421,7 @@ async fn flow_b_transient_trust_failure_retries_then_enacts() {
     // grant (no re-verify) and complete — not left stored-but-untrusted with a
     // burned reqId, and not double-admitted.
     let store = Arc::new(MockApprovedExecStore::new());
-    let path = "/home/managed/stk.AppImage";
-    store.put_source(path, b"bytes");
+    let path = real_source(&store, "retry", b"bytes");
     let trust = Arc::new(MockTrustDb::new());
     trust.set_fail_times(1); // the first trust attempt fails transiently
     let (broker, guardian) = build_loop(store.clone(), trust.clone());
@@ -348,7 +431,7 @@ async fn flow_b_transient_trust_failure_retries_then_enacts() {
         .submit(
             OpType::ExecAllow,
             serde_json::json!({"name": "STK", "sha256": sha, "size": 5}),
-            Some(path.to_string()),
+            Some(path.clone()),
         )
         .await
         .unwrap();
@@ -376,8 +459,7 @@ async fn flow_b_transient_trust_failure_retries_then_enacts() {
 #[tokio::test]
 async fn flow_b_hash_mismatch_refuses() {
     let store = Arc::new(MockApprovedExecStore::new());
-    let path = "/home/managed/stk.AppImage";
-    store.put_source(path, b"real bytes");
+    let path = real_source(&store, "mismatch", b"real bytes");
     let trust = Arc::new(MockTrustDb::new());
     let (broker, guardian) = build_loop(store.clone(), trust.clone());
 
@@ -387,7 +469,7 @@ async fn flow_b_hash_mismatch_refuses() {
         .submit(
             OpType::ExecAllow,
             serde_json::json!({"name": "STK", "sha256": wrong_sha, "size": 9}),
-            Some(path.to_string()),
+            Some(path.clone()),
         )
         .await
         .unwrap();
@@ -407,8 +489,7 @@ async fn flow_b_hash_mismatch_refuses() {
 #[tokio::test]
 async fn flow_b_replay_no_double_admit() {
     let store = Arc::new(MockApprovedExecStore::new());
-    let path = "/home/managed/stk.AppImage";
-    store.put_source(path, b"bytes");
+    let path = real_source(&store, "replay", b"bytes");
     let trust = Arc::new(MockTrustDb::new());
     let (broker, guardian) = build_loop(store.clone(), trust.clone());
 
@@ -417,7 +498,7 @@ async fn flow_b_replay_no_double_admit() {
         .submit(
             OpType::ExecAllow,
             serde_json::json!({"name": "STK", "sha256": sha, "size": 5}),
-            Some(path.to_string()),
+            Some(path.clone()),
         )
         .await
         .unwrap();
