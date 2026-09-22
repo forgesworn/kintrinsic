@@ -10,7 +10,7 @@ use charter_proto::{ClauseKind, OpType};
 use charter_sys::persistence::{MockConsumedIdStore, MockDisk};
 use charter_sys::relay::MockRelayTransport;
 use charter_transport::nip59::{self, Rumor, WrapRandomness};
-use charter_transport::{CharterTransport, ScriptedEntropy};
+use charter_transport::{CharterTransport, ScriptedEntropy, TransportError};
 use charter_verify::test_support::{ClauseBuilder, GrantBuilder, TestGuardian};
 use charter_verify::{verify_clause, verify_grant, ClauseError, VerifyError, VerifyParams};
 
@@ -293,4 +293,23 @@ async fn a_junk_wrap_flood_cannot_crowd_out_the_guardians_grant() {
         "the guardian's wrap was examined despite {} junk wraps ahead of it",
         grants.len() - 1
     );
+}
+
+/// B4: an all-zero machine secret is not a valid secp256k1 scalar, and
+/// `try_new` must report it rather than let the caller abort the process —
+/// a corrupted/zero-filled stored secret must leave the daemon able to keep
+/// enforcing cached clauses.
+#[test]
+fn try_new_rejects_an_all_zero_machine_secret() {
+    let relay = MockRelayTransport::new();
+    let guardian = TestGuardian::new();
+    let err = CharterTransport::try_new(
+        relay,
+        ScriptedEntropy::new(1),
+        [0u8; 32],
+        guardian.pubkey(),
+        vec!["wss://r".into()],
+    )
+    .err();
+    assert_eq!(err, Some(TransportError::BadMachineSecret));
 }

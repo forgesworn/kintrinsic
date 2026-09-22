@@ -55,6 +55,29 @@ impl Entropy for ScriptedEntropy {
     }
 }
 
+/// Why [`CharterTransport::try_new`] could not construct a transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportError {
+    /// The supplied machine secret is not a valid secp256k1 scalar (all-zero,
+    /// out of range, or otherwise corrupted) — `charter_crypto::xonly_pubkey`
+    /// rejected it. See B4, `internal/reviews/2026-09-21/01-core-crypto-proto.md`:
+    /// a partial write, a zero-filled restore, or filesystem damage on a device
+    /// that loses power routinely can all leave a stored secret in this state,
+    /// and the caller must be able to keep enforcing cached clauses rather than
+    /// abort.
+    BadMachineSecret,
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::BadMachineSecret => write!(f, "machine secret is not a valid key"),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
 /// A received (but not yet verified) GRANT.
 #[derive(Debug, Clone)]
 pub struct ReceivedGrant {
@@ -117,17 +140,23 @@ pub struct CharterTransport<R: RelayTransport, E: Entropy> {
 }
 
 impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
-    pub fn new(
+    /// Fallible constructor: `Err(TransportError::BadMachineSecret)` when the
+    /// stored machine secret does not derive a valid key, instead of aborting
+    /// the process. The caller (e.g. `charterd`) can then keep enforcing
+    /// cached clauses and report the failure in STATUS rather than fail
+    /// open by crashing (B4).
+    pub fn try_new(
         relay: R,
         entropy: E,
         machine_sk: [u8; 32],
         guardian_pk: PubKey,
         relays: Vec<RelayUrl>,
-    ) -> Self {
+    ) -> Result<Self, TransportError> {
         let machine_pk = PubKey::from_bytes(
-            charter_crypto::xonly_pubkey(&machine_sk).expect("valid machine secret"),
+            charter_crypto::xonly_pubkey(&machine_sk)
+                .map_err(|_| TransportError::BadMachineSecret)?,
         );
-        CharterTransport {
+        Ok(CharterTransport {
             relay,
             entropy,
             machine_sk: Zeroizing::new(machine_sk),
@@ -135,7 +164,28 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             guardian_pk,
             relays,
             max_inbound: DEFAULT_MAX_INBOUND,
-        }
+        })
+    }
+
+    /// Panicking wrapper over [`Self::try_new`], kept for callers (the
+    /// android/jni warden, this crate's own tests) that have always treated
+    /// an unusable machine secret as unrecoverable. New callers — anything
+    /// that can instead keep enforcing cached clauses — should use `try_new`.
+    pub fn new(
+        relay: R,
+        entropy: E,
+        machine_sk: [u8; 32],
+        guardian_pk: PubKey,
+        relays: Vec<RelayUrl>,
+    ) -> Self {
+        Self::try_new(relay, entropy, machine_sk, guardian_pk, relays)
+            .expect("valid machine secret")
+    }
+
+    /// This transport's own machine pubkey (derived from the machine secret
+    /// at construction).
+    pub fn machine_pubkey(&self) -> PubKey {
+        self.machine_pk
     }
 
     /// Change the inbound cap (rate-limit / flood tests).

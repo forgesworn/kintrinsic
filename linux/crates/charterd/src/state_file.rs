@@ -64,6 +64,12 @@ pub struct PublishedState {
     /// produces one too. (04-G6)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement_gap_secs: Option<i64>,
+    /// This machine could not construct its relay transport this run (an
+    /// unusable machine secret — B4, `internal/reviews/2026-09-21/01-core-crypto-proto.md`).
+    /// Cached clauses are still being enforced; the daemon just cannot poll
+    /// or publish. `false` is the ordinary state.
+    #[serde(default)]
+    pub transport_unavailable: bool,
 }
 
 pub const STATE_VERSION: u32 = 1;
@@ -184,6 +190,7 @@ mod tests {
             paired: false,
             paused_by_admin: false,
             enforcement_gap_secs: None,
+            transport_unavailable: false,
         }
     }
 
@@ -276,9 +283,27 @@ mod tests {
         let o = v.as_object_mut().unwrap();
         o.remove("pausedByAdmin");
         o.remove("enforcementGapSecs");
+        o.remove("transportUnavailable");
         let back: PublishedState = serde_json::from_value(v).unwrap();
         assert!(!back.paused_by_admin);
         assert_eq!(back.enforcement_gap_secs, None);
+        assert!(!back.transport_unavailable);
+    }
+
+    /// The daemon must be able to say "cached clauses only" without lying
+    /// about being paused — a transport failure and an admin pause are
+    /// different facts, and a console conflating them tells the wrong story.
+    #[test]
+    fn transport_unavailable_serializes_camel_case_and_survives_a_roundtrip() {
+        let mut s = state("robin");
+        assert!(!serde_json::to_string(&s)
+            .unwrap()
+            .contains("transportUnavailable\":true"));
+        s.transport_unavailable = true;
+        let wire = serde_json::to_string(&s).unwrap();
+        assert!(wire.contains("\"transportUnavailable\":true"), "{wire}");
+        let back: PublishedState = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, s);
     }
 
     /// The gap is absent-or-a-number, never a zero: "0 seconds unwarded" is a
