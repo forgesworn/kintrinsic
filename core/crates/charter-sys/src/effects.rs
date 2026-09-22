@@ -114,6 +114,25 @@ pub fn desktop_escape(name: &str) -> String {
 pub trait ApprovedExecStore: Send + Sync {
     /// Hash + size a source binary (request-building side).
     async fn inspect(&self, src_path: &str) -> SysResult<InspectResult>;
+    /// Hash + size a source binary the caller has **already opened**.
+    ///
+    /// 03-B8 (TOCTOU): the confused-deputy guard validates a candidate and
+    /// opens it in one breath, under `openat2(RESOLVE_BENEATH)`. Handing that
+    /// same descriptor here is what makes the check binding — a second
+    /// open-by-path would re-walk a tree the ward can rewrite in between, and
+    /// the bytes hashed could be from a different file than the one that
+    /// passed. `src_path` is context for errors only; the fd is the identity.
+    ///
+    /// The default delegates to [`inspect`](Self::inspect), so a store with no
+    /// fd-aware path (the mocks) keeps working unchanged.
+    async fn inspect_from_file(
+        &self,
+        src: &std::fs::File,
+        src_path: &str,
+    ) -> SysResult<InspectResult> {
+        let _ = src;
+        self.inspect(src_path).await
+    }
     /// Whether the store already holds a binary with this sha256 hex.
     async fn contains(&self, sha256_hex: &str) -> SysResult<bool>;
     /// Copy `src_path` into the store, re-hashing the copied bytes; on mismatch
@@ -121,6 +140,20 @@ pub trait ApprovedExecStore: Send + Sync {
     /// sha256 filename; `meta.name` is validated and never used as a path.
     async fn admit(&self, src_path: &str, expected_sha256: &str, meta: &AdmitMeta)
         -> SysResult<()>;
+    /// [`admit`](Self::admit) reading from an **already-open** descriptor
+    /// rather than re-opening `src_path`. Same guarantees otherwise: the copy
+    /// is re-hashed as it lands and nothing is stored on mismatch. Default
+    /// delegates to [`admit`](Self::admit).
+    async fn admit_from_file(
+        &self,
+        src: &std::fs::File,
+        src_path: &str,
+        expected_sha256: &str,
+        meta: &AdmitMeta,
+    ) -> SysResult<()> {
+        let _ = src;
+        self.admit(src_path, expected_sha256, meta).await
+    }
     /// Write a launcher `.desktop` whose `Exec=` points at the stored sha256
     /// path and whose `Name=` is the desktop-escaped display name.
     async fn launcher(&self, sha256_hex: &str, name: &str) -> SysResult<()>;
@@ -136,11 +169,32 @@ impl<S: ApprovedExecStore + ?Sized> ApprovedExecStore for std::sync::Arc<S> {
     async fn inspect(&self, src_path: &str) -> SysResult<InspectResult> {
         (**self).inspect(src_path).await
     }
+    async fn inspect_from_file(
+        &self,
+        src: &std::fs::File,
+        src_path: &str,
+    ) -> SysResult<InspectResult> {
+        // Forwarded explicitly: taking the trait DEFAULT here would quietly
+        // drop the descriptor and send an `Arc<RealApprovedExecStore>` back
+        // down the open-by-path route the fd exists to avoid.
+        (**self).inspect_from_file(src, src_path).await
+    }
     async fn contains(&self, sha256_hex: &str) -> SysResult<bool> {
         (**self).contains(sha256_hex).await
     }
     async fn admit(&self, src: &str, expected: &str, meta: &AdmitMeta) -> SysResult<()> {
         (**self).admit(src, expected, meta).await
+    }
+    async fn admit_from_file(
+        &self,
+        src: &std::fs::File,
+        src_path: &str,
+        expected: &str,
+        meta: &AdmitMeta,
+    ) -> SysResult<()> {
+        (**self)
+            .admit_from_file(src, src_path, expected, meta)
+            .await
     }
     async fn launcher(&self, sha256_hex: &str, name: &str) -> SysResult<()> {
         (**self).launcher(sha256_hex, name).await
@@ -799,21 +853,52 @@ mod real {
         ))
     }
 
+    /// [`candidate_size`] answered from an **already-open** descriptor
+    /// (`fstat`), so the ceiling and the bytes are about one file. A candidate
+    /// opened by the confused-deputy guard arrives here, never a path.
+    fn candidate_size_fd(f: &fs::File) -> SysResult<u64> {
+        let meta = f.metadata().map_err(|e| io_err("fstat candidate", e))?;
+        if meta.len() > MAX_CANDIDATE_BYTES {
+            return Err(too_large(meta.len()));
+        }
+        Ok(meta.len())
+    }
+
+    /// Stream an already-open candidate from byte 0, exactly as
+    /// [`stream_file`] streams a path.
+    fn stream_open_file(f: &fs::File, sink: Option<&mut fs::File>) -> SysResult<(String, u64)> {
+        use std::io::{Seek as _, SeekFrom};
+        // `&File` is both Read and Seek; rewinding leaves the CALLER's handle
+        // usable for a second pass (inspect then admit off the same fd).
+        let mut r: &fs::File = f;
+        r.seek(SeekFrom::Start(0))
+            .map_err(|e| io_err("rewind candidate", e))?;
+        stream_reader(r, sink)
+    }
+
     /// Stream `path` through sha256 in [`CANDIDATE_CHUNK_BYTES`] chunks,
     /// optionally writing each chunk into `sink` as it goes, and return
     /// `(sha256_hex, bytes_read)`. Peak memory is one chunk, whatever the file.
-    ///
-    /// The ceiling is re-checked *as we read*, not only at the `stat`: a file
-    /// that grows between the two (the child appending while we copy) must not
-    /// get an unbounded read through the back door.
-    fn stream_file(path: &Path, mut sink: Option<&mut fs::File>) -> SysResult<(String, u64)> {
-        use sha2::{Digest as _, Sha256};
-        use std::io::{Read as _, Write as _};
-        let mut f = match fs::File::open(path) {
+    fn stream_file(path: &Path, sink: Option<&mut fs::File>) -> SysResult<(String, u64)> {
+        let f = match fs::File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SysError::NotFound),
             Err(e) => return Err(io_err("open candidate", e)),
         };
+        stream_reader(f, sink)
+    }
+
+    /// The streaming loop itself, over whatever the bytes come from.
+    ///
+    /// The ceiling is re-checked *as we read*, not only at the `stat`: a file
+    /// that grows between the two (the child appending while we copy) must not
+    /// get an unbounded read through the back door.
+    fn stream_reader<R: std::io::Read>(
+        mut f: R,
+        mut sink: Option<&mut fs::File>,
+    ) -> SysResult<(String, u64)> {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Write as _;
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; CANDIDATE_CHUNK_BYTES];
         let mut total: u64 = 0;
@@ -834,6 +919,19 @@ mod real {
         }
         let digest: [u8; 32] = hasher.finalize().into();
         Ok((hex_bytes(&digest), total))
+    }
+
+    /// Where `admit` takes the candidate's bytes from.
+    ///
+    /// `Fd` is the 03-B8 path: the confused-deputy guard opened the candidate
+    /// under `openat2(RESOLVE_BENEATH)` and the store copies from *that*
+    /// descriptor, so nothing between the check and the copy can substitute a
+    /// different file. `Path` is the older route, kept for callers that only
+    /// ever had a name (the enactor, which runs long after the guard and
+    /// re-hashes against the granted sha256 anyway).
+    enum AdmitSource<'a> {
+        Path(&'a Path),
+        Fd(&'a fs::File),
     }
 
     /// A staging path no concurrent admit can collide with (pid + a process-
@@ -1276,12 +1374,32 @@ mod real {
             let (sha256, size) = stream_file(path, None)?;
             Ok(InspectResult { sha256, size })
         }
+        /// [`inspect_impl`](Self::inspect_impl) over the descriptor the
+        /// confused-deputy guard opened, so the file that was checked is the
+        /// file that is hashed — nothing is re-opened by path in between.
+        fn inspect_from_file_impl(&self, src: &fs::File) -> SysResult<InspectResult> {
+            candidate_size_fd(src)?;
+            let (sha256, size) = stream_open_file(src, None)?;
+            Ok(InspectResult { sha256, size })
+        }
         fn contains_impl(&self, sha256_hex: &str) -> SysResult<bool> {
             Ok(self.bin_path(sha256_hex).is_file())
         }
         fn admit_impl(
             &self,
             src_path: &str,
+            expected_sha256: &str,
+            meta: &AdmitMeta,
+        ) -> SysResult<()> {
+            self.admit_from(
+                AdmitSource::Path(Path::new(src_path)),
+                expected_sha256,
+                meta,
+            )
+        }
+        fn admit_from(
+            &self,
+            src: AdmitSource<'_>,
             expected_sha256: &str,
             meta: &AdmitMeta,
         ) -> SysResult<()> {
@@ -1293,8 +1411,10 @@ mod real {
             // Streamed, not buffered — and, as in `inspect`, refused on size
             // before the file is opened. The old code held the whole candidate
             // TWICE over (the read buffer plus `atomic_write`'s copy).
-            let src = Path::new(src_path);
-            candidate_size(src)?;
+            match src {
+                AdmitSource::Path(p) => candidate_size(p)?,
+                AdmitSource::Fd(f) => candidate_size_fd(f)?,
+            };
             let store_dir = self.store_dir();
             fs::create_dir_all(&store_dir).map_err(|e| io_err("create_dir_all approved", e))?;
             // Stage the copy under the store dir (same filesystem as the final
@@ -1311,7 +1431,11 @@ mod real {
                     .mode(0o600)
                     .open(&staging)
                     .map_err(|e| io_err("create admit staging", e))?;
-                match stream_file(src, Some(&mut f)).and_then(|(sha, _)| {
+                let streamed = match src {
+                    AdmitSource::Path(p) => stream_file(p, Some(&mut f)),
+                    AdmitSource::Fd(open) => stream_open_file(open, Some(&mut f)),
+                };
+                match streamed.and_then(|(sha, _)| {
                     f.sync_all().map_err(|e| io_err("fsync admit staging", e))?;
                     Ok(sha)
                 }) {
@@ -1392,6 +1516,13 @@ mod real {
         async fn inspect(&self, src_path: &str) -> SysResult<InspectResult> {
             self.inspect_impl(src_path)
         }
+        async fn inspect_from_file(
+            &self,
+            src: &fs::File,
+            _src_path: &str,
+        ) -> SysResult<InspectResult> {
+            self.inspect_from_file_impl(src)
+        }
         async fn contains(&self, sha256_hex: &str) -> SysResult<bool> {
             self.contains_impl(sha256_hex)
         }
@@ -1402,6 +1533,15 @@ mod real {
             meta: &AdmitMeta,
         ) -> SysResult<()> {
             self.admit_impl(src_path, expected_sha256, meta)
+        }
+        async fn admit_from_file(
+            &self,
+            src: &fs::File,
+            _src_path: &str,
+            expected_sha256: &str,
+            meta: &AdmitMeta,
+        ) -> SysResult<()> {
+            self.admit_from(AdmitSource::Fd(src), expected_sha256, meta)
         }
         async fn launcher(&self, sha256_hex: &str, name: &str) -> SysResult<()> {
             self.launcher_impl(sha256_hex, name)
@@ -1752,6 +1892,92 @@ mod real {
             let stored = base.join("approved").join(&inspect.sha256).join("run");
             assert_eq!(fs::read(&stored).unwrap(), bytes);
             assert_eq!(block_on(ops.list()).unwrap(), vec![inspect.sha256.clone()]);
+        }
+
+        /// 03-B8 (TOCTOU): `inspect_from_file` / `admit_from_file` read the
+        /// descriptor they are handed and never the path. The proof is a source
+        /// file that is *unlinked and replaced* after the open: the fd still
+        /// refers to the original inode, so the hash and the stored bytes are
+        /// the original bytes — which is exactly the guarantee the exec guard
+        /// needs, since the ward may rewrite their own tree at any moment.
+        #[test]
+        fn inspect_and_admit_read_the_descriptor_not_the_path() {
+            let base = tmp("exec-fd");
+            let ops = RealApprovedExecStore::with_base(&base);
+            fs::create_dir_all(&base).unwrap();
+            let src = base.join("src.bin");
+            let bytes = b"#!/bin/sh\necho original\n";
+            fs::write(&src, bytes).unwrap();
+
+            let open = fs::File::open(&src).unwrap();
+            // The swap. Anything that re-opens by name from here on reads the
+            // impostor; anything reading `open` reads the original.
+            fs::remove_file(&src).unwrap();
+            fs::write(&src, b"#!/bin/sh\necho swapped\n").unwrap();
+
+            let inspect = block_on(ops.inspect_from_file(&open, src.to_str().unwrap())).unwrap();
+            assert_eq!(inspect.size, bytes.len() as u64);
+            assert_eq!(
+                inspect.sha256,
+                sha_hex(bytes),
+                "the hash is of the opened inode, not of whatever now has that name"
+            );
+
+            let meta = AdmitMeta {
+                name: "Original".into(),
+                size: inspect.size,
+                origin: None,
+            };
+            block_on(ops.admit_from_file(&open, src.to_str().unwrap(), &inspect.sha256, &meta))
+                .unwrap();
+            let stored = base.join("approved").join(&inspect.sha256).join("run");
+            assert_eq!(
+                fs::read(&stored).unwrap(),
+                bytes,
+                "the stored bytes are the opened inode's bytes"
+            );
+        }
+
+        /// The fd is rewound before each pass, so one descriptor can be
+        /// inspected and then admitted — which is how the request path and a
+        /// same-session admit would use it.
+        #[test]
+        fn one_descriptor_survives_inspect_then_admit() {
+            let base = tmp("exec-fd-twice");
+            let ops = RealApprovedExecStore::with_base(&base);
+            fs::create_dir_all(&base).unwrap();
+            let src = base.join("twice.bin");
+            let bytes = b"#!/bin/sh\necho twice\n";
+            fs::write(&src, bytes).unwrap();
+            let open = fs::File::open(&src).unwrap();
+
+            let a = block_on(ops.inspect_from_file(&open, src.to_str().unwrap())).unwrap();
+            let b = block_on(ops.inspect_from_file(&open, src.to_str().unwrap())).unwrap();
+            assert_eq!(a.sha256, b.sha256);
+            assert_eq!(b.size, bytes.len() as u64);
+            assert_eq!(a.sha256, sha_hex(bytes));
+        }
+
+        /// A mismatch on the fd route stores nothing, exactly as on the path
+        /// route.
+        #[test]
+        fn admit_from_file_stores_nothing_on_a_hash_mismatch() {
+            let base = tmp("exec-fd-mismatch");
+            let ops = RealApprovedExecStore::with_base(&base);
+            fs::create_dir_all(&base).unwrap();
+            let src = base.join("m.bin");
+            fs::write(&src, b"real\n").unwrap();
+            let open = fs::File::open(&src).unwrap();
+            let wrong = sha_hex(b"not these bytes\n");
+            let meta = AdmitMeta {
+                name: "M".into(),
+                size: 5,
+                origin: None,
+            };
+            let err = block_on(ops.admit_from_file(&open, src.to_str().unwrap(), &wrong, &meta));
+            assert!(matches!(err, Err(SysError::Conflict(_))), "{err:?}");
+            assert!(!block_on(ops.contains(&wrong)).unwrap());
+            assert!(block_on(ops.list()).unwrap().is_empty());
         }
 
         // ---- B6: the candidate is streamed, and bounded ------------------

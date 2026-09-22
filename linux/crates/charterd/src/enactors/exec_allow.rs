@@ -16,7 +16,7 @@ use charter_verify::VerifiedGrant;
 
 use crate::enactor::{EnactContext, EnactOutcome, Enactor};
 use crate::error::EnactError;
-use crate::exec_guard::{validate_exec_candidate, ExecPathError, ProbeExec};
+use crate::exec_guard::{validate_exec_candidate_open, ExecPathError, ProbeExec};
 
 /// Derive a safe display name from a source path (file stem, sanitized).
 pub fn sanitize_name_from_path(path: &str) -> String {
@@ -172,10 +172,15 @@ pub async fn build_exec_allow_request<S: ApprovedExecStore>(
     caller_uid: u32,
     probe: &dyn ProbeExec,
 ) -> Result<ExecRequest, ExecRequestError> {
-    validate_exec_candidate(source_path, managed_root, caller_uid, probe)
+    // 03-B8 (TOCTOU): the guard hands back the OPEN candidate, not a verdict on
+    // a path. Inspecting from that descriptor is what binds the hash to the
+    // file that passed the guard — an `inspect(source_path)` here would walk
+    // the ward's own directory tree a second time, and they are free to have
+    // re-pointed a component of it since.
+    let validated = validate_exec_candidate_open(source_path, managed_root, caller_uid, probe)
         .map_err(ExecRequestError::ConfusedDeputy)?;
     let inspect = store
-        .inspect(source_path)
+        .inspect_from_file(&validated.file, source_path)
         .await
         .map_err(|_| ExecRequestError::SourceMissing)?;
     let name = sanitize_name_from_path(source_path);

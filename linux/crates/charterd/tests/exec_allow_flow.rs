@@ -182,8 +182,19 @@ async fn submit_binds_the_real_source_path_not_none() {
     // must instead run the confused-deputy guard, inspect the bytes server-side,
     // and bind the REAL path. If someone reverts the seam to drop the path, the
     // `source_path` assertion below fails.
+    // 03-B8: the guard now OPENS the candidate (openat2, RESOLVE_BENEATH) and
+    // hands the descriptor to `inspect_from_file`, so the candidate and its
+    // managed root have to be real files on a real filesystem — a made-up path
+    // string is no longer admissible, which is the point of the fix.
+    let tree = std::env::temp_dir().join(format!("charterd-exec-plan-{}", std::process::id()));
+    let managed_root = tree.join("ward");
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(&managed_root).unwrap();
+    let real_path = managed_root.join("game.AppImage");
+    std::fs::write(&real_path, b"appimage bytes").unwrap(); // 14 bytes
+    let path = real_path.to_str().unwrap();
+
     let store = MockApprovedExecStore::new();
-    let path = "/home/managed/game.AppImage";
     store.put_source(path, b"appimage bytes"); // 14 bytes
     let probe = FakeProbe {
         kind: FileKind::Regular,
@@ -191,10 +202,15 @@ async fn submit_binds_the_real_source_path_not_none() {
     };
 
     let client_params = serde_json::json!({ "path": path });
-    let (params, source_path) =
-        plan_exec_allow(&client_params, 1000, &store, "/home/managed", &probe)
-            .await
-            .expect("a readable in-tree regular file passes the guard + inspect");
+    let (params, source_path) = plan_exec_allow(
+        &client_params,
+        1000,
+        &store,
+        managed_root.to_str().unwrap(),
+        &probe,
+    )
+    .await
+    .expect("a readable in-tree regular file passes the guard + inspect");
 
     // The bound source path is the REAL path — this is exactly the None bug.
     assert_eq!(
@@ -210,6 +226,7 @@ async fn submit_binds_the_real_source_path_not_none() {
     assert_eq!(params["name"], "game");
     assert_eq!(params["size"], 14);
     assert_eq!(params["sha256"], sha_hex(b"appimage bytes"));
+    let _ = std::fs::remove_dir_all(&tree);
 }
 
 #[tokio::test]
