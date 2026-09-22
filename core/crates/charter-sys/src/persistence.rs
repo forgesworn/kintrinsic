@@ -783,27 +783,47 @@ mod real {
                 lock: Mutex::new(()),
             }
         }
-        /// Keep only lowercase hex so a crafted `subject_hex` can never traverse
-        /// out of the base dir (defence in depth; the broker only ever passes a
-        /// verified pubkey hex).
-        fn safe(subject_hex: &str) -> String {
-            subject_hex
-                .chars()
-                .filter(|c| c.is_ascii_hexdigit())
-                .map(|c| c.to_ascii_lowercase())
-                .collect()
+        /// A subject is a nostr x-only pubkey: **exactly** 64 lowercase hex
+        /// characters, or it is not a subject at all.
+        ///
+        /// This used to *filter* non-hex characters out instead of refusing,
+        /// which is the wrong shape for a path guard: `safe("ZZZabc")` and
+        /// `safe("abc")` both produced `"abc"`, and `safe("../..")` produced
+        /// the **empty string**, collapsing `clauses_dir` onto
+        /// `<base>/children/clauses` — one real, writable directory shared by
+        /// every subject that did not survive the filter. Two children mapping
+        /// to one clause directory means one child's schedule and budget govern
+        /// the other, and `clear_for` on one release wipes both. The broker only
+        /// ever passes a verified 64-char pubkey hex today, so nothing on the
+        /// wire reaches this — but this function exists precisely for the day
+        /// that stops being true, and sanitising fails silently and wrongly on
+        /// that day rather than loudly.
+        fn safe(subject_hex: &str) -> Option<String> {
+            let ok = subject_hex.len() == 64
+                && subject_hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            ok.then(|| subject_hex.to_string())
         }
-        fn clauses_dir(&self, subject_hex: &str) -> PathBuf {
-            self.base
-                .join("children")
-                .join(Self::safe(subject_hex))
-                .join("clauses")
+        /// The refusal every entry point propagates. `Unsupported` because the
+        /// caller handed us something that is not a subject — not a storage
+        /// failure, and nothing was touched. The subject itself is NOT echoed:
+        /// it is caller-controlled and unbounded.
+        fn bad_subject(subject_hex: &str) -> crate::error::SysError {
+            crate::error::SysError::Unsupported(format!(
+                "child subject is not 64 lowercase hex characters (len {})",
+                subject_hex.len()
+            ))
         }
-        fn file(&self, subject_hex: &str, kind: u16) -> PathBuf {
-            self.clauses_dir(subject_hex).join(format!("{kind}.json"))
+        fn clauses_dir(&self, subject_hex: &str) -> SysResult<PathBuf> {
+            let safe = Self::safe(subject_hex).ok_or_else(|| Self::bad_subject(subject_hex))?;
+            Ok(self.base.join("children").join(safe).join("clauses"))
+        }
+        fn file(&self, subject_hex: &str, kind: u16) -> SysResult<PathBuf> {
+            Ok(self.clauses_dir(subject_hex)?.join(format!("{kind}.json")))
         }
         fn current(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ClauseRec>> {
-            read_json(&self.file(subject_hex, kind))
+            read_json(&self.file(subject_hex, kind)?)
         }
     }
     impl ChildClauseStore for RealChildClauseStore {
@@ -821,7 +841,7 @@ mod real {
                 }
             }
             write_json(
-                &self.file(subject_hex, kind),
+                &self.file(subject_hex, kind)?,
                 &ClauseRec {
                     issued_at,
                     json: json.to_string(),
@@ -836,7 +856,7 @@ mod real {
             Ok(self.current(subject_hex, kind)?.map(|r| r.issued_at))
         }
         fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses> {
-            let rd = match fs::read_dir(self.clauses_dir(subject_hex)) {
+            let rd = match fs::read_dir(self.clauses_dir(subject_hex)?) {
                 Ok(rd) => rd,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Ok(ChildClauses::default())
@@ -892,7 +912,7 @@ mod real {
         }
         fn clear_for(&self, subject_hex: &str) -> SysResult<()> {
             let _g = self.lock.lock().expect("child clause lock");
-            match fs::remove_dir_all(self.clauses_dir(subject_hex)) {
+            match fs::remove_dir_all(self.clauses_dir(subject_hex)?) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(io_err("remove child clauses", e)),
@@ -1101,69 +1121,101 @@ mod real {
             assert_eq!(s.get_clause(31113).unwrap(), Some(r#"{"a":4}"#.to_string()));
         }
 
+        /// A real subject: exactly 64 lowercase hex characters. `safe()` now
+        /// REFUSES anything else, so the short `"aa"` these tests used to pass
+        /// is no longer a subject at all.
+        fn subj(hex_seed: &str) -> String {
+            let mut s = hex_seed.repeat(64);
+            s.truncate(64);
+            s
+        }
+
         #[test]
         fn child_clause_rollback_per_subject_kind_and_durable() {
             let base = tmp("childclause");
+            let (aa, bb) = (subj("a"), subj("b"));
             {
                 let s = RealChildClauseStore::with_base(&base);
                 // Write the HIGHER kind first (2.json before 1.json) so the
                 // ascending-kind `clauses_for` result below is load-bearing on
                 // the explicit sort, not on filesystem enumeration order.
-                assert!(s.put_child_clause("aa", 2, 100, r#"{"b":1}"#).unwrap());
-                assert!(s.put_child_clause("aa", 1, 100, r#"{"s":1}"#).unwrap());
-                assert!(!s.put_child_clause("aa", 1, 100, r#"{"s":2}"#).unwrap()); // equal
-                assert!(!s.put_child_clause("aa", 1, 50, r#"{"s":3}"#).unwrap()); // lower
-                assert!(s.put_child_clause("aa", 1, 200, r#"{"s":4}"#).unwrap()); // higher
-                assert!(s.put_child_clause("bb", 1, 100, r#"{"s":"bob"}"#).unwrap());
+                assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":1}"#).unwrap());
+                assert!(s.put_child_clause(&aa, 1, 100, r#"{"s":1}"#).unwrap());
+                assert!(!s.put_child_clause(&aa, 1, 100, r#"{"s":2}"#).unwrap()); // equal
+                assert!(!s.put_child_clause(&aa, 1, 50, r#"{"s":3}"#).unwrap()); // lower
+                assert!(s.put_child_clause(&aa, 1, 200, r#"{"s":4}"#).unwrap()); // higher
+                assert!(s.put_child_clause(&bb, 1, 100, r#"{"s":"bob"}"#).unwrap());
             }
             // reopen -> durable + still rollback-protected
             let s2 = RealChildClauseStore::with_base(&base);
-            assert_eq!(s2.highest_issued_at("aa", 1).unwrap(), Some(200));
-            assert!(!s2.put_child_clause("aa", 1, 200, r#"{"s":9}"#).unwrap());
+            assert_eq!(s2.highest_issued_at(&aa, 1).unwrap(), Some(200));
+            assert!(!s2.put_child_clause(&aa, 1, 200, r#"{"s":9}"#).unwrap());
             assert_eq!(
-                s2.clauses_for("aa").unwrap().clauses,
+                s2.clauses_for(&aa).unwrap().clauses,
                 vec![(1, r#"{"s":4}"#.to_string()), (2, r#"{"b":1}"#.to_string())]
             );
             assert_eq!(
-                s2.clauses_for("missing").unwrap(),
+                s2.clauses_for(&subj("c")).unwrap(),
                 ChildClauses::default(),
                 "an absent directory is a child nobody has set anything for"
             );
         }
 
         #[test]
-        fn child_clause_subject_cannot_escape_base_dir() {
-            // The `safe()` sanitiser must keep a path-separator / dot-dot-laden
-            // subject from writing outside <base>/children/. A crafted subject is
-            // filtered down to its hex chars, so it can neither traverse out nor
-            // collide a sibling away.
+        fn a_subject_that_is_not_64_lowercase_hex_is_refused_outright() {
+            // The failure this pins: `safe()` used to FILTER non-hex out rather
+            // than refuse, so "ZZZaa" and "aa" addressed one directory and
+            // "../.." addressed <base>/children/clauses — a real, writable
+            // directory that EVERY such subject shared. Two children in one
+            // clause directory means one child's schedule and budget govern the
+            // other, and `clear_for` on one release wipes both. Every entry
+            // point must now refuse, loudly, and write nothing.
             let base = tmp("childclause-traversal");
             let s = RealChildClauseStore::with_base(&base);
-            // `../` and non-hex chars are stripped; only hex survives.
-            assert!(s
-                .put_child_clause("../../etc/aa", 1, 100, r#"{"s":"evil"}"#)
-                .unwrap());
+            let aa = subj("a");
+            for bad in [
+                "../../etc/aa",              // traversal
+                "..",                        // used to sanitise to ""
+                "",                          // ditto
+                "aa",                        // too short
+                &aa.to_uppercase(),          // uppercase is a DIFFERENT key
+                &format!("{aa}a"),           // 65
+                &aa[..63],                   // 63
+                &format!("{}zz", &aa[..62]), // right length, not hex
+                "aa/../../../../etc/passwd", // traversal, right charset-ish
+            ] {
+                assert!(
+                    matches!(
+                        s.put_child_clause(bad, 1, 100, r#"{"s":"evil"}"#),
+                        Err(crate::error::SysError::Unsupported(_))
+                    ),
+                    "put_child_clause accepted {bad:?}"
+                );
+                assert!(s.get_child_clause(bad, 1).is_err(), "get took {bad:?}");
+                assert!(s.highest_issued_at(bad, 1).is_err(), "floor took {bad:?}");
+                assert!(s.clauses_for(bad).is_err(), "clauses_for took {bad:?}");
+                assert!(s.clear_for(bad).is_err(), "clear_for took {bad:?}");
+            }
+            // Nothing was created anywhere — not even the shared directory the
+            // empty sanitiser used to produce.
+            assert!(
+                !base.join("children").exists(),
+                "a refused subject must not create a directory"
+            );
+            // And the real thing still works.
+            assert!(s.put_child_clause(&aa, 1, 100, r#"{"s":"ok"}"#).unwrap());
+            assert_eq!(
+                s.get_child_clause(&aa, 1).unwrap(),
+                Some(r#"{"s":"ok"}"#.to_string())
+            );
             // The on-disk file resolves UNDER the base, never above it.
-            let dir = std::fs::read_dir(base.join("children")).unwrap();
-            for entry in dir.flatten() {
+            for entry in std::fs::read_dir(base.join("children")).unwrap().flatten() {
                 let canon = entry.path().canonicalize().unwrap();
                 assert!(
                     canon.starts_with(base.canonicalize().unwrap()),
                     "clause file {canon:?} escaped the base dir"
                 );
             }
-            // It round-trips via the SANITISED key ("ecaa" — the surviving hex
-            // of "../../etc/aa": '.' '/' and the non-hex 't' are all stripped).
-            assert_eq!(
-                s.get_child_clause("ecaa", 1).unwrap(),
-                Some(r#"{"s":"evil"}"#.to_string())
-            );
-            // Case folds: "AA" and "aa" address the same slot.
-            assert!(s.put_child_clause("AA", 1, 100, r#"{"s":"up"}"#).unwrap());
-            assert_eq!(
-                s.get_child_clause("aa", 1).unwrap(),
-                Some(r#"{"s":"up"}"#.to_string())
-            );
         }
 
         #[test]
@@ -1173,20 +1225,21 @@ mod real {
             // read as "nothing was ever set" — inert, nothing enforced.
             let base = tmp("childclause-strict");
             let s = RealChildClauseStore::with_base(&base);
-            assert!(s.put_child_clause("aa", 2, 100, r#"{"b":"good"}"#).unwrap());
+            let aa = subj("a");
+            assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":"good"}"#).unwrap());
             assert_eq!(
-                s.clauses_for_strict("aa").unwrap(),
+                s.clauses_for_strict(&aa).unwrap(),
                 vec![(2, r#"{"b":"good"}"#.to_string())]
             );
             let budget_file = base
                 .join("children")
-                .join("aa")
+                .join(&aa)
                 .join("clauses")
                 .join("2.json");
             fs::write(&budget_file, r#"{"issued_at":100,"js"#).unwrap();
-            assert!(s.clauses_for_strict("aa").is_err(), "torn is not absent");
+            assert!(s.clauses_for_strict(&aa).is_err(), "torn is not absent");
             // A child nobody has set anything for is still simply empty.
-            assert_eq!(s.clauses_for_strict("bb").unwrap(), vec![]);
+            assert_eq!(s.clauses_for_strict(&subj("b")).unwrap(), vec![]);
         }
 
         #[test]
@@ -1197,17 +1250,18 @@ mod real {
             // half-finished write bought unlimited time.
             let base = tmp("childclause-torn");
             let s = RealChildClauseStore::with_base(&base);
-            assert!(s.put_child_clause("aa", 1, 100, r#"{"s":"good"}"#).unwrap());
-            assert!(s.put_child_clause("aa", 2, 100, r#"{"b":"good"}"#).unwrap());
+            let aa = subj("a");
+            assert!(s.put_child_clause(&aa, 1, 100, r#"{"s":"good"}"#).unwrap());
+            assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":"good"}"#).unwrap());
             // Truncate the budget file the way a power cut mid-write does.
             let budget_file = base
                 .join("children")
-                .join("aa")
+                .join(&aa)
                 .join("clauses")
                 .join("2.json");
             fs::write(&budget_file, r#"{"issued_at":100,"js"#).unwrap();
 
-            let got = s.clauses_for("aa").unwrap();
+            let got = s.clauses_for(&aa).unwrap();
             assert_eq!(
                 got.clauses,
                 vec![(1, r#"{"s":"good"}"#.to_string())],
@@ -1221,7 +1275,7 @@ mod real {
             // The whole file being empty (a 0-byte O_TRUNC victim) reads the
             // same way: present, illegible.
             fs::write(&budget_file, "").unwrap();
-            assert_eq!(s.clauses_for("aa").unwrap().unreadable, vec![2]);
+            assert_eq!(s.clauses_for(&aa).unwrap().unreadable, vec![2]);
         }
 
         #[test]
