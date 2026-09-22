@@ -6,6 +6,28 @@
 //! the 180 raw bytes — exactly 240 chars — LSB-first within each byte.
 //! Hand-rolled codec on purpose: core crates stay dependency-austere, and the
 //! byte layout is frozen by cross-stack vectors either way.
+//!
+//! # The 25-hour day (B6)
+//!
+//! 1440 slots cannot represent an autumn fall-back date, where the local wall
+//! clock visits 01:00–01:59 twice. The size is **deliberately not changed**:
+//! the bitmap is the frozen USAGE_SYNC wire encoding and the Android warden
+//! shares the journal format, so widening it here would silently desynchronise
+//! two stacks that cannot be rebuilt together.
+//!
+//! The consequences are therefore handled rather than removed:
+//!
+//! - The second pass over a repeated minute ORs onto a bit already set, so on
+//!   a fall-back date the journal can UNDER-count by up to 60 minutes while
+//!   the scalar meter (`UsageLedger::used_today`) counts them correctly.
+//! - Because of that, the pooled union in `budget.rs` is floored at the
+//!   device's own scalar — the journal may only ever under-count, never hand
+//!   time back against a cap.
+//! - A minute-of-day at or past [`MinuteSet::MINUTES`] but still inside a
+//!   25-hour day (< [`MinuteSet::MAX_LOCAL_DAY_MINUTES`]) is CLAMPED into the
+//!   last slot by [`MinuteSet::set_local_minute`] rather than dropped, so a
+//!   caller measuring minutes from local midnight cannot lose the tail of the
+//!   day. Anything beyond that is wire junk and is still ignored.
 
 use chrono::Timelike;
 use chrono_tz::Tz;
@@ -36,11 +58,33 @@ impl std::fmt::Debug for MinuteSet {
 impl MinuteSet {
     pub const MINUTES: usize = 1440;
 
+    /// The longest a local calendar day can run, in minutes: 25 hours, the
+    /// autumn fall-back date. See the module docs — the bitmap is 1440 slots
+    /// and stays that way, so the extra hour is clamped, not stored.
+    pub const MAX_LOCAL_DAY_MINUTES: usize = 1500;
+
     /// Mark one minute-of-day. Out-of-range is a no-op (never panics on wire
     /// data or clock oddities).
     pub fn set(&mut self, minute: usize) {
         if minute < Self::MINUTES {
             self.bits[minute / 8] |= 1 << (minute % 8);
+        }
+    }
+
+    /// Mark one minute of the LOCAL day, tolerating a 25-hour one.
+    ///
+    /// Identical to [`set`](Self::set) for an ordinary `0..1440`, but a minute
+    /// in `1440..1500` — only reachable on a fall-back date, and only when the
+    /// caller counts minutes elapsed from local midnight rather than from the
+    /// wall clock — lands in the last slot instead of being dropped. Losing
+    /// the tail of the day would under-count the journal a second time, on top
+    /// of the repeated-hour collision the module docs describe. Beyond 1500 is
+    /// not a day at all and is ignored, exactly as `set` ignores it.
+    pub fn set_local_minute(&mut self, minute: usize) {
+        if (Self::MINUTES..Self::MAX_LOCAL_DAY_MINUTES).contains(&minute) {
+            self.set(Self::MINUTES - 1);
+        } else {
+            self.set(minute);
         }
     }
 
@@ -70,6 +114,10 @@ impl MinuteSet {
     /// that minute — zero seconds were spent in it). Clamped to the local day
     /// start: the pre-midnight tail of a span is dropped, mirroring how
     /// `UsageLedger::credit` day-rolls before crediting.
+    ///
+    /// On an autumn fall-back date the repeated 01:00–01:59 marks bits already
+    /// set, so the journal under-counts that hour — see the module docs and
+    /// the floor `budget.rs` puts under the pooled union.
     pub fn mark_span(&mut self, tz: Tz, now_unix: i64, elapsed_secs: u64) {
         if elapsed_secs == 0 {
             return;
@@ -85,7 +133,7 @@ impl MinuteSet {
         let end_sec = ssm - 1;
         let start_sec = ssm.saturating_sub(elapsed_secs);
         for minute in (start_sec / 60)..=(end_sec / 60) {
-            self.set(minute as usize);
+            self.set_local_minute(minute as usize);
         }
     }
 
@@ -233,6 +281,40 @@ mod tests {
         let mut n = MinuteSet::default();
         n.mark_span(chrono_tz::UTC, NOON_UTC - 43_200, 600);
         assert!(n.is_empty());
+    }
+
+    /// B6: the extra hour of a 25-hour local day clamps into the last slot
+    /// rather than vanishing, while genuine wire junk still does nothing.
+    #[test]
+    fn set_local_minute_clamps_the_25_hour_days_extra_hour() {
+        let mut m = MinuteSet::default();
+        m.set_local_minute(1439);
+        m.set_local_minute(1440);
+        m.set_local_minute(MinuteSet::MAX_LOCAL_DAY_MINUTES - 1);
+        assert_eq!(m.count(), 1, "all three land in the last slot");
+        assert!(m.contains(MinuteSet::MINUTES - 1));
+
+        let mut n = MinuteSet::default();
+        n.set_local_minute(MinuteSet::MAX_LOCAL_DAY_MINUTES);
+        n.set_local_minute(9999);
+        assert!(n.is_empty(), "beyond a 25-hour day is not a day at all");
+
+        // Ordinary minutes are untouched by the clamp.
+        let mut o = MinuteSet::default();
+        o.set_local_minute(0);
+        o.set_local_minute(719);
+        assert!(o.contains(0) && o.contains(719) && o.count() == 2);
+    }
+
+    /// The fall-back collision, asserted rather than assumed: the same wall
+    /// clock minute lived twice is one bit, so the journal under-counts and
+    /// `budget.rs` must floor the union at the scalar.
+    #[test]
+    fn a_repeated_local_minute_is_marked_once() {
+        let mut m = MinuteSet::default();
+        m.mark_span(chrono_tz::UTC, NOON_UTC, 60);
+        m.mark_span(chrono_tz::UTC, NOON_UTC, 60);
+        assert_eq!(m.count(), 1);
     }
 
     #[test]

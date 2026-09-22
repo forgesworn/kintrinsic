@@ -4,7 +4,7 @@
 //! for parity. `evaluate_grant_schedule` is the runtime-canonical evaluator the
 //! enforcer uses (and is wrapped fail-SAFE at the enforcement layer).
 
-use chrono::{DateTime, Datelike, Timelike};
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +107,36 @@ pub enum ScheduleStatus {
     Unparseable,
 }
 
+/// The unix instant of `minute_of_day` (minutes past local midnight) on `date`
+/// in `tz`, robust across DST — the same ambiguous/gap discipline
+/// `enforcer::local_midnight_ts` uses, which is why that function now delegates
+/// here: an ambiguous (fall-back) wall time takes the EARLIER instant, and one
+/// skipped by a spring-forward gap takes the first valid instant after the gap.
+/// Never silently falls back to "now".
+///
+/// Every schedule countdown is a difference of two of these, never arithmetic
+/// on minute-of-day: a day containing a transition is 1380 or 1500 minutes
+/// long, so `(end − now) * 60` is wrong by exactly an hour across every
+/// spring-forward / fall-back boundary — and that number is what the lock
+/// screen shows as "access resumes in …".
+pub(crate) fn local_wall_ts(tz: Tz, date: NaiveDate, minute_of_day: u32) -> i64 {
+    let naive = date.and_hms_opt(0, 0, 0).expect("valid midnight")
+        + Duration::minutes(i64::from(minute_of_day));
+    match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => dt.timestamp(),
+        LocalResult::Ambiguous(earlier, _later) => earlier.timestamp(),
+        LocalResult::None => (1..=180)
+            .find_map(
+                |m| match tz.from_local_datetime(&(naive + Duration::minutes(m))) {
+                    LocalResult::Single(dt) => Some(dt.timestamp()),
+                    LocalResult::Ambiguous(e, _) => Some(e.timestamp()),
+                    LocalResult::None => None,
+                },
+            )
+            .unwrap_or_else(|| Utc.from_utc_datetime(&naive).timestamp()),
+    }
+}
+
 fn parse_hhmm(s: &str) -> Option<u32> {
     let (h, m) = s.split_once(':')?;
     let h: u32 = h.parse().ok()?;
@@ -136,6 +166,14 @@ fn parse_windows(windows: &[crate::clause::GrantScheduleWindow]) -> Vec<(u32, u3
 /// Runtime-canonical schedule evaluation (weekly + per-date overrides + paused,
 /// `"HH:MM"`, tz-aware). Returns the open/locked status + countdown.
 pub fn evaluate_grant_schedule(sched: &GrantSchedule, now_unix: i64) -> ScheduleStatus {
+    // A body version this build does not implement reads as UNPARSEABLE — the
+    // same fail-SAFE the enforcement layer already gives a clause it cannot
+    // read, and the only honest answer when serde has silently dropped fields
+    // whose meaning we do not know. Checked before `paused`, so no future
+    // field can reach a v1 arm.
+    if !sched.is_supported_version() {
+        return ScheduleStatus::Unparseable;
+    }
     if sched.paused == Some(true) {
         return ScheduleStatus::Locked {
             seconds_to_open: None,
@@ -165,11 +203,17 @@ pub fn evaluate_grant_schedule(sched: &GrantSchedule, now_unix: i64) -> Schedule
     if let Some(windows) = windows_for(sched, &date_key, day) {
         for (start, end) in &windows {
             if minute >= *start && minute < *end {
-                // Seconds until close (today).
-                let close_minute = *end;
-                let secs = (close_minute - minute) as u64 * 60 - now.second() as u64;
+                // Seconds until close: the DIFFERENCE OF TWO INSTANTS, so a
+                // 23- or 25-hour day is counted as it actually elapses. A
+                // 00:00–06:00 window on the spring-forward date used to report
+                // six hours of wall clock where only five will pass, which put
+                // this countdown an hour out of step with the enforcer's own
+                // end-of-day cap. Saturated at zero because the fall-back
+                // hour's EARLIER instant can already be behind us on the
+                // second pass — closing early is the fail-safe direction.
+                let close = local_wall_ts(tz, now.date_naive(), *end);
                 return ScheduleStatus::Open {
-                    seconds_to_close: secs,
+                    seconds_to_close: (close - now_unix).max(0) as u64,
                 };
             }
         }
@@ -224,27 +268,27 @@ pub fn evaluate_app_rules(
 
 fn next_open_secs(sched: &GrantSchedule, tz: &Tz, now_unix: i64) -> Option<u64> {
     let now: DateTime<Tz> = DateTime::from_timestamp(now_unix, 0)?.with_timezone(tz);
-    let now_minute = now.hour() * 60 + now.minute();
-    for day_offset in 0..8i64 {
-        let probe = now + chrono::Duration::days(day_offset);
+    let today = now.date_naive();
+    for day_offset in 0..8u64 {
+        // CALENDAR days, not `now + 86400 * n`: a fixed 24-hour step lands on
+        // the wrong local date across a DST transition (at 00:30 on a 25-hour
+        // day it lands at 23:30 the SAME day, skipping a day entirely).
+        let probe = today.checked_add_days(chrono::Days::new(day_offset))?;
         let day = probe.weekday().num_days_from_sunday();
         let date_key = probe.format("%Y-%m-%d").to_string();
         if let Some(windows) = windows_for(sched, &date_key, day) {
             let mut starts: Vec<u32> = windows.iter().map(|(s, _)| *s).collect();
             starts.sort_unstable();
             for start in starts {
-                if day_offset > 0 || start > now_minute {
-                    // Distance from NOW: whole days ahead + the window's start,
-                    // minus the minutes already elapsed today. (Zeroing the
-                    // elapsed term for future days overcounted by the current
-                    // time of day — a Sat-19:19 lock said "back Mon 02:18"
-                    // instead of "tomorrow 07:00".) Safe unsigned: day_offset
-                    // >= 1 makes the sum >= 1440 > now_minute (<= 1439).
-                    let minutes_ahead =
-                        (day_offset as u64) * 1440 + (start as u64) - (now_minute as u64);
-                    // Subtract current seconds-into-minute for precision.
-                    let secs = minutes_ahead * 60 - now.second() as u64;
-                    return Some(secs);
+                // The countdown is the distance between two INSTANTS, so a
+                // short or long day counts as it will actually elapse.
+                // `day_offset * 1440 + start - now_minute` assumed every day
+                // was 1440 minutes and so was an hour out across every DST
+                // boundary — on the very number the lock screen shows as
+                // "access resumes in …".
+                let open = local_wall_ts(*tz, probe, start);
+                if open > now_unix {
+                    return Some((open - now_unix) as u64);
                 }
             }
         }
@@ -403,6 +447,135 @@ mod parity_tests {
             panic!("expected locked");
         };
         assert_eq!(seconds_to_open, Some(3600));
+    }
+
+    fn every_day_window_in(tz: &str, start: &str, end: &str) -> GrantSchedule {
+        let mut s = every_day_window(start, end);
+        s.tz = tz.into();
+        s
+    }
+
+    /// B5 (spring forward). Europe/London 2027-03-28: 01:00 GMT becomes 02:00
+    /// BST, so the local day is 1380 minutes long. Minute-of-day arithmetic
+    /// said six hours of window where only five will pass, and eight hours to
+    /// the next open where only seven will — an hour wrong on the number the
+    /// lock screen shows as "access resumes in …", and an hour out of step
+    /// with the enforcer's own (DST-correct) end-of-day cap.
+    #[test]
+    fn countdowns_survive_a_spring_forward() {
+        let sched = every_day_window_in("Europe/London", "00:00", "06:00");
+        // Sun 2027-03-28 00:30 local: 06:00 local is 4h30m away, not 5h30m.
+        let at_0030 = 1_806_193_800;
+        assert_eq!(
+            evaluate_grant_schedule(&sched, at_0030),
+            ScheduleStatus::Open {
+                seconds_to_close: 4 * 3600 + 1800
+            }
+        );
+
+        // Sat 2027-03-27 23:00 local, daily 07:00–08:00: the next open is 7h
+        // away (23:00 GMT → 07:00 BST), not the 8h a 1440-minute day implies.
+        let morning = every_day_window_in("Europe/London", "07:00", "08:00");
+        let sat_2300 = 1_806_188_400;
+        assert_eq!(
+            evaluate_grant_schedule(&morning, sat_2300),
+            ScheduleStatus::Locked {
+                seconds_to_open: Some(7 * 3600)
+            }
+        );
+    }
+
+    /// B5 (fall back). Europe/London 2026-10-25: 02:00 BST becomes 01:00 GMT,
+    /// a 1500-minute day. The error runs the other way — the countdowns were
+    /// an hour SHORT.
+    #[test]
+    fn countdowns_survive_a_fall_back() {
+        let sched = every_day_window_in("Europe/London", "00:00", "06:00");
+        // Sun 2026-10-25 00:30 local (BST): 06:00 local (GMT) is 6h30m away.
+        let at_0030 = 1_792_884_600;
+        assert_eq!(
+            evaluate_grant_schedule(&sched, at_0030),
+            ScheduleStatus::Open {
+                seconds_to_close: 6 * 3600 + 1800
+            }
+        );
+
+        // Sat 2026-10-24 23:00 local, daily 07:00–08:00: 9h to the next open.
+        let morning = every_day_window_in("Europe/London", "07:00", "08:00");
+        let sat_2300 = 1_792_879_200;
+        assert_eq!(
+            evaluate_grant_schedule(&morning, sat_2300),
+            ScheduleStatus::Locked {
+                seconds_to_open: Some(9 * 3600)
+            }
+        );
+    }
+
+    /// The day-walk steps CALENDAR days. A fixed 24-hour step lands on the
+    /// wrong local date across a transition — at 00:30 on a 25-hour day it
+    /// lands at 23:30 the SAME day — which would probe one date twice and skip
+    /// another entirely.
+    #[test]
+    fn the_next_open_walk_never_skips_a_calendar_day() {
+        // Only SUNDAY has a window; asked on Sun 2026-10-25 00:30 (the 25-hour
+        // day), the answer must be 07:00 the same morning — 7h30m of real
+        // time away, because the hour 01:00–01:59 is lived twice.
+        let mut sched = every_day_window_in("Europe/London", "07:00", "08:00");
+        sched.weekly.mon = None;
+        sched.weekly.tue = None;
+        sched.weekly.wed = None;
+        sched.weekly.thu = None;
+        sched.weekly.fri = None;
+        sched.weekly.sat = None;
+        assert_eq!(
+            evaluate_grant_schedule(&sched, 1_792_884_600),
+            ScheduleStatus::Locked {
+                seconds_to_open: Some(7 * 3600 + 1800)
+            }
+        );
+        // …and from Sunday evening the walk carries on to the NEXT Sunday
+        // rather than answering the same morning twice.
+        let sun_1900 = 1_792_884_600 + 19 * 3600 + 30 * 60; // Sun 19:00 GMT
+        let ScheduleStatus::Locked { seconds_to_open } = evaluate_grant_schedule(&sched, sun_1900)
+        else {
+            panic!("expected locked");
+        };
+        assert_eq!(seconds_to_open, Some(6 * 86_400 + 12 * 3600));
+    }
+
+    /// G1: a body version this build does not implement is UNPARSEABLE — the
+    /// fail-SAFE the enforcer turns into a `Malformed` lock — never a v1 body
+    /// whose unknown fields serde silently dropped.
+    #[test]
+    fn a_future_body_version_is_unparseable() {
+        let mut sched = every_day_window("00:00", "23:59");
+        sched.v = crate::clause::SCHEDULE_VERSION + 1;
+        assert_eq!(
+            evaluate_grant_schedule(&sched, 1_783_166_400),
+            ScheduleStatus::Unparseable
+        );
+        // An empty weekly set would otherwise be Unbounded — the version check
+        // outranks every arm, including the one that imposes nothing.
+        let empty = GrantSchedule {
+            v: crate::clause::SCHEDULE_VERSION + 1,
+            tz: "Etc/UTC".into(),
+            paused: None,
+            weekly: crate::clause::WeeklySchedule::default(),
+            overrides: None,
+            issued_at: 0,
+        };
+        assert_eq!(
+            evaluate_grant_schedule(&empty, 1_783_166_400),
+            ScheduleStatus::Unparseable
+        );
+        // A per-app rule carrying one is Blocked, same fail-safe direction.
+        let rule = crate::clause::AppRule {
+            pkg: "com.example.game".into(),
+            label: None,
+            blocked: false,
+            schedule: Some(sched),
+        };
+        assert_eq!(evaluate_app_rule(&rule, 1_783_166_400), AppAccess::Blocked);
     }
 
     #[derive(serde::Deserialize)]

@@ -45,12 +45,24 @@ pub enum TetherMode {
     Filtered,
 }
 
-/// Level-triggered per-tick evaluation: no clause, an explicit `none`, or an
-/// expired window all mean Blocked — fail-safe in every direction.
+/// Level-triggered per-tick evaluation: no clause, an explicit `none`, an
+/// expired window, or a body version this build does not implement all mean
+/// Blocked — fail-safe in every direction.
+///
+/// The version check is why [`TETHERING_VERSION`] exists, and the fail
+/// direction here is the worst one in the product: the arm that survives an
+/// unrecognised body is `Raw`, which hands tethered clients unfiltered
+/// upstream internet, kernel-forwarded around every on-device filter
+/// (`spec/contract.md` §tethering). Serde drops unknown fields, so a `v: 2`
+/// that (say) added a required scope would otherwise evaluate to "raw,
+/// unbounded".
 pub fn evaluate_tethering(grant: Option<&GrantTethering>, now: u64) -> TetherMode {
     let Some(g) = grant else {
         return TetherMode::Blocked;
     };
+    if g.v > TETHERING_VERSION {
+        return TetherMode::Blocked;
+    }
     if let Some(until) = g.until {
         if now >= until {
             return TetherMode::Blocked;
@@ -129,6 +141,38 @@ mod tests {
             until: None,
         };
         assert_eq!(evaluate_tethering(Some(&g), u64::MAX), TetherMode::Raw);
+    }
+
+    /// G4: a future body version is BLOCKED, not read as v1. `raw` is the arm
+    /// that would otherwise survive an unrecognised body, and it is the one
+    /// that hands out unfiltered internet.
+    #[test]
+    fn a_future_body_version_is_blocked() {
+        for allow in [TetherAllow::Raw, TetherAllow::Filtered, TetherAllow::None] {
+            let g = GrantTethering {
+                v: TETHERING_VERSION + 1,
+                issued_at: 1,
+                allow,
+                until: None,
+            };
+            assert_eq!(
+                evaluate_tethering(Some(&g), 1_700_000_000),
+                TetherMode::Blocked,
+                "v{} allow {allow:?}",
+                g.v
+            );
+        }
+        // …and the version this build implements still evaluates normally.
+        let ok = GrantTethering {
+            v: TETHERING_VERSION,
+            issued_at: 1,
+            allow: TetherAllow::Raw,
+            until: None,
+        };
+        assert_eq!(
+            evaluate_tethering(Some(&ok), 1_700_000_000),
+            TetherMode::Raw
+        );
     }
 
     #[test]

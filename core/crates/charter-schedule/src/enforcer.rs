@@ -5,7 +5,7 @@
 //! rejects freezing charterd or the lock UI. Enforcement is **fail-SAFE**: a
 //! malformed/unparseable clause locks (never fail-open).
 
-use chrono::{DateTime, Duration, LocalResult, TimeZone, Utc};
+use chrono::DateTime;
 use chrono_tz::Tz;
 
 use crate::budget::ConsolidatedUsage;
@@ -174,20 +174,9 @@ fn enforcement_tz(inp: &EnforcerInputs) -> Tz {
 /// skipped by a spring-forward gap uses the first valid instant after the gap.
 /// Never silently falls back to "now".
 fn local_midnight_ts(tz: Tz, date: chrono::NaiveDate) -> i64 {
-    let naive = date.and_hms_opt(0, 0, 0).expect("valid midnight");
-    match tz.from_local_datetime(&naive) {
-        LocalResult::Single(dt) => dt.timestamp(),
-        LocalResult::Ambiguous(earlier, _later) => earlier.timestamp(),
-        LocalResult::None => (1..=180)
-            .find_map(
-                |m| match tz.from_local_datetime(&(naive + Duration::minutes(m))) {
-                    LocalResult::Single(dt) => Some(dt.timestamp()),
-                    LocalResult::Ambiguous(e, _) => Some(e.timestamp()),
-                    LocalResult::None => None,
-                },
-            )
-            .unwrap_or_else(|| Utc.from_utc_datetime(&naive).timestamp()),
-    }
+    // One implementation of the rule, shared with every schedule countdown —
+    // see `schedule_eval::local_wall_ts`.
+    crate::schedule_eval::local_wall_ts(tz, date, 0)
 }
 
 fn secs_to_eod(tz: Tz, now_unix: i64) -> u64 {
@@ -756,17 +745,29 @@ mod tests {
         assert!(!r.locked);
     }
 
-    /// A PAUSED budget reads as zero on the caps that exist and unset on the
-    /// ones that don't, so "paused" can never be mistaken for "no limit".
+    /// A PAUSED budget reads as zero on BOTH axes whichever caps the body
+    /// carries. `-1` is how this surface says "unbounded", so leaving an unset
+    /// axis at `-1` was the one shape in which "paused" could be read as "no
+    /// limit" — and with neither cap set that is exactly what the enforcer
+    /// did (02-B4).
     #[test]
-    fn a_paused_budget_reads_as_nothing_left_on_the_caps_that_exist() {
+    fn a_paused_budget_reads_as_nothing_left_on_both_axes() {
         let (usage, ext) = ledgers();
-        let mut b = day_and_week(Some(120), None);
-        b.paused = Some(true);
-        let r = with_budget(&b, &usage, &ext);
-        assert_eq!(r.budget_day_secs, 0);
-        assert_eq!(r.budget_week_secs, -1);
-        assert!(r.locked);
+        for caps in [
+            (Some(120), None),
+            (None, Some(300)),
+            (Some(120), Some(300)),
+            (None, None),
+        ] {
+            let mut b = day_and_week(caps.0, caps.1);
+            b.paused = Some(true);
+            let r = with_budget(&b, &usage, &ext);
+            assert_eq!(r.budget_day_secs, 0, "caps {caps:?}");
+            assert_eq!(r.budget_week_secs, 0, "caps {caps:?}");
+            assert_eq!(r.budget_secs, 0, "caps {caps:?}");
+            assert!(r.locked, "caps {caps:?}");
+            assert_eq!(r.reason, Some(LockReason::Budget), "caps {caps:?}");
+        }
     }
 
     /// A revoked budget is unbounded on both — nothing is being capped.

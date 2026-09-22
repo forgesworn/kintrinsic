@@ -85,6 +85,10 @@ impl WeeklySchedule {
     }
 }
 
+/// The frozen `schedule` clause body version — the highest this build
+/// implements. See [`GrantSchedule::is_supported_version`].
+pub const SCHEDULE_VERSION: u32 = 1;
+
 /// The runtime-canonical schedule clause (the device authority).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +102,22 @@ pub struct GrantSchedule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<BTreeMap<String, Vec<GrantScheduleWindow>>>,
     pub issued_at: u64,
+}
+
+impl GrantSchedule {
+    /// Whether this build knows what the body MEANS.
+    ///
+    /// Serde drops unknown fields, so a `v: 2` body — a future shape whose
+    /// fields may mean something else entirely — otherwise deserialises
+    /// cleanly into the v1 struct and is enforced as if it were v1, with the
+    /// failure direction decided by whatever the bump changed. An unknown
+    /// version is therefore treated exactly as an UNREADABLE clause of this
+    /// kind: [`evaluate_grant_schedule`](crate::evaluate_grant_schedule)
+    /// answers [`ScheduleStatus::Unparseable`](crate::ScheduleStatus), which
+    /// the enforcer fail-SAFES into a `Malformed` lock.
+    pub fn is_supported_version(&self) -> bool {
+        self.v <= SCHEDULE_VERSION
+    }
 }
 
 /// The frozen `appRules` clause body version.
@@ -258,6 +278,10 @@ pub enum WeekStart {
     Mon,
 }
 
+/// The frozen `budget` clause body version — the highest this build
+/// implements. See [`GrantBudget::is_supported_version`].
+pub const BUDGET_VERSION: u32 = 1;
+
 /// The runtime-canonical, **device-enforced** budget clause (frozen here +
 /// `spec/contract.md`). `paused` ⇒ 0; `revoked` ⇒ no constraint; absent caps
 /// unconstrained.
@@ -311,6 +335,18 @@ pub enum TimeModel {
     /// charged while it is open, several open at once are charged once, and
     /// nothing open costs nothing.
     Named,
+}
+
+impl GrantBudget {
+    /// Whether this build knows what the body MEANS — the budget twin of
+    /// [`GrantSchedule::is_supported_version`], and the more dangerous of the
+    /// two: a `v: 2` that moved to (say) `dailySeconds` parses here with
+    /// `dailyMinutes: None`, i.e. NO CAP AT ALL. An unknown version is
+    /// therefore treated exactly as an unreadable budget — `paused`
+    /// semantics, quota zero on both axes.
+    pub fn is_supported_version(&self) -> bool {
+        self.v <= BUDGET_VERSION
+    }
 }
 
 impl TimeModel {

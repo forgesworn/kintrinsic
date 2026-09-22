@@ -22,8 +22,8 @@ pub use clause::{
     cmdline_needle, is_cmdline_id, is_site_id, site_id, AppBucket, AppRule, ChartedClause,
     GrantAppRules, GrantBuckets, GrantBudget, GrantSchedule, GrantScheduleWindow, ScheduleWindow,
     TimeModel, WeekStart, WeeklySchedule, APP_RULES_VERSION, BUCKETS_VERSION,
-    BUCKETS_VERSION_WEEKLY, CMDLINE_ID_PREFIX, MAX_BUCKET_WEEK_MINUTES, MIN_CMDLINE_NEEDLE,
-    SITE_ID_PREFIX,
+    BUCKETS_VERSION_WEEKLY, BUDGET_VERSION, CMDLINE_ID_PREFIX, MAX_BUCKET_WEEK_MINUTES,
+    MIN_CMDLINE_NEEDLE, SCHEDULE_VERSION, SITE_ID_PREFIX,
 };
 pub use enforcer::{
     burn_schedule_extension, compute_remaining, end_of_day_unix, enforcement_eod_unix,
@@ -37,5 +37,7 @@ pub use schedule_eval::{
     evaluate_app_rule, evaluate_app_rules, evaluate_grant_schedule, evaluate_schedule, AppAccess,
     EvaluateReason, EvaluateResult, ScheduleStatus,
 };
-pub use tethering::{evaluate_tethering, GrantTethering, TetherAllow, TetherMode};
+pub use tethering::{
+    evaluate_tethering, GrantTethering, TetherAllow, TetherMode, TETHERING_VERSION,
+};
 pub use usage::{Activity, Bucket, UsageLedger};

@@ -1,0 +1,234 @@
+{
+  "comment": "Every case here asserts the FAIL-SAFE direction: a clause the device cannot read, cannot understand, or that says 'stop' must lock, and a DST boundary must not shift a countdown by an hour. Driven through the enforcer entry point (compute_remaining), NOT a library helper — the paused-with-no-caps hole (02-B4) survived for months precisely because every existing vector drove quota_left instead. Review 2026-09-21, findings 02-B4/B5/B6/G1/G2 and 02b-G4.",
+  "enforcer": [
+    {
+      "name": "paused_budget_with_no_caps_locks",
+      "why": "02-B4: wire-paused carrying neither cap read as UNBOUNDED to the enforcer while the exported helper said zero. The contract: 'When true, blocks all time (quota = 0). Distinct from absent.'",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "budget": { "v": 1, "tz": "Europe/London", "paused": true, "issuedAt": 1 },
+      "usedTodaySecs": 0,
+      "expect": {
+        "locked": true,
+        "reason": "budget",
+        "budgetSecs": 0,
+        "budgetDaySecs": 0,
+        "budgetWeekSecs": 0
+      }
+    },
+    {
+      "name": "paused_budget_with_a_daily_cap_only_locks_on_both_axes",
+      "why": "02-B4: paused is zero on both axes whichever caps the body carries, so no surface can read an unset axis as 'no limit'.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "budget": {
+        "v": 1,
+        "tz": "Europe/London",
+        "dailyMinutes": 120,
+        "paused": true,
+        "issuedAt": 1
+      },
+      "usedTodaySecs": 0,
+      "expect": {
+        "locked": true,
+        "reason": "budget",
+        "budgetSecs": 0,
+        "budgetDaySecs": 0,
+        "budgetWeekSecs": 0
+      }
+    },
+    {
+      "name": "future_budget_version_locks",
+      "why": "02-G1: serde drops unknown fields, so a v:2 body that moved to dailySeconds would parse here as NO CAP. An unimplemented version is an unreadable budget.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "budget": { "v": 2, "tz": "Europe/London", "dailySeconds": 7200, "issuedAt": 1 },
+      "usedTodaySecs": 0,
+      "expect": {
+        "locked": true,
+        "reason": "budget",
+        "budgetSecs": 0,
+        "budgetDaySecs": 0,
+        "budgetWeekSecs": 0
+      }
+    },
+    {
+      "name": "future_budget_version_outranks_revoked",
+      "why": "02-G1: revoked is the one arm that means 'unbounded'. A body we cannot read must not reach it on the strength of a field that happens to share a v1 name.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "budget": {
+        "v": 2,
+        "tz": "Europe/London",
+        "revoked": true,
+        "issuedAt": 1
+      },
+      "usedTodaySecs": 0,
+      "expect": { "locked": true, "reason": "budget", "budgetSecs": 0 }
+    },
+    {
+      "name": "future_schedule_version_locks_malformed",
+      "why": "02-G1: an unimplemented schedule version reads as unparseable — the same fail-SAFE a clause file we cannot read takes — never as a v1 schedule.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 2,
+        "tz": "Europe/London",
+        "weekly": { "mon": [{ "start": "00:00", "end": "23:59" }] },
+        "issuedAt": 1
+      },
+      "expect": { "locked": true, "reason": "malformed", "scheduleSecs": 0 }
+    },
+    {
+      "name": "future_schedule_version_locks_even_with_no_windows",
+      "why": "02-G1: an empty weekly set is otherwise UNBOUNDED. The version check outranks every arm, including the one that imposes nothing.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "schedule": { "v": 2, "tz": "Europe/London", "issuedAt": 1 },
+      "expect": { "locked": true, "reason": "malformed", "scheduleSecs": 0 }
+    },
+    {
+      "name": "unparseable_timezone_locks_malformed",
+      "why": "02-G2: the fail-safe arm the enforcer has always had, now actually covered by a vector.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Not/AZone",
+        "weekly": { "mon": [{ "start": "00:00", "end": "23:59" }] },
+        "issuedAt": 1
+      },
+      "expect": { "locked": true, "reason": "malformed", "scheduleSecs": 0 }
+    },
+    {
+      "name": "paused_schedule_locks_with_no_countdown",
+      "why": "02-G2: a paused schedule locks indefinitely, and must not offer a 'back in …' the ward could wait out.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Europe/London",
+        "paused": true,
+        "weekly": { "mon": [{ "start": "00:00", "end": "23:59" }] },
+        "issuedAt": 1
+      },
+      "expect": {
+        "locked": true,
+        "reason": "schedule",
+        "scheduleSecs": 0,
+        "nextOpenSecs": null
+      }
+    },
+    {
+      "name": "spring_forward_window_close_counts_real_seconds",
+      "why": "02-B5: Sun 2027-03-28 00:30 Europe/London, window 00:00-06:00. The local day is 1380 minutes, so 06:00 is 4h30m away — minute-of-day arithmetic claimed 5h30m.",
+      "nowUnix": 1806193800,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Europe/London",
+        "weekly": { "sun": [{ "start": "00:00", "end": "06:00" }] },
+        "issuedAt": 1
+      },
+      "expect": { "locked": false, "scheduleSecs": 16200 }
+    },
+    {
+      "name": "spring_forward_next_open_counts_real_seconds",
+      "why": "02-B5: Sat 2027-03-27 23:00 Europe/London, daily 07:00-08:00. The next open is 7h of real time away, not the 8h a 1440-minute day implies — and this is the number the lock screen shows.",
+      "nowUnix": 1806188400,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Europe/London",
+        "weekly": {
+          "sat": [{ "start": "07:00", "end": "08:00" }],
+          "sun": [{ "start": "07:00", "end": "08:00" }]
+        },
+        "issuedAt": 1
+      },
+      "expect": {
+        "locked": true,
+        "reason": "schedule",
+        "scheduleSecs": 0,
+        "nextOpenSecs": 25200
+      }
+    },
+    {
+      "name": "fall_back_window_close_counts_real_seconds",
+      "why": "02-B5, the other direction: Sun 2026-10-25 00:30 Europe/London, window 00:00-06:00. 01:00-01:59 is lived twice, so 06:00 is 6h30m away and the old arithmetic was an hour SHORT.",
+      "nowUnix": 1792884600,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Europe/London",
+        "weekly": { "sun": [{ "start": "00:00", "end": "06:00" }] },
+        "issuedAt": 1
+      },
+      "expect": { "locked": false, "scheduleSecs": 23400 }
+    },
+    {
+      "name": "fall_back_next_open_counts_real_seconds",
+      "why": "02-B5: Sat 2026-10-24 23:00 Europe/London, daily 07:00-08:00 — 9h of real time to the next open across the 25-hour day.",
+      "nowUnix": 1792879200,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Europe/London",
+        "weekly": {
+          "sat": [{ "start": "07:00", "end": "08:00" }],
+          "sun": [{ "start": "07:00", "end": "08:00" }]
+        },
+        "issuedAt": 1
+      },
+      "expect": {
+        "locked": true,
+        "reason": "schedule",
+        "scheduleSecs": 0,
+        "nextOpenSecs": 32400
+      }
+    },
+    {
+      "name": "an_unreadable_clause_outranks_a_spent_budget_in_the_explanation",
+      "why": "02-G2: a lock the device cannot explain must never be dressed up as a decision somebody made.",
+      "nowUnix": 1782734400,
+      "tz": "Europe/London",
+      "schedule": {
+        "v": 1,
+        "tz": "Not/AZone",
+        "weekly": { "mon": [{ "start": "00:00", "end": "23:59" }] },
+        "issuedAt": 1
+      },
+      "budget": {
+        "v": 1,
+        "tz": "Europe/London",
+        "dailyMinutes": 60,
+        "issuedAt": 1
+      },
+      "usedTodaySecs": 7200,
+      "expect": { "locked": true, "reason": "malformed" }
+    }
+  ],
+  "tethering": [
+    {
+      "name": "future_version_raw_is_blocked",
+      "why": "02b-G4: the arm that survived an unrecognised body was Raw — unfiltered upstream internet, kernel-forwarded around every on-device filter. The worst fail direction in the product.",
+      "payload": { "v": 2, "issuedAt": 1700000000, "allow": "raw" },
+      "now": 1700000000,
+      "expect": "blocked"
+    },
+    {
+      "name": "future_version_filtered_is_blocked",
+      "why": "02b-G4: no v2 arm is trusted, not even the conservative one.",
+      "payload": { "v": 2, "issuedAt": 1700000000, "allow": "filtered" },
+      "now": 1700000000,
+      "expect": "blocked"
+    },
+    {
+      "name": "implemented_version_still_evaluates",
+      "why": "The guard must not block the version this build actually implements.",
+      "payload": { "v": 1, "issuedAt": 1700000000, "allow": "raw" },
+      "now": 1700000000,
+      "expect": "raw"
+    }
+  ]
+}

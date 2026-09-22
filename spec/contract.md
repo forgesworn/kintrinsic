@@ -2069,6 +2069,17 @@ you change it in both, or a red test tells you which stack drifted.
 ## Versioning
 
 - Clauses carry `v: 1` today. Future bumps signal incompatible shape changes.
+- **A body whose `v` exceeds the highest version an implementation implements
+  MUST be treated exactly as an unreadable clause of that kind — never
+  evaluated by the rules of an earlier version.** Parsers ignore unknown
+  fields, so a future body otherwise deserialises cleanly into the old shape
+  and is enforced with whatever its bump changed silently dropped: a `budget`
+  that moved to `dailySeconds` would read as *no cap*, and a `tethering` body
+  would keep its `raw` arm, i.e. unfiltered upstream internet. The required
+  behaviour is therefore each kind's own fail-safe: `schedule` locks
+  (malformed), `budget` reads as `paused` (quota 0 on both axes), `tethering`
+  is `blocked`, `content` fails closed, and a capping kind such as `buckets`
+  caps nothing.
 - The contract version (this document) is `v0.1` — pre-stable.
 - The NIP-46 method namespace is `charter_*`; we do not draft an upstream NIP until the namespace stabilises (matches the `heartwood_*` discipline).
 

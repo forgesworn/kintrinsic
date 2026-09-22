@@ -39,6 +39,14 @@ pub struct ConsolidatedUsage {
 ///
 /// Weekly is always scalar, gated on `week_key`. Absent/stale views only ever
 /// UNDER-count the pool — a flaky relay can never cause a wrongful early lock.
+///
+/// The union result is FLOORED at the device's own scalar. A `MinuteSet` holds
+/// 1440 slots, so on an autumn fall-back date (a 25-hour local day) the
+/// repeated 01:00–01:59 ORs onto bits already set and up to an hour of real
+/// time disappears from the journal while the scalar counts it correctly — see
+/// `minutes.rs`. Without the floor the pooled figure could drop BELOW the
+/// device's own count, handing the ward that hour back against the daily cap
+/// and contradicting the under-count invariant above.
 fn pooled_used(
     usage: &UsageLedger,
     consolidated: Option<&ConsolidatedUsage>,
@@ -54,7 +62,7 @@ fn pooled_used(
         let own = usage.minutes_today(now_unix);
         match &c.elsewhere_minutes_today {
             Some(elsewhere) if !own.is_empty() || local_today == 0 => {
-                u64::from(own.union(elsewhere).count()) * 60
+                (u64::from(own.union(elsewhere).count()) * 60).max(local_today)
             }
             _ => local_today.saturating_add(c.spent_elsewhere_today_secs),
         }
@@ -128,8 +136,8 @@ pub fn quota_left_signed_pooled(
 /// running out — "40 minutes left today" and "2 hours left this week" are
 /// different sentences with different consequences, and the minimum alone
 /// cannot say which it is. `None` for a cap means that cap is not set (or the
-/// whole budget is revoked); `Some(0)` on every SET cap means paused — and on
-/// the daily slot alone when a paused budget sets neither.
+/// whole budget is revoked); `(Some(0), Some(0))` means paused, whichever caps
+/// the body happens to carry.
 ///
 /// Returns SIGNED remainders for the same reason as the collapsed form: an
 /// overdrawn ward must stay overdrawn.
@@ -141,24 +149,25 @@ pub fn quota_parts_signed_pooled(
     extra_today_secs: i64,
     baseline: Option<(u64, u64)>,
 ) -> (Option<i64>, Option<i64>) {
+    // A body version this build does not implement is an UNREADABLE budget,
+    // not a v1 one: serde drops the fields it does not know, so a `v: 2` that
+    // moved to `dailySeconds` would parse to "no caps at all". Checked BEFORE
+    // `revoked`, so a future body cannot lift the cap by carrying a field that
+    // happens to share a v1 name.
+    if !budget.is_supported_version() {
+        return (Some(0), Some(0));
+    }
     if budget.revoked == Some(true) {
         return (None, None); // unbounded
     }
     if budget.paused == Some(true) {
-        // Paused reads as "nothing left" on whichever caps are actually set,
-        // so a paused budget can never be mistaken for an absent one — and on
-        // the DAILY slot when NEITHER is set. `(None, None)` is how this
-        // function says "unbounded", so a paused budget carrying no caps used
-        // to enforce nothing at all, against the contract ("blocks all time
-        // (quota = 0). Distinct from absent.") and against
-        // `quota_left_pooled` below, which always answered zero.
-        if budget.daily_minutes.is_none() && budget.weekly_minutes.is_none() {
-            return (Some(0), None);
-        }
-        return (
-            budget.daily_minutes.map(|_| 0),
-            budget.weekly_minutes.map(|_| 0),
-        );
+        // Paused is zero on BOTH slots regardless of which caps are set:
+        // `(None, None)` is how this function says "unbounded", so a paused
+        // budget carrying no caps used to enforce nothing at all, against the
+        // contract ("blocks all time (quota = 0). Distinct from absent.").
+        // This is now the ONLY implementation of the rule — `quota_left_pooled`
+        // delegates here rather than deciding it a second time.
+        return (Some(0), Some(0));
     }
     let (pooled_today, pooled_week) = pooled_used(usage, consolidated, now_unix);
     let daily = budget.daily_minutes.map(|daily| {
@@ -179,31 +188,24 @@ pub fn quota_parts_signed_pooled(
     (daily, weekly)
 }
 
+/// The unsigned, saturating form of [`quota_left_signed_pooled`] with no
+/// extension in play — the shape the cross-stack `budget_vectors.json` and the
+/// wire-facing callers want.
+///
+/// It DELEGATES to [`quota_parts_signed_pooled`] rather than re-deriving the
+/// rule. Two implementations of one rule in one file disagreed for months on
+/// the one case nothing covered (a `paused` body with no caps: zero here,
+/// unbounded in the enforcer's own function, and the enforcer's answer was the
+/// one that mattered).
 pub fn quota_left_pooled(
     usage: &UsageLedger,
     budget: &GrantBudget,
     consolidated: Option<&ConsolidatedUsage>,
     now_unix: i64,
 ) -> QuotaStatus {
-    if budget.revoked == Some(true) {
-        return QuotaStatus::Unbounded;
-    }
-    if budget.paused == Some(true) {
-        return QuotaStatus::Remaining(0);
-    }
-    let (pooled_today, pooled_week) = pooled_used(usage, consolidated, now_unix);
-    let mut rem: Option<u64> = None;
-    if let Some(daily) = budget.daily_minutes {
-        let left = (daily as u64 * 60).saturating_sub(pooled_today);
-        rem = Some(rem.map_or(left, |r| r.min(left)));
-    }
-    if let Some(weekly) = budget.weekly_minutes {
-        let left = (weekly as u64 * 60).saturating_sub(pooled_week);
-        rem = Some(rem.map_or(left, |r| r.min(left)));
-    }
-    match rem {
+    match quota_left_signed_pooled(usage, budget, consolidated, now_unix, 0, None) {
         None => QuotaStatus::Unbounded,
-        Some(r) => QuotaStatus::Remaining(r),
+        Some(r) => QuotaStatus::Remaining(r.max(0) as u64),
     }
 }
 
@@ -275,12 +277,67 @@ mod tests {
         let (daily, weekly) = quota_parts_signed_pooled(&u, &b, None, NOON, 0, None);
         assert_eq!(
             (daily, weekly),
-            (Some(0), None),
+            (Some(0), Some(0)),
             "never (None, None) = unbounded"
         );
         // A grant does not reopen a paused budget.
         let (daily, _) = quota_parts_signed_pooled(&u, &b, None, NOON, 3600, None);
         assert_eq!(daily, Some(0));
+    }
+
+    /// Paused is zero on BOTH slots whichever caps the body carries — one
+    /// implementation of the rule, so the exported function and the one the
+    /// enforcer calls cannot drift apart again.
+    #[test]
+    fn paused_is_zero_on_both_slots_whichever_caps_are_set() {
+        let u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        for caps in [
+            (None, None),
+            (Some(120), None),
+            (None, Some(600)),
+            (Some(120), Some(600)),
+        ] {
+            let mut b = budget(caps.0, caps.1);
+            b.paused = Some(true);
+            assert_eq!(
+                quota_parts_signed_pooled(&u, &b, None, NOON, 0, None),
+                (Some(0), Some(0)),
+                "paused with caps {caps:?}"
+            );
+            assert_eq!(
+                quota_left(&u, &b, NOON),
+                QuotaStatus::Remaining(0),
+                "paused with caps {caps:?}"
+            );
+        }
+    }
+
+    /// G1: a body version this build does not implement is an UNREADABLE
+    /// budget — fail-safe paused — never a v1 one whose unknown fields serde
+    /// quietly dropped (a `v: 2` on `dailySeconds` would parse to "no cap").
+    #[test]
+    fn a_future_body_version_is_fail_safe_zero() {
+        let u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        let mut b = budget(None, None);
+        b.v = crate::clause::BUDGET_VERSION + 1;
+        assert_eq!(
+            quota_parts_signed_pooled(&u, &b, None, NOON, 0, None),
+            (Some(0), Some(0))
+        );
+        assert_eq!(quota_left(&u, &b, NOON), QuotaStatus::Remaining(0));
+        // Not even `revoked` (the one unbounded arm) survives the bump, and a
+        // grant cannot buy past it either.
+        b.revoked = Some(true);
+        assert_eq!(quota_left(&u, &b, NOON), QuotaStatus::Remaining(0));
+        assert_eq!(
+            quota_parts_signed_pooled(&u, &b, None, NOON, 7200, None),
+            (Some(0), Some(0))
+        );
+        // v1 itself is of course still honoured.
+        let mut ok = budget(None, None);
+        ok.v = crate::clause::BUDGET_VERSION;
+        ok.revoked = Some(true);
+        assert_eq!(quota_left(&u, &ok, NOON), QuotaStatus::Unbounded);
     }
 
     #[test]
@@ -352,6 +409,30 @@ mod tests {
         assert_eq!(
             quota_left_pooled(&u, &budget(Some(60), None), Some(&c), NOON + 2400),
             QuotaStatus::Remaining(10 * 60)
+        );
+    }
+
+    /// B6: the union is FLOORED at the device's own scalar. Crediting the same
+    /// wall-clock minutes twice is exactly the shape of an autumn fall-back
+    /// date — a 25-hour local day the 1440-slot journal cannot represent, so
+    /// the second pass over 01:00–01:59 ORs onto bits already set. The scalar
+    /// counts those seconds; the journal cannot. Unfloored, the pooled figure
+    /// drops BELOW the local count and hands the hour back against the cap.
+    #[test]
+    fn pooled_union_never_falls_below_the_local_scalar() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit(NOON, Activity::Active, 600); // 10 min, journals minutes 770..779
+        u.credit(NOON, Activity::Active, 600); // the hour lived twice: same minutes
+        assert_eq!(u.used_today(NOON), 1200);
+        assert_eq!(u.minutes_today(NOON).count(), 10, "journal cannot say 20");
+        let c = ConsolidatedUsage {
+            elsewhere_minutes_today: Some(MinuteSet::default()),
+            ..view(&u)
+        };
+        // cap 30m: pooled must be the scalar 1200, not the journal's 600.
+        assert_eq!(
+            quota_left_pooled(&u, &budget(Some(30), None), Some(&c), NOON),
+            QuotaStatus::Remaining(600)
         );
     }
 
