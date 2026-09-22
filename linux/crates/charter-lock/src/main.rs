@@ -492,8 +492,11 @@ fn render_preview(text: &LockText, path: &str) -> Result<(), Box<dyn Error>> {
 // X11 lock. Always compiled (pure-Rust x11rb), run on a real display.
 // ---------------------------------------------------------------------------
 
+use std::cell::Cell;
+
 use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::composite::{self, ConnectionExt as _};
+use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     ConnectionExt as _, CreateGCAux, CreateWindowAux, Drawable, EventMask, Gcontext, GrabMode,
     ImageFormat, Screen, StackMode, SubwindowMode, Window, WindowClass,
@@ -716,6 +719,18 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
             .override_redirect(1) // bypass the WM — cannot be moved/closed
             .event_mask(EventMask::EXPOSURE | EventMask::KEY_PRESS | EventMask::BUTTON_PRESS),
     )?;
+    // Screen-change events (hotplug/resize) so the lock can follow the root
+    // window's geometry instead of staying the size it was mapped at (04-B8):
+    // a monitor plugged in while locked otherwise shows the live, unlocked
+    // desktop on the new area with no panel over it at all. `dims` is the
+    // single source of truth for the lock's current width/height from here
+    // on — a `Cell` because `compose` below closes over it for the rest of
+    // the function's life, so a plain `let mut` couldn't be reassigned later
+    // without fighting the borrow checker.
+    // Best-effort: a server without RandR (or a connection hiccup here) just
+    // means the lock never gets a resize event, not a reason to fail the lock.
+    let _ = conn.randr_select_input(root, randr::NotifyMask::SCREEN_CHANGE);
+    let dims: Cell<(u16, u16)> = Cell::new((w, h));
     // The overlay is the frozen-compositor path (see overlay_window); the lock's
     // own window covers the live- and no-compositor cases. Both show identical
     // pixels, so whichever path reaches the screen, the panel looks the same.
@@ -780,8 +795,11 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
     let mut can_ask = std::env::var("CHARTER_LOCK_CAN_ASK").is_ok_and(|v| v == "1")
         && std::env::var("CHARTER_LOCK_USER").is_ok();
     // One place composes the whole panel — the normal card or the unlock-entry
-    // card — so both paths render identically.
+    // card — so both paths render identically. Reads `dims` (not `w`/`h`)
+    // so a post-lock RandR resize (04-B8) is picked up without re-defining
+    // this closure.
     let compose = |text: &LockText, buttons: &[Button]| -> render::Canvas {
+        let (w, h) = dims.get();
         render::render_panel(
             w,
             h,
@@ -856,7 +874,12 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                             can_ask = false;
                             text.lines
                                 .push("Asked! Your guardian will see it shortly.".into());
-                            buttons = button_layout(w, h, text.lines.len() as u16, false);
+                            buttons = button_layout(
+                                dims.get().0,
+                                dims.get().1,
+                                text.lines.len() as u16,
+                                false,
+                            );
                             canvas = compose(&text, &buttons);
                             paint(&canvas, true)?;
                         }
@@ -922,7 +945,12 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                                     canvas = compose(&utext, &[]);
                                     buttons = Vec::new();
                                 } else {
-                                    buttons = button_layout(w, h, text.lines.len() as u16, can_ask);
+                                    buttons = button_layout(
+                                        dims.get().0,
+                                        dims.get().1,
+                                        text.lines.len() as u16,
+                                        can_ask,
+                                    );
                                     canvas = compose(&text, &buttons);
                                 }
                                 // Show "Unlocking…" BEFORE we pause, so the
@@ -955,10 +983,20 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                                     // button step 1 tells them to press — so the
                                     // normal escapes stay on screen.
                                     let ntext = recovery_notice_text();
-                                    buttons = button_layout(w, h, ntext.lines.len() as u16, false);
+                                    buttons = button_layout(
+                                        dims.get().0,
+                                        dims.get().1,
+                                        ntext.lines.len() as u16,
+                                        false,
+                                    );
                                     canvas = compose(&ntext, &buttons);
                                 } else {
-                                    buttons = button_layout(w, h, text.lines.len() as u16, can_ask);
+                                    buttons = button_layout(
+                                        dims.get().0,
+                                        dims.get().1,
+                                        text.lines.len() as u16,
+                                        can_ask,
+                                    );
                                     canvas = compose(&text, &buttons);
                                 }
                                 paint(&canvas, true)?;
@@ -974,6 +1012,45 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                    }
+                }
+                // A hotplugged monitor or a resolution change grows/shrinks the
+                // root window; without this the lock stays its original size
+                // and the new screen area shows the live desktop with no panel
+                // over it at all (04-B8). Resize + recompose so the canvas and
+                // the button hit-boxes both match the new geometry.
+                Event::RandrScreenChangeNotify(ev) => {
+                    let (new_w, new_h) = (ev.width, ev.height);
+                    if (new_w, new_h) != dims.get() && new_w > 0 && new_h > 0 {
+                        dims.set((new_w, new_h));
+                        conn.configure_window(
+                            win,
+                            &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                                .width(new_w as u32)
+                                .height(new_h as u32)
+                                .stack_mode(StackMode::ABOVE),
+                        )?;
+                        eprintln!(
+                            "charter-lock: screen changed to {new_w}x{new_h}; resized + recomposed"
+                        );
+                        canvas = match unlock.as_ref() {
+                            Some(u) if u.active => {
+                                buttons = Vec::new();
+                                compose(&unlock_panel_text(u, Instant::now()), &[])
+                            }
+                            _ if recovery_notice => {
+                                let ntext = recovery_notice_text();
+                                buttons =
+                                    button_layout(new_w, new_h, ntext.lines.len() as u16, false);
+                                compose(&ntext, &buttons)
+                            }
+                            _ => {
+                                buttons =
+                                    button_layout(new_w, new_h, text.lines.len() as u16, can_ask);
+                                compose(&text, &buttons)
+                            }
+                        };
+                        paint(&canvas, true)?;
                     }
                 }
                 Event::Error(e) => eprintln!(
@@ -993,6 +1070,15 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                     buttons = Vec::new();
                 }
             }
+            // Self-heal: re-assert top-of-stack every tick. A window mapped
+            // after the lock (a notification bubble, an OSD, a second X
+            // client) otherwise stays stacked above it forever — the 1 Hz
+            // repaint before this fix wrote into the lock's own, now-covered
+            // window and healed nothing (04-B8).
+            conn.configure_window(
+                win,
+                &x11rb::protocol::xproto::ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )?;
             paint(&canvas, true)?;
             last_tick = Instant::now();
         }

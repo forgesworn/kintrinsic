@@ -296,6 +296,7 @@ dependencies = [
  "hmac",
  "secp256k1",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -330,6 +331,7 @@ dependencies = [
 name = "charter-proto"
 version = "0.1.0"
 dependencies = [
+ "charter-content",
  "charter-primitives",
  "serde",
  "serde_json",
@@ -379,6 +381,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",
