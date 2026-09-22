@@ -77,10 +77,68 @@ fi
 # Only a BLANKET rule ("(ALL : ALL) ALL", "(root) NOPASSWD: ALL") counts: Mint
 # grants every account a few fixed helper commands (mint-refresh-cache, …), so
 # "may run something" is true of every user on the target platform.
+grant_re='\([^)]*\)[[:space:]]+(.*[,:][[:space:]]*)?ALL[[:space:]]*(,.*)?$'
 if command -v sudo >/dev/null 2>&1 \
     && LC_ALL=C sudo -n -l -U "$MANAGED_USER" 2>/dev/null \
-        | grep -qE '^[[:space:]]+\([^)]*\)[[:space:]]+(.*[,:][[:space:]]*)?ALL[[:space:]]*(,.*)?$'; then
+        | grep -qE "^[[:space:]]+${grant_re}"; then
     fail "\"$MANAGED_USER\" still has sudo rights from a sudoers rule (see /etc/sudoers and /etc/sudoers.d) — Kintrinsic cannot protect this computer while that account can become root. Remove the rule, then run setup again."
+fi
+# Belt-and-braces (04-G3): `sudo -n -l -U` depends on sudo's own PAM/NSS
+# lookup working for this account, and it's the only check above that looks
+# at sudoers at all — read /etc/sudoers + /etc/sudoers.d/* directly too, by
+# the account's own name AND by every group it remains in (a `%group` grant
+# is invisible to a by-name check). Reuses the same blanket-grant pattern and
+# fail() rather than a second, divergent check.
+sudoers_targets="$MANAGED_USER"
+for g in $(id -nG "$MANAGED_USER" 2>/dev/null); do
+    sudoers_targets="$sudoers_targets %$g"
+done
+for f in /etc/sudoers /etc/sudoers.d/*; do
+    [ -f "$f" ] || continue
+    for who in $sudoers_targets; do
+        who_re="$(printf '%s' "$who" | sed 's/[.[\*^$]/\\&/g')"
+        if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -qE "^${who_re}[[:space:]]+${grant_re}"; then
+            fail "\"$MANAGED_USER\" still has a blanket sudo grant in $f (for $who) — Kintrinsic cannot protect this computer while that account can become root. Remove the rule, then run setup again."
+        fi
+    done
+done
+# Root-equivalent groups beyond the admin set (04-G3): docker/lxd hand a
+# member root via a mountable container, disk gives raw block-device access,
+# shadow gives read access to the password hashes. None of these trip the
+# brick guard's admin test, but any one of them is still a route to root.
+# Strip them too (best-effort) and warn — not fail — if one survives, since
+# unlike sudo/wheel/admin a family box may have a legitimate reason to keep
+# the child in one of these (e.g. `disk` from an old udev rule).
+root_equiv_warn=""
+for g in docker lxd disk shadow; do
+    if id -nG "$MANAGED_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
+        gpasswd -d "$MANAGED_USER" "$g" 2>/dev/null || true
+        if id -nG "$MANAGED_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
+            root_equiv_warn="$root_equiv_warn $g"
+        fi
+    fi
+done
+if [ -n "$root_equiv_warn" ]; then
+    echo "charter-setup: WARN \"$MANAGED_USER\" is still in root-equivalent group(s):${root_equiv_warn} — this can be used to gain root despite the lockdown. Remove manually if not needed."
+fi
+
+# Group membership is read at LOGIN — polkit evaluates the session's groups,
+# not the account's current ones, so if the child is logged in right now (the
+# normal case: this wizard runs from the parent's desktop on a shared box)
+# every lockdown above is inert in their existing session until they log out
+# and back in (04-G3).
+echo "charter-setup: log \"$MANAGED_USER\" out and back in for this to take effect."
+if [ "$GUI" = 1 ] && command -v loginctl >/dev/null 2>&1 \
+    && loginctl show-user "$MANAGED_USER" >/dev/null 2>&1; then
+    if zenity --question --title="Kintrinsic Setup" --ok-label="Log them out now" --cancel-label="Later" \
+        --text="\"$MANAGED_USER\" is logged in right now. The lockdown above only applies to their NEXT login — until then their current session keeps the old permissions.\n\nEnd their session now so it applies immediately? (Any unsaved work in their session is lost.)" \
+        2>/dev/null; then
+        if loginctl terminate-user "$MANAGED_USER" 2>/dev/null; then
+            echo "charter-setup: ended \"$MANAGED_USER\"'s session(s)."
+        else
+            echo "charter-setup: WARN could not end \"$MANAGED_USER\"'s session — log them out manually."
+        fi
+    fi
 fi
 
 echo "==> charter state dirs"
@@ -95,15 +153,31 @@ echo "==> host config (/etc/charter/charterd.env)"
 # manual overrides for exotic hosts. Re-derived every run (idempotent).
 install -d -m 0755 /etc/charter
 MANAGED_UID="$(id -u "$MANAGED_USER")"
-cat > /etc/charter/charterd.env <<EOF
-CHARTER_MANAGED_UID=${MANAGED_UID}
-EOF
-chmod 0644 /etc/charter/charterd.env
-# Optional staged bring-up mode (observe / freeze-only); absent => full enforce.
+ENV_FILE=/etc/charter/charterd.env
+# Merge, don't truncate. A from-scratch `cat >` rewrite destroyed whatever
+# CHARTER_DISPLAY / CHARTER_XAUTHORITY / CHARTER_LOCK_BIN overrides the env
+# example tells admins to hand-edit, and silently dropped CHARTER_ENFORCE
+# back to full enforce on any re-run that didn't happen to export it — the
+# console's "Set up" button re-runs this on every press (04-B9). Copy every
+# existing line except the two keys this run may (re)write, keep the old
+# CHARTER_ENFORCE line unless THIS run explicitly passes one, then append
+# the fresh values.
+ENV_TMP="$(mktemp /etc/charter/charterd.env.XXXXXX)"
+if [ -f "$ENV_FILE" ]; then
+    grep -vE '^(CHARTER_MANAGED_UID=|CHARTER_ENFORCE=)' "$ENV_FILE" > "$ENV_TMP" 2>/dev/null || true
+    if [ -z "${CHARTER_ENFORCE:-}" ]; then
+        grep -E '^CHARTER_ENFORCE=' "$ENV_FILE" >> "$ENV_TMP" 2>/dev/null || true
+    fi
+fi
+echo "CHARTER_MANAGED_UID=${MANAGED_UID}" >> "$ENV_TMP"
+# Optional staged bring-up mode (observe / freeze-only); absent => full enforce
+# (or whatever was already on disk, preserved above).
 if [ -n "${CHARTER_ENFORCE:-}" ]; then
-    echo "CHARTER_ENFORCE=${CHARTER_ENFORCE}" >> /etc/charter/charterd.env
+    echo "CHARTER_ENFORCE=${CHARTER_ENFORCE}" >> "$ENV_TMP"
     echo "charter-setup: enforce mode = ${CHARTER_ENFORCE} (written to charterd.env)"
 fi
+chmod 0644 "$ENV_TMP"
+mv "$ENV_TMP" "$ENV_FILE"
 
 echo "==> default screen-time limits for '$MANAGED_USER' (per-child)"
 # Seed sensible defaults so the child is enforced immediately; the parent tunes
@@ -112,9 +186,27 @@ echo "==> default screen-time limits for '$MANAGED_USER' (per-child)"
 # file (a re-run keeps the parent's chosen limits).
 install -d -m 0755 /etc/charter/limits.d
 LIMITS_FILE="/etc/charter/limits.d/${MANAGED_USER}.json"
-TZ_NAME="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
-[ -z "$TZ_NAME" ] && TZ_NAME="UTC"
 if [ ! -f "$LIMITS_FILE" ]; then
+    # Resolve the host's real timezone rather than defaulting to UTC: a wrong
+    # tz silently shifts wake/bedtime by hours with no error anywhere
+    # (04-B10). Only needed here — a re-run with an existing limits file
+    # never touches tz, so a host with no resolvable timezone should not
+    # start failing an otherwise-idempotent re-run.
+    # 1) systemd's own idea of it (works everywhere systemd runs, not just
+    #    Debian).
+    # 2) the /etc/localtime symlink target, which is how the TZ actually
+    #    takes effect regardless of what any text file says.
+    # 3) /etc/timezone (Debian/Ubuntu's own record) as a last resort.
+    # If none of those resolve, fail loudly instead of silently mislocking
+    # the child's day on UTC.
+    TZ_NAME="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    if [ -z "$TZ_NAME" ] && [ -L /etc/localtime ]; then
+        TZ_NAME="$(readlink -f /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+    fi
+    if [ -z "$TZ_NAME" ]; then
+        TZ_NAME="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
+    fi
+    [ -z "$TZ_NAME" ] && fail "couldn't determine this computer's timezone (checked timedatectl, /etc/localtime, /etc/timezone). Set one (e.g. 'sudo timedatectl set-timezone Region/City') and run setup again — Kintrinsic refuses to guess UTC and silently shift the child's wake/bedtime hours."
     cat > "$LIMITS_FILE" <<EOF
 {
   "tz": "${TZ_NAME}",
@@ -157,5 +249,5 @@ if [ "$GUI" = 1 ]; then
         2>/dev/null || true
 else
     echo "==> guardian pairing is optional (device-only limits work without it)."
-    echo "==> done. Set limits in the Kintrinsic app (The rules), or run 'charter pair' to add a phone guardian."
+    echo "==> done. Set limits in the Kintrinsic app (The rules), or pair a phone guardian from the Kintrinsic app -> Connect (needs an admin password)."
 fi

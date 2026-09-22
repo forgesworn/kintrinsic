@@ -5,8 +5,14 @@
 
 use charter_ipc::{CharterdClient, ExecProbe, IpcError, Op, PairingSink};
 
-use crate::pairing::validate_bunker_uri;
 use crate::render;
+
+/// `charter pair` cannot actually pair a guardian — `RealPairingSink::pair`
+/// is a permanent stub (`Err(NotPaired)`), and pairing now requires an admin
+/// password the CLI has no way to collect. Point at the real path instead of
+/// letting the command look like it might work. (04-G7)
+const PAIR_REDIRECT: &str =
+    "Pairing is done from the Kintrinsic app → Connect (it needs an admin password).";
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 2;
@@ -56,9 +62,13 @@ fn err_out(e: IpcError) -> CliOutcome {
 }
 
 /// Dispatch a parsed argv (without the program name).
+///
+/// `pairing` stays in the signature (callers — `main.rs`, the mock tests —
+/// still build a `PairingSink`) even though `pair` no longer calls it; see
+/// `PAIR_REDIRECT`.
 pub async fn dispatch(
     client: &dyn CharterdClient,
-    pairing: &dyn PairingSink,
+    _pairing: &dyn PairingSink,
     probe: &dyn ExecProbe,
     args: &[String],
 ) -> CliOutcome {
@@ -163,23 +173,11 @@ pub async fn dispatch(
                 Err(e) => err_out(e),
             }
         }
-        "pair" => {
-            let Some(uri) = positional(1) else {
-                return usage("usage: charter pair <bunker uri>");
-            };
-            if validate_bunker_uri(&uri).is_err() {
-                return usage("invalid bunker:// uri (must be bunker:// with wss:// relays)");
-            }
-            match pairing.pair(&uri).await {
-                Ok(_) => ok("paired".into()),
-                Err(IpcError::Invalid(m)) => CliOutcome {
-                    code: EXIT_USAGE,
-                    rendered: m,
-                },
-                Err(e) => err_out(e),
-            }
-        }
-        "" => usage("usage: charter <install|run|status|time-left|ask-for-more|ask-to-open|pair>"),
+        // `charter pair` cannot pair — `RealPairingSink::pair` is a permanent
+        // stub, and pairing now needs an admin password only the Kintrinsic
+        // app can collect. Redirect rather than validate-then-fail (04-G7).
+        "pair" => usage(PAIR_REDIRECT),
+        "" => usage("usage: charter <install|run|status|time-left|ask-for-more|ask-to-open>"),
         other => usage(&format!("unknown command: {other}")),
     }
 }

@@ -271,41 +271,15 @@ async fn run_missing_path_exit4() {
     assert_eq!(out.code, EXIT_NOT_FOUND);
 }
 
+// `charter pair` cannot pair — `RealPairingSink::pair` is a permanent stub
+// (04-G7). Whatever argv follows `pair`, the CLI redirects to the app rather
+// than validating a URI it can never act on.
 #[tokio::test]
-async fn pair_rejects_http_relay() {
+async fn pair_always_redirects_to_the_app() {
     let client = MockCharterdClient::new();
     let out = dispatch(
         &client,
         &MockPairingSink::new(false),
-        &MockExecProbe::new(),
-        &argv(&[
-            "pair",
-            "bunker://aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899?relay=ws://insecure&kind=charter",
-        ]),
-    )
-    .await;
-    assert_eq!(out.code, EXIT_USAGE);
-}
-
-#[tokio::test]
-async fn pair_rejects_non_bunker_uri() {
-    let client = MockCharterdClient::new();
-    let out = dispatch(
-        &client,
-        &MockPairingSink::new(false),
-        &MockExecProbe::new(),
-        &argv(&["pair", "nostrconnect://x"]),
-    )
-    .await;
-    assert_eq!(out.code, EXIT_USAGE);
-}
-
-#[tokio::test]
-async fn pair_already_paired_refuses() {
-    let client = MockCharterdClient::new();
-    let out = dispatch(
-        &client,
-        &MockPairingSink::new(true), // already paired
         &MockExecProbe::new(),
         &argv(&[
             "pair",
@@ -314,6 +288,24 @@ async fn pair_already_paired_refuses() {
     )
     .await;
     assert_eq!(out.code, EXIT_USAGE);
+    assert_eq!(
+        out.rendered,
+        "Pairing is done from the Kintrinsic app → Connect (it needs an admin password)."
+    );
+}
+
+#[tokio::test]
+async fn pair_with_no_args_still_redirects() {
+    let client = MockCharterdClient::new();
+    let out = dispatch(
+        &client,
+        &MockPairingSink::new(false),
+        &MockExecProbe::new(),
+        &argv(&["pair"]),
+    )
+    .await;
+    assert_eq!(out.code, EXIT_USAGE);
+    assert!(out.rendered.contains("Kintrinsic app"));
 }
 
 #[tokio::test]
