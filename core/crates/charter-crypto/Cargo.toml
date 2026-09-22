@@ -10,3 +10,4 @@ publish = false
 secp256k1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+zeroize = { workspace = true }

@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use charter_content::CuratorList;
 use charter_primitives::{kinds, NostrEvent, PubKey};
 use charter_sys::relay::{Filter, PublishOutcome, RelayIoError, RelayTransport, RelayUrl};
+use zeroize::Zeroizing;
 
 use crate::curator::{list_id, parse_curator_list};
 use crate::nip59::{self, Rumor, WrapRandomness};
@@ -97,7 +98,9 @@ pub const DEFAULT_MAX_INBOUND: usize = 8 * 1024;
 pub struct CharterTransport<R: RelayTransport, E: Entropy> {
     relay: R,
     entropy: E,
-    machine_sk: [u8; 32],
+    /// Wrapped in [`Zeroizing`]: this is the ECDH half that decrypts every
+    /// guardian message, held for the transport's whole lifetime.
+    machine_sk: Zeroizing<[u8; 32]>,
     machine_pk: PubKey,
     guardian_pk: PubKey,
     relays: Vec<RelayUrl>,
@@ -127,7 +130,7 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         CharterTransport {
             relay,
             entropy,
-            machine_sk,
+            machine_sk: Zeroizing::new(machine_sk),
             machine_pk,
             guardian_pk,
             relays,

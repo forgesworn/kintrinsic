@@ -136,7 +136,8 @@ pub fn wrap(
 ) -> Result<NostrEvent, Nip59Error> {
     // 1. Seal: encrypt the rumor to the recipient with the author's conv key.
     let rumor_json = serde_json::to_string(rumor).map_err(|_| Nip59Error::Json)?;
-    let seal_ck = nip44::conversation_key(author_sk, recipient_pk).map_err(Nip59Error::Decrypt)?;
+    let seal_ck =
+        nip44::conversation_key_zeroizing(author_sk, recipient_pk).map_err(Nip59Error::Decrypt)?;
     let seal_content =
         nip44::encrypt(&rumor_json, &seal_ck, &r.seal_nonce).map_err(Nip59Error::Decrypt)?;
     let seal = sign_event_raw(
@@ -149,8 +150,8 @@ pub fn wrap(
 
     // 2. Wrap: encrypt the seal to the recipient with an ephemeral conv key.
     let seal_json = serde_json::to_string(&seal).map_err(|_| Nip59Error::Json)?;
-    let wrap_ck =
-        nip44::conversation_key(&r.ephemeral_secret, recipient_pk).map_err(Nip59Error::Decrypt)?;
+    let wrap_ck = nip44::conversation_key_zeroizing(&r.ephemeral_secret, recipient_pk)
+        .map_err(Nip59Error::Decrypt)?;
     let wrap_content =
         nip44::encrypt(&seal_json, &wrap_ck, &r.wrap_nonce).map_err(Nip59Error::Decrypt)?;
     let tags = vec![vec![
@@ -198,7 +199,7 @@ pub fn unwrap_with_author(
         return Err(Nip59Error::BadWrapSignature);
     }
 
-    let wrap_ck = nip44::conversation_key(recipient_sk, wrap.pubkey.as_bytes())
+    let wrap_ck = nip44::conversation_key_zeroizing(recipient_sk, wrap.pubkey.as_bytes())
         .map_err(Nip59Error::Decrypt)?;
     let seal_json = nip44::decrypt(&wrap.content, &wrap_ck).map_err(Nip59Error::Decrypt)?;
     let seal: NostrEvent = serde_json::from_str(&seal_json).map_err(|_| Nip59Error::Json)?;
@@ -209,7 +210,7 @@ pub fn unwrap_with_author(
         return Err(Nip59Error::BadSealSignature);
     }
 
-    let seal_ck = nip44::conversation_key(recipient_sk, seal.pubkey.as_bytes())
+    let seal_ck = nip44::conversation_key_zeroizing(recipient_sk, seal.pubkey.as_bytes())
         .map_err(Nip59Error::Decrypt)?;
     let rumor_json = nip44::decrypt(&seal.content, &seal_ck).map_err(Nip59Error::Decrypt)?;
     let rumor: Rumor = serde_json::from_str(&rumor_json).map_err(|_| Nip59Error::Json)?;

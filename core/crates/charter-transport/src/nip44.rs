@@ -11,6 +11,7 @@ use hkdf::Hkdf;
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -39,21 +40,41 @@ pub enum Nip44Error {
 }
 
 /// The shared conversation key: `HKDF-Extract(salt="nip44-v2", ikm=ecdh_x)`.
+///
+/// Kept returning a bare `[u8; 32]`: `linux/crates/charterd/src/runtime.rs`
+/// calls this directly and is outside this review's file ownership, so its
+/// signature must not move. Prefer [`conversation_key_zeroizing`] at any new
+/// call site within this crate.
 pub fn conversation_key(secret32: &[u8; 32], pubkey32: &[u8; 32]) -> Result<[u8; 32], Nip44Error> {
+    Ok(*conversation_key_zeroizing(secret32, pubkey32)?)
+}
+
+/// As [`conversation_key`], wrapped in [`Zeroizing`] so the key is wiped when
+/// the caller drops it — this key decrypts every wire message and must not
+/// linger in freed memory afterwards.
+pub fn conversation_key_zeroizing(
+    secret32: &[u8; 32],
+    pubkey32: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, Nip44Error> {
     let shared_x = charter_crypto::ecdh_x(secret32, pubkey32).ok_or(Nip44Error::BadKey)?;
-    let (prk, _) = Hkdf::<Sha256>::extract(Some(SALT), &shared_x);
-    let mut out = [0u8; 32];
+    let (prk, _) = Hkdf::<Sha256>::extract(Some(SALT), &*shared_x);
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&prk);
     Ok(out)
 }
 
-fn message_keys(conversation_key: &[u8; 32], nonce: &[u8; 32]) -> ([u8; 32], [u8; 12], [u8; 32]) {
+/// Derive the per-message ChaCha20 key/nonce + HMAC key. The two keys are
+/// wrapped in [`Zeroizing`]; the nonce is not secret (it travels on the wire).
+fn message_keys(
+    conversation_key: &[u8; 32],
+    nonce: &[u8; 32],
+) -> (Zeroizing<[u8; 32]>, [u8; 12], Zeroizing<[u8; 32]>) {
     let hk = Hkdf::<Sha256>::from_prk(conversation_key).expect("32-byte prk");
-    let mut okm = [0u8; 76];
-    hk.expand(nonce, &mut okm).expect("76-byte expand");
-    let mut chacha_key = [0u8; 32];
+    let mut okm = Zeroizing::new([0u8; 76]);
+    hk.expand(nonce, &mut *okm).expect("76-byte expand");
+    let mut chacha_key = Zeroizing::new([0u8; 32]);
     let mut chacha_nonce = [0u8; 12];
-    let mut hmac_key = [0u8; 32];
+    let mut hmac_key = Zeroizing::new([0u8; 32]);
     chacha_key.copy_from_slice(&okm[0..32]);
     chacha_nonce.copy_from_slice(&okm[32..44]);
     hmac_key.copy_from_slice(&okm[44..76]);
@@ -106,7 +127,7 @@ pub fn encrypt(
     }
     let (chacha_key, chacha_nonce, hmac_key) = message_keys(conversation_key, nonce);
     let mut buf = pad(bytes);
-    let mut cipher = ChaCha20::new((&chacha_key).into(), (&chacha_nonce).into());
+    let mut cipher = ChaCha20::new((&*chacha_key).into(), (&chacha_nonce).into());
     cipher.apply_keystream(&mut buf);
     let tag = mac(&hmac_key, nonce, &buf);
 
@@ -148,7 +169,7 @@ pub fn decrypt(payload_b64: &str, conversation_key: &[u8; 32]) -> Result<String,
     }
 
     let mut buf = ciphertext.to_vec();
-    let mut cipher = ChaCha20::new((&chacha_key).into(), (&chacha_nonce).into());
+    let mut cipher = ChaCha20::new((&*chacha_key).into(), (&chacha_nonce).into());
     cipher.apply_keystream(&mut buf);
 
     if buf.len() < 2 {

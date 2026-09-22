@@ -9,6 +9,7 @@
 use secp256k1::schnorr::Signature;
 use secp256k1::{Keypair, Parity, PublicKey, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 pub mod unlock;
 
@@ -61,12 +62,16 @@ pub fn xonly_pubkey(secret32: &[u8; 32]) -> Result<[u8; 32], CryptoError> {
 /// The x-coordinate of the ECDH shared point `secret * pubkey`, where `pubkey`
 /// is an x-only key lifted with even y (NIP-44 v2 convention). Returns `None`
 /// for an invalid secret or pubkey.
-pub fn ecdh_x(secret32: &[u8; 32], xonly_pub32: &[u8; 32]) -> Option<[u8; 32]> {
+///
+/// Returned wrapped in [`Zeroizing`]: this is shared secret material (the
+/// NIP-44 conversation key is derived directly from it) and must not linger
+/// in freed memory after the caller drops it.
+pub fn ecdh_x(secret32: &[u8; 32], xonly_pub32: &[u8; 32]) -> Option<Zeroizing<[u8; 32]>> {
     let sk = SecretKey::from_secret_bytes(*secret32).ok()?;
     let xonly = XOnlyPublicKey::from_byte_array(*xonly_pub32).ok()?;
     let full: PublicKey = xonly.public_key(Parity::Even);
     let point = secp256k1::ecdh::shared_secret_point(&full, &sk);
-    let mut x = [0u8; 32];
+    let mut x = Zeroizing::new([0u8; 32]);
     x.copy_from_slice(&point[..32]);
     Some(x)
 }

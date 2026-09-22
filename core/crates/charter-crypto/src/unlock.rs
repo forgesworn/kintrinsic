@@ -26,6 +26,7 @@
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -50,8 +51,8 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 /// shared secret `conv_key` (the NIP-44 conversation key). Returns exactly
 /// [`UNLOCK_CODE_DIGITS`] ASCII digits.
 pub fn unlock_code(conv_key: &[u8; 32], challenge: &str) -> String {
-    let secret = hmac_sha256(conv_key, DOMAIN);
-    let mac = hmac_sha256(&secret, challenge.as_bytes());
+    let secret = Zeroizing::new(hmac_sha256(conv_key, DOMAIN));
+    let mac = hmac_sha256(&*secret, challenge.as_bytes());
     // RFC 4226 (HOTP) dynamic truncation: use the low nibble of the last byte
     // as an offset into the MAC and read a 31-bit big-endian integer there.
     let off = (mac[mac.len() - 1] & 0x0f) as usize;
