@@ -16,7 +16,9 @@ what it *would* do and touches nothing. You then escalate one rung at a time.
   the session and drops you at the login screen, where you sign in to your
   admin account and open **Kintrinsic → Recovery → Pause** (or run the
   command above once you're there). Pressing **Ctrl+Alt+Shift+Q** at the lock
-  shows this exact route on screen.
+  shows this exact route on screen — **but only while no phone guardian is
+  paired**; once one is paired, that chord opens the offline unlock-code
+  entry instead (you won't have paired one yet in this walk-through).
 - **Timeshift** snapshot (below) is a full rollback if anything feels off.
 
 ## 0. Snapshot (2 min)

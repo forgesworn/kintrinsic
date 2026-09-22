@@ -1019,8 +1019,15 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                 // and the new screen area shows the live desktop with no panel
                 // over it at all (04-B8). Resize + recompose so the canvas and
                 // the button hit-boxes both match the new geometry.
-                Event::RandrScreenChangeNotify(ev) => {
-                    let (new_w, new_h) = (ev.width, ev.height);
+                Event::RandrScreenChangeNotify(_ev) => {
+                    // Re-read the ROOT WINDOW's geometry rather than trusting
+                    // the event's own width/height: RandR reports those
+                    // UNROTATED, so a 90°/270°-rotated output hands us
+                    // dimensions transposed from what the root window (and
+                    // hence the lock, which is sized to match it) actually
+                    // has. `get_geometry` reflects the rotation.
+                    let geom = conn.get_geometry(root)?.reply()?;
+                    let (new_w, new_h) = (geom.width, geom.height);
                     if (new_w, new_h) != dims.get() && new_w > 0 && new_h > 0 {
                         dims.set((new_w, new_h));
                         conn.configure_window(

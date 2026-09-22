@@ -169,10 +169,15 @@ These are the routes that actually work:
     Kintrinsic**).
 
   A locked child screen shows this exact route on request: press
-  **Ctrl+Alt+Shift+Q** at the lock for a notice with these steps spelled out.
+  **Ctrl+Alt+Shift+Q** at the lock for a notice with these steps spelled
+  out — **but only while no phone guardian is paired.** Once a phone is
+  paired, that same chord does something different (below): it opens the
+  offline unlock-code entry instead of this notice.
 
-- **The offline unlock code (once a phone is connected).** Press
-  **Ctrl+Alt+Shift+Q** at the lock screen. It shows a short code and the
+- **The offline unlock code (once a phone is paired).** Press
+  **Ctrl+Alt+Shift+Q** at the lock screen — the same chord as above, now
+  opening the code entry instead of the recovery notice because a guardian
+  is connected. It shows a short code and the
   prompt "In Kintrinsic, open 'Unlock a device', enter this code, then type
   the 8-digit code it shows here." Open Kintrinsic on your phone, do that,
   and type the 8 digits it gives you — a correct code pauses enforcement
@@ -192,9 +197,25 @@ sudo systemctl stop charterd.service   # stops + thaws everything immediately
 
 Full undo / uninstall:
 
+**Before you run `charter-setup`, note which admin groups the child's
+account was already in** (`id kid`) — setup strips it from all of them, and
+undoing that means putting each one back, not just `sudo`.
+
 ```sh
 sudo systemctl disable --now charterd.service   # stop enforcing
-sudo gpasswd -a kid sudo                         # give the account admin back
+# Restore every group charter-setup strips (only add back the ones the
+# account actually had before setup — see the note above):
+sudo gpasswd -a kid sudo
+sudo gpasswd -a kid adm
+sudo gpasswd -a kid lpadmin
+sudo gpasswd -a kid wheel     # Fedora/RHEL-style admin group, if present
+sudo gpasswd -a kid admin     # legacy Ubuntu admin group, if present
+sudo gpasswd -a kid docker    # only if it was in docker before setup
+sudo gpasswd -a kid lxd       # only if it was in lxd before setup
+sudo gpasswd -a kid disk      # only if it was in disk before setup
+sudo gpasswd -a kid shadow    # only if it was in shadow before setup
+sudo gpasswd -a kid libvirt   # only if it was in libvirt before setup
+sudo gpasswd -a kid kvm       # only if it was in kvm before setup
 sudo apt remove kintrinsic                       # remove Kintrinsic entirely
 ```
 

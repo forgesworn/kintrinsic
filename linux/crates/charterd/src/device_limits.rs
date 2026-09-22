@@ -286,14 +286,78 @@ pub fn purge_subject_store(base: &str, subject_hex: &str) -> SysResult<()> {
     }
 }
 
-/// The system timezone (`/etc/timezone`), falling back to `UTC` — so the
-/// settings UI doesn't have to ask the parent for it.
-pub fn detect_tz() -> String {
-    std::fs::read_to_string("/etc/timezone")
+/// The system timezone, resolved the same chain `charter-setup` uses (so the
+/// settings UI and the setup wizard never disagree about what "the
+/// timezone" is), and validated the same way. This used to read only
+/// `/etc/timezone` — absent on plenty of systemd hosts where the timezone
+/// lives solely in the `/etc/localtime` symlink — and fell back to a
+/// hardcoded `"UTC"` on any failure, silently shifting a child's wake/bedtime
+/// hours with no error anywhere.
+///
+/// 1) `timedatectl`'s own idea of it (works everywhere systemd runs, not
+///    just Debian).
+/// 2) the `/etc/localtime` symlink target, resolved to an absolute path,
+///    which is how the TZ actually takes effect regardless of what any text
+///    file says.
+/// 3) `/etc/timezone` (Debian/Ubuntu's own record) as a last resort.
+///
+/// `Err` when none of those resolve to a validated name. Callers must not
+/// paper over that with a hardcoded `"UTC"` — see `charter-settings.rs`.
+pub fn detect_tz() -> SysResult<String> {
+    if let Some(tz) = std::process::Command::new("timedatectl")
+        .args(["show", "-p", "Timezone", "--value"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| tz_is_valid(s))
+    {
+        return Ok(tz);
+    }
+    if let Some(tz) = std::fs::canonicalize("/etc/localtime")
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .and_then(|s| s.split("/zoneinfo/").nth(1).map(|s| s.to_string()))
+        .filter(|s| tz_is_valid(s))
+    {
+        return Ok(tz);
+    }
+    if let Some(tz) = std::fs::read_to_string("/etc/timezone")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "UTC".to_string())
+        .filter(|s| tz_is_valid(s))
+    {
+        return Ok(tz);
+    }
+    Err(charter_sys::SysError::Unsupported(
+        "could not determine this system's timezone (checked timedatectl, \
+         /etc/localtime, /etc/timezone)"
+            .to_string(),
+    ))
+}
+
+/// The pure half of zone-name validation: non-empty `/`-separated segments
+/// of alphanumerics/`_`/`+`/`-` only (`^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$`
+/// — the same shape `charter-setup` requires). Split out from `tz_is_valid`
+/// so it can be unit-tested without touching the filesystem.
+fn tz_name_shape_ok(tz: &str) -> bool {
+    !tz.is_empty()
+        && tz.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-'))
+        })
+}
+
+/// A validated IANA zone name: `tz_name_shape_ok`, AND a real file under
+/// `/usr/share/zoneinfo` for it. `timedatectl` prints the literal string
+/// `"n/a"` when it doesn't know the timezone; that passes the shape check
+/// but `/usr/share/zoneinfo/n/a` doesn't exist, so the existence check
+/// correctly rejects it rather than treating it as a zone.
+fn tz_is_valid(tz: &str) -> bool {
+    tz_name_shape_ok(tz) && std::path::Path::new("/usr/share/zoneinfo").join(tz).exists()
 }
 
 #[cfg(test)]
@@ -625,5 +689,45 @@ mod tests {
         assert_eq!(limits[0].0, "alice");
         // But the full config loader sees both.
         assert_eq!(load_child_configs(d).len(), 2);
+    }
+
+    #[test]
+    fn tz_name_shape_accepts_ordinary_iana_names() {
+        assert!(tz_name_shape_ok("UTC"));
+        assert!(tz_name_shape_ok("Europe/London"));
+        assert!(tz_name_shape_ok("America/Argentina/Buenos_Aires"));
+        assert!(tz_name_shape_ok("Etc/GMT+1"));
+        assert!(tz_name_shape_ok("Etc/GMT-1"));
+    }
+
+    #[test]
+    fn tz_name_shape_rejects_empty_and_malformed() {
+        assert!(!tz_name_shape_ok(""));
+        // timedatectl's own "unknown" sentinel — must never be treated as a
+        // zone name even though it happens to pass a naive alnum check.
+        assert!(tz_name_shape_ok("n/a")); // shape alone can't catch this...
+                                           // ...which is exactly why `tz_is_valid` also requires the
+                                           // zoneinfo file to exist (covered by the doc comment above
+                                           // `tz_is_valid`; not re-asserted here since it needs a real
+                                           // /usr/share/zoneinfo on the test machine).
+        assert!(!tz_name_shape_ok("/leading/slash/empty/segment"));
+        assert!(!tz_name_shape_ok("trailing/slash/"));
+        assert!(!tz_name_shape_ok("has space"));
+        assert!(!tz_name_shape_ok("../../etc/passwd"));
+        assert!(!tz_name_shape_ok("semi;colon"));
+    }
+
+    #[test]
+    fn tz_is_valid_requires_a_real_zoneinfo_file() {
+        // Only run where tzdata is actually installed (true on every Debian/
+        // Ubuntu box this ships to, but not guaranteed in every CI image).
+        if !std::path::Path::new("/usr/share/zoneinfo/UTC").exists() {
+            return;
+        }
+        assert!(tz_is_valid("UTC"));
+        assert!(tz_is_valid("Europe/London"));
+        assert!(!tz_is_valid("n/a"));
+        assert!(!tz_is_valid("Not/A_Real_Zone"));
+        assert!(!tz_is_valid(""));
     }
 }

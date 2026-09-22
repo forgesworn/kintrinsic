@@ -17,6 +17,156 @@ fail() {
     exit 1
 }
 
+# --- sudoers FILE-syntax scan -----------------------------------------------
+#
+# `sudo -n -l -U` (below) tells us what sudo itself thinks the account can
+# run, but it depends on sudo's own PAM/NSS lookup working for that account.
+# Belt-and-braces: read /etc/sudoers + /etc/sudoers.d/* directly too.
+#
+# This used to reuse `grant_re`, which is written for `sudo -l` OUTPUT —
+# `(ALL : ALL) ALL`, i.e. the "(runas) commands" tail with nothing in front
+# of it. A real sudoers FILE line is `user ALL=(ALL:ALL) ALL` or
+# `%group ALL=(ALL) NOPASSWD: ALL` (may be indented or tab-separated, and the
+# host list before `=` need not be `ALL`) — `grant_re` requires a literal `(`
+# immediately after the leading whitespace, which a file line never has (it
+# has `user`/`%group` + a host list + `=` first), so the file scan never
+# matched anything. It ran, found nothing, and reported "clean" regardless of
+# what was actually in the file.
+#
+# who_re: the exact "user" or "%group" token as it appears in a sudoers
+# entry (already escaped for regex use).
+# grant_tail: what comes after `=` — an optional `(runas)`, then any number
+# of tags (`NOPASSWD:`, `SETENV:`, …), then a command list. Only a command
+# list that IS (or contains, comma-separated) the blanket `ALL` counts —
+# matches the same "blanket only" policy as the sudo -l check below.
+sudoers_grant_tail_re='(\([^)]*\))?[[:space:]]*([A-Za-z_]+:[[:space:]]*)*ALL[[:space:]]*(,.*)?$'
+
+# sudoers_line_is_blanket_grant <who> <line>
+# <who> is an exact "user" or "%group" token. Returns 0 (match) if <line> is
+# an uncommented sudoers-file entry granting <who> a blanket ALL command
+# list.
+sudoers_line_is_blanket_grant() {
+    local who="$1" line="$2" who_re
+    who_re="$(printf '%s' "$who" | sed 's/[.[\*^$]/\\&/g')"
+    printf '%s\n' "$line" | grep -vE '^[[:space:]]*#' \
+        | grep -qE "^[[:space:]]*${who_re}[[:space:]]+[^=]+=[[:space:]]*${sudoers_grant_tail_re}"
+}
+
+# _sudoers_collect_files <sudoers-path> <out-array-name>
+# Collects <sudoers-path> itself, every file in the sibling `sudoers.d`
+# directory next to it (the conventional layout — `/etc/sudoers` +
+# `/etc/sudoers.d`, and what a test harness gets by pointing <sudoers-path>
+# at a fixture dir), and every file in any directory named by an
+# `@includedir`/`#includedir` line inside <sudoers-path> — skipping names
+# sudo itself ignores: anything containing `.` or ending in `~` (editor
+# backups, .rpmnew, .dpkg-*, …).
+_sudoers_collect_files() {
+    local root="$1"
+    local -n _sudoers_out="$2"
+    _sudoers_out=()
+    [ -f "$root" ] && _sudoers_out+=("$root")
+
+    local dir f base
+    dir="$(dirname "$root")/sudoers.d"
+    if [ -d "$dir" ]; then
+        for f in "$dir"/*; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            case "$base" in
+                *.*|*~) continue ;;
+            esac
+            _sudoers_out+=("$f")
+        done
+    fi
+
+    [ -f "$root" ] || return 0
+    local inc idir
+    while IFS= read -r inc; do
+        idir="${inc#*includedir}"
+        idir="$(printf '%s' "$idir" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -n "$idir" ] && [ -d "$idir" ] || continue
+        for f in "$idir"/*; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            case "$base" in
+                *.*|*~) continue ;;
+            esac
+            _sudoers_out+=("$f")
+        done
+    done < <(grep -E '^[[:space:]]*[@#]includedir[[:space:]]+' "$root" 2>/dev/null || true)
+}
+
+# sudoers_scan_blanket <user> [group ...]
+# Scans /etc/sudoers, /etc/sudoers.d/*, and any @includedir targets for a
+# blanket ALL grant to <user> (by name) or any of the given groups (by
+# `%group`). Prints the matching file and returns 0 on the first hit;
+# returns 1 if none found. Independent of `command -v sudo` — this reads
+# the files directly.
+sudoers_scan_blanket() {
+    local user="$1"; shift
+    local -a who_list=("$user") files=()
+    local g f line who
+    for g in "$@"; do who_list+=("%$g"); done
+    _sudoers_collect_files /etc/sudoers files
+    for f in "${files[@]}"; do
+        while IFS= read -r line || [ -n "$line" ]; do
+            for who in "${who_list[@]}"; do
+                if sudoers_line_is_blanket_grant "$who" "$line"; then
+                    printf '%s\n' "$f"
+                    return 0
+                fi
+            done
+        done < "$f"
+    done
+    return 1
+}
+
+# current_session_uid: best-effort uid of the account that owns the session
+# THIS SCRIPT is running in — i.e. the parent at the desktop clicking through
+# the wizard, or the admin who typed `sudo charter-setup`. Tried in order:
+# pkexec's own record of who invoked it, sudo's, then (no wrapper at all —
+# e.g. run directly inside a root shell in a graphical session) logind's
+# session table, matched by walking this process's ancestry for a PID that
+# some session claims as its Leader. Prints nothing and fails if none of
+# these resolve (unknown, not "no session").
+current_session_uid() {
+    if [ -n "${PKEXEC_UID:-}" ]; then
+        printf '%s\n' "$PKEXEC_UID"
+        return 0
+    fi
+    if [ -n "${SUDO_UID:-}" ]; then
+        printf '%s\n' "$SUDO_UID"
+        return 0
+    fi
+    command -v loginctl >/dev/null 2>&1 || return 1
+    local ancestors=" " p="$$" ppid
+    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+        ancestors="$ancestors$p "
+        ppid="$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || true)"
+        [ -z "$ppid" ] || [ "$ppid" = "$p" ] && break
+        p="$ppid"
+    done
+    local sid leader uid
+    while IFS= read -r sid; do
+        [ -n "$sid" ] || continue
+        leader="$(loginctl show-session "$sid" -p Leader --value 2>/dev/null || true)"
+        case "$ancestors" in
+            *" $leader "*)
+                uid="$(loginctl show-session "$sid" -p User --value 2>/dev/null || true)"
+                if [ -n "$uid" ]; then
+                    printf '%s\n' "$uid"
+                    return 0
+                fi
+                ;;
+        esac
+    done < <(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}')
+    return 1
+}
+
+# Let a test harness `source` this script to call the functions above
+# without running the rest of setup.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
 # No user named + a desktop available -> graphical wizard.
 if [ -z "$MANAGED_USER" ] && command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
     GUI=1
@@ -87,21 +237,13 @@ fi
 # lookup working for this account, and it's the only check above that looks
 # at sudoers at all — read /etc/sudoers + /etc/sudoers.d/* directly too, by
 # the account's own name AND by every group it remains in (a `%group` grant
-# is invisible to a by-name check). Reuses the same blanket-grant pattern and
-# fail() rather than a second, divergent check.
-sudoers_targets="$MANAGED_USER"
-for g in $(id -nG "$MANAGED_USER" 2>/dev/null); do
-    sudoers_targets="$sudoers_targets %$g"
-done
-for f in /etc/sudoers /etc/sudoers.d/*; do
-    [ -f "$f" ] || continue
-    for who in $sudoers_targets; do
-        who_re="$(printf '%s' "$who" | sed 's/[.[\*^$]/\\&/g')"
-        if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -qE "^${who_re}[[:space:]]+${grant_re}"; then
-            fail "\"$MANAGED_USER\" still has a blanket sudo grant in $f (for $who) — Kintrinsic cannot protect this computer while that account can become root. Remove the rule, then run setup again."
-        fi
-    done
-done
+# is invisible to a by-name check). Uses `sudoers_scan_blanket`, which parses
+# actual sudoers FILE syntax (see the comment above its definition) — this
+# runs regardless of whether sudo itself is even installed.
+sudoers_hit_file="$(sudoers_scan_blanket "$MANAGED_USER" $(id -nG "$MANAGED_USER" 2>/dev/null) || true)"
+if [ -n "$sudoers_hit_file" ]; then
+    fail "\"$MANAGED_USER\" still has a blanket sudo grant in $sudoers_hit_file — Kintrinsic cannot protect this computer while that account can become root. Remove the rule, then run setup again."
+fi
 # Root-equivalent groups beyond the admin set (04-G3): docker/lxd hand a
 # member root via a mountable container, disk gives raw block-device access,
 # shadow gives read access to the password hashes. None of these trip the
@@ -110,7 +252,7 @@ done
 # unlike sudo/wheel/admin a family box may have a legitimate reason to keep
 # the child in one of these (e.g. `disk` from an old udev rule).
 root_equiv_warn=""
-for g in docker lxd disk shadow; do
+for g in docker lxd disk shadow libvirt kvm; do
     if id -nG "$MANAGED_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
         gpasswd -d "$MANAGED_USER" "$g" 2>/dev/null || true
         if id -nG "$MANAGED_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
@@ -120,25 +262,6 @@ for g in docker lxd disk shadow; do
 done
 if [ -n "$root_equiv_warn" ]; then
     echo "charter-setup: WARN \"$MANAGED_USER\" is still in root-equivalent group(s):${root_equiv_warn} — this can be used to gain root despite the lockdown. Remove manually if not needed."
-fi
-
-# Group membership is read at LOGIN — polkit evaluates the session's groups,
-# not the account's current ones, so if the child is logged in right now (the
-# normal case: this wizard runs from the parent's desktop on a shared box)
-# every lockdown above is inert in their existing session until they log out
-# and back in (04-G3).
-echo "charter-setup: log \"$MANAGED_USER\" out and back in for this to take effect."
-if [ "$GUI" = 1 ] && command -v loginctl >/dev/null 2>&1 \
-    && loginctl show-user "$MANAGED_USER" >/dev/null 2>&1; then
-    if zenity --question --title="Kintrinsic Setup" --ok-label="Log them out now" --cancel-label="Later" \
-        --text="\"$MANAGED_USER\" is logged in right now. The lockdown above only applies to their NEXT login — until then their current session keeps the old permissions.\n\nEnd their session now so it applies immediately? (Any unsaved work in their session is lost.)" \
-        2>/dev/null; then
-        if loginctl terminate-user "$MANAGED_USER" 2>/dev/null; then
-            echo "charter-setup: ended \"$MANAGED_USER\"'s session(s)."
-        else
-            echo "charter-setup: WARN could not end \"$MANAGED_USER\"'s session — log them out manually."
-        fi
-    fi
 fi
 
 echo "==> charter state dirs"
@@ -163,6 +286,11 @@ ENV_FILE=/etc/charter/charterd.env
 # CHARTER_ENFORCE line unless THIS run explicitly passes one, then append
 # the fresh values.
 ENV_TMP="$(mktemp /etc/charter/charterd.env.XXXXXX)"
+# Belt-and-braces: if anything below fails (or the wizard's own ERR trap
+# fires) before the mv, don't leave a stray, possibly-secret-bearing temp
+# file sitting in /etc/charter. A successful `mv "$ENV_TMP" "$ENV_FILE"`
+# renames the file out from under this trap, so it's a harmless no-op then.
+trap 'rm -f "$ENV_TMP"' EXIT
 if [ -f "$ENV_FILE" ]; then
     grep -vE '^(CHARTER_MANAGED_UID=|CHARTER_ENFORCE=)' "$ENV_FILE" > "$ENV_TMP" 2>/dev/null || true
     if [ -z "${CHARTER_ENFORCE:-}" ]; then
@@ -199,12 +327,26 @@ if [ ! -f "$LIMITS_FILE" ]; then
     # 3) /etc/timezone (Debian/Ubuntu's own record) as a last resort.
     # If none of those resolve, fail loudly instead of silently mislocking
     # the child's day on UTC.
+    #
+    # Each candidate is VALIDATED, not trusted: `timedatectl` prints the
+    # literal string "n/a" when it doesn't know the timezone (that is not a
+    # zone name — treat it as unresolved and fall through to the next
+    # source), and only a name that both matches the IANA zone-name shape
+    # and has a real file under /usr/share/zoneinfo is accepted. An
+    # unvalidated name reaching the limits file is exactly the "silently
+    # mislocking on garbage" failure this whole check exists to prevent.
+    tz_is_valid() {
+        [[ "$1" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] && [ -e "/usr/share/zoneinfo/$1" ]
+    }
     TZ_NAME="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+    tz_is_valid "$TZ_NAME" || TZ_NAME=""
     if [ -z "$TZ_NAME" ] && [ -L /etc/localtime ]; then
         TZ_NAME="$(readlink -f /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+        tz_is_valid "$TZ_NAME" || TZ_NAME=""
     fi
     if [ -z "$TZ_NAME" ]; then
         TZ_NAME="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
+        tz_is_valid "$TZ_NAME" || TZ_NAME=""
     fi
     [ -z "$TZ_NAME" ] && fail "couldn't determine this computer's timezone (checked timedatectl, /etc/localtime, /etc/timezone). Set one (e.g. 'sudo timedatectl set-timezone Region/City') and run setup again — Kintrinsic refuses to guess UTC and silently shift the child's wake/bedtime hours."
     cat > "$LIMITS_FILE" <<EOF
@@ -241,6 +383,42 @@ NOEXEC_NOTE=""
 if [ "${NOEXEC_PENDING:-0}" = 1 ]; then
     NOEXEC_NOTE="\n\nRestart this computer when convenient — one protection only switches on at the next start."
     echo "==> noexec /tmp + /dev/shm enabled; they take effect at the next boot."
+fi
+
+# Group membership is read at LOGIN — polkit evaluates the session's groups,
+# not the account's current ones, so if the child is logged in right now (the
+# normal case: this wizard runs from the parent's desktop on a shared box)
+# every lockdown above is inert in their existing session until they log out
+# and back in (04-G3).
+#
+# This offer runs LAST, after state dirs / env / limits / `systemctl enable
+# --now` are all written — `loginctl terminate-user` kills every process in
+# the target session, and if the parent ran this wizard FROM the child's own
+# session (e.g. sat the child down at their own desktop and typed the
+# command there), ending that session mid-script would kill the script
+# before any of the above ran. Doing the offer last means a self-terminate
+# only ever cuts off the (already-printed) final messages, never the setup
+# itself.
+#
+# And skip the offer entirely — don't even ask — when the session THIS
+# SCRIPT is running in belongs to the child being locked down: ending your
+# own session is not something to offer as a button, it's just "log out
+# yourself when you're done here".
+echo "charter-setup: log \"$MANAGED_USER\" out and back in for this to take effect."
+session_uid="$(current_session_uid || true)"
+if [ -n "$session_uid" ] && [ "$session_uid" = "$MANAGED_UID" ]; then
+    echo "charter-setup: this wizard is running from \"$MANAGED_USER\"'s own session — log out and back in yourself once you're done here to pick it up."
+elif [ "$GUI" = 1 ] && command -v loginctl >/dev/null 2>&1 \
+    && loginctl show-user "$MANAGED_USER" >/dev/null 2>&1; then
+    if zenity --question --title="Kintrinsic Setup" --ok-label="Log them out now" --cancel-label="Later" \
+        --text="\"$MANAGED_USER\" is logged in right now. The lockdown above only applies to their NEXT login — until then their current session keeps the old permissions.\n\nEnd their session now so it applies immediately? (Any unsaved work in their session is lost.)" \
+        2>/dev/null; then
+        if loginctl terminate-user "$MANAGED_USER" 2>/dev/null; then
+            echo "charter-setup: ended \"$MANAGED_USER\"'s session(s)."
+        else
+            echo "charter-setup: WARN could not end \"$MANAGED_USER\"'s session — log them out manually."
+        fi
+    fi
 fi
 
 if [ "$GUI" = 1 ]; then

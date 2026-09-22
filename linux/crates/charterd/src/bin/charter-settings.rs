@@ -73,8 +73,21 @@ fn headless_set(args: &[String]) -> ! {
         .into_iter()
         .find(|(u, _)| *u == user)
         .map(|(_, l)| l);
+    // A brand-new child (no file yet) needs a timezone from somewhere; a
+    // detection failure must not fall back to a silent, wrong "UTC" (that
+    // used to shift the child's wake/bedtime hours with no error anywhere).
+    let tz = match cur.as_ref().map(|c| c.tz.clone()) {
+        Some(tz) => tz,
+        None => match detect_tz() {
+            Ok(tz) => tz,
+            Err(e) => {
+                eprintln!("charter-settings: could not determine this system's timezone: {e}");
+                std::process::exit(1);
+            }
+        },
+    };
     let limits = DeviceLimits {
-        tz: cur.as_ref().map(|c| c.tz.clone()).unwrap_or_else(detect_tz),
+        tz,
         wake,
         bedtime,
         daily_minutes,
@@ -167,17 +180,32 @@ fn main() {
     let Some(user) = pick_child(&children) else {
         return; // cancelled
     };
-    let cur = children
+    let cur = match children
         .iter()
         .find(|(u, _)| *u == user)
         .map(|(_, l)| l.clone())
-        .unwrap_or_else(|| DeviceLimits {
-            tz: detect_tz(),
-            wake: "07:00".into(),
-            bedtime: "20:00".into(),
-            daily_minutes: 120,
-            weekend: None,
-        });
+    {
+        Some(l) => l,
+        // Shouldn't normally happen — `user` came from `children` — but if
+        // it does, a detection failure must fail loudly rather than write a
+        // silently wrong "UTC" default.
+        None => match detect_tz() {
+            Ok(tz) => DeviceLimits {
+                tz,
+                wake: "07:00".into(),
+                bedtime: "20:00".into(),
+                daily_minutes: 120,
+                weekend: None,
+            },
+            Err(e) => {
+                notify(
+                    "--error",
+                    &format!("Could not determine this system's timezone: {e}"),
+                );
+                std::process::exit(1);
+            }
+        },
+    };
 
     let weekend = cur
         .weekend
