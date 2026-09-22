@@ -97,9 +97,18 @@ pub fn build_status(
 }
 
 /// Whether to emit STATUS this tick: on any displayable **state** change
-/// (locked / source / lock reason), or after `heartbeat_secs` since the last
-/// emit (so a steady state still refreshes the PWA). The continuously-ticking
-/// time fields are deliberately NOT compared — else every tick would publish.
+/// (locked / source / lock reason), or after `heartbeat_secs` of clock
+/// movement in EITHER direction since the last emit (so a steady state still
+/// refreshes the PWA). The continuously-ticking time fields are deliberately
+/// NOT compared — else every tick would publish.
+///
+/// The comparison is an absolute difference, and a clock that has moved
+/// BACKWARDS at all forces an emit. With a saturating forward-only subtraction,
+/// a backwards step — an NTP correction, a suspend/resume glitch, a ward who
+/// got at the clock — silenced the feed until wall time climbed back past the
+/// last emit's `ts`: set the clock back a week and the guardian's feed went
+/// quiet for a week while the PWA kept showing the last known state as if it
+/// were current. Silence is the one failure the guardian cannot see.
 pub fn should_emit_status(
     last: Option<&StatusPayload>,
     cur: &StatusPayload,
@@ -115,7 +124,8 @@ pub fn should_emit_status(
                 // wait out a heartbeat. It changes at most once per boot, so
                 // it can never become a source of churn.
                 || prev.enforcement_gap != cur.enforcement_gap
-                || cur.ts.saturating_sub(prev.ts) >= heartbeat_secs
+                || cur.ts < prev.ts
+                || cur.ts.abs_diff(prev.ts) >= heartbeat_secs
         }
     }
 }
@@ -214,5 +224,37 @@ mod tests {
         locked.locked = true;
         locked.lock_reason = Some(StatusLockReason::Schedule);
         assert!(should_emit_status(Some(&base), &locked, 60));
+    }
+
+    /// B7: a backwards clock step must not silence the feed. With a
+    /// forward-only saturating subtraction, setting the clock back a week left
+    /// the guardian looking at a week-old state presented as current.
+    #[test]
+    fn a_backwards_clock_step_still_emits() {
+        let r = remaining(false, None);
+        let base = build_status(
+            PubKey::from_bytes([1; 32]),
+            PubKey::from_bytes([2; 32]),
+            1_000_000,
+            &r,
+            0,
+            None,
+            "d".into(),
+            None,
+            PolicySource::Guardian,
+        );
+        // A week backwards: the old comparison saturated to 0 and stayed quiet
+        // until wall time climbed back past 1_000_000.
+        let mut back = base.clone();
+        back.ts = 1_000_000 - 7 * 86_400;
+        assert!(should_emit_status(Some(&base), &back, 60));
+        // Even one second backwards is news — the clock moved under us.
+        let mut nudged = base.clone();
+        nudged.ts = 999_999;
+        assert!(should_emit_status(Some(&base), &nudged, 60));
+        // Forward within the heartbeat is still throttled.
+        let mut fwd = base.clone();
+        fwd.ts = 1_000_030;
+        assert!(!should_emit_status(Some(&base), &fwd, 60));
     }
 }
