@@ -110,6 +110,13 @@ impl ExtensionLedger {
         if self.tz == tz {
             return;
         }
+        // Roll in the OLD tz first. Re-keying stamps `day_key` with today, and
+        // every getter trusts that stamp — so without this, a ledger whose
+        // pools belong to a PAST day (a snapshot restored after a restart,
+        // now that they are persisted) had them re-dated to today the moment
+        // the clause tz differed: yesterday's "+30" live again. Pools that
+        // really are today's survive the roll and are re-keyed as before.
+        self.roll(now_unix);
         self.tz = tz.to_string();
         self.day_key = day_key(self.tz(), now_unix);
     }
@@ -316,6 +323,30 @@ mod tests {
 
     const TZ: &str = "Europe/London";
     const NOON: i64 = 1_782_734_400; // Mon 2026-06-29 12:00 BST
+
+    /// Pools are persisted now, so a ledger can wake up holding YESTERDAY's.
+    /// Every getter is day-guarded, so that is harmless — unless `reconcile`
+    /// re-dates the stale pools to today, which a changed clause tz made it do.
+    #[test]
+    fn reconciling_a_stale_ledger_to_a_new_tz_does_not_revive_yesterdays_grant() {
+        let mut l = ExtensionLedger::new(TZ, NOON);
+        assert!(l.apply(NOON, "req-a", 30, Dimension::Budget));
+        let restored = ExtensionLedger::from_snapshot(&l.snapshot()).unwrap();
+
+        let next_day = NOON + 86_400;
+        let mut stale = restored.clone();
+        stale.reconcile("America/New_York", next_day);
+        assert_eq!(
+            stale.budget_extra_secs(next_day),
+            0,
+            "yesterday's +30 stays dead"
+        );
+
+        // The case `reconcile` exists for: a tz edit the SAME day keeps it.
+        let mut same_day = restored;
+        same_day.reconcile("Europe/Paris", NOON + 60);
+        assert_eq!(same_day.budget_extra_secs(NOON + 60), 30 * 60);
+    }
 
     #[test]
     fn additive_and_idempotent_by_reqid() {
