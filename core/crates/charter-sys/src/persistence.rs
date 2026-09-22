@@ -667,7 +667,16 @@ mod real {
             };
             let mut out = vec![];
             for entry in rd {
-                let path = entry.map_err(|e| io_err("dir entry", e))?.path();
+                // One entry the kernel cannot hand back (a torn directory
+                // block, a name it cannot decode) is that entry's problem —
+                // it must not hide every other record in the directory.
+                let path = match entry {
+                    Ok(e) => e.path(),
+                    Err(e) => {
+                        eprintln!("charter: skipping unreadable directory entry: {e}");
+                        continue;
+                    }
+                };
                 if !is_json(&path) {
                     continue;
                 }
@@ -836,7 +845,16 @@ mod real {
             };
             let mut out = ChildClauses::default();
             for entry in rd {
-                let path = entry.map_err(|e| io_err("dir entry", e))?.path();
+                // One entry the kernel cannot hand back (a torn directory
+                // block, a name it cannot decode) is that entry's problem —
+                // it must not hide every other record in the directory.
+                let path = match entry {
+                    Ok(e) => e.path(),
+                    Err(e) => {
+                        eprintln!("charter: skipping unreadable directory entry: {e}");
+                        continue;
+                    }
+                };
                 if !is_json(&path) {
                     continue;
                 }
@@ -941,7 +959,16 @@ mod real {
             };
             let mut recs = vec![];
             for entry in rd {
-                let path = entry.map_err(|e| io_err("dir entry", e))?.path();
+                // One entry the kernel cannot hand back (a torn directory
+                // block, a name it cannot decode) is that entry's problem —
+                // it must not hide every other record in the directory.
+                let path = match entry {
+                    Ok(e) => e.path(),
+                    Err(e) => {
+                        eprintln!("charter: skipping unreadable directory entry: {e}");
+                        continue;
+                    }
+                };
                 if !is_json(&path) {
                     continue;
                 }

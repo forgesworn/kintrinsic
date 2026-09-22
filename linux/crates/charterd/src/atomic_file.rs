@@ -19,6 +19,45 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Remove `<name>.tmp` and `<name>.<pid>.<n>.tmp` siblings of `target` left by
+/// a crash or by the pre-hardening writer. Best-effort: a sweep that fails
+/// costs nothing but a stale file.
+fn sweep_stale_tmps(target: &Path) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let me = std::process::id();
+    for e in rd.flatten() {
+        let f = e.file_name();
+        let f = f.to_string_lossy();
+        if !f.starts_with(&prefix) || !f.ends_with(".tmp") {
+            continue;
+        }
+        // `<name>.<pid>.<n>.tmp` from a process still running — ours
+        // included — is a write IN FLIGHT, not a leftover: sweeping it would
+        // pull the file out from under that writer's rename. Only the bare
+        // pre-hardening `<name>.tmp` and a dead process's temps go.
+        let owner: Option<u32> = f[prefix.len()..]
+            .split('.')
+            .next()
+            .and_then(|pid| pid.parse().ok());
+        let in_flight = match owner {
+            Some(pid) if pid == me => true,
+            Some(pid) => Path::new(&format!("/proc/{pid}")).exists(),
+            None => false,
+        };
+        if !in_flight {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Write `bytes` to `path` atomically, leaving the file at `mode`.
 ///
 /// The mode is set AT OPEN rather than after the write, and on a file this
@@ -35,11 +74,16 @@ pub fn atomic_write(path: &str, bytes: &[u8], mode: u32) -> std::io::Result<()> 
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = format!("{path}.tmp");
-    match std::fs::remove_file(&tmp) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
+    // Unique per process and per call: two writers to one path (a second
+    // daemon task, a helper binary) could otherwise unlink each other's tmp
+    // and rename a half-written file into place. Leftovers from a crash are
+    // swept up so `create_new` never inherits an old file's mode.
+    let tmp = format!(
+        "{path}.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    sweep_stale_tmps(target);
     {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -88,7 +132,12 @@ mod tests {
         atomic_write(&path, b"{\"a\":1}", 0o600).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
         assert_eq!(mode_of(&path), 0o600, "0600, not whatever the umask allows");
-        assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
+        let leftovers = std::fs::read_dir(format!("{dir}/nested"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]
@@ -115,8 +164,38 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = format!("{dir}/three.json");
         std::fs::write(format!("{path}.tmp"), "half-written").unwrap();
+        std::fs::write(format!("{path}.4194304999.7.tmp"), "half-written").unwrap();
+        // A neighbour that merely shares the stem is NOT a leftover.
+        std::fs::write(format!("{dir}/three.json.extension.json"), "keep").unwrap();
 
         atomic_write(&path, b"whole", 0o600).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "whole");
+        assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
+        assert!(!std::path::Path::new(&format!("{path}.4194304999.7.tmp")).exists());
+        assert!(std::path::Path::new(&format!("{dir}/three.json.extension.json")).exists());
+    }
+
+    #[test]
+    fn two_writers_to_one_path_never_share_a_temp_name() {
+        // With one `<path>.tmp`, writer B could unlink A's temp and A could
+        // then rename B's half-written file into place.
+        let dir = tmpdir("concurrent");
+        let path = format!("{dir}/four.json");
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || atomic_write(&p, &[b'0' + i; 4096], 0o600))
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        let got = std::fs::read(&path).unwrap();
+        assert_eq!(
+            got.len(),
+            4096,
+            "always one writer's whole file, never a torn one"
+        );
+        assert!(got.iter().all(|b| *b == got[0]));
     }
 }
