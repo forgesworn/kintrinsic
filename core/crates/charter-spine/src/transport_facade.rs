@@ -9,6 +9,26 @@ use async_trait::async_trait;
 use charter_primitives::{NostrEvent, PubKey};
 use charter_transport::{FetchedCuratorList, ReceivedClause, ReceivedGrant};
 
+/// Relay reachability + publish-failure signal for the most recent round of
+/// polling/publishing, read (and reset) once per `Broker::poll_once` call.
+///
+/// Exists because every `poll_*`/`emit_*` method above returns a bare `Vec`
+/// (no `Result`) — a shape the Android JNI facade also implements, so it
+/// cannot change without touching `android/`. `charter-sys` already
+/// distinguishes "every relay unreachable" (`RelayIoError::Unreachable`) from
+/// "reached, nothing new" (`Ok(vec![])`); a facade that has that information
+/// (`RealTransportFacade`) surfaces it here instead of silently folding both
+/// into an empty `Vec`, which is exactly the fail-open shape B4/G1's sibling
+/// review items flagged elsewhere in this slice.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PollHealth {
+    /// At least one poll this round could not reach ANY relay in the set.
+    pub relays_unreachable: bool,
+    /// Per-relay publish failures accumulated this round (each failed relay
+    /// on a single publish counts once).
+    pub publish_failed: u32,
+}
+
 /// Delivery seam: publish requests/audit, poll for grants/clauses. Returns
 /// **unverified** events — the broker authenticates them.
 #[async_trait]
@@ -26,6 +46,14 @@ pub trait TransportFacade: Send + Sync {
     async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64);
     fn pinned_guardian(&self) -> PubKey;
     fn machine_pubkey(&self) -> PubKey;
+
+    /// Read-and-reset [`PollHealth`] for the round just finished. Default:
+    /// always healthy — the historic shape every existing facade (the
+    /// Android JNI bridge, this module's `MockTransport`) had before this
+    /// field existed. `RealTransportFacade` overrides it.
+    fn poll_health(&self) -> PollHealth {
+        PollHealth::default()
+    }
 }
 
 /// An in-memory mock transport: scriptable grant/clause delivery + recorders.
@@ -44,6 +72,7 @@ struct Inner {
     curator_lists: Vec<FetchedCuratorList>,
     published: Vec<String>,
     audits: Vec<Vec<Vec<String>>>,
+    health: PollHealth,
 }
 
 impl MockTransport {
@@ -110,6 +139,20 @@ impl MockTransport {
     pub fn audits(&self) -> Vec<Vec<Vec<String>>> {
         self.inner.lock().expect("lock").audits.clone()
     }
+
+    /// Test hook: make the next [`PollHealth`] read report every relay
+    /// unreachable this round (simulating `RelayIoError::Unreachable`
+    /// without needing a `Result`-returning trait method — see
+    /// [`PollHealth`]'s doc comment for why).
+    pub fn set_relays_unreachable(&self, v: bool) {
+        self.inner.lock().expect("lock").health.relays_unreachable = v;
+    }
+
+    /// Test hook: make the next [`PollHealth`] read report `n` per-relay
+    /// publish failures this round.
+    pub fn set_publish_failed(&self, n: u32) {
+        self.inner.lock().expect("lock").health.publish_failed = n;
+    }
 }
 
 #[async_trait]
@@ -156,6 +199,10 @@ impl TransportFacade for MockTransport {
 
     fn machine_pubkey(&self) -> PubKey {
         self.machine
+    }
+
+    fn poll_health(&self) -> PollHealth {
+        std::mem::take(&mut self.inner.lock().expect("lock").health)
     }
 }
 

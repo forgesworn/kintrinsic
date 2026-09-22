@@ -35,4 +35,4 @@ pub use enactor::{EnactOutcome, Enactor, EnactorRegistry};
 pub use error::{BrokerError, EnactError};
 pub use lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
 pub use ports::{EventSink, TimeLeftProvider, TimeLeftSnapshot, TimeLeftState};
-pub use transport_facade::{MockTransport, TransportFacade};
+pub use transport_facade::{MockTransport, PollHealth, TransportFacade};

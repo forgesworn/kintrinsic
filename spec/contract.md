@@ -1421,6 +1421,10 @@ interface StatusPayload {
   locked: boolean;
   lockReason?: 'schedule' | 'budget' | 'malformed' | 'standdown';
   source: 'guardian' | 'device-only' | 'unconstrained';   // which policy is in force for this child now
+  pausedByAdmin?: boolean;         // an admin PAUSED enforcement on this device (Recovery tool) — on purpose
+  enforcementGapSecs?: number;     // Linux: seconds this device went WITHOUT a running warden before it came back
+  relayUnreachablePolls?: number;  // consecutive relay polls, most recent run, where every relay was unreachable
+  transportUnavailable?: boolean;  // this device could not construct its own relay transport this run
 }
 ```
 
@@ -1625,6 +1629,22 @@ or a platform-level force-stop lands here too, and a guardian surface MUST
 present it as "the warden was not running for N boots" and leave the reading
 to the family. Numbers only, per the privacy rule below — it never names what
 ran while nothing was watching.
+
+**`pausedByAdmin?: boolean`, `enforcementGapSecs?: number`,
+`relayUnreachablePolls?: number`, `transportUnavailable?: boolean`
+(charterd Linux runtime; 03-G5/04-G6/B4/relay-health follow-up).** Four
+absent-unless-true/non-zero runtime facts, mirrored from `charterd`'s
+world-readable state file onto this wire so a quiet STATUS feed is never
+mistaken for a dead device. `pausedByAdmin` says the Recovery tool paused
+enforcement on purpose; `enforcementGapSecs` is Linux's seconds-shaped
+account of a warden gap, deliberately a **different field** from
+`enforcementGap` above — that one is Android's boot-count-shaped account of
+the same idea, and the two platforms are not coerced into one shape.
+`relayUnreachablePolls` counts consecutive polls where every relay in the
+device's set was unreachable (distinct from `Ok(vec![])`, which is "reached,
+nothing new"). `transportUnavailable` says the device could not even
+construct its relay transport this run (an unusable machine secret, B4) —
+cached clauses are still being enforced regardless of any of these four.
 
 **Privacy.** Numbers + enums only — **no** child content, exec source path,
 `time.extend` reason, name, or DOB ever appears. Delivery is E2E NIP-59

@@ -159,6 +159,30 @@ export interface DeviceStatus {
    * warden was not running for N boots".
    */
   enforcementGap?: { unexplainedBoots: number; lastNoticedAt: number };
+  /** An administrator PAUSED enforcement on the device (the Recovery tool) —
+   *  nothing is being enforced right now, ON PURPOSE. Mirrors charterd's
+   *  world-readable state file onto this wire, so a quiet feed during a
+   *  pause is not mistaken for a dead device. `parseStatus` always fills
+   *  this in (default `false`), even though the type leaves it optional for
+   *  a `DeviceStatus` built some other way (e.g. test fixtures). */
+  pausedByAdmin?: boolean;
+  /** Seconds this LINUX device went WITHOUT a running warden before the
+   *  daemon most recently came back. Deliberately a DIFFERENT field from
+   *  `enforcementGap` above, which is Android's boot-count-shaped account of
+   *  the same idea — the two platforms measure the gap differently.
+   *  `parseStatus` always fills this in (default `0`, meaning "no such gap
+   *  reported", not "reported as zero"). */
+  enforcementGapSecs?: number;
+  /** Consecutive relay polls, most recent run, where every relay in the
+   *  device's set was unreachable. `0` is the ordinary state; a climbing
+   *  count says the device's relay set itself has gone bad. `parseStatus`
+   *  always fills this in (default `0`). */
+  relayUnreachablePolls?: number;
+  /** The device could not construct its own relay transport this run (an
+   *  unusable machine secret) — cached clauses are still enforced, but
+   *  nothing is being polled or published on the failed transport.
+   *  `parseStatus` always fills this in (default `false`). */
+  transportUnavailable?: boolean;
 }
 
 /** One installed launchable app on a device. */
@@ -314,6 +338,10 @@ export function parseStatus(json: string): DeviceStatus | null {
     outOfHoursWeekSecs: isNonNegInt(o.outOfHoursWeekSecs) ? o.outOfHoursWeekSecs : undefined,
     outOfHoursNightsWeek: isNonNegInt(o.outOfHoursNightsWeek) ? o.outOfHoursNightsWeek : undefined,
     enforcementGap: parseEnforcementGap(o.enforcementGap),
+    pausedByAdmin: o.pausedByAdmin === true,
+    enforcementGapSecs: isNonNegInt(o.enforcementGapSecs) ? o.enforcementGapSecs : 0,
+    relayUnreachablePolls: isNonNegInt(o.relayUnreachablePolls) ? o.relayUnreachablePolls : 0,
+    transportUnavailable: o.transportUnavailable === true,
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)

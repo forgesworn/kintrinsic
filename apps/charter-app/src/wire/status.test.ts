@@ -25,6 +25,12 @@ function sample(machine: string, subject: string): DeviceStatus {
     effectiveSecs: 900,
     locked: false,
     source: "guardian",
+    // `parseStatus` always fills these four in (defaults false/0), so a
+    // fixture compared against its own round trip must carry them too.
+    pausedByAdmin: false,
+    enforcementGapSecs: 0,
+    relayUnreachablePolls: 0,
+    transportUnavailable: false,
   };
 }
 
@@ -135,6 +141,44 @@ describe("parseStatus", () => {
     expect(parseStatus(JSON.stringify({ ...base, effectiveSecs: -1 }))).toBeNull();
     expect(parseStatus(JSON.stringify({ ...base, locked: "yes" }))).toBeNull();
     expect(parseStatus("not json")).toBeNull();
+  });
+});
+
+// 03-G5/04-G6/B4/relay-health follow-up: the four Linux-runtime fields default
+// to false/0 rather than staying undefined, unlike every other absent-not-zero
+// STATUS meter — a quiet feed and an explicit "nothing wrong" must both read
+// as the same reassuring state here.
+describe("the four Linux-runtime STATUS fields", () => {
+  it("default to false/0 when absent from the wire", () => {
+    const s = sample("ab".repeat(32), "cd".repeat(32));
+    const parsed = parseStatus(JSON.stringify(s));
+    expect(parsed?.pausedByAdmin).toBe(false);
+    expect(parsed?.enforcementGapSecs).toBe(0);
+    expect(parsed?.relayUnreachablePolls).toBe(0);
+    expect(parsed?.transportUnavailable).toBe(false);
+  });
+
+  it("carries the reported values through when set", () => {
+    const s = {
+      ...sample("ab".repeat(32), "cd".repeat(32)),
+      pausedByAdmin: true,
+      enforcementGapSecs: 14_400,
+      relayUnreachablePolls: 3,
+      transportUnavailable: true,
+    };
+    const parsed = parseStatus(JSON.stringify(s));
+    expect(parsed?.pausedByAdmin).toBe(true);
+    expect(parsed?.enforcementGapSecs).toBe(14_400);
+    expect(parsed?.relayUnreachablePolls).toBe(3);
+    expect(parsed?.transportUnavailable).toBe(true);
+  });
+
+  it("drops a negative or non-numeric count rather than trusting it", () => {
+    const base = sample("ab".repeat(32), "cd".repeat(32));
+    const neg = parseStatus(JSON.stringify({ ...base, enforcementGapSecs: -5 }));
+    expect(neg?.enforcementGapSecs).toBe(0);
+    const nonNum = parseStatus(JSON.stringify({ ...base, relayUnreachablePolls: "3" }));
+    expect(nonNum?.relayUnreachablePolls).toBe(0);
   });
 });
 

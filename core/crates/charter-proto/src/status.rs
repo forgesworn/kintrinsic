@@ -209,6 +209,38 @@ pub struct StatusPayload {
     /// reassuring one. See [`EnforcementGap`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement_gap: Option<EnforcementGap>,
+    /// An administrator PAUSED enforcement on this device (the Recovery
+    /// tool) — nothing is being enforced right now, ON PURPOSE. Mirrors
+    /// `charterd`'s world-readable state file's `pausedByAdmin` (03-G5) onto
+    /// the guardian-facing wire, so the guardian's app is not left guessing
+    /// whether a quiet feed means a pause or a dead device. Absent when not
+    /// paused, the ordinary state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by_admin: Option<bool>,
+    /// Seconds this LINUX device went WITHOUT a running warden before the
+    /// daemon most recently came back — mirrors `charterd`'s state-file
+    /// `enforcementGapSecs` (04-G6). Deliberately a DIFFERENT field from
+    /// [`Self::enforcement_gap`] above, which is Android's boot-count-shaped
+    /// account of the same idea — the two platforms measure the gap
+    /// differently and neither can be coerced into the other's shape. Absent
+    /// when there was no such gap, never `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_gap_secs: Option<u64>,
+    /// Consecutive relay polls, most recent run, where every relay in this
+    /// device's set was unreachable (`charter_spine::PollHealth`,
+    /// review 02b-G1/02b-B5). Absent (or `0`) is the ordinary state; a
+    /// climbing count says the device's relay set — not just this one poll —
+    /// has gone bad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_unreachable_polls: Option<u32>,
+    /// This device could not construct its own relay transport this run (an
+    /// unusable machine secret — B4, `internal/reviews/2026-09-21/01-core-crypto-proto.md`).
+    /// Cached clauses are still being enforced; nothing is being polled or
+    /// published on the failed transport. Absent (or the machine reporting
+    /// it never got out at all — the report itself needs A working
+    /// transport) is the ordinary state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_unavailable: Option<bool>,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -414,6 +446,10 @@ mod tests {
             out_of_hours_week_secs: None,
             out_of_hours_nights_week: None,
             enforcement_gap: None,
+            paused_by_admin: None,
+            enforcement_gap_secs: None,
+            relay_unreachable_polls: None,
+            transport_unavailable: None,
         }
     }
 
@@ -431,6 +467,29 @@ mod tests {
         let json = s.to_json();
         assert!(json.contains("\"unexplainedBoots\":2"), "got {json}");
         assert!(json.contains("\"lastNoticedAt\":1700000500"), "got {json}");
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
+    }
+
+    /// The four Linux-runtime STATUS fields (03-G5/04-G6/B4/relay-health
+    /// follow-up) are absent by default, camelCase on the wire, and round-trip.
+    #[test]
+    fn the_four_linux_runtime_fields_omit_when_absent_and_round_trip_camel_case() {
+        let mut s = sample();
+        let json = s.to_json();
+        assert!(!json.contains("pausedByAdmin"), "got {json}");
+        assert!(!json.contains("enforcementGapSecs"), "got {json}");
+        assert!(!json.contains("relayUnreachablePolls"), "got {json}");
+        assert!(!json.contains("transportUnavailable"), "got {json}");
+
+        s.paused_by_admin = Some(true);
+        s.enforcement_gap_secs = Some(14_400);
+        s.relay_unreachable_polls = Some(3);
+        s.transport_unavailable = Some(true);
+        let json = s.to_json();
+        assert!(json.contains("\"pausedByAdmin\":true"), "got {json}");
+        assert!(json.contains("\"enforcementGapSecs\":14400"), "got {json}");
+        assert!(json.contains("\"relayUnreachablePolls\":3"), "got {json}");
+        assert!(json.contains("\"transportUnavailable\":true"), "got {json}");
         assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
     }
 

@@ -271,6 +271,16 @@ pub struct PollCounts {
     /// managed" means on its platform — on Linux, a `systemctl try-restart`
     /// that brings charterd back through its unpaired arm.
     pub released: bool,
+    /// At least one poll this round could not reach ANY relay in the set
+    /// (`charter_sys::relay::RelayIoError::Unreachable`, surfaced through
+    /// [`crate::transport_facade::PollHealth`]). Distinct from every count
+    /// above being zero, which is equally what "reached, nothing new" looks
+    /// like — a device whose relay set has gone bad must not read as a
+    /// device with a perfectly quiet guardian.
+    pub relays_unreachable: bool,
+    /// Per-relay publish failures this round (each failed relay on a single
+    /// publish counts once).
+    pub publish_failed: u32,
 }
 
 /// The privileged broker spine, generic over the system layer + transport.
@@ -908,6 +918,9 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         for grant in self.transport.poll_grants(cursor, now).await {
             self.on_grant(grant).await;
         }
+        let health = self.transport.poll_health();
+        counts.relays_unreachable = health.relays_unreachable;
+        counts.publish_failed = health.publish_failed;
         let mut st = self.state.lock().expect("state lock");
         // Lag the cursor a jitter window behind now (see `POLL_LOOKBACK_SECS`) so
         // a slightly-backdated or late-redelivered guardian event is never
@@ -1391,5 +1404,38 @@ mod ttl_and_caps_tests {
         // caller may ask again.
         b.sys().mock_clock().advance_secs(SUBMIT_WINDOW_SECS + 1);
         ask(&b, MIA).await.expect("the window has slid");
+    }
+
+    /// Relay health wiring (02b-G1/02b-B5 follow-through): a transport whose
+    /// query reported every relay unreachable this round must surface that on
+    /// `PollCounts`, and nothing else about the round changes.
+    #[tokio::test]
+    async fn poll_once_reports_relays_unreachable_and_nothing_else_changes() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        b.transport().set_relays_unreachable(true);
+        let counts = b.poll_once().await;
+        assert!(counts.relays_unreachable);
+        assert_eq!(counts.publish_failed, 0);
+        assert_eq!(counts.clauses_seen, 0);
+        assert_eq!(counts.clauses_accepted, 0);
+        assert_eq!(counts.clauses_write_failed, 0);
+        assert!(!counts.released);
+
+        // The signal is read-and-reset: a healthy round right after reports
+        // no lingering unreachable flag.
+        let counts2 = b.poll_once().await;
+        assert!(!counts2.relays_unreachable);
+    }
+
+    /// A publish that failed against one relay this round must be counted.
+    #[tokio::test]
+    async fn poll_once_counts_a_single_relay_publish_failure() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        b.transport().set_publish_failed(1);
+        let counts = b.poll_once().await;
+        assert_eq!(counts.publish_failed, 1);
+        assert!(!counts.relays_unreachable);
     }
 }

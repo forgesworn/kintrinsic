@@ -26,6 +26,12 @@ function sample(machine: string, subject: string): DeviceStatus {
     effectiveSecs: 900,
     locked: false,
     source: "guardian",
+    // `parseStatus` always fills these four in (defaults false/0), so a
+    // fixture compared against its own round trip must carry them too.
+    pausedByAdmin: false,
+    enforcementGapSecs: 0,
+    relayUnreachablePolls: 0,
+    transportUnavailable: false,
   };
 }
 

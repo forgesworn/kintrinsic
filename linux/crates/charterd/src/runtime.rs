@@ -22,16 +22,17 @@ use charter_schedule::{
     day_key, enforcement_tz_of, is_valid_freeze_target, reconcile_freeze, EnforcerEffect,
     FreezeAction, WarnLevel,
 };
+use charter_spine::PollHealth;
 use charter_sys::effects::{
     CgroupFreezer, RealApprovedExecStore, RealFlatpakOps, RealTrustDb, VtControl,
 };
 use charter_sys::persistence::{ChildClauseStore, PairingStore};
-use charter_sys::relay::{RealRelayTransport, RelayUrl};
+use charter_sys::relay::{PublishOutcome, RealRelayTransport, RelayIoError, RelayUrl};
 use charter_sys::signer::RealMachineSigner;
 use charter_sys::{Clock, RealSystem, SystemLayer};
 use charter_transport::pairing::Pairing;
 use charter_transport::{
-    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant,
+    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant, TransportError,
 };
 
 use crate::atomic_file::atomic_write;
@@ -174,11 +175,16 @@ impl Entropy for RealEntropy {
 
 /// Bridges the broker's [`TransportFacade`] onto the real gift-wrap transport
 /// (`CharterTransport`) over the rustls websocket relay. Poll failures surface
-/// as empty batches (offline is "nothing delivered", never a crash).
+/// as empty batches (offline is "nothing delivered", never a crash) — but the
+/// underlying `RelayIoError::Unreachable` / per-relay `PublishOutcome::Failed`
+/// are not thrown away: they accumulate in `relay_unreachable`/`publish_failed`
+/// for `poll_health()` to read (and reset) once per broker `poll_once` round.
 pub struct RealTransportFacade {
     inner: CharterTransport<RealRelayTransport, RealEntropy>,
     guardian: PubKey,
     machine: PubKey,
+    relay_unreachable: std::sync::atomic::AtomicBool,
+    publish_failed: std::sync::atomic::AtomicU32,
 }
 
 /// Scan-to-pair: while an unpaired ward has a live pairing token on screen,
@@ -233,28 +239,73 @@ fn spawn_pair_listener(machine_sk: [u8; 32], limits_dir: String) {
 
 impl RealTransportFacade {
     /// Build from the machine secret + pinned guardian + relay set.
+    ///
+    /// Panics on an unusable machine secret — kept for callers that have
+    /// always treated that as unrecoverable (the pair listener, which has no
+    /// pairing yet to fall back on). `run`'s own construction sites use
+    /// [`Self::try_new`] instead, so a corrupted secret on an already-paired
+    /// device degrades to cached-clause enforcement rather than aborting
+    /// (B4).
     pub fn new(machine_sk: [u8; 32], guardian: PubKey, relays: Vec<RelayUrl>) -> Self {
-        let machine = PubKey::from_bytes(
-            charter_crypto::xonly_pubkey(&machine_sk).expect("valid machine secret"),
-        );
-        let inner = CharterTransport::new(
+        Self::try_new(machine_sk, guardian, relays).expect("valid machine secret")
+    }
+
+    /// Fallible counterpart to [`Self::new`] — `Err(TransportError)` instead
+    /// of a panic when the machine secret does not derive a valid key (B4).
+    pub fn try_new(
+        machine_sk: [u8; 32],
+        guardian: PubKey,
+        relays: Vec<RelayUrl>,
+    ) -> Result<Self, TransportError> {
+        let inner = CharterTransport::try_new(
             RealRelayTransport::default(),
             RealEntropy,
             machine_sk,
             guardian,
             relays,
-        );
-        Self {
+        )?;
+        let machine = inner.machine_pubkey();
+        Ok(Self {
             inner,
             guardian,
             machine,
+            relay_unreachable: std::sync::atomic::AtomicBool::new(false),
+            publish_failed: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
+
+    /// Record a poll's per-relay `Result`, folding `Unreachable` into the
+    /// health accumulator instead of throwing it away — the shape every
+    /// `poll_*` wrapper below shares.
+    fn record_poll<T>(&self, r: Result<Vec<T>, RelayIoError>) -> Vec<T> {
+        match r {
+            Ok(v) => v,
+            Err(RelayIoError::Unreachable(_)) => {
+                self.relay_unreachable
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Record a publish's per-relay outcomes, folding any `Failed` entries
+    /// into the health accumulator.
+    fn record_publish(&self, outcomes: Vec<(RelayUrl, PublishOutcome)>) {
+        let failed = outcomes
+            .iter()
+            .filter(|(_, o)| matches!(o, PublishOutcome::Failed(_)))
+            .count() as u32;
+        if failed > 0 {
+            self.publish_failed
+                .fetch_add(failed, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     /// Publish a gift-wrapped STATUS (kind 31114) to the pinned guardian.
     /// Best-effort — a failed publish is a dropped update, never a crash.
     pub async fn emit_status(&self, status_json: &str, now: u64) {
-        let _ = self.inner.emit_status(status_json, now).await;
+        let outcomes = self.inner.emit_status(status_json, now).await;
+        self.record_publish(outcomes);
     }
 
     /// Poll PAIR_OFFERs addressed to this machine (the unpaired scan-to-pair
@@ -265,56 +316,53 @@ impl RealTransportFacade {
         since: u64,
         now: u64,
     ) -> Vec<charter_transport::transport::ReceivedPairOffer> {
-        self.inner
-            .poll_pair_offers(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.inner.poll_pair_offers(since, now).await)
     }
 }
 
 #[async_trait]
 impl TransportFacade for RealTransportFacade {
     async fn publish_request(&self, request_json: &str, now: u64) {
-        let _ = self.inner.submit_request(request_json, now).await;
+        let outcomes = self.inner.submit_request(request_json, now).await;
+        self.record_publish(outcomes);
     }
     async fn poll_grants(&self, since: u64, now: u64) -> Vec<ReceivedGrant> {
-        self.inner.poll_grants(since, now).await.unwrap_or_default()
+        self.record_poll(self.inner.poll_grants(since, now).await)
     }
     async fn poll_clauses(&self, since: u64, now: u64) -> Vec<ReceivedClause> {
-        self.inner
-            .poll_clauses(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.inner.poll_clauses(since, now).await)
     }
     async fn poll_usage_syncs(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
-        self.inner
-            .poll_usage_syncs(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.inner.poll_usage_syncs(since, now).await)
     }
     /// The guardian's "Disconnect this device" (S7). Best-effort like every
     /// other poll: a relay outage is "no releases this tick", never a crash on
     /// a ward that is still enforcing limits offline.
     async fn poll_releases(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
-        self.inner
-            .poll_releases(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.inner.poll_releases(since, now).await)
     }
     async fn poll_curator_lists(&self, curators: &[PubKey], since: u64) -> Vec<FetchedCuratorList> {
-        self.inner
-            .poll_curator_lists(curators, since)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.inner.poll_curator_lists(curators, since).await)
     }
     async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) {
-        let _ = self.inner.emit_audit(tags, now).await;
+        let outcomes = self.inner.emit_audit(tags, now).await;
+        self.record_publish(outcomes);
     }
     fn pinned_guardian(&self) -> PubKey {
         self.guardian
     }
     fn machine_pubkey(&self) -> PubKey {
         self.machine
+    }
+    fn poll_health(&self) -> PollHealth {
+        PollHealth {
+            relays_unreachable: self
+                .relay_unreachable
+                .swap(false, std::sync::atomic::Ordering::Relaxed),
+            publish_failed: self
+                .publish_failed
+                .swap(0, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 }
 
@@ -1551,15 +1599,33 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     let brokered_subject_hex: Option<String> =
         pairing_opt.as_ref().map(|p| p.subject_pubkey.to_hex());
 
+    // B4: a corrupted/zero-filled machine secret must not abort the process —
+    // it must leave the daemon enforcing whatever clauses are already cached
+    // on disk, with the failure reported rather than hidden. Either
+    // construction below can fail independently (each is its own transport),
+    // and either failing sets this — see `transport_unavailable` on
+    // `PublishedState`/`StatusPayload`.
+    let mut transport_unavailable = false;
+
     // A dedicated transport handle for the STATUS feed (paired only) — a second
     // stateless relay handle, so publishing status never contends with the
     // broker's own transport. `status_last` throttles per-child re-publishes.
     let (status_tx, status_machine): (Option<RealTransportFacade>, Option<PubKey>) =
         match pairing_opt.as_ref() {
             Some(p) => {
-                let tx = RealTransportFacade::new(secret, p.guardian_pubkey, p.relays.clone());
-                let m = tx.machine;
-                (Some(tx), Some(m))
+                match RealTransportFacade::try_new(secret, p.guardian_pubkey, p.relays.clone()) {
+                    Ok(tx) => {
+                        let m = tx.machine;
+                        (Some(tx), Some(m))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                        "charterd: transport unavailable ({e}) — STATUS publish disabled this run"
+                    );
+                        transport_unavailable = true;
+                        (None, None)
+                    }
+                }
             }
             None => (None, None),
         };
@@ -1577,24 +1643,42 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     });
 
     // If paired, stand up the broker for guardian grants (install/exec) + its
-    // signal channel. Per-child screen-time enforcement runs either way.
+    // signal channel. Per-child screen-time enforcement runs either way — a
+    // broker of `None` below (unpaired, OR paired but this transport failed
+    // to construct, B4) still leaves every cached clause on disk enforced by
+    // the rest of this loop, which reads them straight from `sys`, not
+    // through the broker.
     let (broker, signal_rx): (Option<Arc<RealBroker>>, Option<_>) = match pairing_opt {
         Some(pairing) => {
             let enforcer = Arc::new(Mutex::new(EnforcerRuntime::new(&sys, "UTC")));
-            let transport =
-                RealTransportFacade::new(secret, pairing.guardian_pubkey, pairing.relays.clone());
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let events: Box<dyn EventSink> = Box::new(ChannelEventSink::new(tx));
-            let broker = Arc::new(build_broker(
-                RealSystem::default(),
-                transport,
-                enforcer.clone(),
-                events,
-                pairing.subject_pubkey,
-                extension_inbox.clone(),
-            ));
-            eprintln!("charterd: paired — guardian grants + per-child limits enforced");
-            (Some(broker), Some(rx))
+            match RealTransportFacade::try_new(
+                secret,
+                pairing.guardian_pubkey,
+                pairing.relays.clone(),
+            ) {
+                Ok(transport) => {
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    let events: Box<dyn EventSink> = Box::new(ChannelEventSink::new(tx));
+                    let broker = Arc::new(build_broker(
+                        RealSystem::default(),
+                        transport,
+                        enforcer.clone(),
+                        events,
+                        pairing.subject_pubkey,
+                        extension_inbox.clone(),
+                    ));
+                    eprintln!("charterd: paired — guardian grants + per-child limits enforced");
+                    (Some(broker), Some(rx))
+                }
+                Err(e) => {
+                    eprintln!(
+                        "charterd: transport unavailable ({e}) — no broker this run; \
+                         cached clauses are still enforced from disk"
+                    );
+                    transport_unavailable = true;
+                    (None, None)
+                }
+            }
         }
         None => {
             eprintln!(
@@ -1690,6 +1774,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             "charterd: no warden was running on this machine for {gap}s before this start              — nothing was enforced during that time (reported to the guardian)"
         );
     }
+    // Relay health wiring (02b-G1/02b-B5 follow-through): consecutive SLOW
+    // ticks whose broker poll reported every relay unreachable. Reset to 0 by
+    // any tick that reaches a relay at all, so a climbing count means the
+    // relay set itself has gone bad, not one bad poll.
+    let mut consecutive_unreachable: u32 = 0;
     // Tell systemd we are up before the first tick, so `WatchdogSec` starts
     // counting from a daemon that is actually looping.
     crate::watchdog::ping();
@@ -2288,6 +2377,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                             paired,
                             paused_by_admin: false,
                             enforcement_gap_secs,
+                            transport_unavailable,
                         });
                     }
                     snap.insert(*uid, view);
@@ -2579,7 +2669,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
 
         // 5) If paired: subscribe -> verify -> enact guardian grants (install/exec).
         if let Some(b) = &broker {
-            if b.poll_once().await.released {
+            let poll = b.poll_once().await;
+            if poll.relays_unreachable {
+                consecutive_unreachable = consecutive_unreachable.saturating_add(1);
+            } else {
+                consecutive_unreachable = 0;
+            }
+            if poll.released {
                 // The guardian pressed Disconnect and the release authenticated
                 // (S7). The pairing and every clause are already off disk; what
                 // is left is a running daemon holding stale in-memory authority.
@@ -2650,6 +2746,16 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 // on a Chrome-only machine at all.
                 status.site_runtime_missing =
                     (site_apps_by_uid.contains_key(uid) && !site_runtime_present).then_some(true);
+                // 03-G5/04-G6/B4/relay-health follow-up: the same runtime
+                // facts already carried on the world-readable state file, now
+                // also on the guardian-facing wire. Each absent unless it is
+                // actually true/non-zero, matching every other STATUS field's
+                // "absent is the ordinary state" rule.
+                status.paused_by_admin = enforcement_paused().then_some(true);
+                status.enforcement_gap_secs = enforcement_gap_secs.map(|g| g.max(0) as u64);
+                status.relay_unreachable_polls =
+                    (consecutive_unreachable > 0).then_some(consecutive_unreachable);
+                status.transport_unavailable = transport_unavailable.then_some(true);
                 // Per-bucket ("named time") progress, so the guardian's app
                 // can show "Play: 22 of 60 used" instead of a blank. RAW
                 // meters — not extra-adjusted — because this is the guardian's

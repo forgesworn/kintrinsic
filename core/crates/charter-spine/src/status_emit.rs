@@ -93,6 +93,13 @@ pub fn build_status(
         // is the gap this counts, and only Android has one). Absent unless
         // the device has actually booted without its warden.
         enforcement_gap: None,
+        // The four below are stamped by the device loop from runtime/state-
+        // file data (03-G5/04-G6/B4/relay-health follow-up), same pattern as
+        // pair_token/apps.
+        paused_by_admin: None,
+        enforcement_gap_secs: None,
+        relay_unreachable_polls: None,
+        transport_unavailable: None,
     }
 }
 
