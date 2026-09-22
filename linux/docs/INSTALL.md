@@ -1,8 +1,9 @@
-# Charter for Linux — install, setup & use (Linux Mint)
+# Kintrinsic for Linux — install, setup & use (Linux Mint)
 
-A parent's runbook for putting Charter on a child's Linux Mint machine: install
-it, lock the account down, set screen-time limits (on the box **or** from your
-phone), and use it day to day. Targets **Linux Mint 22.x (Cinnamon / X11)**.
+A parent's runbook for putting Kintrinsic on a child's Linux Mint machine:
+install it, lock the account down, set screen-time limits (on the box **or**
+from your phone), and use it day to day. Targets **Linux Mint 22.x (Cinnamon /
+X11)**.
 
 > **Before you start — honest status.** This is the **first real walk-through**.
 > The code is built and tested, but it has not yet been proven on a real Mint
@@ -13,34 +14,36 @@ phone), and use it day to day. Targets **Linux Mint 22.x (Cinnamon / X11)**.
 
 ---
 
-## Two ways to use Charter
+## One app, two ways to set limits
 
-- **A · Device-only (no phone).** You set the limits right on the machine in a
-  little app. Simplest; needs nothing else. **Start here.**
-- **B · Remote (from your phone).** You set the limits in **MyCharter** on your
-  phone and they're delivered to the device, signed by your key in **Signet**.
-  More moving parts — do **A** first, then add **B**.
+Everything — setup, the rules, connecting a phone, recovery — lives in one
+app: **Kintrinsic**.
 
-Sections 1–4 are common + Path A. Section 5 onward is Path B.
+- **On the box (no phone).** Set the limits right in the Kintrinsic app.
+  Simplest; needs nothing else. **Start here.**
+- **From your phone.** Connect a phone from the app's **Connect a phone**
+  tab, then set limits in **Kintrinsic** on your phone (delivered to the
+  device, signed by your key). More moving parts — do the on-box path first,
+  then connect a phone.
 
 ---
 
 ## 1. What you'll need
 
-- A Mint 22.x machine for the child, with a **normal (non-admin) account**, e.g.
-  `kid`.
-- A **separate admin account for you** — Charter takes the child out of the
-  admin groups, so don't manage the box from their account.
-- The Charter package `charter_<version>_amd64.deb`. Download it on the child's
-  machine — get the current `.deb` from the download page
+- A Mint 22.x machine for the child, with a **normal (non-admin) account**,
+  e.g. `kid`.
+- A **separate admin account for you** — Kintrinsic takes the child out of
+  the admin groups, so don't manage the box from their account.
+- The Kintrinsic package `kintrinsic_<version>_amd64.deb`. Download it on the
+  child's machine — get the current `.deb` from the download page
   (<https://kintrinsic.app/download.html>); it downloads from Blossom
   (content-addressed), so the file is named by its hash.
   Or build it from this repo instead, if you have the Rust toolchain:
   ```sh
   cargo run -p xtask -- deb     # lands in linux/target/deb/
   ```
-- *(Path B only)* **Signet** set up on your phone (your signing key) and access
-  to **MyCharter** at `https://charter.mysignet.app`.
+- *(Optional)* Kintrinsic on your phone, if you want to connect it — see
+  §5 below.
 
 ## 2. Install the package
 
@@ -48,127 +51,93 @@ Double-click the `.deb` (it opens in the GDebi installer) and click **Install**,
 or from a terminal:
 
 ```sh
-sudo apt install ./charter_<version>_amd64.deb     # pulls deps (systemd, dbus)
+sudo apt install ./kintrinsic_<version>_amd64.deb     # pulls deps (systemd, dbus)
 ```
 
 This installs the daemon (`charterd`), the child's CLI (`charter`), the lock
-screen (`charter-lock`), the setup helper (`charter-setup`), the **"Charter
-Setup"** and **"Charter Screen Time"** menu apps, and the enforcement plumbing
-(systemd / D-Bus / polkit / fapolicyd).
+screen (`charter-lock`), the setup helper (`charter-setup`), the single
+**"Kintrinsic"** menu app, and the enforcement plumbing (systemd / D-Bus /
+polkit / fapolicyd).
 
-## 3. Lock the child's account down
+## 3. Set up Kintrinsic
 
-Open your applications menu, search **"Charter Setup"**, and launch it. Enter
-your admin password when asked, then **pick the child's account** and confirm.
+Open your applications menu, launch **"Kintrinsic"**. On the **Home** tab,
+choose your child's account and press **Set up Kintrinsic**. It asks for your
+admin password (this is what actually does the work — `charter-setup` behind
+a `pkexec` prompt).
 
 *(Same thing from a terminal: `sudo charter-setup kid`.)*
 
-It's safe to re-run. It takes the child out of `sudo`/`adm`/`lpadmin`, puts them
-in the `charter-managed` group, writes `/etc/charter/charterd.env` (so the lock
-screen can reach their session), and starts the `charterd` service.
+It's safe to re-run. It takes the child out of `sudo`/`wheel`/`admin`/`adm`/
+`lpadmin` (and warns if they're still in another root-equivalent group like
+`docker`), puts them in the `charter-managed` group, writes
+`/etc/charter/charterd.env` (so the lock screen can reach their session), and
+starts the `charterd` service.
 
-> ⚠ **rough edge:** if the child doesn't log in on display `:0`, edit
-> `CHARTER_DISPLAY` in `/etc/charter/charterd.env` and
-> `sudo systemctl restart charterd`.
+> ⚠ **rough edge:** the group change only takes effect on the child's
+> **next login**. If they're already logged in, Kintrinsic Setup offers to
+> end their session right there so the lockdown applies immediately —
+> otherwise log them out and back in yourself.
 
----
+## 4. Set the rules (on the box, no phone)
 
-## 4. Path A — set limits on the box (no phone)
+On the **"The rules"** tab, enter your admin password and set:
 
-Open **"Charter Screen Time"** from the menu, enter your admin password, and set:
-
-- **Allowed from / until** — the hours the machine may be used (e.g. `07:00`–
+- **Allowed hours** — the hours the machine may be used (e.g. `07:00`–
   `20:00`). Outside them, it locks.
-- **Daily minutes** — the on-screen time cap per day.
-- **Weekend** (optional) — a separate Sat/Sun window.
+- **Time each day** — the on-screen time cap per day.
 
-**Save.** Within a few seconds `charterd` is enforcing it. That's the whole of
-Path A — you're done. (Under the hood this writes
-`/etc/charter/limits.d/<child>.json`, which only an admin can edit.)
+**Save.** Within a few seconds `charterd` is enforcing it. That's the whole
+of the on-box path — you're done. (Under the hood this writes
+`/etc/charter/limits.d/<child>.json`, which only an admin can edit.) You can
+also turn on **Khan Academy is time-free** here, so learning time there
+doesn't use up the daily cap.
 
-**More than one child?** Give each child their own login and run **Charter
-Setup** + **Charter Screen Time** for each. Whoever is logged in is the one whose
-time is counted, and each child is judged on their own limits.
+**More than one child?** Give each child their own login and run **Set up
+Kintrinsic** for each. Whoever is logged in is the one whose time is counted,
+and each child is judged on their own limits.
 
 ---
 
-## 5. Path B — manage it from your phone (remote)
+## 5. Connect a phone (optional, remote control)
 
-This adds remote control on top of Path A. The shape:
+This adds remote control on top of the on-box limits. On the **"Connect a
+phone"** tab (in the Kintrinsic app), press **Show the pairing code** — this
+asks for your admin password, since only a parent may invite a guardian —
+then scan the QR (or type the code) with **Kintrinsic on your phone**
+(**Add your child → Set up a computer**). The page flips to "Connected" on
+its own once the phone finishes.
 
-```
-  Your phone                          The child's machine
-  ──────────                          ───────────────────
-  Signet  ── holds your key
-  MyCharter ── you set limits  ──(signed, over a relay)──▶  charterd enforces
-```
+From then on you can set limits, see time used, and approve "more time" from
+Kintrinsic on your phone, from anywhere. The phone takes charge: once you've
+set a child's limits from the phone, those are authoritative for that child;
+the on-box limits are the fallback while it's offline.
 
-You pair the two **once**: the device learns to trust your key, and your phone
-learns the device's address.
-
-### 5a. Get your guardian link from Signet
-In **Signet** on your phone, create/choose your guardian identity and copy its
-**connection link** — a `bunker://…` string (it contains your public key + a
-relay). You'll use this in two places below.
-
-### 5b. Tell the device to trust you
-On the child's machine, open **"Charter — Pair Guardian"** from the menu (enter
-your admin password). Paste **your guardian link** from 5a, then paste **your
-child's ID** from MyCharter (their Signet "dependant ID"). It pins your key and
-links the child, so your phone-set limits will take effect.
-
-> Use the **graphical** "Charter — Pair Guardian" for this — it's the path that
-> both pins your key **and** links the child's ID (both are required, or your
-> phone-set limits won't apply). The `charter pair` terminal command only
-> validates/queries pairing; it does **not** pin the guardian, so don't rely on
-> it to set up pairing.
-
-### 5c. Get this device's pairing code
-On the child's machine, open **"Charter — This Device's Code"** from the menu. It
-shows a **QR + a 64-character code** — you'll scan/type it into MyCharter next.
-*(No password needed; it's public.)*
-
-### 5d. In MyCharter (your phone)
-Open **`https://charter.mysignet.app`** and:
-
-1. **Turn on parent approval → "Set up with Signet"**, and **paste the same
-   `bunker://…` link** from 5a. This connects MyCharter to your key in Signet.
-2. **Add the child** (just a name).
-3. **Set up their computer** → when it asks for the device's code, **scan the QR
-   or type the code** from 5c.
-
-### 5e. Set limits remotely
-Open the child on the **Limits** screen, set their allowed hours / daily cap, and
-**Save**. MyCharter builds the rule, asks Signet to **sign** it with your key,
-and sends it to the device, which verifies your signature and starts enforcing —
-no phone-side "trust me" button, every change is signed by you.
-
-> ⚠ **rough edge:** today you confirm each change in Signet (every limit edit
-> prompts a signature). You can turn on "approve without the extra tap" in
-> MyCharter to stop the per-edit prompt.
+> The `charter pair` terminal command does **not** pair a guardian — pairing
+> needs an admin password, which only the Kintrinsic app can collect.
+> Running it just tells you to use the app.
 
 ---
 
 ## 6. Using it day to day
 
 **You (parent):**
-- Change limits any time — on the box (Charter Screen Time) or your phone
-  (MyCharter). **The phone takes charge:** once you've set a child's limits from
-  MyCharter, those are authoritative for that child; the on-box limits are the
-  fallback for a child you haven't set from the phone (or while it's offline).
-- *(Path B)* When the child asks to run/install something or asks for more time,
-  you get a request to **approve or deny** in MyCharter.
+- Change limits any time — on the box (**The rules**) or your phone
+  (Kintrinsic).
+- *(Once a phone is connected)* When the child asks to run/install something
+  or asks for more time, you get a request to **approve or deny** on your
+  phone.
 
 **The child:** on their machine —
 ```sh
 charter time-left        # how much time is left today (works with or without a phone)
 charter ask-for-more 15  # ask you for 15 more minutes when a limit is hit
 charter run ~/Game.AppImage   # ask you to allow an app
-charter status           # check whether your parent has answered a request
+charter status            # check whether your parent has answered a request
 ```
-`ask-for-more` and `run` need the phone guardian (Path B) — until you've paired,
-they reply that Charter isn't connected to a phone yet. `time-left` works either
-way.
+`ask-for-more` and `run` need a connected phone — until you've connected one,
+they reply that Kintrinsic isn't connected to a phone yet. `time-left` works
+either way.
 
 **When time's up:** their apps freeze and a full-screen message explains why
 ("Time's up for today" / "Outside allowed hours"). It clears itself when the
@@ -185,16 +154,37 @@ flatpak install ...   # should be refused (only your approval can install)
 
 ## 8. If you get stuck — Recovery
 
-**The parent's account is never governed** — only the child's. So if a limit ever
-locks *the child's* screen when it shouldn't, log in as **your admin account**
-(switch users at the greeter) and open **"Charter — Recovery"** from the menu:
+**The parent's account is never governed** — only the child's. The lock
+screen holds the keyboard and pointer and **VT switching is turned off while
+it's up — there is no `Ctrl+Alt+F3` escape to a text console during a lock.**
+These are the routes that actually work:
 
-- **Pause** — unfreeze the child now, keep your settings (resume any time).
-- **Resume** — start enforcing again.
-- **Turn Charter off** — stop enforcing entirely (re-enable from Charter Setup).
+- **Log out → your admin session → Recovery.** The lock's own **Log out**
+  button ends the child's session (it unfreezes it first) and drops you at
+  the login screen. Sign in to **your admin account**, open **Kintrinsic**
+  from the menu, go to the **Recovery** tab, and choose:
+  - **Pause** — unfreeze the child now, keep your settings (resume any time).
+  - **Resume** — start enforcing again.
+  - **Turn off** — stop enforcing entirely (re-enable from **Set up
+    Kintrinsic**).
 
-If you can't reach the desktop at all, recovery is also one command from your
-admin account (or another TTY, `Ctrl+Alt+F3`):
+  A locked child screen shows this exact route on request: press
+  **Ctrl+Alt+Shift+Q** at the lock for a notice with these steps spelled out.
+
+- **The offline unlock code (once a phone is connected).** Press
+  **Ctrl+Alt+Shift+Q** at the lock screen. It shows a short code and the
+  prompt "In Kintrinsic, open 'Unlock a device', enter this code, then type
+  the 8-digit code it shows here." Open Kintrinsic on your phone, do that,
+  and type the 8 digits it gives you — a correct code pauses enforcement
+  immediately, no admin login needed. A handful of wrong tries locks entry
+  out for a while (it backs off further each time), so it can't be guessed.
+
+- **Shut down.** The lock's **Shut down** button powers the machine off. This
+  does **not** unlock anything by itself — `charterd` self-heals and resumes
+  enforcing on the next boot — but it's there if you need to step away.
+
+If you're already at your own admin desktop (not locked out), you can also
+just run:
 
 ```sh
 sudo systemctl stop charterd.service   # stops + thaws everything immediately
@@ -205,7 +195,7 @@ Full undo / uninstall:
 ```sh
 sudo systemctl disable --now charterd.service   # stop enforcing
 sudo gpasswd -a kid sudo                         # give the account admin back
-sudo apt remove charter                          # remove Charter entirely
+sudo apt remove kintrinsic                       # remove Kintrinsic entirely
 ```
 
 ---
@@ -216,9 +206,9 @@ sudo apt remove charter                          # remove Charter entirely
   multi-child, freeze + lock + web filter) and the remote signing pipeline are
   unit-tested and build clean.
 - **What this walk-through is checking:** that it all behaves on a *real* Mint
-  box — the lock actually holding, the install + wizards being clear, and the
-  remote pairing being followable. Note where you get stuck; the **⚠ rough
-  edge** flags are the spots we already expect to be rougher than normie-grade.
-- **Needs the guardian app to exist:** Path B assumes **Signet** can sign and
-  **MyCharter** is reachable. If Signet's Charter support isn't live yet, Path A
-  (device-only) is fully self-contained and the right thing to walk first.
+  box — the lock actually holding, install + setup being clear, and phone
+  pairing being followable. Note where you get stuck; the **⚠ rough edge**
+  flags are the spots we already expect to be rougher than normie-grade.
+- **Connecting a phone is optional.** The on-box path (§4) is fully
+  self-contained; connect a phone (§5) only once that's working and you want
+  remote control.
