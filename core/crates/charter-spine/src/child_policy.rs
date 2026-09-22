@@ -218,23 +218,89 @@ pub fn resolve_effective(
     }
 }
 
+/// Every `subject` that more than one of these configs claims.
+///
+/// # Why a shared subject is not a policy but a collision (02b-G8)
+///
+/// Each child's `subject` comes from its own `<dir>/<username>.json` and is
+/// validated for SHAPE — 64 hex — and nothing else. Two usernames carrying the
+/// same subject therefore both resolve to the same guardian clause set, both
+/// load a `ConsolidatedUsage` from the same `(subject, USAGE_SYNC)` slot, and
+/// both emit STATUS under the same `(subject, machine)` pair — which the
+/// guardian's consolidator can only read as one device reporting twice, so one
+/// sibling's usage overwrites the other's and the pooled figure under-counts by
+/// a whole child. A guardian-approved `time.extend` addressed to that subject
+/// lands on whichever uid the loop finds FIRST.
+///
+/// There is no safe way to pick a winner: the guardian's clauses were written
+/// for ONE child, and applying them to the wrong one is the failure. So the
+/// binding is dropped from EVERY claimant, all of them fall back to
+/// device-only defaults, and the error is logged loudly enough to fix.
+fn duplicated_subjects(configs: &[(String, ChildConfig)]) -> std::collections::BTreeSet<String> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut dupes = std::collections::BTreeSet::new();
+    for (_, cfg) in configs {
+        if let Some(s) = cfg.subject.as_deref() {
+            if !seen.insert(s) {
+                dupes.insert(s.to_string());
+            }
+        }
+    }
+    dupes
+}
+
+/// Strip a `subject` that more than one child claims, in place, before anything
+/// downstream (clause routing, bucket reads, STATUS, extension delivery) gets a
+/// chance to act on it. Returns the usernames whose binding was dropped.
+///
+/// The write path refuses to create this state in the first place
+/// (`set_child_subject`); this is the load-time half, for a `limits.d` that was
+/// hand-edited, restored from a backup, or written by an older build.
+pub fn drop_duplicate_subjects(configs: &mut [(String, ChildConfig)]) -> Vec<String> {
+    let dupes = duplicated_subjects(configs);
+    if dupes.is_empty() {
+        return Vec::new();
+    }
+    let mut dropped = Vec::new();
+    for (user, cfg) in configs.iter_mut() {
+        if cfg.subject.as_deref().is_some_and(|s| dupes.contains(s)) {
+            eprintln!(
+                "charter: {user} shares a guardian subject with another managed child — \
+                 the binding is dropped for ALL of them (device-only limits apply) so no \
+                 guardian clause is applied to the wrong child. Re-pair each child \
+                 separately to fix this."
+            );
+            cfg.subject = None;
+            dropped.push(user.clone());
+        }
+    }
+    dropped
+}
+
 /// Resolve every managed child's effective policy for the enforcement tick. For
 /// each loaded [`ChildConfig`], pull the guardian's per-child clauses (by
 /// `subject`) from the [`ChildClauseStore`] and apply Signet-first precedence via
 /// [`resolve_effective`]. Children whose username doesn't resolve to a uid in
 /// `passwd` are skipped. Generic over the system layer, so the precedence
 /// integration is mock-tested without a daemon/bus/relay.
+///
+/// A subject claimed by more than one child is ignored here too, whether or not
+/// the caller ran [`drop_duplicate_subjects`] first — this is the function that
+/// turns a binding into applied policy, so it is the one place the rule cannot
+/// be skipped by a caller that forgot.
 pub fn resolve_child_policies<S: SystemLayer>(
     sys: &S,
     passwd: &str,
     configs: &[(String, ChildConfig)],
 ) -> Vec<(u32, EffectivePolicy)> {
+    let dupes = duplicated_subjects(configs);
     configs
         .iter()
         .filter_map(|(user, cfg)| {
             let uid = uid_for_user(passwd, user)?;
             // Guardian's per-child clauses (empty if unbound or none received yet).
-            let guardian_clauses = match &cfg.subject {
+            let subject = cfg.subject.as_ref().filter(|s| !dupes.contains(s.as_str()));
+            let guardian_clauses = match subject {
                 Some(subject) => match sys.child_clauses().clauses_for(subject) {
                     Ok(c) => c,
                     // The walk itself failed: the directory is there and will
@@ -748,5 +814,67 @@ mod sys_tests {
         let bob = out.iter().find(|(u, _)| *u == 1002).unwrap();
         assert_eq!(alice.1.source, PolicySource::Guardian);
         assert_eq!(bob.1.source, PolicySource::DeviceOnly);
+    }
+
+    /// 02b-G8: two children bound to the SAME subject. The guardian wrote those
+    /// clauses for one child, so neither may have them — the alternative is
+    /// enforcing one sibling's rules against the other, silently.
+    #[test]
+    fn two_children_sharing_a_subject_both_fall_back_to_device_only() {
+        let sys = MockSystem::new(1000);
+        store_guardian_schedule(&sys, SUBJ_A);
+        let configs = vec![
+            ("alice".to_string(), bound(SUBJ_A, Some(dl()))),
+            ("bob".to_string(), bound(SUBJ_A, Some(dl()))),
+        ];
+        let out = resolve_child_policies(&sys, PASSWD, &configs);
+        assert_eq!(out.len(), 2);
+        for (uid, pol) in &out {
+            assert_eq!(
+                pol.source,
+                PolicySource::DeviceOnly,
+                "uid {uid} must not inherit a clause set written for one child"
+            );
+        }
+    }
+
+    /// One child alone on a subject is the ordinary case and is untouched — the
+    /// rule is about a COLLISION, not about bindings in general.
+    #[test]
+    fn a_subject_claimed_once_is_untouched() {
+        let sys = MockSystem::new(1000);
+        store_guardian_schedule(&sys, SUBJ_A);
+        let mut configs = vec![
+            ("alice".to_string(), bound(SUBJ_A, Some(dl()))),
+            ("bob".to_string(), bound(&"b".repeat(64), Some(dl()))),
+        ];
+        assert!(drop_duplicate_subjects(&mut configs).is_empty());
+        assert_eq!(configs[0].1.subject.as_deref(), Some(SUBJ_A));
+        let out = resolve_child_policies(&sys, PASSWD, &configs);
+        let alice = out.iter().find(|(u, _)| *u == 1001).unwrap();
+        assert_eq!(alice.1.source, PolicySource::Guardian);
+    }
+
+    /// The load-time half, which every other consumer of `configs` (bucket
+    /// reads, STATUS addressing, extension delivery) depends on: the binding is
+    /// gone from the config itself, not merely ignored by one resolver.
+    #[test]
+    fn drop_duplicate_subjects_clears_the_binding_on_every_claimant() {
+        let mut configs = vec![
+            ("alice".to_string(), bound(SUBJ_A, Some(dl()))),
+            ("bob".to_string(), bound(SUBJ_A, Some(dl()))),
+            ("carol".to_string(), bound(&"c".repeat(64), Some(dl()))),
+        ];
+        let dropped = drop_duplicate_subjects(&mut configs);
+        assert_eq!(dropped, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(configs[0].1.subject, None);
+        assert_eq!(configs[1].1.subject, None);
+        assert_eq!(
+            configs[2].1.subject.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+            "an uninvolved child keeps their binding"
+        );
+        // Device-only limits survive the drop — the child is still managed.
+        assert!(configs[0].1.limits.is_some());
     }
 }

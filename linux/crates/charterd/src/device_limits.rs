@@ -101,6 +101,26 @@ pub fn set_child_subject(dir: &str, username: &str, subject_hex: Option<&str>) -
             ));
         }
     }
+    // 02b-G8: one subject, one child. Two children bound to the same guardian
+    // subject share a clause set, a usage-pool slot and a STATUS identity —
+    // the guardian's consolidator reads them as one device reporting twice, so
+    // one sibling's usage overwrites the other's, and a `time.extend` approved
+    // for one lands on whichever uid the loop happens to find first. Refuse at
+    // the point the state would be created; `child_policy::drop_duplicate_subjects`
+    // is the load-time backstop for a file that got there another way.
+    if let Some(s) = subject_hex {
+        let wanted = s.to_lowercase();
+        if let Some(other) = load_child_configs(dir)
+            .into_iter()
+            .find(|(user, cfg)| user != username && cfg.subject.as_deref() == Some(wanted.as_str()))
+        {
+            return Err(charter_sys::SysError::Io(format!(
+                "that guardian subject is already bound to {} — each child needs their \
+                 own; unbind {} first, or pair this child separately",
+                other.0, other.0
+            )));
+        }
+    }
     let path = child_limits_path(dir, username);
     let mut cfg = std::fs::read_to_string(&path)
         .ok()
@@ -220,24 +240,44 @@ pub fn child_limits_path(dir: &str, username: &str) -> String {
 pub const CHILD_CLAUSE_STORE_BASE: &str = "/var/lib/charter";
 
 /// Remove `subject_hex`'s per-child clause store under `base` —
-/// `<base>/children/<subject_hex>/clauses`, sanitised to lowercase hex exactly
-/// as `RealChildClauseStore::clear_for` does, so a crafted subject can never
-/// escape `base`. `charter-pair`/`pair_commit` call this on a re-pair to a NEW
+/// `<base>/children/<subject_hex>/clauses`, using the SAME subject rule
+/// `RealChildClauseStore` now enforces, so a crafted subject can never escape
+/// `base`. `charter-pair`/`pair_commit` call this on a re-pair to a NEW
 /// subject: the old subject's clauses are otherwise orphaned — cached but
 /// unreachable — which is the same state a guardian RELEASE clears via that
 /// trait method. This mirrors its logic directly rather than depending on it,
 /// since `charter_sys`'s real filesystem impls are gated behind the `real`
 /// feature and this module builds under `mock` too (`pair_commit`'s tests run
 /// there). Missing already ⇒ `Ok(())` (nothing to purge is not a failure).
+///
+/// # The subject is REJECTED, never sanitised (02-B8)
+///
+/// This used to FILTER: strip every non-hex character, lowercase the rest, and
+/// use whatever survived. That is the dangerous shape — it always produces
+/// *some* path, so `"../../etc"` and `"AA…AA"` and a 12-character fragment all
+/// name a directory somebody might have, and the one it names is not the one
+/// the caller asked about. `RealChildClauseStore::safe` now demands exactly 64
+/// lowercase hex characters and refuses anything else; a purge that quietly
+/// accepted more would be the surviving half of the same hole, deleting a
+/// directory on the strength of a string that is not a subject.
 pub fn purge_subject_store(base: &str, subject_hex: &str) -> SysResult<()> {
-    let safe: String = subject_hex
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
+    let conforms = subject_hex.len() == 64
+        && subject_hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !conforms {
+        // The subject itself is never echoed: it is caller-controlled and
+        // unbounded, exactly as `bad_subject` reasons in charter-sys.
+        eprintln!(
+            "charter: refusing to purge a clause store for a subject that is not 64 \
+             lowercase hex characters (len {}) — nothing was touched",
+            subject_hex.len()
+        );
+        return Ok(());
+    }
     let dir = std::path::Path::new(base)
         .join("children")
-        .join(safe)
+        .join(subject_hex)
         .join("clauses");
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),
@@ -283,10 +323,7 @@ mod tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(format!("{old}/1.json"), "{}").unwrap();
         let other_hex = "b".repeat(64);
-        let other = format!(
-            "{d}/children/{other_hex}/clauses",
-            d = d.to_string_lossy()
-        );
+        let other = format!("{d}/children/{other_hex}/clauses", d = d.to_string_lossy());
         std::fs::create_dir_all(&other).unwrap();
 
         purge_subject_store(&d.to_string_lossy(), HEX64).unwrap();
@@ -295,6 +332,71 @@ mod tests {
         assert!(std::path::Path::new(&other).exists(), "untouched");
         // Missing already: not an error.
         assert!(purge_subject_store(&d.to_string_lossy(), HEX64).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 02b-G8: the write path is where this state would be created, so it is
+    /// the first place it is refused.
+    #[test]
+    fn set_child_subject_refuses_a_subject_another_child_already_holds() {
+        let dir = std::env::temp_dir().join("charter-dup-subject-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+
+        set_child_subject(d, "alice", Some(HEX64)).unwrap();
+        let err = set_child_subject(d, "bob", Some(HEX64))
+            .expect_err("two children must not share one guardian subject");
+        assert!(
+            format!("{err}").contains("alice"),
+            "the refusal names who already holds it: {err}"
+        );
+        // Bob is untouched — not half-bound.
+        let bob = load_child_configs(d).into_iter().find(|(u, _)| u == "bob");
+        assert!(bob.is_none() || bob.unwrap().1.subject.is_none());
+
+        // Re-binding the SAME child to the same subject is a no-op, not a clash.
+        set_child_subject(d, "alice", Some(HEX64)).unwrap();
+        // Case is normalised before the comparison, so uppercase clashes too.
+        assert!(set_child_subject(d, "bob", Some(&HEX64.to_uppercase())).is_err());
+        // Once alice lets go, bob may have it.
+        set_child_subject(d, "alice", None).unwrap();
+        set_child_subject(d, "bob", Some(HEX64)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 02-B8: a subject that is not exactly 64 lowercase hex must be REFUSED,
+    /// not filtered down into some other child's directory. The uppercase case
+    /// is the sharp one — the old sanitiser lowercased it, so purging
+    /// `"AAAA…"` silently deleted `"aaaa…"`'s clauses.
+    #[test]
+    fn purge_subject_store_refuses_a_subject_that_is_not_64_lowercase_hex() {
+        let d = std::env::temp_dir().join("charter-purge-subject-reject-test");
+        let _ = std::fs::remove_dir_all(&d);
+        let base = d.to_string_lossy().into_owned();
+        let live = format!("{base}/children/{HEX64}/clauses");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(format!("{live}/1.json"), "{}").unwrap();
+
+        for bad in [
+            HEX64.to_uppercase(),    // lowercased into the live subject
+            format!("{HEX64}-"),     // hex plus a stray character
+            "../../etc".to_string(), // traversal, filtered down to "ec"
+            "aabb".to_string(),      // a fragment
+            String::new(),
+        ] {
+            assert!(
+                purge_subject_store(&base, &bad).is_ok(),
+                "a refusal is not a storage failure"
+            );
+            assert!(
+                std::path::Path::new(&live).exists(),
+                "nothing may be deleted on the strength of {bad:?}"
+            );
+        }
+        // The real subject still purges.
+        purge_subject_store(&base, HEX64).unwrap();
+        assert!(!std::path::Path::new(&live).exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

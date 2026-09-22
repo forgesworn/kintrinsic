@@ -8,7 +8,9 @@ use std::path::Path;
 use charter_primitives::PubKey;
 use charter_sys::relay::RelayUrl;
 
-use crate::device_limits::{load_child_configs, purge_subject_store, set_child_subject, CHILD_CLAUSE_STORE_BASE};
+use crate::device_limits::{
+    load_child_configs, purge_subject_store, set_child_subject, CHILD_CLAUSE_STORE_BASE,
+};
 use crate::pairing_setup::build_pairing_json;
 
 /// Where a pin lands. Injected rather than hardcoded so the whole commit is
@@ -103,8 +105,7 @@ pub fn commit_pin(
         std::fs::rename(&tmp, &paths.pairing).map_err(|e| e.to_string())
     })();
     if let Err(e) = write_result {
-        if let Err(re) = set_child_subject(&paths.limits_dir, &child, previous_subject.as_deref())
-        {
+        if let Err(re) = set_child_subject(&paths.limits_dir, &child, previous_subject.as_deref()) {
             eprintln!(
                 "charterd: could not roll back {child}'s subject link after a failed pin \
                  write ({e}): {re}"
