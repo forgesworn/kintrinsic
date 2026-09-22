@@ -15,7 +15,7 @@
       ]
     ],
     "content": "{\"v\":1,\"kind\":\"schedule\",\"issuedAt\":1700000000,\"body\":{\"v\":1,\"tz\":\"Europe/London\",\"weekly\":{\"mon\":[{\"start\":\"16:00\",\"end\":\"20:00\"}]},\"issuedAt\":1700000000}}",
-    "sig": "ead540bee832366473b5b63b6ea5f2b83ffc86675a90f6876ea2b0291196776b3f75cad0d6a7fce1e3b922d79974dc440cff2a010234d97f91ceb02cd807fda7"
+    "sig": "3b95cd6b52d4843df55575f1f7ea266a8c57219ce4f6c5bdab5ef3f8a7895c74f9999aacd0e6d190a522bd00aba0d420abe9bf8033d8a46ddd05b9a2a4d30ceb"
   },
   "guardian_pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
   "payload": {

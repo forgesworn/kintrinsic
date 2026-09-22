@@ -39,7 +39,7 @@
       ]
     ],
     "content": "test release notes",
-    "sig": "4bc214731f53797e9e50f8ca32ccbac5d7722064ae2db5e2f13d1fcc6e43d4846f031c25335ceb320ac41e542d222e9fde782bdb83194209d5f5cdaa2c1772d7"
+    "sig": "0a57010c9aa4d8f34cd6a173279dfa7711723fc1a841244696839e9d7653852be63dbead9968cdbf745e81531b229c2437fd0f5b46fef72d4acc29e3ccec14f3"
   },
   "release_pubkey": "463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b",
   "expected": {
