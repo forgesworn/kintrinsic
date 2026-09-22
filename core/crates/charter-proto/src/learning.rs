@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use charter_content::domain::parse_domain;
+
 use crate::error::ProtoError;
 
 /// The frozen `learning` clause body version.
@@ -108,6 +110,15 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// A site app's launch URL: `https://` only, no whitespace or comma. This
+/// string is string-interpolated into a line-oriented Chromium
+/// `--host-resolver-rules` / `--app=` sink downstream (S11, review
+/// 2026-09-21 03b-B7 / 01-G3), so a control character or comma here is an
+/// injection into that sink, not a merely-unusual URL.
+fn valid_learning_url(url: &str) -> bool {
+    url.starts_with("https://") && !url.chars().any(|c| c.is_whitespace() || c == ',')
+}
+
 impl GrantLearning {
     /// Parse from a clause body JSON value (fail-closed on version/shape:
     /// site apps require `url` + non-empty `domains`; native require `exec`).
@@ -126,11 +137,26 @@ impl GrantLearning {
             }
             match app.kind {
                 LearningAppKind::Site => {
-                    if app.url.as_deref().unwrap_or("").is_empty() || app.domains.is_empty() {
+                    let url = app.url.as_deref().unwrap_or("");
+                    if url.is_empty() || app.domains.is_empty() {
                         return Err(ProtoError::BadParams(format!(
                             "site learning app {:?} needs url + non-empty domains",
                             app.id
                         )));
+                    }
+                    if !valid_learning_url(url) {
+                        return Err(ProtoError::BadParams(format!(
+                            "site learning app {:?} has a bad url {:?}: must start https:// with no whitespace or comma",
+                            app.id, url
+                        )));
+                    }
+                    for d in &app.domains {
+                        if parse_domain(d).is_none() {
+                            return Err(ProtoError::BadParams(format!(
+                                "site learning app {:?} has an invalid domain {:?}",
+                                app.id, d
+                            )));
+                        }
                     }
                 }
                 LearningAppKind::Native => {
@@ -265,5 +291,56 @@ mod tests {
         });
         let g = GrantLearning::from_value(&v).unwrap();
         assert!(g.active_apps().is_empty());
+    }
+
+    // S11 (review 2026-09-21, 01-G3 / 03b-B7): `domains` and `url` land in a
+    // line-oriented Chromium resolver-rules sink downstream, so a malformed
+    // entry must reject the whole app rather than materialise an unpinned
+    // window that still reads as sanctioned.
+    fn site_value(domain: &str, url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "v": 1, "issuedAt": 1,
+            "apps": [{
+                "id": "site", "label": "Site", "kind": "site",
+                "domains": [domain], "url": url
+            }]
+        })
+    }
+
+    #[test]
+    fn a_comma_containing_domain_is_rejected() {
+        let v = site_value("example.org, EXCLUDE evil.example", "https://example.org/");
+        assert!(GrantLearning::from_value(&v).is_err());
+    }
+
+    #[test]
+    fn a_domain_with_a_space_is_rejected() {
+        let v = site_value("evil example", "https://example.org/");
+        assert!(GrantLearning::from_value(&v).is_err());
+    }
+
+    #[test]
+    fn an_exclude_star_domain_is_rejected() {
+        let v = site_value("EXCLUDE *", "https://example.org/");
+        assert!(GrantLearning::from_value(&v).is_err());
+    }
+
+    #[test]
+    fn a_file_scheme_url_is_rejected() {
+        let v = site_value("example.org", "file:///etc/passwd");
+        assert!(GrantLearning::from_value(&v).is_err());
+    }
+
+    #[test]
+    fn a_plain_http_url_is_rejected() {
+        let v = site_value("example.org", "http://example.org/");
+        assert!(GrantLearning::from_value(&v).is_err());
+    }
+
+    #[test]
+    fn a_normal_site_app_is_accepted() {
+        let v = site_value("example.org", "https://example.org/");
+        let g = GrantLearning::from_value(&v).unwrap();
+        assert_eq!(g.apps.len(), 1);
     }
 }
