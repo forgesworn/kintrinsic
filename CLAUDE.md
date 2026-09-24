@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # Charter — working with decented (read this first)
 
 ## Who's who / how we work
