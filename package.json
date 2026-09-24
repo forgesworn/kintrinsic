@@ -30,7 +30,8 @@
   },
   "files": [
     "dist/",
-    "LICENSE"
+    "LICENSE",
+    "llms.txt"
   ],
   "scripts": {
     "build": "tsc",

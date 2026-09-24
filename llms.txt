@@ -1,0 +1,64 @@
+# Charter (Kintrinsic consumer SDK)
+
+> Consumer apps that want to honour a family's Nostr-signed wardship rules
+> otherwise have to re-implement clause parsing, pairing storage and
+> schedule evaluation themselves. `@forgesworn/charter` is the TypeScript SDK
+> that does it: it lets a Nostr-aware app honour a guardian's schedule clause
+> for a paired dependant, without the rest of Kintrinsic.
+
+Kintrinsic is a libre, self-hosted digital wardship system: a guardian grants
+scoped, revocable screen-time, app, content and comms permissions to a
+child's devices, signed with the family's own keys, enforced on-device, with
+no platform account in the middle. This SDK is for developers building a
+Nostr-aware consumer app (a game, a browser app, anything with a sign-in
+flow) that wants to respect a Charter schedule clause issued by a guardian.
+
+## Getting Started
+
+```bash
+npm install @forgesworn/charter nostr-tools
+```
+
+```typescript
+import { evaluateSchedule, createCharterEvaluator } from "@forgesworn/charter";
+
+const ev = createCharterEvaluator({ appKeypair: { pubkey: APP_PUB, privkey: APP_PRIV } });
+await ev.init({
+  charterAuthors: [guardianPubkey],
+  charterRelays: ["wss://relay.example.com"],
+  depCanonicalPubkey: null,
+  subjectPubkey: signedInChildPubkey,
+});
+const decision = ev.check(signedInChildPubkey);
+if (!decision.allow) showLockoutScreen(decision.reason);
+```
+
+## Key Concepts
+
+- **Clause**: a signed, encrypted rule a guardian issues (currently only the
+  `schedule` kind: allowed time windows per day, in an IANA timezone).
+- **Charter evaluator**: subscribes to a guardian's relays for kind-31000
+  clause events addressed to the app, NIP-44 decrypts them, caches the
+  latest clause per subject in IndexedDB, and exposes a synchronous `check()`
+  gate for the app to call.
+- **Pairing store**: an IndexedDB-backed store of NIP-46 bunker pairings, one
+  record per subject pubkey; pairings are per-device and do not sync.
+- **Schedule evaluation**: a pure function over a clause payload and a
+  `Date` that returns an allow/deny decision and a reason.
+
+## API Surface
+
+- `evaluateSchedule(clause, now)` and `validateClausePayload(payload)` from
+  `@forgesworn/charter` or `@forgesworn/charter/schedule`.
+- `createPairingStore(options?)` from `@forgesworn/charter` or
+  `@forgesworn/charter/pairing`: `pair()`, `has()`, `getSigner()`, `unpair()`.
+- `createCharterEvaluator(options)` from `@forgesworn/charter` or
+  `@forgesworn/charter/evaluator`: `init()`, `check()`, `shutdown()`.
+
+## Optional
+
+- [docs/integrating.md](docs/integrating.md): the full consumer integration
+  guide, including the Charter deny error shape and render guidance.
+- [spec/contract.md](spec/contract.md): the wire-level Nostr protocol
+  (clauses, grants, deny and audit shapes).
+- [README.md](README.md): what Kintrinsic is, the full system beyond the SDK.
