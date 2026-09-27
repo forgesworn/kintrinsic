@@ -25,7 +25,7 @@ charter-tray = { path = "../../linux/crates/charter-tray", default-features = fa
 charter-ipc = { path = "../../linux/crates/charter-ipc", default-features = false, features = [
     "real",
 ] }
-gtk = "0.18"
+gtk = "0.19"
 libloading = "0.8"
 async-channel = "2"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
