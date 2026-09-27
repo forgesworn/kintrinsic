@@ -38,7 +38,12 @@
 # memfd_create + execve from such a script; filesystems not in fapolicyd's
 # `watch_fs` (FUSE) are not watched at all — the ward is denied fusermount
 # below, and removable media mount noexec while armed, which leaves only
-# FUSE mounts the system itself makes.
+# FUSE mounts the system itself makes. While armed, fapolicyd marks whole
+# filesystems (`allow_filesystem_mark = 1`), so a bind mount or another mount
+# namespace of a watched filesystem is watched too, and unprivileged user
+# namespaces are restricted to AppArmor-profiled programs; a sandbox such a
+# profile allows (bwrap under flatpak) can still create a fresh tmpfs, which
+# nothing watches.
 
 # The dynamic loader run by hand (`/lib64/ld-linux-x86-64.so.2 ~/game`) maps
 # the payload without an execute event of its own; fapolicyd's ld_so pattern
@@ -52,18 +57,21 @@ deny_log perm=any @WARD@ pattern=ld_so : all
 deny_log perm=execute @WARD@ : path=/usr/bin/fusermount3
 deny_log perm=execute @WARD@ : path=/usr/bin/fusermount
 
-# Shared libraries. Code can be run without any execute event by loading it
-# as a library into a trusted program (`LD_PRELOAD=~/x.so firefox`, dlopen,
-# `ld.so --preload`); the loader OPENS the .so, so a ward's opens of ELF
-# shared objects are held to the same trees as execution.
-allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/usr/
-allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/etc/
-allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/opt/
-allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/snap/
-allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/var/lib/flatpak/
-allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/var/lib/charter/approved/
-allow perm=open @WARD@ : ftype=application/x-sharedlib trust=1
-deny_log perm=open @WARD@ : ftype=application/x-sharedlib
+# Libraries, and every other ELF object. Code can be run without any
+# execute event by loading it as a library into a trusted program
+# (`LD_PRELOAD=~/x.so firefox`, dlopen, `ld.so --preload`); the loader OPENS
+# the object, so a ward's opens of ELF files are held to the same trees as
+# execution. All three ELF types are treated the same: fapolicyd types a
+# shared object that has an entry point (libc.so.6 is one) as
+# x-executable, and a malformed one as x-bad-elf, and either loads.
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf dir=/usr/
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf dir=/etc/
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf dir=/opt/
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf dir=/snap/
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf dir=/var/lib/flatpak/
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf dir=/var/lib/charter/approved/
+allow perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf trust=1
+deny_log perm=open @WARD@ : ftype=application/x-sharedlib,application/x-executable,application/x-bad-elf
 
 # Root-only trees. Subject left of the colon, object right.
 allow perm=execute @WARD@ : dir=/usr/

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Test harness for the pure helpers in ../charter-applock: rule rendering from
-# the shipped template, fapolicyd.conf edits, denial-log parsing and .desktop
-# Exec parsing. Needs no root and touches nothing outside a temp dir.
+# the shipped template, fapolicyd.conf edits, denial-log parsing, .desktop
+# Exec parsing, and a textual check of the arm/disarm/post-dpkg steps that
+# need root (applock-container.sh runs those for real). Needs no root and touches nothing outside a temp dir.
 #
 # Run directly: bash linux/packaging/setup/tests/applock.sh
 # (also run by `cargo test -p xtask`).
@@ -107,13 +108,22 @@ if under_allowed_tree /usrx/evil; then bad "/usrx is not /usr"; else ok "/usrx i
 if under_allowed_tree /var/tmp/x; then bad "/var/tmp is not a tree"; else ok "/var/tmp is not a tree"; fi
 
 # --- shared libraries (H1) and fusermount (H3) in the rendered rules --------------------
-so_deny_at="$(grep -n 'deny_log perm=open uid=1001 : ftype=application/x-sharedlib' <<< "$rules" | cut -d: -f1)"
-so_allow_at="$(grep -n 'allow perm=open uid=1001 : ftype=application/x-sharedlib dir=/usr/' <<< "$rules" | cut -d: -f1)"
+ELF_TYPES="application/x-sharedlib,application/x-executable,application/x-bad-elf"
+so_deny_at="$(grep -nx "deny_log perm=open uid=1001 : ftype=$ELF_TYPES" <<< "$rules" | cut -d: -f1)"
+so_allow_at="$(grep -nx "allow perm=open uid=1001 : ftype=$ELF_TYPES dir=/usr/" <<< "$rules" | cut -d: -f1)"
 if [ -n "$so_deny_at" ] && [ -n "$so_allow_at" ] && [ "$so_allow_at" -lt "$so_deny_at" ]; then
-    ok "ward library opens: tree allows precede the sharedlib deny"
+    ok "ward ELF opens: tree allows precede the ELF deny"
 else
-    bad "ward library opens: tree allows precede the sharedlib deny ($so_allow_at vs $so_deny_at)"
+    bad "ward ELF opens: tree allows precede the ELF deny ($so_allow_at vs $so_deny_at)"
 fi
+expect_eq "$(grep -cx "deny_log perm=open auid=1001 : ftype=$ELF_TYPES" <<< "$rules")" 1 "ELF open deny by auid too"
+# Every ftype= in the template names all three ELF types, the same way.
+expect_eq "$(grep -o 'ftype=[^ ]*' "$TEMPLATE" | sort -u)" "ftype=$ELF_TYPES" "every ELF open rule covers sharedlib, executable and bad-elf alike"
+# Each exec tree has a matching ELF-open allow, so a library the ward may load
+# from a tree is never refused while its programs run.
+for t in "${ALLOWED_TREES[@]}"; do
+    expect_eq "$(grep -cx "allow perm=open uid=1001 : ftype=$ELF_TYPES dir=$t/" <<< "$rules")" 1 "ELF opens allowed from $t/"
+done
 expect_eq "$(grep -c 'deny_log perm=open all' <<< "$rules")" 0 "no library deny for everyone"
 for fm in "${INTENDED_DENY[@]}"; do
     fm_at="$(grep -n "deny_log perm=execute uid=1001 : path=$fm\$" <<< "$rules" | cut -d: -f1)"
@@ -147,6 +157,37 @@ printf '[defaults]\ndefaults=exec\n' > "$TMP/admin.conf"
 if file_is_ours "$TMP/u.conf"; then ok "file_is_ours: our udisks conf"; else bad "file_is_ours: our udisks conf"; fi
 if file_is_ours "$TMP/apt.conf"; then ok "file_is_ours: our apt hook"; else bad "file_is_ours: our apt hook"; fi
 if file_is_ours "$TMP/admin.conf"; then bad "file_is_ours: an admin's file is not ours"; else ok "file_is_ours: an admin's file is not ours"; fi
+
+# --- user namespaces, filesystem marks and the apt hook ---------------------------------------
+case "$SYSCTL_DROPIN" in
+    /etc/sysctl.d/*) ;;
+    *) bad "SYSCTL_DROPIN is in /etc/sysctl.d ($SYSCTL_DROPIN)" ;;
+esac
+# sysctl.d applies files in name order and the last one wins: ours must sort
+# after Mint's 20-apparmor-mint.conf, which turns the switch off.
+if [[ "$(basename "$SYSCTL_DROPIN")" > "20-apparmor-mint.conf" ]]; then
+    ok "the userns drop-in sorts after Mint's"
+else
+    bad "the userns drop-in sorts after Mint's ($SYSCTL_DROPIN)"
+fi
+expect_eq "$USERNS_PROC" "/proc/sys/${USERNS_SYSCTL//.//}" "USERNS_PROC is the sysctl's /proc path"
+case "$USERNS_PRIOR" in "$STATE_DIR"/*) ok "the prior userns value is kept in the state dir" ;; *) bad "USERNS_PRIOR under STATE_DIR" ;; esac
+printf '%s userns\n%s = 1\n' "$OURS_TAG" "$USERNS_SYSCTL" > "$TMP/sysctl.conf"
+if file_is_ours "$TMP/sysctl.conf"; then ok "file_is_ours: our sysctl drop-in"; else bad "file_is_ours: our sysctl drop-in"; fi
+# The script's own body (below the source guard) — checked by text.
+body="$(sed -n '/^\[\[ "\${BASH_SOURCE\[0\]}" == "\$0" \]\]/,$p' "$HERE/../charter-applock")"
+post_dpkg="$(sed -n '/^cmd_post_dpkg()/,/^}/p' <<< "$body")"
+enabled_at="$(grep -n 'systemctl is-enabled --quiet fapolicyd' <<< "$post_dpkg" | head -n1 | cut -d: -f1)"
+restart_at="$(grep -n 'systemctl restart fapolicyd' <<< "$post_dpkg" | head -n1 | cut -d: -f1)"
+if [ -n "$enabled_at" ] && [ -n "$restart_at" ] && [ "$enabled_at" -lt "$restart_at" ]; then
+    ok "post-dpkg checks fapolicyd is enabled before any restart"
+else
+    bad "post-dpkg checks fapolicyd is enabled before any restart ($enabled_at vs $restart_at)"
+fi
+if grep -q 'conf_set "$FAPO_CONF" allow_filesystem_mark 1' <<< "$body"; then ok "arm sets allow_filesystem_mark = 1"; else bad "arm sets allow_filesystem_mark = 1"; fi
+if grep -q 'unshare -rm' <<< "$body"; then ok "the self-test runs the canary under unshare -rm"; else bad "the self-test runs the canary under unshare -rm"; fi
+if grep -q 'libexeccanary.so' <<< "$body"; then ok "an x-executable library canary is tested"; else bad "an x-executable library canary is tested"; fi
+if grep -q '^    restore_userns$' <<< "$body"; then ok "disarm restores the userns switch"; else bad "disarm restores the userns switch"; fi
 
 echo "$checks checks, $fails failed"
 [ "$fails" -eq 0 ]

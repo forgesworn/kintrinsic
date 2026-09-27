@@ -26,12 +26,20 @@
 #      ward's session binaries that live outside the root-only trees, that no
 #      ward owns or can write, and that are not under a home, a temp dir or
 #      removable media.
-#   4. fapolicyd runs in PERMISSIVE mode first while every session binary is
-#      exec-probed as each ward, together with two canaries in the ward's own
-#      files: a copy of `true` (execution) and a copy of a system shared
-#      library (library loading). The lock is only switched to enforcing if
-#      both canaries WERE denied (the rules are live) and nothing needed was.
-#   5. After switching to enforcing it probes again, for real, and disarms
+#   4. fapolicyd is set to watch whole filesystems (`allow_filesystem_mark`)
+#      and unprivileged user namespaces are restricted to AppArmor-profiled
+#      programs (the sysctl Ubuntu ships on and Mint turns off). With
+#      fapolicyd still stopped, a ward must fail to run its canary inside a
+#      new user + mount namespace (`unshare -rm`), and the library canaries
+#      must still load, so a refusal later is fapolicyd's doing.
+#   5. fapolicyd runs in PERMISSIVE mode first while every session binary is
+#      exec-probed as each ward, together with three canaries in the ward's
+#      own files: a copy of `true` (execution), a copy of a system shared
+#      library, and a copy of a shared object fapolicyd types as an
+#      executable (libc.so.6; library loading). The lock is only switched to
+#      enforcing if every canary WAS denied (the rules are live) and nothing
+#      needed was.
+#   6. After switching to enforcing it probes again, for real, and disarms
 #      itself on the spot if anything needed is refused. Any failure or
 #      interruption part-way through puts everything back.
 #
@@ -93,6 +101,21 @@ INTENDED_DENY=(/usr/bin/fusermount3 /usr/bin/fusermount)
 # daemon that is itself waiting on a permission decision can hang the box.
 EXTRA_WATCH_FS=(exfat ntfs3)
 PROBE_AS_BYTES=65536
+# Unprivileged user namespaces let a ward make its own mount namespace and
+# mount a fresh filesystem (a tmpfs) that fapolicyd never marked. AppArmor's
+# switch keeps them to programs whose profile allows it. Armed sets it to 1
+# live and in a sysctl.d drop-in sorting after Mint's 20-apparmor-mint.conf;
+# disarm removes the drop-in and puts the recorded live value back.
+USERNS_SYSCTL=kernel.apparmor_restrict_unprivileged_userns
+USERNS_PROC=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+SYSCTL_DROPIN=/etc/sysctl.d/99-kintrinsic-applock.conf
+USERNS_PRIOR="$STATE_DIR/userns-restrict.orig"
+# Ubuntu's AppArmor profiles that let a desktop program (a browser sandbox,
+# flatpak's bwrap, an Electron app) keep making user namespaces while the
+# switch is on. Arm lists which are present; a program whose profile is
+# missing cannot start its sandbox for a ward while armed.
+USERNS_PROFILES=(chrome mint-chromium brave msedge opera vivaldi-bin firefox epiphany flatpak steam
+    element-desktop signal-desktop slack Discord code)
 
 log() { echo "$PROG: $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -361,6 +384,52 @@ preload_refused() {
     return 1
 }
 
+# userns_open <uid> <gid> <canary> — 0 if the ward could make a new user +
+# mount namespace and run <canary> (a copy of `true`) inside it. Run while
+# fapolicyd is stopped, it measures the namespace restriction alone.
+userns_open() {
+    LC_ALL=C timeout -s KILL 10 setpriv --reuid="$1" --regid="$2" --init-groups --reset-env -- \
+        unshare -rm -- "$3" </dev/null >/dev/null 2>&1
+}
+
+# restrict_userns — the AppArmor userns switch on, live and across reboots.
+# The live value before the first arm is recorded once, for disarm.
+restrict_userns() {
+    if ! [ -e "$USERNS_PROC" ]; then
+        log "note: this kernel has no $USERNS_SYSCTL; the self-test alone decides whether a ward can make a user namespace"
+        return 0
+    fi
+    [ -f "$USERNS_PRIOR" ] || cat "$USERNS_PROC" > "$USERNS_PRIOR" || return 1
+    install -d -m 0755 "$(dirname "$SYSCTL_DROPIN")"
+    printf '%s unprivileged user namespaces stay restricted while the app lock is armed; removed by '"'"'charter-applock disarm'"'"'.\n%s = 1\n' \
+        "$OURS_TAG" "$USERNS_SYSCTL" > "$SYSCTL_DROPIN" || return 1
+    chmod 0644 "$SYSCTL_DROPIN"
+    printf '1\n' > "$USERNS_PROC" 2>/dev/null || return 1
+    [ "$(cat "$USERNS_PROC" 2>/dev/null)" = 1 ]
+}
+
+# restore_userns — the drop-in gone and the recorded live value back.
+restore_userns() {
+    [ -f "$SYSCTL_DROPIN" ] && file_is_ours "$SYSCTL_DROPIN" && rm -f "$SYSCTL_DROPIN"
+    if [ -f "$USERNS_PRIOR" ]; then
+        local prior
+        prior="$(cat "$USERNS_PRIOR" 2>/dev/null)"
+        [[ "$prior" =~ ^[0-9]+$ ]] && [ -e "$USERNS_PROC" ] && printf '%s\n' "$prior" > "$USERNS_PROC" 2>/dev/null
+        rm -f "$USERNS_PRIOR"
+    fi
+}
+
+# userns_profiles_report — which of USERNS_PROFILES are present.
+userns_profiles_report() {
+    local p have="" missing=""
+    for p in "${USERNS_PROFILES[@]}"; do
+        if [ -f "/etc/apparmor.d/$p" ]; then have="$have $p"; else missing="$missing $p"; fi
+    done
+    echo "==> AppArmor profiles that may still make user namespaces:${have:- none}"
+    [ -n "$missing" ] && echo "==> not present (a program of that name cannot start its sandbox for a ward while armed):$missing"
+    return 0
+}
+
 fapolicyd_active() { systemctl is-active --quiet fapolicyd 2>/dev/null; }
 
 fapolicyd_pid() {
@@ -380,20 +449,36 @@ system_shlib() {
     return 1
 }
 
+# system_exec_shlib — a shared object `true` itself loads (so it is the
+# right architecture) that fapolicyd types as application/x-executable, to
+# copy as the second library canary. libc.so.6 is the usual one.
+system_exec_shlib() {
+    local l
+    for l in $(ldd /usr/bin/true 2>/dev/null | awk '$2 == "=>" && $3 ~ /^\// { print $3 }'); do
+        l="$(realpath -e "$l" 2>/dev/null)" || continue
+        [ "$(fapolicyd-cli --ftype "$l" 2>/dev/null)" = application/x-executable ] && { printf '%s\n' "$l"; return 0; }
+    done
+    return 1
+}
+
 # make_canaries <user> <uid> <gid> <home> — in a fresh directory created BY
 # the ward (so a planted symlink can't redirect a root write), somewhere the
-# ward can write and that is not mounted noexec: `canary` (a copy of `true`)
-# and `libcanary.so` (a copy of a system library). Prints the directory.
+# ward can write and that is not mounted noexec: `canary` (a copy of `true`),
+# `libcanary.so` (a copy of a system library) and `libexeccanary.so` (a
+# copy of a system shared object fapolicyd types as x-executable). Prints
+# the directory.
 make_canaries() {
-    local user="$1" uid="$2" gid="$3" home="$4" base out lib
+    local user="$1" uid="$2" gid="$3" home="$4" base out lib xlib
     lib="$(system_shlib)" || return 1
+    xlib="$(system_exec_shlib)" || return 1
     for base in "$home/.cache" /var/tmp; do
         out="$(as_ward "$uid" "$gid" /bin/sh -c '
-            base="$1"; lib="$2"
+            base="$1"; lib="$2"; xlib="$3"
             mkdir -p "$base" 2>/dev/null || exit 1
             d="$(mktemp -d "$base/kintrinsic-applock-canary.XXXXXX")" || exit 1
             cp /usr/bin/true "$d/canary" && chmod 0755 "$d/canary" \
-                && cp "$lib" "$d/libcanary.so" && echo "$d"' _ "$base" "$lib" 2>/dev/null)" || continue
+                && cp "$lib" "$d/libcanary.so" && cp "$xlib" "$d/libexeccanary.so" \
+                && echo "$d"' _ "$base" "$lib" "$xlib" 2>/dev/null)" || continue
         [ -n "$out" ] || continue
         printf '%s %s %s %s\n' "$user" "$uid" "$gid" "$out/canary" >> "$CANARIES"
         if findmnt -no OPTIONS -T "$out" 2>/dev/null | tr ',' '\n' | grep -qx noexec; then
@@ -504,6 +589,7 @@ EOF
 remove_owned_files() {
     [ -f "$APT_HOOK" ] && file_is_ours "$APT_HOOK" && rm -f "$APT_HOOK"
     [ -f "$UDISKS_CONF" ] && file_is_ours "$UDISKS_CONF" && rm -f "$UDISKS_CONF"
+    restore_userns
     remove_trial
 }
 
@@ -633,6 +719,9 @@ cmd_keep() {
 cmd_post_dpkg() {
     [ "$(id -u)" -eq 0 ] || return 0
     [ -f "$MARKER" ] && [ -f "$RULES_DST" ] || return 0
+    # Someone stopped the lock on purpose (`systemctl disable --now
+    # fapolicyd`, the emergency stop): never bring it back from here.
+    systemctl is-enabled --quiet fapolicyd 2>/dev/null || return 0
     local pid exe
     pid="$(fapolicyd_pid || true)"
     if [ -z "$pid" ]; then
@@ -691,6 +780,10 @@ verify_ward_enforced() {
         || { echo "enforcing fapolicyd still let '$user' open the library canary"; return 1; }
     preload_refused "$uid" "$gid" "$dir/libcanary.so" \
         || { echo "enforcing fapolicyd still let '$user' LD_PRELOAD the library canary"; return 1; }
+    preload_refused "$uid" "$gid" "$dir/libexeccanary.so" \
+        || { echo "enforcing fapolicyd still let '$user' LD_PRELOAD the x-executable library canary"; return 1; }
+    ! userns_open "$uid" "$gid" "$dir/canary" \
+        || { echo "'$user' ran the canary inside a new user namespace"; return 1; }
     st="$(run_as_ward_real "$uid" "$gid" /usr/bin/true)"
     [ "$st" = 0 ] || { echo "enforcing fapolicyd refused /usr/bin/true for '$user'"; return 1; }
     return 0
@@ -724,11 +817,12 @@ cmd_arm() {
     fi
     install -d -m 0755 "$TRUST_DIR"
     local tool
-    for tool in setpriv prlimit timeout findmnt realpath ldconfig fagenrules fapolicyd-cli; do
+    for tool in setpriv prlimit timeout findmnt realpath ldconfig ldd unshare fagenrules fapolicyd-cli; do
         command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
     done
     [ -f "$RULES_TEMPLATE" ] || die "rule template missing: $RULES_TEMPLATE (reinstall kintrinsic)."
     system_shlib >/dev/null || die "no system shared library found to build the library canary from."
+    system_exec_shlib >/dev/null || die "no system shared object that fapolicyd types as application/x-executable (libc.so.6) found to build the second library canary from."
     local kconf="/boot/config-$(uname -r)"
     if [ -f "$kconf" ] && ! grep -q '^CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y' "$kconf"; then
         die "this kernel has no fanotify permission events (CONFIG_FANOTIFY_ACCESS_PERMISSIONS); fapolicyd cannot run on it."
@@ -869,6 +963,11 @@ $hits"
     # recorded; disarm restores the previous value with the whole file.
     conf_set "$FAPO_CONF" integrity sha256
     conf_set "$FAPO_CONF" watch_fs "$(csv_merge "$(conf_get "$FAPO_CONF" watch_fs)" ext4 tmpfs xfs vfat btrfs "${EXTRA_WATCH_FS[@]}")"
+    # Mark whole filesystems, not mounts: a bind mount, or a watched
+    # filesystem seen from another mount namespace, is then watched too.
+    conf_set "$FAPO_CONF" allow_filesystem_mark 1
+    restrict_userns || abort_arm "could not set $USERNS_SYSCTL=1 (live and in $SYSCTL_DROPIN)"
+    userns_profiles_report
     rm -f "$STALE_RULES"
     install -d -m 0755 "$FAPO_DIR/rules.d"
     render_rules "$RULES_TEMPLATE" "${W_UID[@]}" > "$RULES_DST.tmp" && mv "$RULES_DST.tmp" "$RULES_DST" \
@@ -893,6 +992,21 @@ $hits"
         CANARY+=("$p")
     done
 
+    # --- 7b. user namespaces, and canaries that work without the lock --------------------
+    # fapolicyd is stopped here, so these measure the namespace restriction
+    # and the canaries themselves, not the rules.
+    echo "==> checking that no ward can make a user namespace"
+    local c
+    for i in "${!W_USER[@]}"; do
+        if userns_open "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/canary"; then
+            abort_arm "'${W_USER[$i]}' ran a program inside a new user + mount namespace (unshare -rm), so they could mount a filesystem fapolicyd does not watch. $USERNS_SYSCTL is $(cat "$USERNS_PROC" 2>/dev/null || echo 'not available on this kernel')."
+        fi
+        for c in libcanary.so libexeccanary.so; do
+            ! preload_refused "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/$c" \
+                || abort_arm "the library canary ${CANARY[$i]}/$c does not load even without the lock, so its refusal would prove nothing"
+        done
+    done
+
     # --- 8. permissive self-test ------------------------------------------------------
     echo "==> self-test: fapolicyd in permissive mode (nothing is blocked yet)"
     local stlog="$STATE_DIR/selftest.log"
@@ -915,6 +1029,7 @@ $(tail -n 15 "$stlog")"
     for i in "${!W_USER[@]}"; do
         probe_exec "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/canary" >/dev/null
         probe_open "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/libcanary.so" >/dev/null
+        probe_open "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/libexeccanary.so" >/dev/null
     done
     for j in "${!PROBE_PATH[@]}"; do
         i="${PROBE_WARD[$j]}"
@@ -933,11 +1048,13 @@ $(tail -n 15 "$stlog")"
             || abort_arm "the self-test did not see the canary for '${W_USER[$i]}' denied (${CANARY[$i]}/canary). Log: $stlog"
         grep -qxF "${CANARY[$i]}/libcanary.so" <<< "$denied" \
             || abort_arm "the self-test did not see the library canary for '${W_USER[$i]}' denied (${CANARY[$i]}/libcanary.so). Log: $stlog"
+        grep -qxF "${CANARY[$i]}/libexeccanary.so" <<< "$denied" \
+            || abort_arm "the self-test did not see the x-executable library canary for '${W_USER[$i]}' denied (${CANARY[$i]}/libexeccanary.so). Log: $stlog"
     done
     local bad="" unexpected=""
     while IFS= read -r p; do
         [ -n "$p" ] || continue
-        local is_canary=0 c
+        local is_canary=0
         for c in "${CANARY[@]}"; do case "$p" in "$c"/*) is_canary=1 ;; esac; done
         [ "$is_canary" = 1 ] && continue
         intended_deny "$p" && continue
@@ -976,7 +1093,7 @@ Log: $stlog"
         [ "$accept_blocked" = 1 ] \
             || abort_arm "programs or libraries the ward uses today would be blocked (listed above). Re-run with --accept-blocked to arm anyway."
     fi
-    echo "==> self-test passed: both canaries were denied and nothing the session needs was"
+    echo "==> self-test passed: every canary was denied and nothing the session needs was"
 
     # --- 10. enforce, then verify for real --------------------------------------------------
     conf_set "$FAPO_CONF" permissive 0

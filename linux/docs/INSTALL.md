@@ -175,11 +175,31 @@ Before it switches anything on, `arm` checks that the child can't write
 anywhere the lock trusts. It then trusts (by checksum) the child's session
 programs that live elsewhere. It only does that for programs no child owns or
 can change, and never for anything in a home folder, a temp folder or on
-removable media. Then it runs a **self-test** with fapolicyd in permissive
+removable media. It also turns on two system settings for as long as the
+lock is armed (disarm puts both back as they were):
+
+- fapolicyd watches **whole filesystems**, not just the places they are
+  mounted (`allow_filesystem_mark = 1`), so the child's files seen through a
+  second mount are still watched;
+- **user namespaces** are restricted to programs with an AppArmor profile
+  that allows them (`kernel.apparmor_restrict_unprivileged_userns = 1`, set
+  now and in `/etc/sysctl.d/99-kintrinsic-applock.conf`). Ubuntu ships this
+  on; Linux Mint turns it off. Without it, the child could make a private
+  mount of their own, which fapolicyd never sees.
+
+`arm` then checks, as the child, that they can no longer run a program inside
+a new user namespace (`unshare -rm`), and stops if they can. It prints which
+of Ubuntu's AppArmor profiles for sandboxed programs (Chrome and other
+Chromium browsers, Firefox, flatpak, Steam, Electron apps such as VS Code or
+Signal) are present. A sandboxed program with no profile cannot start its
+sandbox in the child's account while the lock is armed.
+
+Then it runs a **self-test** with fapolicyd in permissive
 mode (nothing blocked yet). The self-test tries every program the desktop and
-the child's session start, plus two harmless test files placed in the child's
-own files: a program, and a copy of a system library. It only switches to
-enforcing if both test files **were** caught and nothing the desktop needs
+the child's session start, plus three harmless test files placed in the
+child's own files: a program, a copy of a system library, and a copy of
+`libc.so.6` (a library fapolicyd classes as a program). It only switches to
+enforcing if every test file **was** caught and nothing the desktop needs
 was. After
 switching, it checks again for real and undoes itself at once if anything
 needed is refused. If a program the child runs today lives in their own files
@@ -196,6 +216,10 @@ to them (`charter-applock refresh`). Until that has happened, the guardian's
 app shows the lock as **not armed**. While it is armed, USB sticks and other
 removable drives mount **noexec** for every account on the computer, yours
 included.
+
+If fapolicyd has been stopped on purpose (`systemctl disable --now
+fapolicyd`), a later `apt` run leaves it stopped: the lock's apt hook only
+restarts fapolicyd while it is still enabled.
 
 **To undo, one command** (from your desktop, a terminal, a text console, or a
 recovery shell):
@@ -231,6 +255,23 @@ not running means nothing is enforced.
   What is left is a FUSE mount made by the system, not the child. A USB
   stick formatted NTFS or exFAT that is mounted through a FUSE driver is the
   case in point, and it is mounted noexec (above).
+- **Sandboxes that are allowed user namespaces.** A program whose AppArmor
+  profile allows user namespaces can still make them while the lock is
+  armed. Flatpak is the one that matters: its `bwrap` sandbox can give the
+  child a fresh temporary filesystem, which fapolicyd does not watch, so a
+  child who can run `flatpak run` could run their own program inside it.
+  Restricting flatpak for children would close that, and would also stop
+  every flatpak app working for them; it is left as it is for now, pending
+  a decision on which matters more.
+- **Programs whose sandbox has no AppArmor profile.** With user namespaces
+  restricted, a sandboxed program (a browser, an Electron app) that Ubuntu
+  ships no profile for cannot start its sandbox in the child's account.
+  `arm` lists the profiles present.
+- **ELF files in the child's own files cannot be opened, not just run.**
+  Libraries **and** programs: the lock treats every kind of ELF file the
+  same, because fapolicyd classes some libraries (`libc.so.6`) as programs.
+  So the child cannot copy, checksum or inspect a program they downloaded,
+  either.
 - **Libraries in the child's own files do not load.** That is the point
   (`LD_PRELOAD=~/x.so` is refused), but it also refuses libraries programs
   download into a home folder by themselves. The one a child will notice is
