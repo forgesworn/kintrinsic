@@ -150,8 +150,16 @@ impl GrantLearning {
                             app.id, url
                         )));
                     }
+                    // The raw string is what reaches the resolver sink, and
+                    // `parse_domain` cuts at the first `/`, `?` or `:` before
+                    // validating, so `example.org/, EXCLUDE *` would pass it
+                    // alone. Hostname characters only; `www.` and upper case
+                    // stay accepted so existing clauses survive an upgrade.
                     for d in &app.domains {
-                        if parse_domain(d).is_none() {
+                        let host_chars = d
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+                        if !host_chars || parse_domain(d).is_none() {
                             return Err(ProtoError::BadParams(format!(
                                 "site learning app {:?} has an invalid domain {:?}",
                                 app.id, d
@@ -323,6 +331,26 @@ mod tests {
     fn an_exclude_star_domain_is_rejected() {
         let v = site_value("EXCLUDE *", "https://example.org/");
         assert!(GrantLearning::from_value(&v).is_err());
+    }
+
+    #[test]
+    fn a_www_or_upper_case_domain_is_still_accepted() {
+        for d in ["www.example.org", "Example.ORG"] {
+            let v = site_value(d, "https://example.org/");
+            assert!(GrantLearning::from_value(&v).is_ok(), "{d:?} rejected");
+        }
+    }
+
+    #[test]
+    fn a_domain_smuggled_past_a_path_port_or_query_cut_is_rejected() {
+        for d in [
+            "example.org/, EXCLUDE *",
+            "example.org:443, EXCLUDE *",
+            "example.org?,EXCLUDE *",
+        ] {
+            let v = site_value(d, "https://example.org/");
+            assert!(GrantLearning::from_value(&v).is_err(), "{d:?} accepted");
+        }
     }
 
     #[test]

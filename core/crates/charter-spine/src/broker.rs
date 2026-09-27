@@ -203,6 +203,25 @@ fn warn_unreadable_floor(slot: &str, e: charter_sys::error::SysError) {
     );
 }
 
+/// What a clause whose replay floor cannot be read comes to. It is never
+/// stored — with no floor there is no replay protection — but if it
+/// authenticates as the pinned guardian's it is counted as `WriteFailed`, so
+/// `clausesWriteFailed` tells the guardian their clause did not land (M3: a
+/// torn record with no floor sidecar used to refuse every correction
+/// silently, forever). A clause that does not authenticate stays `Refused`, so
+/// nobody else can move the counter.
+fn unreadable_floor_outcome(
+    received: &ReceivedClause,
+    pinned: &PubKey,
+    kind: ClauseKind,
+    now: u64,
+) -> ClauseOutcome {
+    match verify_clause(&received.clause, pinned, kind, None, now) {
+        Ok(_) => ClauseOutcome::WriteFailed,
+        Err(_) => ClauseOutcome::Refused,
+    }
+}
+
 /// Say that an authenticated clause's store write itself failed — distinct
 /// from `warn_unreadable_floor`, which is about the *read* that gates
 /// acceptance. This is logged at error level because it is exactly the
@@ -224,7 +243,7 @@ fn warn_write_failed(slot: &str, e: charter_sys::error::SysError) {
 /// `/var/lib/charter`, an EIO) into the same "not accepted" bit is exactly
 /// what let a write failure report as "delivered and applied" to the
 /// guardian while the device kept enforcing the previous clause. See B10,
-/// `internal/reviews/2026-09-21/02-core-schedule-spine-policy.md`.
+/// the 2026-09-21 review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClauseOutcome {
     /// Authenticated and durably stored.
@@ -758,18 +777,21 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 // so a hostile relay cannot revert one child's clause or replay
                 // another child's into theirs.
                 let subject_hex = subject.to_hex();
+                // A sidecar floor (the record torn, or left below the
+                // sidecar by a crash) takes the pinned guardian's re-send at
+                // the floor itself (R2-7): `verify_bound` is one below it.
                 let prev = match self
                     .sys
                     .child_clauses()
-                    .highest_issued_at(&subject_hex, store_key)
+                    .replay_floor(&subject_hex, store_key)
                 {
-                    Ok(prev) => prev,
+                    Ok(floor) => floor.and_then(|f| f.verify_bound()),
                     Err(e) => {
                         warn_unreadable_floor(
                             &format!("child clause {subject_hex}/{store_key}"),
                             e,
                         );
-                        return ClauseOutcome::Refused;
+                        return unreadable_floor_outcome(&received, &pinned, payload.kind, now);
                     }
                 };
                 if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
@@ -794,11 +816,11 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 ClauseOutcome::Refused
             }
             None => {
-                let prev = match self.sys.clauses().highest_issued_at(store_key) {
-                    Ok(prev) => prev,
+                let prev = match self.sys.clauses().replay_floor(store_key) {
+                    Ok(floor) => floor.and_then(|f| f.verify_bound()),
                     Err(e) => {
                         warn_unreadable_floor(&format!("clause {store_key}"), e);
-                        return ClauseOutcome::Refused;
+                        return unreadable_floor_outcome(&received, &pinned, payload.kind, now);
                     }
                 };
                 if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {

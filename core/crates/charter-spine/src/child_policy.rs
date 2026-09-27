@@ -64,10 +64,16 @@ pub struct EffectivePolicy {
     pub source: PolicySource,
 }
 
-/// The tz a synthesised fail-safe carries. Whatever the guardian meant is
-/// exactly what we could not read, so there is no better answer — and none is
-/// needed: both syntheses block all time in every tz.
-pub(crate) const FAIL_SAFE_TZ: &str = "UTC";
+/// The tz a synthesised fail-safe carries when no readable sibling clause
+/// names one: "not known here". Both syntheses block all time in every tz, so
+/// enforcement does not care — but the multi-child usage ledger KEYS ITS DAY
+/// on the budget's tz, and a constant (it used to be `"UTC"`) re-keyed the
+/// ledger to the UTC date while the budget was unreadable, so a UTC midnight
+/// that was not a local one zeroed `used_today` (M2). The consumer that owns a
+/// ledger replaces this with the ledger's current tz, else the device tz
+/// ([`crate::multi_child`]); it is never a real IANA name, so it cannot be
+/// mistaken for one.
+pub(crate) const UNRESOLVED_TZ: &str = "";
 
 /// The fail-SAFE schedule used when a guardian schedule clause is present but
 /// unparseable: `paused` blocks all time regardless of tz, so the child locks.
@@ -161,6 +167,24 @@ pub fn resolve_effective(
     //    unlimited time. (Body validity is irrelevant here: a present-but-
     //    malformed schedule still counts, so the fail-safe below still fires.)
     if guardian_time_governs {
+        // A fail-safe takes the tz of a READABLE sibling time clause, so the
+        // ledger stays keyed on the guardian's day; with none, it is left for
+        // the ledger's owner to fill (see `UNRESOLVED_TZ`).
+        let sibling_tz = clauses
+            .iter()
+            .find_map(|(kind, json)| {
+                if *kind == ClauseKind::Budget.store_key() {
+                    serde_json::from_str::<GrantBudget>(json).ok().map(|b| b.tz)
+                } else if *kind == ClauseKind::Schedule.store_key() {
+                    serde_json::from_str::<GrantSchedule>(json)
+                        .ok()
+                        .map(|s| s.tz)
+                } else {
+                    None
+                }
+            })
+            .filter(|tz| !tz.trim().is_empty())
+            .unwrap_or_else(|| UNRESOLVED_TZ.to_string());
         let mut schedule = None;
         let mut budget = None;
         for (kind, json) in clauses {
@@ -168,7 +192,7 @@ pub fn resolve_effective(
                 // Malformed schedule fail-SAFES (paused → locks this child).
                 schedule = Some(
                     serde_json::from_str::<GrantSchedule>(json)
-                        .unwrap_or_else(|_| fail_safe_schedule(FAIL_SAFE_TZ)),
+                        .unwrap_or_else(|_| fail_safe_schedule(&sibling_tz)),
                 );
             } else if *kind == ClauseKind::Budget.store_key() {
                 // Malformed budget fail-SAFES too (zero cap → locks this
@@ -177,7 +201,7 @@ pub fn resolve_effective(
                 // HAS a schedule. See the module doc.
                 budget = Some(
                     serde_json::from_str::<GrantBudget>(json)
-                        .unwrap_or_else(|_| fail_safe_budget(FAIL_SAFE_TZ)),
+                        .unwrap_or_else(|_| fail_safe_budget(&sibling_tz)),
                 );
             }
         }
@@ -186,10 +210,10 @@ pub fn resolve_effective(
         // concerned, and the one that reads as "the guardian set nothing" is
         // the dangerous one.
         if unreadable(ClauseKind::Schedule) {
-            schedule = Some(fail_safe_schedule(FAIL_SAFE_TZ));
+            schedule = Some(fail_safe_schedule(&sibling_tz));
         }
         if unreadable(ClauseKind::Budget) {
-            budget = Some(fail_safe_budget(FAIL_SAFE_TZ));
+            budget = Some(fail_safe_budget(&sibling_tz));
         }
         return EffectivePolicy {
             schedule,
@@ -220,7 +244,7 @@ pub fn resolve_effective(
 
 /// Every `subject` that more than one of these configs claims.
 ///
-/// # Why a shared subject is not a policy but a collision (02b-G8)
+/// # A shared subject is a collision, and the binding is KEPT (02b-G8)
 ///
 /// Each child's `subject` comes from its own `<dir>/<username>.json` and is
 /// validated for SHAPE — 64 hex — and nothing else. Two usernames carrying the
@@ -229,13 +253,19 @@ pub fn resolve_effective(
 /// both emit STATUS under the same `(subject, machine)` pair — which the
 /// guardian's consolidator can only read as one device reporting twice, so one
 /// sibling's usage overwrites the other's and the pooled figure under-counts by
-/// a whole child. A guardian-approved `time.extend` addressed to that subject
-/// lands on whichever uid the loop finds FIRST.
+/// a whole child.
 ///
-/// There is no safe way to pick a winner: the guardian's clauses were written
-/// for ONE child, and applying them to the wrong one is the failure. So the
-/// binding is dropped from EVERY claimant, all of them fall back to
-/// device-only defaults, and the error is logged loudly enough to fix.
+/// Dropping the binding from every claimant looked like the careful answer and
+/// was a fail-OPEN: a claimant with no device-only limits resolved to
+/// `Unconstrained` — no schedule, no budget, nothing — on the strength of a
+/// hand-edited or restored `limits.d`, and one child with two logins is an
+/// ordinary layout. So EVERY claimant keeps the guardian's clauses, exactly as
+/// before 02b-G8 was raised: the guardian's rules are enforced on each account.
+///
+/// Accepted residual: the pooled-usage under-count above (and a `time.extend`
+/// for that subject landing on whichever uid the loop finds first) stands
+/// until each child is re-paired separately. Under-counting pooled usage is a
+/// smaller hole than an account with no rules at all.
 fn duplicated_subjects(configs: &[(String, ChildConfig)]) -> std::collections::BTreeSet<String> {
     let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut dupes = std::collections::BTreeSet::new();
@@ -249,32 +279,45 @@ fn duplicated_subjects(configs: &[(String, ChildConfig)]) -> std::collections::B
     dupes
 }
 
-/// Strip a `subject` that more than one child claims, in place, before anything
-/// downstream (clause routing, bucket reads, STATUS, extension delivery) gets a
-/// chance to act on it. Returns the usernames whose binding was dropped.
+/// The usernames whose `subject` another managed child also claims, in config
+/// order. Pure; the binding is left in place (see [`duplicated_subjects`]).
+pub fn shared_subject_claimants(configs: &[(String, ChildConfig)]) -> Vec<String> {
+    let dupes = duplicated_subjects(configs);
+    configs
+        .iter()
+        .filter(|(_, cfg)| cfg.subject.as_deref().is_some_and(|s| dupes.contains(s)))
+        .map(|(user, _)| user.clone())
+        .collect()
+}
+
+/// Report a `subject` that more than one child claims. Returns the claimants'
+/// usernames. Despite the name (kept for the call site in the enforcement
+/// loop), NOTHING is dropped any more: every claimant keeps the guardian's
+/// clauses, because dropping the binding left a child with no device limits
+/// wholly unconstrained. See [`duplicated_subjects`].
+///
+/// This runs every tick, so the warning is emitted only when the set of
+/// claimants CHANGES (process-wide), not once a second forever.
 ///
 /// The write path refuses to create this state in the first place
 /// (`set_child_subject`); this is the load-time half, for a `limits.d` that was
 /// hand-edited, restored from a backup, or written by an older build.
 pub fn drop_duplicate_subjects(configs: &mut [(String, ChildConfig)]) -> Vec<String> {
-    let dupes = duplicated_subjects(configs);
-    if dupes.is_empty() {
-        return Vec::new();
-    }
-    let mut dropped = Vec::new();
-    for (user, cfg) in configs.iter_mut() {
-        if cfg.subject.as_deref().is_some_and(|s| dupes.contains(s)) {
+    static LAST_REPORTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let claimants = shared_subject_claimants(configs);
+    let mut last = LAST_REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+    if *last != claimants {
+        if !claimants.is_empty() {
             eprintln!(
-                "charter: {user} shares a guardian subject with another managed child — \
-                 the binding is dropped for ALL of them (device-only limits apply) so no \
-                 guardian clause is applied to the wrong child. Re-pair each child \
-                 separately to fix this."
+                "charter: {} share a guardian subject — the guardian's clauses are \
+                 enforced on EVERY one of them, but their usage is pooled under one \
+                 identity and under-counted. Re-pair each child separately to fix this.",
+                claimants.join(", ")
             );
-            cfg.subject = None;
-            dropped.push(user.clone());
         }
+        *last = claimants.clone();
     }
-    dropped
+    claimants
 }
 
 /// Resolve every managed child's effective policy for the enforcement tick. For
@@ -284,23 +327,19 @@ pub fn drop_duplicate_subjects(configs: &mut [(String, ChildConfig)]) -> Vec<Str
 /// `passwd` are skipped. Generic over the system layer, so the precedence
 /// integration is mock-tested without a daemon/bus/relay.
 ///
-/// A subject claimed by more than one child is ignored here too, whether or not
-/// the caller ran [`drop_duplicate_subjects`] first — this is the function that
-/// turns a binding into applied policy, so it is the one place the rule cannot
-/// be skipped by a caller that forgot.
+/// A subject claimed by more than one child is applied to EVERY claimant (see
+/// [`duplicated_subjects`] for why that is the fail-safe answer).
 pub fn resolve_child_policies<S: SystemLayer>(
     sys: &S,
     passwd: &str,
     configs: &[(String, ChildConfig)],
 ) -> Vec<(u32, EffectivePolicy)> {
-    let dupes = duplicated_subjects(configs);
     configs
         .iter()
         .filter_map(|(user, cfg)| {
             let uid = uid_for_user(passwd, user)?;
             // Guardian's per-child clauses (empty if unbound or none received yet).
-            let subject = cfg.subject.as_ref().filter(|s| !dupes.contains(s.as_str()));
-            let guardian_clauses = match subject {
+            let guardian_clauses = match cfg.subject.as_ref() {
                 Some(subject) => match sys.child_clauses().clauses_for(subject) {
                     Ok(c) => c,
                     // The walk itself failed: the directory is there and will
@@ -816,30 +855,31 @@ mod sys_tests {
         assert_eq!(bob.1.source, PolicySource::DeviceOnly);
     }
 
-    /// 02b-G8: two children bound to the SAME subject. The guardian wrote those
-    /// clauses for one child, so neither may have them — the alternative is
-    /// enforcing one sibling's rules against the other, silently.
+    /// 02b-G8: two children bound to the SAME subject. Both keep the guardian's
+    /// clauses — dropping the binding left a child with no device limits
+    /// wholly unconstrained, which is the failure that matters.
     #[test]
-    fn two_children_sharing_a_subject_both_fall_back_to_device_only() {
+    fn two_children_sharing_a_subject_both_keep_the_guardian_clauses() {
         let sys = MockSystem::new(1000);
         store_guardian_schedule(&sys, SUBJ_A);
-        let configs = vec![
+        let mut configs = vec![
             ("alice".to_string(), bound(SUBJ_A, Some(dl()))),
-            ("bob".to_string(), bound(SUBJ_A, Some(dl()))),
+            ("bob".to_string(), bound(SUBJ_A, None)),
         ];
+        drop_duplicate_subjects(&mut configs);
         let out = resolve_child_policies(&sys, PASSWD, &configs);
         assert_eq!(out.len(), 2);
         for (uid, pol) in &out {
             assert_eq!(
                 pol.source,
-                PolicySource::DeviceOnly,
-                "uid {uid} must not inherit a clause set written for one child"
+                PolicySource::Guardian,
+                "uid {uid} must stay under the guardian's clauses, never fall to unconstrained"
             );
+            assert_eq!(pol.schedule.as_ref().unwrap().tz, "America/New_York");
         }
     }
 
-    /// One child alone on a subject is the ordinary case and is untouched — the
-    /// rule is about a COLLISION, not about bindings in general.
+    /// One child alone on a subject is the ordinary case and is untouched.
     #[test]
     fn a_subject_claimed_once_is_untouched() {
         let sys = MockSystem::new(1000);
@@ -848,33 +888,29 @@ mod sys_tests {
             ("alice".to_string(), bound(SUBJ_A, Some(dl()))),
             ("bob".to_string(), bound(&"b".repeat(64), Some(dl()))),
         ];
-        assert!(drop_duplicate_subjects(&mut configs).is_empty());
+        assert!(shared_subject_claimants(&configs).is_empty());
+        drop_duplicate_subjects(&mut configs);
         assert_eq!(configs[0].1.subject.as_deref(), Some(SUBJ_A));
         let out = resolve_child_policies(&sys, PASSWD, &configs);
         let alice = out.iter().find(|(u, _)| *u == 1001).unwrap();
         assert_eq!(alice.1.source, PolicySource::Guardian);
     }
 
-    /// The load-time half, which every other consumer of `configs` (bucket
-    /// reads, STATUS addressing, extension delivery) depends on: the binding is
-    /// gone from the config itself, not merely ignored by one resolver.
+    /// The report names every claimant and leaves every binding in place.
     #[test]
-    fn drop_duplicate_subjects_clears_the_binding_on_every_claimant() {
+    fn duplicate_subjects_are_reported_but_the_binding_is_kept() {
         let mut configs = vec![
             ("alice".to_string(), bound(SUBJ_A, Some(dl()))),
             ("bob".to_string(), bound(SUBJ_A, Some(dl()))),
             ("carol".to_string(), bound(&"c".repeat(64), Some(dl()))),
         ];
-        let dropped = drop_duplicate_subjects(&mut configs);
-        assert_eq!(dropped, vec!["alice".to_string(), "bob".to_string()]);
-        assert_eq!(configs[0].1.subject, None);
-        assert_eq!(configs[1].1.subject, None);
+        let claimants = drop_duplicate_subjects(&mut configs);
+        assert_eq!(claimants, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(configs[0].1.subject.as_deref(), Some(SUBJ_A));
+        assert_eq!(configs[1].1.subject.as_deref(), Some(SUBJ_A));
         assert_eq!(
             configs[2].1.subject.as_deref(),
             Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
-            "an uninvolved child keeps their binding"
         );
-        // Device-only limits survive the drop — the child is still managed.
-        assert!(configs[0].1.limits.is_some());
     }
 }

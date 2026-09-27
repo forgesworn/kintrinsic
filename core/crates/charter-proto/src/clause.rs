@@ -170,7 +170,8 @@ pub struct LifelineBody {
     /// body does not deny unknown fields), so no ship-order guard is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub torch: Option<bool>,
-    /// The break-glass override (`docs/superpowers/specs/2026-07-24-lifeline-incall-and-break-glass.md`):
+    /// The break-glass override (internal design spec
+    /// 2026-07-24-lifeline-incall-and-break-glass):
     /// the ward can always unlock in an emergency; doing so is loud, not
     /// blocked. Absent = ENABLED ([`BreakGlassCfg::safety_net`]) — so a
     /// guardian turning it off must send an explicit `enabled: false`.

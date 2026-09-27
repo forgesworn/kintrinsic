@@ -16,6 +16,14 @@ pub trait Clock: Send + Sync {
     fn suspended_secs(&self) -> u64 {
         0
     }
+    /// Whether the platform vouches for the wall clock right now — on Linux,
+    /// the kernel reports it NTP-synchronised (`adjtimex(2)`: not
+    /// `TIME_ERROR`, `STA_UNSYNC` clear). The usage ledger drops a far-future
+    /// day key back only while this holds (N1). Default `false` = untrusted,
+    /// the fail-safe: the ledger keeps its pure high-water mark.
+    fn wall_clock_synchronised(&self) -> bool {
+        false
+    }
 }
 
 /// A controllable in-memory clock for tests.
@@ -24,6 +32,8 @@ pub trait Clock: Send + Sync {
 pub struct MockClock {
     /// (wall unix secs, monotonic ms, cumulative suspended secs)
     inner: std::sync::Arc<std::sync::Mutex<(u64, u64, u64)>>,
+    /// What [`Clock::wall_clock_synchronised`] answers; `false` unless set.
+    synchronised: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "mock")]
@@ -32,7 +42,14 @@ impl MockClock {
     pub fn at(now_utc: u64) -> Self {
         MockClock {
             inner: std::sync::Arc::new(std::sync::Mutex::new((now_utc, 0, 0))),
+            synchronised: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Set what [`Clock::wall_clock_synchronised`] answers.
+    pub fn set_synchronised(&self, synchronised: bool) {
+        self.synchronised
+            .store(synchronised, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set the wall-clock unix seconds.
@@ -71,6 +88,9 @@ impl Clock for MockClock {
     }
     fn suspended_secs(&self) -> u64 {
         self.inner.lock().expect("clock lock").2
+    }
+    fn wall_clock_synchronised(&self) -> bool {
+        self.synchronised.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -134,6 +154,25 @@ impl Clock for RealClock {
             }
         }
         0
+    }
+    // A read-only `adjtimex` (`modes = 0` changes nothing, so it needs no
+    // privilege). The kernel sets `STA_UNSYNC` at boot and on every
+    // `settimeofday`/`clock_settime`, and only an NTP daemon's discipline
+    // clears it — so an RTC set in firmware setup, or a clock stepped by
+    // hand, reads as untrusted until NTP has actually synchronised it. Any
+    // failure is untrusted (fail-safe).
+    fn wall_clock_synchronised(&self) -> bool {
+        #[cfg(all(feature = "real-os", target_os = "linux"))]
+        {
+            // SAFETY: `timex` is plain old data; all-zero is a valid value
+            // and `modes = 0` makes the call a pure read into it.
+            let mut tx: libc::timex = unsafe { std::mem::zeroed() };
+            // SAFETY: valid, exclusive out-pointer for the call's duration.
+            let state = unsafe { libc::adjtimex(&mut tx) };
+            return state >= 0 && state != libc::TIME_ERROR && tx.status & libc::STA_UNSYNC == 0;
+        }
+        #[allow(unreachable_code)]
+        false
     }
 }
 

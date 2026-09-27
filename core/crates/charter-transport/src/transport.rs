@@ -60,7 +60,7 @@ impl Entropy for ScriptedEntropy {
 pub enum TransportError {
     /// The supplied machine secret is not a valid secp256k1 scalar (all-zero,
     /// out of range, or otherwise corrupted) — `charter_crypto::xonly_pubkey`
-    /// rejected it. See B4, `internal/reviews/2026-09-21/01-core-crypto-proto.md`:
+    /// rejected it. See B4, the 2026-09-21 review:
     /// a partial write, a zero-filled restore, or filesystem damage on a device
     /// that loses power routinely can all leave a stored secret in this state,
     /// and the caller must be able to keep enforcing cached clauses rather than

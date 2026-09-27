@@ -100,7 +100,94 @@ pub fn build_status(
         enforcement_gap_secs: None,
         relay_unreachable_polls: None,
         transport_unavailable: None,
+        // Stamped by the loop with [`clock_stepped_back_from`] against the
+        // last EMITTED status, which only the loop holds.
+        clock_stepped_back_from: None,
+        // Stamped by the loop from its [`StatusSeq`] as the status is
+        // emitted, once the new value is durable.
+        seq: None,
+        // Stamped by the loop, which alone sees whether the usage ledger's
+        // saves are landing.
+        usage_unsaved: None,
     }
+}
+
+/// The device's STATUS `seq` counter (R2-2/R2-3): strictly increasing per
+/// device, across restarts, whatever the wall clock does.
+///
+/// The platform owns the storage; this owns the arithmetic. At start the
+/// platform reads its stored value (`None` when missing or unreadable) and
+/// calls [`resume`](Self::resume); for each STATUS it emits it takes
+/// [`advance`](Self::advance), stores that value durably (atomically) and only then
+/// stamps and publishes it. A value consumed by an emit that never reached a
+/// relay is simply a gap: the guardian needs order, not density.
+///
+/// Seeding takes the higher of the stored value and the wall clock in unix
+/// MILLISECONDS. With a stored value the first `next` is therefore never
+/// below stored + 1; without one (a first start, a wiped or torn file) the
+/// sequence restarts from the clock, which on a sane clock is far above any
+/// value the old sequence reached — one emit per heartbeat never gains on a
+/// counter that advances a thousand a second. A clock the ward has set back
+/// can make a WIPED sequence restart low, but the state is root's, so the ward
+/// cannot wipe it; and a stored value always wins over a low clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusSeq {
+    last: u64,
+}
+
+impl StatusSeq {
+    /// Resume from the stored value (`None` if missing or unreadable) and the
+    /// wall clock now, in unix milliseconds.
+    pub fn resume(stored: Option<u64>, now_unix_ms: u64) -> Self {
+        StatusSeq {
+            last: stored.unwrap_or(0).max(now_unix_ms),
+        }
+    }
+
+    /// The next `seq` to stamp. Store it durably before publishing.
+    pub fn advance(&mut self) -> u64 {
+        self.last = self.last.saturating_add(1);
+        self.last
+    }
+
+    /// Parse a stored value: one decimal `u64`, surrounding whitespace
+    /// ignored. Anything else is unreadable (`None`), which [`resume`]
+    /// answers from the clock.
+    pub fn parse_stored(s: &str) -> Option<u64> {
+        s.trim().parse().ok()
+    }
+
+    /// The stored form of `seq`.
+    pub fn format_stored(seq: u64) -> String {
+        format!("{seq}\n")
+    }
+}
+
+/// The `clockSteppedBackFrom` value for a STATUS about to be emitted at
+/// `ts`, given the last STATUS emitted for the same child (`last`).
+///
+/// When the wall clock now reads below `last.ts` this is `last.ts`: the one
+/// status that tells the guardian "I saw my clock step back from here", so it
+/// may accept a lower-`ts` status as current. Otherwise it is `None`, so the
+/// statuses after that first one omit it — except that a stamp the loop
+/// could not deliver (`undelivered`, the stamp of an emit that reached no
+/// relay) is carried until one does. Without the carry a failed publish would
+/// lose the only stamp, and the guardian would treat the feed as stale until
+/// wall time climbed back past its stored `ts`. When both apply the higher
+/// wins: the guardian's stored `ts` is at most the higher of the two.
+///
+/// Held in memory only, like the last-emit `ts` it is computed from: after a
+/// restart the first status carries no stamp. Ordering does not depend on it
+/// any more — a guardian orders by the durable [`StatusSeq`] when a status
+/// carries one — so all a lost marker costs is the "clock went backwards"
+/// notice.
+pub fn clock_stepped_back_from(
+    last: Option<&StatusPayload>,
+    ts: u64,
+    undelivered: Option<u64>,
+) -> Option<u64> {
+    let stepped = last.filter(|p| ts < p.ts).map(|p| p.ts);
+    stepped.max(undelivered)
 }
 
 /// Whether to emit STATUS this tick: on any displayable **state** change
@@ -263,5 +350,112 @@ mod tests {
         let mut fwd = base.clone();
         fwd.ts = 1_000_030;
         assert!(!should_emit_status(Some(&base), &fwd, 60));
+    }
+
+    #[test]
+    fn status_seq_is_strictly_increasing_and_never_below_stored_plus_one() {
+        // Stored value ahead of the clock (a clock set back): stored + 1.
+        let mut s = StatusSeq::resume(Some(5_000_000_000_000), 1_000);
+        assert_eq!(s.advance(), 5_000_000_000_001);
+        assert_eq!(s.advance(), 5_000_000_000_002);
+        // Stored value behind the clock: the clock wins, still above stored.
+        let mut s = StatusSeq::resume(Some(10), 1_790_000_000_000);
+        assert_eq!(s.advance(), 1_790_000_000_001);
+    }
+
+    #[test]
+    fn status_seq_seeds_from_the_clock_when_nothing_is_stored() {
+        let mut s = StatusSeq::resume(None, 1_790_000_000_000);
+        let first = s.advance();
+        assert_eq!(first, 1_790_000_000_001);
+        // A wiped state a minute later, after an hour of heartbeats, still
+        // sorts after everything the old sequence emitted.
+        let mut old = StatusSeq::resume(None, 1_790_000_000_000);
+        let mut last_old = 0;
+        for _ in 0..60 {
+            last_old = old.advance();
+        }
+        let mut wiped = StatusSeq::resume(None, 1_790_000_060_000);
+        assert!(wiped.advance() > last_old);
+    }
+
+    #[test]
+    fn status_seq_round_trips_through_storage_across_a_restart() {
+        let mut s = StatusSeq::resume(None, 1_000);
+        let a = s.advance();
+        let stored = StatusSeq::format_stored(a);
+        // Restart with the clock set back to the epoch.
+        let mut r = StatusSeq::resume(StatusSeq::parse_stored(&stored), 0);
+        assert!(r.advance() > a);
+        assert_eq!(StatusSeq::parse_stored("garbage"), None);
+        assert_eq!(StatusSeq::parse_stored(""), None);
+        assert_eq!(StatusSeq::parse_stored("-3"), None);
+    }
+
+    #[test]
+    fn build_status_leaves_seq_for_the_loop() {
+        assert_eq!(at(1).seq, None);
+    }
+
+    fn at(ts: u64) -> StatusPayload {
+        let mut s = build_status(
+            PubKey::from_bytes([1; 32]),
+            PubKey::from_bytes([2; 32]),
+            ts,
+            &remaining(false, None),
+            0,
+            None,
+            "d".into(),
+            None,
+            PolicySource::Guardian,
+        );
+        s.clock_stepped_back_from = None;
+        s
+    }
+
+    /// The first status after the clock steps back names the `ts` it stepped
+    /// back from; the ones after it do not.
+    #[test]
+    fn a_backwards_step_is_stamped_once_with_the_previous_ts() {
+        let first = at(1_000_000);
+        assert_eq!(clock_stepped_back_from(None, 1_000_000, None), None);
+        // Forward: nothing to say.
+        assert_eq!(clock_stepped_back_from(Some(&first), 1_000_060, None), None);
+        // Back two days: the previous emitted ts.
+        let back_ts = 1_000_000 - 2 * 86_400;
+        let mut back = at(back_ts);
+        back.clock_stepped_back_from = clock_stepped_back_from(Some(&first), back_ts, None);
+        assert_eq!(back.clock_stepped_back_from, Some(1_000_000));
+        assert!(should_emit_status(Some(&first), &back, 60));
+        assert!(back.to_json().contains("\"clockSteppedBackFrom\":1000000"));
+        // The next status, measured against the stamped one, omits it.
+        assert_eq!(
+            clock_stepped_back_from(Some(&back), back_ts + 60, None),
+            None
+        );
+        let mut next = at(back_ts + 60);
+        next.clock_stepped_back_from = clock_stepped_back_from(Some(&back), next.ts, None);
+        assert!(!next.to_json().contains("clockSteppedBackFrom"));
+    }
+
+    /// A stamp that reached no relay is carried to the next emit, and the
+    /// higher of a carried stamp and a fresh step wins.
+    #[test]
+    fn an_undelivered_stamp_is_carried_until_it_lands() {
+        let back = at(900_000);
+        assert_eq!(
+            clock_stepped_back_from(Some(&back), 900_060, Some(1_000_000)),
+            Some(1_000_000)
+        );
+        // A second step back below a status that itself never landed.
+        assert_eq!(
+            clock_stepped_back_from(Some(&back), 800_000, Some(1_000_000)),
+            Some(1_000_000)
+        );
+        let high = at(1_100_000);
+        assert_eq!(
+            clock_stepped_back_from(Some(&high), 800_000, Some(1_000_000)),
+            Some(1_100_000)
+        );
     }
 }

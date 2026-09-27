@@ -114,17 +114,26 @@ impl RealMachineSigner {
 
     /// Load the key from `path`. A missing or invalid key is **fail-safe**
     /// (`secret = None`), never an error — the broker boots and degrades closed.
-    /// A key whose mode or ownership no longer protects it is refused the same
-    /// way (loudly) rather than used — see [`check_key_file_perms`].
+    /// A key owned by someone else is refused the same way (loudly) rather than
+    /// used; one of ours with a loose mode is tightened to 0600 — see
+    /// [`check_key_file_perms`].
     pub fn with_key_path(path: impl AsRef<std::path::Path>) -> Self {
         let path = path.as_ref();
-        if let Err(e) = check_key_file_perms(path) {
-            eprintln!("charter: {e}");
-            return Self { secret: None };
-        }
-        let secret = std::fs::read_to_string(path)
+        use std::io::Read as _;
+        let mut file = match check_key_file_perms(path) {
+            Ok(Some(f)) => f,
+            Ok(None) => return Self { secret: None },
+            Err(e) => {
+                eprintln!("charter: {e}");
+                return Self { secret: None };
+            }
+        };
+        // Read through the descriptor that was checked, never the path again.
+        let mut text = String::new();
+        let secret = file
+            .read_to_string(&mut text)
             .ok()
-            .and_then(|s| decode_hex32(s.trim()))
+            .and_then(|_| decode_hex32(text.trim()))
             .and_then(validate_secret);
         Self { secret }
     }
@@ -145,16 +154,23 @@ impl RealMachineSigner {
     pub fn load_or_create_secret(path: impl AsRef<std::path::Path>) -> SysResult<[u8; 32]> {
         let path = path.as_ref();
         // Before a single byte is read: is the file that is sitting there still
-        // protected? A key that is group/world readable, or owned by someone
-        // else, is as compromised as one printed on a wall — and it is NOT
-        // repaired here, nor replaced. See `check_key_file_perms`.
-        check_key_file_perms(path)?;
+        // protected? A key owned by someone else is refused (never replaced);
+        // one of ours with a loose mode is tightened to 0600 first. See
+        // `check_key_file_perms`.
+        let checked = check_key_file_perms(path)?;
         // "Absent" and "present but unusable" are different events and must not
         // collapse into one: the machine key has no backup by design and the
         // guardian's pairing is pinned to its pubkey, so minting over a key we
         // merely FAILED TO READ silently orphans the device for good.
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
+        // Read through the descriptor that was checked, never the path again:
+        // what was verified to be a regular file is what is read.
+        let read = checked.map(|mut f| {
+            use std::io::Read as _;
+            let mut text = String::new();
+            f.read_to_string(&mut text).map(|_| text)
+        });
+        match read {
+            Some(Ok(text)) => {
                 if let Some(secret) = decode_hex32(text.trim()).and_then(validate_secret) {
                     return Ok(secret);
                 }
@@ -175,11 +191,11 @@ impl RealMachineSigner {
                     );
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            // EIO / EACCES / …: the key may be perfectly good. Touch nothing;
-            // the caller fails and is retried, which a transient error survives
+            None => {}
+            // EIO / …: the key may be perfectly good. Touch nothing; the
+            // caller fails and is retried, which a transient error survives
             // and an overwrite would not.
-            Err(e) => {
+            Some(Err(e)) => {
                 return Err(crate::error::SysError::Io(format!(
                     "machine key at {} is unreadable ({e}); refusing to replace it",
                     path.display()
@@ -220,57 +236,96 @@ impl MachineSigner for RealMachineSigner {
     }
 }
 
+/// What the on-load key-file guard makes of a `stat`.
+#[cfg(any(feature = "real-relay", feature = "real-os"))]
+#[derive(Debug, PartialEq, Eq)]
+enum KeyPerms {
+    /// Owner-only and ours.
+    Ok,
+    /// Ours, but a group/other bit is set: tighten to 0600 and carry on.
+    Loose(String),
+    /// Owned by someone else: refuse.
+    Foreign(String),
+}
+
 /// The pure half of the on-load key-file guard: given a `stat`, is this file
-/// still protecting the key? `None` = yes, `Some(reason)` = refuse it.
+/// still protecting the key?
 ///
 /// `mode` is the raw `st_mode` (file-type bits included, they are masked off).
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
-fn key_perms_error(mode: u32, owner_uid: u32, process_uid: u32) -> Option<String> {
+fn key_perms(mode: u32, owner_uid: u32, process_uid: u32) -> KeyPerms {
+    if owner_uid != process_uid {
+        return KeyPerms::Foreign(format!(
+            "owned by uid {owner_uid}, not this process's uid {process_uid}"
+        ));
+    }
     if mode & 0o077 != 0 {
-        return Some(format!(
+        return KeyPerms::Loose(format!(
             "mode {:04o} grants group/other access",
             mode & 0o7777
         ));
     }
-    if owner_uid != process_uid {
-        return Some(format!(
-            "owned by uid {owner_uid}, not this process's uid {process_uid}"
-        ));
-    }
-    None
+    KeyPerms::Ok
 }
 
-/// `stat` the machine key before it is read, and refuse it if the file no
-/// longer protects it: any group/other bit set, or an owner that is not this
-/// process.
+/// `stat` the machine key before it is read. An owner that is not this process
+/// is refused; a key that is ours but group/other accessible is tightened to
+/// 0600 (with `fchmod` on the opened file, so it is the same inode that was
+/// checked) and used, with a warning.
 ///
-/// The failure is handled exactly like the "present but unreadable" branch of
-/// `load_or_create_secret` — **fail, touch nothing, say so loudly**:
-///   * NOT `chmod`-and-continue. The secrecy is already gone (a key restored
-///     from a backup, copied by an operator, or written by an older build has
-///     been readable for however long it sat there); tightening the mode hides
-///     that and leaves the device signing STATUS and sealing the guardian
-///     channel with a key someone else may hold.
-///   * NOT re-provision. The guardian's pairing is pinned to this pubkey and
-///     the key has no backup, so minting over it orphans the device for good.
+/// A foreign owner is handled exactly like the "present but unreadable" branch
+/// of `load_or_create_secret` — **fail, touch nothing, say so loudly** — since
+/// someone else can replace the key under us, and re-provisioning would orphan
+/// the guardian's pairing, which is pinned to this pubkey.
 ///
-/// A human decides which — re-pair, or restore the key properly.
+/// A loose mode on our own key used to be refused too, on the argument that
+/// the secrecy may already be gone. But the refusal was worse than the risk
+/// (M6): on Android `Warden::init` failed and no warden ran at all, from a
+/// restored backup or a umask change. Tightening restores the protection from
+/// here on and keeps enforcement running; the warning is the record that the
+/// key sat exposed.
 ///
-/// A **missing** file is `Ok(())`: "absent" is the caller's business (it is
-/// the provisioning path), and only what is actually there can be misprotected.
+/// A **missing** file is `Ok(None)`: "absent" is the caller's business (it is
+/// the provisioning path), and only what is actually there can be
+/// misprotected. Otherwise the checked, open file is returned and the caller
+/// reads THROUGH IT, so the inode that was checked is the one that is read.
+///
+/// The open is `O_NOFOLLOW | O_NONBLOCK` (and close-on-exec, std's default),
+/// then `fstat`: a symlink is refused rather than followed, and a FIFO opens
+/// without blocking — it used to hang the open for ever, at startup, before
+/// the watchdog's first ping — and is refused as not a regular file before a
+/// byte is read or a mode is changed. Any other open failure (EACCES, EIO) is
+/// an error: the key may be perfectly good, so the callers refuse and touch
+/// nothing, exactly as they treat a failed read.
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
-fn check_key_file_perms(path: &std::path::Path) -> SysResult<()> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+fn check_key_file_perms(path: &std::path::Path) -> SysResult<Option<std::fs::File>> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(crate::error::SysError::Io(format!(
+                "machine key at {} is a symlink; refusing to use or replace it",
+                path.display()
+            )))
+        }
         Err(e) => {
             return Err(crate::error::SysError::Io(format!(
-                "machine key at {} cannot be stat'ed ({e}); refusing to use or replace it",
+                "machine key at {} cannot be opened ({e}); refusing to use or replace it",
                 path.display()
             )))
         }
     };
+    let meta = file.metadata().map_err(|e| {
+        crate::error::SysError::Io(format!(
+            "machine key at {} cannot be stat'ed ({e}); refusing to use or replace it",
+            path.display()
+        ))
+    })?;
     if !meta.is_file() {
         return Err(crate::error::SysError::Io(format!(
             "machine key at {} is not a regular file; refusing to use or replace it",
@@ -279,9 +334,25 @@ fn check_key_file_perms(path: &std::path::Path) -> SysResult<()> {
     }
     // SAFETY: `geteuid` is always-succeeds, no arguments, no allocation.
     let process_uid = unsafe { libc::geteuid() } as u32;
-    match key_perms_error(meta.permissions().mode(), meta.uid(), process_uid) {
-        None => Ok(()),
-        Some(why) => Err(crate::error::SysError::Io(format!(
+    match key_perms(meta.permissions().mode(), meta.uid(), process_uid) {
+        KeyPerms::Ok => Ok(Some(file)),
+        KeyPerms::Loose(why) => {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    crate::error::SysError::Io(format!(
+                        "machine key at {} is not protected ({why}) and cannot be tightened ({e}); \
+                         refusing to use it",
+                        path.display()
+                    ))
+                })?;
+            eprintln!(
+                "charter: machine key at {} was not protected ({why}) — tightened to 0600; \
+                 if it may have been copied while exposed, re-pair the device",
+                path.display()
+            );
+            Ok(Some(file))
+        }
+        KeyPerms::Foreign(why) => Err(crate::error::SysError::Io(format!(
             "machine key at {} is not protected ({why}); refusing to use it — \
              the key must be restored 0600 and owner-only, or the device re-paired",
             path.display()
@@ -526,46 +597,52 @@ mod real_tests {
     // ---- G3: the key file's mode + ownership are checked on LOAD ---------
 
     #[test]
-    fn key_perms_error_names_what_is_wrong() {
+    fn key_perms_names_what_is_wrong() {
         // Owner-only and ours: fine.
-        assert_eq!(key_perms_error(0o100600, 0, 0), None);
-        assert_eq!(key_perms_error(0o100400, 1000, 1000), None);
-        // Any group or other bit at all — read, write or execute.
+        assert_eq!(key_perms(0o100600, 0, 0), KeyPerms::Ok);
+        assert_eq!(key_perms(0o100400, 1000, 1000), KeyPerms::Ok);
+        // Any group or other bit at all — read, write or execute — on our own
+        // key is repairable.
         for mode in [0o100640, 0o100604, 0o100660, 0o100644, 0o100601] {
-            let why = key_perms_error(mode, 0, 0).expect("refused");
+            let KeyPerms::Loose(why) = key_perms(mode, 0, 0) else {
+                panic!("mode {mode:o} not flagged loose");
+            };
             assert!(why.contains("group/other"), "mode {mode:o}: {why}");
         }
-        // Right mode, wrong owner: a key someone else can replace under us.
-        let why = key_perms_error(0o100600, 1000, 0).expect("refused");
-        assert!(why.contains("uid 1000"), "{why}");
+        // Wrong owner, whatever the mode: a key someone else can replace under
+        // us is refused.
+        for mode in [0o100600, 0o100644] {
+            let KeyPerms::Foreign(why) = key_perms(mode, 1000, 0) else {
+                panic!("foreign owner not refused");
+            };
+            assert!(why.contains("uid 1000"), "{why}");
+        }
     }
 
     #[test]
-    fn a_world_readable_key_is_refused_and_never_repaired_or_replaced() {
-        // The case this pins: a key restored from a backup / copied by an
-        // operator lands 0644 and used to be loaded without a word. It must
-        // now FAIL — and the bytes on disk must be untouched, because both
-        // "chmod and carry on" (the secrecy is already gone) and "mint a new
-        // one" (the pairing is pinned to this pubkey) are the wrong repair.
+    fn a_world_readable_key_of_ours_is_tightened_and_used() {
+        // M6: a key restored from a backup lands 0644. Refusing it stopped the
+        // Android warden from existing at all; it is now tightened to 0600 in
+        // place and the SAME identity carries on — never re-minted.
         let dir = tmp("world-readable");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("machine.key");
         let key = "11".repeat(32);
         write_key(&path, &key);
-        // Provisioned fine while it is 0600.
-        assert!(RealMachineSigner::with_key_path(&path).is_provisioned());
+        let pk = RealMachineSigner::with_key_path(&path).pubkey();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        // The fail-safe loader degrades closed rather than using it.
         let s = RealMachineSigner::with_key_path(&path);
-        assert!(!s.is_provisioned(), "a misprotected key is not loaded");
-        assert!(s.sign(&[1u8; 32]).is_err());
+        assert!(s.is_provisioned(), "our own key is repaired and loaded");
+        assert_eq!(s.pubkey(), pk, "same identity");
+        assert_eq!(mode_of(&path), 0o600, "tightened to owner-only");
 
-        // The provisioning loader errors — and touches nothing.
-        assert!(RealMachineSigner::load_or_create(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let b = RealMachineSigner::load_or_create(&path).unwrap();
+        assert_eq!(b.pubkey(), pk, "the provisioning loader keeps it too");
+        assert_eq!(mode_of(&path), 0o600);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), key, "same bytes");
-        assert_eq!(mode_of(&path), 0o644, "not chmod'ed behind our back");
         assert_eq!(
             std::fs::read_dir(&dir).unwrap().count(),
             1,
@@ -585,6 +662,50 @@ mod real_tests {
         assert_eq!(mode_of(&path), 0o600, "key file is owner-only");
         // And the guard it just satisfied lets the reload straight through.
         assert!(RealMachineSigner::with_key_path(&path).is_provisioned());
+    }
+
+    /// L-c: a FIFO at the key path used to block the open for ever — at
+    /// startup, before the watchdog's first ping. It must be refused promptly
+    /// by both loaders, and left where it is.
+    #[test]
+    fn a_fifo_at_the_key_path_is_refused_without_hanging() {
+        let dir = tmp("fifo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("machine.key");
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let loaded = RealMachineSigner::with_key_path(&p).is_provisioned();
+            let created = RealMachineSigner::load_or_create(&p).is_err();
+            let _ = tx.send((loaded, created));
+        });
+        let (loaded, refused) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("opening a FIFO key path must not block");
+        assert!(!loaded, "a FIFO is not a key");
+        assert!(refused, "and is never provisioned over");
+        use std::os::unix::fs::FileTypeExt as _;
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+    }
+
+    /// A symlink at the key path is refused, not followed.
+    #[test]
+    fn a_symlinked_key_is_refused_not_followed() {
+        let dir = tmp("symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("elsewhere.key");
+        write_key(&real, &"11".repeat(32));
+        let path = dir.join("machine.key");
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert!(!RealMachineSigner::with_key_path(&path).is_provisioned());
+        assert!(RealMachineSigner::load_or_create(&path).is_err());
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_symlink());
     }
 
     #[test]

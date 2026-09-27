@@ -51,7 +51,7 @@ pub enum PairingError {
 /// `pin_from_connect` calls this too, so the surfaces that accept a pairing
 /// link (charterd, `charter-console`, `charter pair`) cannot drift on what
 /// counts as a valid one again — see B7,
-/// `internal/reviews/2026-09-21/04-linux-lock-tray-cli-packaging.md`.
+/// the 2026-09-21 review.
 pub fn validate_and_normalize(link: &str) -> Result<String, PairingError> {
     let bunker_uri = match link.strip_prefix("https://") {
         Some(_) => link

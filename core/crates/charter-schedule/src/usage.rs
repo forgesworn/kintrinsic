@@ -103,6 +103,177 @@ pub struct UsageLedger {
     /// `#[serde(default)]` so pre-weekly-bucket snapshots restore empty.
     #[serde(default)]
     bucket_week_secs: BTreeMap<String, u64>,
+    /// Whether the caller vouches for the wall clock at this moment (N1):
+    /// on Linux, the kernel reports it NTP-synchronised. It gates ONLY the
+    /// drop-back of a far-future day/week key in [`roll`](Self::roll); see
+    /// there. Deliberately not persisted (`#[serde(skip)]`): it is a fact
+    /// about the clock now, not about the ledger, so every restored or fresh
+    /// ledger starts untrusted — pure high-water — until the caller says
+    /// otherwise via [`set_clock_trusted`](Self::set_clock_trusted).
+    #[serde(skip)]
+    clock_trusted: bool,
+    /// The day-keyed counters each day roll set aside since the clock was
+    /// last confirmed (R2-1), oldest first. A forward firmware trip rolls the
+    /// day and zeroes the counters; when the kernel later vouches for the
+    /// clock and the key drops back, the counters set aside for the real day
+    /// (and every excursion day after it) are added back, so the trip is
+    /// worth nothing. See [`roll`](Self::roll). Persisted with the ledger:
+    /// the return from a trip is normally a reboot. `#[serde(default)]` so
+    /// older snapshots restore with an empty chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pre_roll_days: Vec<DayCounters>,
+    /// The week-keyed twin of `pre_roll_days`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pre_roll_weeks: Vec<WeekCounters>,
+}
+
+/// The most pre-roll entries a chain keeps. Past it, the two NEWEST are
+/// merged under the newer key (R3-1). The chain's first (oldest) key is never
+/// touched, so [`chain_restores`] still sees the chain reach back to the real
+/// day; and the merged entry carries the later key, so a restore takes it
+/// whenever either half would have been taken — it can only ever over-charge
+/// (an earlier fake day counted into today), never hand time back.
+const PRE_ROLL_CAP: usize = 16;
+
+/// The day-keyed counters set aside by one day roll (R2-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DayCounters {
+    key: String,
+    #[serde(default)]
+    used_today_secs: u64,
+    #[serde(default)]
+    learning_today_secs: u64,
+    #[serde(default)]
+    unrecognised_today_secs: u64,
+    #[serde(default)]
+    out_of_hours_today_secs: u64,
+    #[serde(default)]
+    minutes_today: MinuteSet,
+    #[serde(default)]
+    bucket_today_secs: BTreeMap<String, u64>,
+}
+
+/// The week-keyed counters set aside by one week roll (R2-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WeekCounters {
+    key: String,
+    #[serde(default)]
+    used_week_secs: u64,
+    #[serde(default)]
+    out_of_hours_week_secs: u64,
+    #[serde(default)]
+    out_of_hours_nights_week: u32,
+    #[serde(default)]
+    bucket_week_secs: BTreeMap<String, u64>,
+}
+
+fn add_buckets(into: &mut BTreeMap<String, u64>, from: &BTreeMap<String, u64>) {
+    for (k, v) in from {
+        let e = into.entry(k.clone()).or_insert(0);
+        *e = e.saturating_add(*v);
+    }
+}
+
+impl DayCounters {
+    /// Fold `other`'s counters into these (the key is the caller's business).
+    fn absorb(&mut self, other: &DayCounters) {
+        self.used_today_secs = self.used_today_secs.saturating_add(other.used_today_secs);
+        self.learning_today_secs = self
+            .learning_today_secs
+            .saturating_add(other.learning_today_secs);
+        self.unrecognised_today_secs = self
+            .unrecognised_today_secs
+            .saturating_add(other.unrecognised_today_secs);
+        self.out_of_hours_today_secs = self
+            .out_of_hours_today_secs
+            .saturating_add(other.out_of_hours_today_secs);
+        self.minutes_today = self.minutes_today.union(&other.minutes_today);
+        add_buckets(&mut self.bucket_today_secs, &other.bucket_today_secs);
+    }
+}
+
+impl WeekCounters {
+    fn absorb(&mut self, other: &WeekCounters) {
+        self.used_week_secs = self.used_week_secs.saturating_add(other.used_week_secs);
+        self.out_of_hours_week_secs = self
+            .out_of_hours_week_secs
+            .saturating_add(other.out_of_hours_week_secs);
+        self.out_of_hours_nights_week = self
+            .out_of_hours_nights_week
+            .saturating_add(other.out_of_hours_nights_week);
+        add_buckets(&mut self.bucket_week_secs, &other.bucket_week_secs);
+    }
+}
+
+/// A pre-roll chain entry: anything with a date key that can absorb another.
+trait PreRoll: Clone {
+    fn key(&self) -> &str;
+    fn set_key(&mut self, key: String);
+    fn merge(&mut self, other: &Self);
+}
+
+impl PreRoll for DayCounters {
+    fn key(&self) -> &str {
+        &self.key
+    }
+    fn set_key(&mut self, key: String) {
+        self.key = key;
+    }
+    fn merge(&mut self, other: &Self) {
+        self.absorb(other);
+    }
+}
+
+impl PreRoll for WeekCounters {
+    fn key(&self) -> &str {
+        &self.key
+    }
+    fn set_key(&mut self, key: String) {
+        self.key = key;
+    }
+    fn merge(&mut self, other: &Self) {
+        self.absorb(other);
+    }
+}
+
+/// Append a pre-roll entry, keeping the chain within [`PRE_ROLL_CAP`] by
+/// merging the two newest under the later key. Merging the oldest instead
+/// would move the chain's first key forward past the real day and disable
+/// the restore on return (R3-1).
+fn push_pre_roll<T: PreRoll>(chain: &mut Vec<T>, entry: T) {
+    chain.push(entry);
+    while chain.len() > PRE_ROLL_CAP {
+        let newest = chain.pop().expect("chain is over the cap");
+        let prev = chain.last_mut().expect("the cap is at least two");
+        let later = std::cmp::max(prev.key(), newest.key()).to_string();
+        prev.merge(&newest);
+        prev.set_key(later);
+    }
+}
+
+/// Whether a trusted clock at computed key `current` should take back the
+/// counters `chain` set aside: the stored key is ahead of `current`, and the
+/// chain reaches back to (or before) it — so the lead is the product of rolls
+/// that began on or before the real day, and every entry keyed `current` or
+/// later was really spent today.
+fn chain_restores<T: PreRoll>(trusted: bool, chain: &[T], stored: &str, current: &str) -> bool {
+    trusted && stored > current && chain.first().is_some_and(|e| e.key() <= current)
+}
+
+/// Remove and fold together every entry keyed `current` or later.
+fn take_restorable<T: PreRoll>(chain: &mut Vec<T>, current: &str) -> Option<T> {
+    let mut out: Option<T> = None;
+    for e in chain.drain(..).filter(|e| e.key() >= current) {
+        match out.as_mut() {
+            Some(o) => o.merge(&e),
+            None => {
+                let mut e = e;
+                e.set_key(current.to_string());
+                out = Some(e);
+            }
+        }
+    }
+    out
 }
 
 fn local(now_unix: i64, tz: Tz) -> DateTime<Tz> {
@@ -129,6 +300,13 @@ fn week_key_of(dt: &DateTime<Tz>, week_start: WeekStart) -> String {
     start.format("%Y-%m-%d").to_string()
 }
 
+/// How many calendar days the `YYYY-MM-DD` key `stored` lies after `current`
+/// (negative when behind); `None` if either will not parse.
+fn days_ahead(stored: &str, current: &str) -> Option<i64> {
+    let parse = |k: &str| chrono::NaiveDate::parse_from_str(k, "%Y-%m-%d").ok();
+    Some((parse(stored)? - parse(current)?).num_days())
+}
+
 impl UsageLedger {
     /// A fresh ledger for `tz` at `now`.
     pub fn new(tz: &str, week_start: WeekStart, now_unix: i64) -> Self {
@@ -149,11 +327,36 @@ impl UsageLedger {
             minutes_today: MinuteSet::default(),
             bucket_today_secs: BTreeMap::new(),
             bucket_week_secs: BTreeMap::new(),
+            clock_trusted: false,
+            pre_roll_days: Vec::new(),
+            pre_roll_weeks: Vec::new(),
         }
+    }
+
+    /// Tell the ledger whether the wall clock can be trusted right now —
+    /// `true` only when the platform can vouch for it (Linux: the kernel
+    /// reports it NTP-synchronised). Untrusted is the default and the
+    /// fail-safe: the day/week keys are then a pure high-water mark. Call it
+    /// before each tick's credits; it is not persisted.
+    pub fn set_clock_trusted(&mut self, trusted: bool) {
+        self.clock_trusted = trusted;
+    }
+
+    /// Whether a stored key `ahead` days in front of the computed one should
+    /// be dropped back to it. An unparseable key always is (corruption
+    /// recovery; the ledger file is not the ward's to write). A far-future key
+    /// is only while the clock is trusted — see [`roll`](Self::roll).
+    fn drop_back(&self, ahead: Option<i64>, bound: i64) -> bool {
+        ahead.is_none_or(|d| self.clock_trusted && d > bound)
     }
 
     fn tz(&self) -> Tz {
         self.tz.parse().unwrap_or(chrono_tz::UTC)
+    }
+
+    /// The tz name the ledger's day and week keys are currently anchored on.
+    pub fn tz_name(&self) -> &str {
+        &self.tz
     }
 
     /// Whether the ledger's day has ADVANCED past the one its counters belong
@@ -184,27 +387,137 @@ impl UsageLedger {
     /// happened. That is the residual: an RTC that reads a future date rolls
     /// the day once, and the correction back does not restore it.
     ///
+    /// The high-water mark is bounded, though (M4) — but only while the
+    /// clock is TRUSTED ([`set_clock_trusted`](Self::set_clock_trusted)). One
+    /// tick with the clock years ahead — a bad RTC — used to set the key into
+    /// the future, and once the clock was right again `dk > day_key` stayed
+    /// false for years: the counters never reset and the ward was locked every
+    /// day once the first day's cap was spent. So, with a trusted clock, a
+    /// stored key more than one day (or, for the week, one week) AHEAD of the
+    /// computed one is pulled back to it, WITHOUT zeroing anything: the
+    /// counters carry on and the next real midnight resets them as normal.
+    ///
+    /// Why only when trusted (N1): an untrusted drop-back is itself a lever.
+    /// The firmware RTC is read at boot before NTP runs, so a ward who sets
+    /// it two days back and keeps the Wi-Fi off would get the key dropped
+    /// back to T-2, and the NTP step forward on reconnecting would then roll
+    /// "a new day" and refill the quota — repeatably, one refill per trip to
+    /// the firmware. Untrusted, the keys stay a pure high-water mark, so a
+    /// step back and return is a no-op, and a future excursion stays frozen
+    /// (locked, the fail-safe direction) until the kernel reports the clock
+    /// synchronised, when it recovers here. An unparseable key is re-anchored
+    /// regardless.
+    ///
+    /// A forward excursion still rolls the day (a high-water mark cannot tell
+    /// it from a real midnight), so each roll sets the counters it zeroes
+    /// aside in a pre-roll chain (R2-1), persisted with the ledger. A roll on
+    /// a trusted clock is a real midnight and clears the chain, and so does
+    /// any trusted tick that finds the stored key current: from then on the
+    /// counters are the real day's. When a trusted clock finds the stored key
+    /// AHEAD and the chain reaching back to the computed day, the lead came
+    /// from rolls a wrong clock made, so every entry keyed today or later was
+    /// really spent today: it is added back and the key re-anchored, whatever
+    /// the size of the lead. A forward trip to the firmware is therefore
+    /// worth nothing once the clock is synchronised again, and neither is a
+    /// chain of fake midnights. Without a chain the bounded drop-back above
+    /// applies, as before. Android pins the clock under Device Owner and
+    /// never sets the flag, so it keeps the pure high-water mark.
+    ///
     /// Day keys are `YYYY-MM-DD` and week keys are the start-of-week date in
     /// the same shape, so lexicographic order IS chronological order.
     fn roll(&mut self, now_unix: i64) {
         let dt = local(now_unix, self.tz());
         let dk = day_key_of(&dt);
         let wk = week_key_of(&dt, self.week_start);
+        let mut restored_day: Option<DayCounters> = None;
         if dk > self.day_key {
-            self.day_key = dk;
-            self.used_today_secs = 0;
-            self.learning_today_secs = 0;
-            self.unrecognised_today_secs = 0;
-            self.out_of_hours_today_secs = 0;
-            self.minutes_today = MinuteSet::default();
-            self.bucket_today_secs.clear();
+            let old = DayCounters {
+                key: std::mem::replace(&mut self.day_key, dk.clone()),
+                used_today_secs: std::mem::take(&mut self.used_today_secs),
+                learning_today_secs: std::mem::take(&mut self.learning_today_secs),
+                unrecognised_today_secs: std::mem::take(&mut self.unrecognised_today_secs),
+                out_of_hours_today_secs: std::mem::take(&mut self.out_of_hours_today_secs),
+                minutes_today: std::mem::take(&mut self.minutes_today),
+                bucket_today_secs: std::mem::take(&mut self.bucket_today_secs),
+            };
+            if !self.clock_trusted {
+                push_pre_roll(&mut self.pre_roll_days, old);
+            }
+        } else if chain_restores(self.clock_trusted, &self.pre_roll_days, &self.day_key, &dk) {
+            // Back from a forward excursion on a trusted clock: what the
+            // excursion's rolls set aside was spent today. Add it back.
+            restored_day = take_restorable(&mut self.pre_roll_days, &dk);
+            self.day_key = dk.clone();
+            if let Some(r) = &restored_day {
+                let mut cur = DayCounters {
+                    key: dk.clone(),
+                    used_today_secs: self.used_today_secs,
+                    learning_today_secs: self.learning_today_secs,
+                    unrecognised_today_secs: self.unrecognised_today_secs,
+                    out_of_hours_today_secs: self.out_of_hours_today_secs,
+                    minutes_today: std::mem::take(&mut self.minutes_today),
+                    bucket_today_secs: std::mem::take(&mut self.bucket_today_secs),
+                };
+                cur.absorb(r);
+                self.used_today_secs = cur.used_today_secs;
+                self.learning_today_secs = cur.learning_today_secs;
+                self.unrecognised_today_secs = cur.unrecognised_today_secs;
+                self.out_of_hours_today_secs = cur.out_of_hours_today_secs;
+                self.minutes_today = cur.minutes_today;
+                self.bucket_today_secs = cur.bucket_today_secs;
+            }
+        } else if self.drop_back(days_ahead(&self.day_key, &dk), 1) {
+            // Back from a future excursion on a trusted clock (or an
+            // unparseable key): re-anchor, keep the counters.
+            self.day_key = dk.clone();
+        }
+        if self.clock_trusted && self.day_key == dk {
+            // The clock vouches for the day the counters are on: the chain
+            // is closed.
+            self.pre_roll_days.clear();
         }
         if wk > self.week_key {
-            self.week_key = wk;
-            self.used_week_secs = 0;
-            self.out_of_hours_week_secs = 0;
-            self.out_of_hours_nights_week = 0;
-            self.bucket_week_secs.clear();
+            let old = WeekCounters {
+                key: std::mem::replace(&mut self.week_key, wk.clone()),
+                used_week_secs: std::mem::take(&mut self.used_week_secs),
+                out_of_hours_week_secs: std::mem::take(&mut self.out_of_hours_week_secs),
+                out_of_hours_nights_week: std::mem::take(&mut self.out_of_hours_nights_week),
+                bucket_week_secs: std::mem::take(&mut self.bucket_week_secs),
+            };
+            if !self.clock_trusted {
+                push_pre_roll(&mut self.pre_roll_weeks, old);
+            }
+        } else if chain_restores(
+            self.clock_trusted,
+            &self.pre_roll_weeks,
+            &self.week_key,
+            &wk,
+        ) {
+            if let Some(r) = take_restorable(&mut self.pre_roll_weeks, &wk) {
+                self.used_week_secs = self.used_week_secs.saturating_add(r.used_week_secs);
+                self.out_of_hours_week_secs = self
+                    .out_of_hours_week_secs
+                    .saturating_add(r.out_of_hours_week_secs);
+                self.out_of_hours_nights_week = self
+                    .out_of_hours_nights_week
+                    .saturating_add(r.out_of_hours_nights_week);
+                add_buckets(&mut self.bucket_week_secs, &r.bucket_week_secs);
+            }
+            self.week_key = wk.clone();
+        } else if self.drop_back(days_ahead(&self.week_key, &wk), 7) {
+            self.week_key = wk.clone();
+        }
+        if self.clock_trusted && self.week_key == wk {
+            self.pre_roll_weeks.clear();
+        }
+        // A night the excursion counted a second time (out-of-hours use on
+        // both the real day and a fake one) is still one night.
+        if let Some(r) = restored_day {
+            if r.out_of_hours_today_secs > 0
+                && self.out_of_hours_today_secs > r.out_of_hours_today_secs
+            {
+                self.out_of_hours_nights_week = self.out_of_hours_nights_week.saturating_sub(1);
+            }
         }
     }
 
@@ -368,8 +681,14 @@ impl UsageLedger {
     /// still held today's seconds, and a guardian's view of today would stop
     /// matching the device that produced it.
     pub fn current_day_key(&self, now_unix: i64) -> String {
-        if self.day_has_rolled(now_unix) {
-            day_key_of(&local(now_unix, self.tz()))
+        let dk = day_key_of(&local(now_unix, self.tz()));
+        // Mirrors `roll`: on a trusted clock a key more than a day in the
+        // future is re-anchored.
+        if dk > self.day_key
+            || chain_restores(self.clock_trusted, &self.pre_roll_days, &self.day_key, &dk)
+            || self.drop_back(days_ahead(&self.day_key, &dk), 1)
+        {
+            dk
         } else {
             self.day_key.clone()
         }
@@ -378,8 +697,17 @@ impl UsageLedger {
     /// The CURRENT local week key at `now` in the ledger's tz — monotonic for
     /// the same reason as [`current_day_key`](Self::current_day_key).
     pub fn current_week_key(&self, now_unix: i64) -> String {
-        if self.week_has_rolled(now_unix) {
-            week_key_of(&local(now_unix, self.tz()), self.week_start)
+        let wk = week_key_of(&local(now_unix, self.tz()), self.week_start);
+        if wk > self.week_key
+            || chain_restores(
+                self.clock_trusted,
+                &self.pre_roll_weeks,
+                &self.week_key,
+                &wk,
+            )
+            || self.drop_back(days_ahead(&self.week_key, &wk), 7)
+        {
+            wk
         } else {
             self.week_key.clone()
         }
@@ -437,6 +765,10 @@ impl UsageLedger {
         // PRESERVED so a clause edit can never refill the quota.
         self.day_key = day_key_of(&dt);
         self.week_key = week_key_of(&dt, week_start);
+        // The chains are keyed in the old tz; they cannot be compared with
+        // the new keys, and a guardian's edit is not a ward's lever.
+        self.pre_roll_days.clear();
+        self.pre_roll_weeks.clear();
     }
 }
 
@@ -689,6 +1021,259 @@ mod tests {
         assert_eq!(u.used_week(tomorrow), 4260, "same week keeps accumulating");
         // …and the new day is itself now the floor.
         assert_eq!(u.used_today(NOON), 60);
+    }
+
+    /// M4: one tick with the clock far in the future, then the correction.
+    /// The future tick rolls the day once (the residual), but the stored key
+    /// must come back, or no real midnight would ever reset the day again.
+    #[test]
+    fn a_future_clock_excursion_does_not_freeze_the_day_key() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit(NOON, Activity::Active, 600);
+        let far = NOON + 5 * 365 * 24 * 3600;
+        u.credit(far, Activity::Active, 60);
+        // Corrected, but not yet synchronised: the key stays frozen ahead
+        // (the fail-safe direction)…
+        u.credit(NOON + 30, Activity::Active, 0);
+        assert_eq!(u.current_day_key(NOON + 30), u.current_day_key(far));
+        assert_eq!(u.used_today(NOON + 30), 60);
+        // …and once the kernel vouches for the clock, the counters are kept,
+        // not zeroed, and what the excursion's roll set aside comes back
+        // (R2-1)…
+        u.set_clock_trusted(true);
+        u.credit(NOON + 60, Activity::Active, 60);
+        assert_eq!(u.used_today(NOON + 60), 720, "no refill on the way back");
+        assert_eq!(u.used_week(NOON + 60), 720);
+        assert_eq!(u.current_day_key(NOON + 60), u.current_day_key(NOON));
+        // …and the next real midnight resets as normal.
+        let tomorrow = NOON + 24 * 3600;
+        u.credit(tomorrow, Activity::Active, 30);
+        assert_eq!(u.used_today(tomorrow), 30, "the next day starts fresh");
+        assert_eq!(u.used_week(tomorrow), 750, "same week keeps accumulating");
+        let next_week = NOON + 7 * 24 * 3600;
+        assert_eq!(u.used_week(next_week), 0, "and the week rolls too");
+    }
+
+    /// The bound on the high-water mark does not loosen it for a step BACK:
+    /// a step back across midnight still keeps today's spend.
+    #[test]
+    fn a_backwards_step_still_never_refills_after_the_bound() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit(NOON, Activity::Active, 3600);
+        let before_midnight = NOON - 14 * 3600; // 23:00 local the day before
+        u.credit(before_midnight, Activity::Active, 60);
+        assert_eq!(u.used_today(before_midnight), 3660);
+        u.credit(NOON + 60, Activity::Active, 60);
+        assert_eq!(u.used_today(NOON + 60), 3720, "coming back does not reset");
+        // A step back of several days is never zeroed either.
+        let days_back = NOON - 3 * 24 * 3600;
+        u.credit(days_back, Activity::Active, 60);
+        assert_eq!(u.used_today(days_back), 3780);
+    }
+
+    /// N1, the firmware-RTC trip: the RTC is set two days back with the
+    /// Wi-Fi off (untrusted), then NTP steps it forward on reconnecting. The
+    /// return must never refill — neither while the clock is still
+    /// untrusted, nor once it is synchronised again.
+    #[test]
+    fn back_two_days_then_return_never_refills_untrusted() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit(NOON, Activity::Active, 3600);
+        let back = NOON - 2 * 24 * 3600;
+        u.credit(back, Activity::Active, 60);
+        assert_eq!(u.used_today(back), 3660, "untrusted: pure high-water");
+        assert_eq!(u.current_day_key(back), u.current_day_key(NOON));
+        // Back to the right time, still untrusted.
+        u.credit(NOON + 60, Activity::Active, 60);
+        assert_eq!(u.used_today(NOON + 60), 3720, "no refill on return");
+        assert_eq!(u.used_week(NOON + 60), 3720);
+        // Synchronised at last: still no refill.
+        u.set_clock_trusted(true);
+        u.credit(NOON + 120, Activity::Active, 60);
+        assert_eq!(u.used_today(NOON + 120), 3780, "no refill once trusted");
+        // The same trip repeated is still worth nothing.
+        u.set_clock_trusted(false);
+        u.credit(back, Activity::Active, 0);
+        u.set_clock_trusted(true);
+        u.credit(NOON + 180, Activity::Active, 0);
+        assert_eq!(u.used_today(NOON + 180), 3780);
+    }
+
+    /// The week twin of the trip above: ten days back and return.
+    #[test]
+    fn back_ten_days_then_return_never_refills_the_week_untrusted() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.credit(NOON, Activity::Active, 3600);
+        let back = NOON - 10 * 24 * 3600;
+        u.credit(back, Activity::Active, 60);
+        u.set_clock_trusted(true);
+        u.credit(NOON + 60, Activity::Active, 60);
+        assert_eq!(u.used_today(NOON + 60), 3720);
+        assert_eq!(u.used_week(NOON + 60), 3720);
+    }
+
+    /// R2-1: the forward firmware trip. Two days ahead with the Wi-Fi off
+    /// rolls the day and zeroes it (the high-water mark cannot tell it from
+    /// midnight); once the kernel vouches for the clock again, the counters
+    /// the roll set aside come back, so the trip is worth nothing.
+    #[test]
+    fn a_forward_trip_then_sync_gives_no_extra_allowance() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.set_clock_trusted(true);
+        u.credit(NOON, Activity::Active, 3600);
+        u.credit_app_bucket(NOON, "play", 600);
+        u.credit_bucket(NOON, Activity::Active, Bucket::Learning, 300);
+        // Firmware RTC two days ahead, booted offline: untrusted.
+        u.set_clock_trusted(false);
+        let ahead = NOON + 2 * 24 * 3600 + 60;
+        u.credit(ahead, Activity::Active, 900);
+        u.credit_app_bucket(ahead, "play", 900);
+        assert_eq!(
+            u.used_today(ahead),
+            900,
+            "the excursion looks like a fresh day"
+        );
+        // It survives a restart (the return is normally a reboot).
+        let mut u = UsageLedger::from_snapshot(&u.snapshot()).expect("restores");
+        // NTP corrects the clock and clears STA_UNSYNC.
+        u.set_clock_trusted(true);
+        let back = NOON + 3600;
+        u.credit(back, Activity::Active, 60);
+        assert_eq!(u.current_day_key(back), day_key_of(&local(NOON, u.tz())));
+        assert_eq!(
+            u.used_today(back),
+            3600 + 900 + 60,
+            "no net extra allowance"
+        );
+        assert_eq!(u.used_week(back), 3600 + 900 + 60);
+        assert_eq!(u.app_bucket_today_secs(back, "play"), 1500);
+        assert_eq!(u.learning_today_secs(back), 300);
+        // Repeating the trip is still worth nothing.
+        u.set_clock_trusted(false);
+        u.credit(ahead + 3600, Activity::Active, 120);
+        u.set_clock_trusted(true);
+        u.credit(back + 60, Activity::Active, 0);
+        assert_eq!(u.used_today(back + 60), 4560 + 120);
+        // …and the next real midnight still resets.
+        let tomorrow = NOON + 24 * 3600;
+        u.credit(tomorrow, Activity::Active, 30);
+        assert_eq!(u.used_today(tomorrow), 30);
+    }
+
+    /// The trip before the clock was ever confirmed today (Wi-Fi off since
+    /// boot, so the real midnight roll was untrusted too), and a chain of
+    /// fake midnights on the excursion: only the real day and the excursion
+    /// come back, never the day before.
+    #[test]
+    fn a_chain_of_fake_midnights_after_an_untrusted_real_one_restores_today_only() {
+        let yesterday = NOON - 24 * 3600;
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, yesterday);
+        u.credit(yesterday, Activity::Active, 5000);
+        // Real midnight, untrusted (booted offline).
+        u.credit(NOON, Activity::Active, 3600);
+        assert_eq!(u.used_today(NOON), 3600);
+        // Firmware +2 days, then +3, then +4: three fake midnights.
+        for d in 2..=4 {
+            u.credit(NOON + d * 24 * 3600, Activity::Active, 100);
+        }
+        u.set_clock_trusted(true);
+        u.credit(NOON + 60, Activity::Active, 0);
+        assert_eq!(
+            u.used_today(NOON + 60),
+            3600 + 300,
+            "today plus the excursion"
+        );
+        // NOON is a Monday, so yesterday was last week; the fake days are
+        // this week, and the week meter never rolled.
+        assert_eq!(u.used_week(NOON + 60), 3600 + 300, "week kept whole");
+    }
+
+    /// A trip across a week boundary refills the week too, and the week comes
+    /// back the same way — even when the lead is exactly one week, which the
+    /// bounded drop-back alone would leave frozen (R2-6).
+    #[test]
+    fn a_forward_trip_across_the_week_restores_the_week() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.set_clock_trusted(true);
+        u.credit(NOON, Activity::Active, 3600);
+        u.set_clock_trusted(false);
+        let next_week = NOON + 7 * 24 * 3600;
+        u.credit(next_week, Activity::Active, 600);
+        assert_eq!(u.used_week(next_week), 600);
+        u.set_clock_trusted(true);
+        u.credit(NOON + 60, Activity::Active, 0);
+        assert_eq!(u.used_today(NOON + 60), 4200);
+        assert_eq!(u.used_week(NOON + 60), 4200);
+        assert_eq!(u.current_week_key(NOON + 60), u.current_week_key(NOON));
+        // And the next real week still rolls.
+        assert_eq!(u.used_week(next_week), 0);
+    }
+
+    /// A genuine midnight, trusted or not, still resets — the chain never
+    /// hands yesterday back.
+    #[test]
+    fn a_genuine_midnight_roll_still_resets() {
+        for trusted in [true, false] {
+            let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+            u.set_clock_trusted(trusted);
+            u.credit(NOON, Activity::Active, 3600);
+            let tomorrow = NOON + 24 * 3600;
+            u.credit(tomorrow, Activity::Active, 60);
+            // Synchronised later that day: the key is current, so nothing
+            // comes back.
+            u.set_clock_trusted(true);
+            u.credit(tomorrow + 60, Activity::Active, 0);
+            assert_eq!(u.used_today(tomorrow + 60), 60, "trusted={trusted}");
+            assert!(u.pre_roll_days.is_empty(), "the chain is closed");
+        }
+    }
+
+    /// Chains on a clock that is never trusted (Android) stay bounded.
+    #[test]
+    fn an_untrusted_chain_stays_bounded() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        for d in 1..=100 {
+            u.credit(NOON + d * 24 * 3600, Activity::Active, 60);
+        }
+        assert!(u.pre_roll_days.len() <= PRE_ROLL_CAP);
+        assert!(u.pre_roll_weeks.len() <= PRE_ROLL_CAP);
+        assert_eq!(u.used_today(NOON + 100 * 24 * 3600), 60);
+    }
+
+    /// More untrusted rolls than the chain holds still restore on a trusted
+    /// return (R3-1): the cap merges the newest entries, so the chain still
+    /// reaches back to the real day and nothing spent is left uncharged.
+    #[test]
+    fn a_capped_chain_still_restores_the_real_day() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.set_clock_trusted(true);
+        u.credit(NOON, Activity::Active, 3600);
+        u.set_clock_trusted(false);
+        let rolls: i64 = PRE_ROLL_CAP as i64 + 4;
+        for d in 1..=rolls {
+            u.credit(NOON + d * 24 * 3600, Activity::Active, 60);
+        }
+        assert!(u.pre_roll_days.len() <= PRE_ROLL_CAP);
+        u.set_clock_trusted(true);
+        u.credit(NOON + 60, Activity::Active, 0);
+        // The real day's hour plus every fake day's minute, all charged today.
+        let expected = 3600 + 60 * rolls as u64;
+        assert_eq!(u.used_today(NOON + 60), expected);
+        assert!(u.pre_roll_days.is_empty(), "the chain is closed");
+    }
+
+    /// Restoring a snapshot never restores trust: a fresh ledger is untrusted
+    /// until the caller says otherwise.
+    #[test]
+    fn a_restored_ledger_starts_untrusted() {
+        let mut u = UsageLedger::new(TZ, WeekStart::Mon, NOON);
+        u.set_clock_trusted(true);
+        u.credit(NOON, Activity::Active, 600);
+        let far = NOON + 30 * 24 * 3600;
+        u.credit(far, Activity::Active, 60);
+        let mut r = UsageLedger::from_snapshot(&u.snapshot()).expect("restores");
+        r.credit(NOON + 60, Activity::Active, 0);
+        assert_eq!(r.current_day_key(NOON + 60), r.current_day_key(far));
     }
 
     /// The day-keyed side meters follow the same floor — otherwise a rollback

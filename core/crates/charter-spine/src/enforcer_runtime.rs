@@ -17,7 +17,7 @@ use charter_schedule::{
 use charter_sys::persistence::{ClauseStore, ExtensionStore, UsageStore};
 use charter_sys::{Clock, SystemLayer};
 
-use crate::child_policy::{fail_safe_budget, fail_safe_schedule, FAIL_SAFE_TZ};
+use crate::child_policy::{fail_safe_budget, fail_safe_schedule, UNRESOLVED_TZ};
 
 /// The runtime enforcer: owns the durable ledgers + the decision state machine.
 pub struct EnforcerRuntime {
@@ -120,6 +120,10 @@ impl EnforcerRuntime {
         elapsed_secs: u64,
     ) -> Vec<EnforcerEffect> {
         let now = sys.clock().now_utc() as i64;
+        // N1: a far-future day key drops back only on a clock the platform
+        // vouches for; untrusted keeps the pure high-water mark.
+        self.usage
+            .set_clock_trusted(sys.clock().wall_clock_synchronised());
         let schedule = self.load_schedule(sys);
         let budget = self.load_budget(sys);
         // M12/M13: the usage ledger resets on the BUDGET clause's tz + weekStart
@@ -239,22 +243,24 @@ pub fn time_extend_eod<S: SystemLayer>(sys: &S, now_unix: i64) -> i64 {
     // A clause that is PRESENT and will not parse is the same event here as
     // it is in `load_schedule`/`load_budget`: it stands in as its fail-safe,
     // so the enactor's end-of-day agrees with what the enforcer is about to
-    // do rather than silently pretending the clause is absent.
+    // do rather than silently pretending the clause is absent. Its tz is left
+    // unresolved (read as UTC by the eod helper): this only bounds a grant's
+    // `exp`, it keys no ledger, and a fail-safe budget is paused anyway.
     let schedule: Option<GrantSchedule> =
         match sys.clauses().get_clause(ClauseKind::Schedule.store_key()) {
             Ok(Some(j)) => {
-                Some(serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_schedule(FAIL_SAFE_TZ)))
+                Some(serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_schedule(UNRESOLVED_TZ)))
             }
             Ok(None) => None,
-            Err(_) => Some(fail_safe_schedule(FAIL_SAFE_TZ)),
+            Err(_) => Some(fail_safe_schedule(UNRESOLVED_TZ)),
         };
     let budget: Option<GrantBudget> = match sys.clauses().get_clause(ClauseKind::Budget.store_key())
     {
         Ok(Some(j)) => {
-            Some(serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_budget(FAIL_SAFE_TZ)))
+            Some(serde_json::from_str(&j).unwrap_or_else(|_| fail_safe_budget(UNRESOLVED_TZ)))
         }
         Ok(None) => None,
-        Err(_) => Some(fail_safe_budget(FAIL_SAFE_TZ)),
+        Err(_) => Some(fail_safe_budget(UNRESOLVED_TZ)),
     };
     // The extension is dimension-isolated, but the grant `exp` may legitimately
     // be the end-of-day in EITHER clause's tz (a schedule extension uses the

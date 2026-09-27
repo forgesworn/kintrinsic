@@ -73,6 +73,10 @@ async fn a_per_child_clause_is_refused_when_its_floor_cannot_be_read() {
         counts.clauses_seen, 1,
         "it was seen — it is the floor, not the payload, that could not be read"
     );
+    assert_eq!(
+        counts.clauses_write_failed, 1,
+        "M3: it WAS the guardian's clause, so the refusal is counted where STATUS reads it"
+    );
     b.sys().disk().repair_clause_reads();
     assert_eq!(
         b.sys()
@@ -82,6 +86,22 @@ async fn a_per_child_clause_is_refused_when_its_floor_cannot_be_read() {
         None,
         "and nothing was written: the refusal is before the store, not after it"
     );
+}
+
+/// An unreadable floor is counted only for a clause that authenticates: a
+/// stranger's wrap must not be able to move `clausesWriteFailed`.
+#[tokio::test]
+async fn an_unauthenticated_clause_over_an_unreadable_floor_is_not_counted() {
+    let guardian = TestGuardian::new();
+    let stranger = TestGuardian::from_seed(0x22);
+    let b = broker(&guardian);
+    b.sys().disk().break_clause_reads();
+
+    let clause = ClauseBuilder::schedule(100).subject(ALICE).build(&stranger);
+    b.transport().deliver_clause(clause, stranger.pubkey());
+    let counts = b.poll_once().await;
+    assert_eq!(counts.clauses_accepted, 0);
+    assert_eq!(counts.clauses_write_failed, 0);
 }
 
 #[tokio::test]
@@ -154,6 +174,7 @@ async fn a_single_child_clause_is_refused_when_its_floor_cannot_be_read() {
     let counts = b.poll_once().await;
 
     assert_eq!(counts.clauses_accepted, 0);
+    assert_eq!(counts.clauses_write_failed, 1);
     b.sys().disk().repair_clause_reads();
     assert_eq!(
         b.sys()
@@ -213,4 +234,81 @@ async fn a_usage_sync_is_stored_when_its_floor_is_merely_absent() {
             .unwrap(),
         None
     );
+}
+
+/// R2-7: a torn record whose floor sidecar still reads. The floor is the
+/// sidecar's, and the clause that raised it may never have landed, so the
+/// pinned guardian's re-send at exactly that `issuedAt` is taken — once — and
+/// anything older is still a replay. Both the per-child and the machine-wide
+/// paths.
+#[tokio::test]
+async fn a_torn_record_takes_the_guardians_resend_at_the_sidecar_floor() {
+    let guardian = TestGuardian::new();
+    let b = broker(&guardian);
+    let key = ClauseKind::Schedule.store_key();
+
+    let first = ClauseBuilder::schedule(100).subject(ALICE).build(&guardian);
+    b.transport().deliver_clause(first, guardian.pubkey());
+    assert_eq!(b.poll_once().await.clauses_accepted, 1);
+
+    b.sys().disk().tear_clause_records();
+    let older = ClauseBuilder::schedule(99).subject(ALICE).build(&guardian);
+    b.transport().deliver_clause(older, guardian.pubkey());
+    let counts = b.poll_once().await;
+    assert_eq!(
+        counts.clauses_accepted, 0,
+        "below the floor is still a replay"
+    );
+
+    let resend = ClauseBuilder::schedule(100)
+        .subject(ALICE)
+        .body(json!({"tz": "Europe/London", "resent": true}))
+        .build(&guardian);
+    b.transport()
+        .deliver_clause(resend.clone(), guardian.pubkey());
+    let counts = b.poll_once().await;
+    assert_eq!(
+        counts.clauses_accepted, 1,
+        "the guardian's re-send is taken"
+    );
+    assert_eq!(counts.clauses_write_failed, 0);
+    assert_eq!(
+        b.sys()
+            .child_clauses()
+            .highest_issued_at(&ALICE.to_hex(), key)
+            .unwrap(),
+        Some(100)
+    );
+
+    // The record is mended: the same `issuedAt` is a replay again.
+    b.transport().deliver_clause(resend, guardian.pubkey());
+    assert_eq!(b.poll_once().await.clauses_accepted, 0);
+
+    // Machine-wide (content) slot, same rule.
+    let c = ClauseBuilder::content(200).build(&guardian);
+    b.transport().deliver_clause(c, guardian.pubkey());
+    assert_eq!(b.poll_once().await.clauses_accepted, 1);
+    b.sys().disk().tear_clause_records();
+    let c2 = ClauseBuilder::content(200)
+        .body(json!({"resent": true}))
+        .build(&guardian);
+    b.transport().deliver_clause(c2, guardian.pubkey());
+    assert_eq!(b.poll_once().await.clauses_accepted, 1);
+}
+
+/// The sidecar re-send allowance is the pinned guardian's alone.
+#[tokio::test]
+async fn a_strangers_clause_at_the_sidecar_floor_is_refused() {
+    let guardian = TestGuardian::new();
+    let stranger = TestGuardian::from_seed(0x22);
+    let b = broker(&guardian);
+    let first = ClauseBuilder::schedule(100).subject(ALICE).build(&guardian);
+    b.transport().deliver_clause(first, guardian.pubkey());
+    assert_eq!(b.poll_once().await.clauses_accepted, 1);
+    b.sys().disk().tear_clause_records();
+    let forged = ClauseBuilder::schedule(100).subject(ALICE).build(&stranger);
+    b.transport().deliver_clause(forged, stranger.pubkey());
+    let counts = b.poll_once().await;
+    assert_eq!(counts.clauses_accepted, 0);
+    assert_eq!(counts.clauses_write_failed, 0);
 }

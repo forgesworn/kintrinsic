@@ -241,6 +241,15 @@ mod real {
     /// kilobytes; 256 KiB leaves generous headroom and caps the per-frame cost.
     const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
 
+    /// The ceiling handed to tungstenite, above [`MAX_WS_MESSAGE_BYTES`] on
+    /// purpose. The library's own over-cap error is fatal to the socket
+    /// (tokio-tungstenite fuses the stream on any error), so at 256 KiB one
+    /// relay-served frame over the cap ended the whole query. Between the two
+    /// ceilings a message is read and then discarded by `read_events`, so the
+    /// query carries on to `EOSE`; above this one it still ends, which bounds
+    /// what one frame can cost.
+    const MAX_WS_FRAME_BYTES: usize = 2 * 1024 * 1024;
+
     /// Set to `1` to allow plaintext `ws://` relay URLs (a local test relay).
     /// Absent — i.e. in production — a non-`wss://` relay is refused at connect.
     const ALLOW_INSECURE_RELAY_ENV: &str = "CHARTER_ALLOW_INSECURE_RELAY";
@@ -248,8 +257,8 @@ mod real {
     /// The websocket config every Charter socket is opened with.
     fn ws_config() -> WebSocketConfig {
         WebSocketConfig {
-            max_message_size: Some(MAX_WS_MESSAGE_BYTES),
-            max_frame_size: Some(MAX_WS_MESSAGE_BYTES),
+            max_message_size: Some(MAX_WS_FRAME_BYTES),
+            max_frame_size: Some(MAX_WS_FRAME_BYTES),
             ..Default::default()
         }
     }
@@ -305,6 +314,55 @@ mod real {
         accepted < MAX_EVENTS_PER_QUERY
             && bytes.saturating_add(event_weight(ev)) <= MAX_BYTES_PER_QUERY
             && filter.matches(ev)
+    }
+
+    /// Read one subscription's `EVENT`s into `out` until `EOSE`, a ceiling, or
+    /// the end of the stream. Generic over the stream so it is testable
+    /// without a socket; the caller bounds it with the query timeout (and
+    /// keeps whatever landed in `out` if that fires).
+    ///
+    /// A message we cannot use is SKIPPED, not the end of the query (M1): one
+    /// oversize or undecodable frame used to end the read at that point, so a
+    /// single junk wrap served ahead of the guardian's hid every clause, grant
+    /// and RELEASE behind it. Oversize text is dropped here without being
+    /// charged to the byte budget — see [`MAX_WS_FRAME_BYTES`] for why the
+    /// library lets it through. A stream ERROR still ends the read, because
+    /// tokio-tungstenite fuses the stream on any error: nothing more can be
+    /// read from it.
+    async fn read_events<S, E>(ws: &mut S, filter: &Filter, out: &mut Vec<NostrEvent>)
+    where
+        S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+    {
+        let mut bytes = 0usize;
+        while let Some(item) = ws.next().await {
+            let t = match item {
+                Ok(Message::Text(t)) => t,
+                Ok(_) => continue,
+                Err(_) => break,
+            };
+            if t.len() > MAX_WS_MESSAGE_BYTES {
+                continue;
+            }
+            match parse_relay_message(t.as_str()) {
+                Some(RelayMsg::Event(sub, ev)) if sub == SUB_ID => {
+                    // Hard caps: stop reading once either ceiling is hit
+                    // rather than keep buffering a hostile relay's flood (a
+                    // well-behaved relay never reaches either).
+                    if out.len() >= MAX_EVENTS_PER_QUERY || bytes >= MAX_BYTES_PER_QUERY {
+                        break;
+                    }
+                    // Re-validate against our own REQ filter; drop any event
+                    // the relay served that does not match.
+                    if accept_event(filter, &ev, out.len(), bytes) {
+                        bytes = bytes.saturating_add(event_weight(&ev));
+                        out.push(*ev);
+                    }
+                }
+                Some(RelayMsg::Eose(sub)) if sub == SUB_ID => break,
+                // Undecodable, another subscription, NOTICE…: skipped.
+                _ => {}
+            }
+        }
     }
 
     /// The pure publish verdict, factored out of `publish_one` so the one
@@ -486,34 +544,8 @@ mod real {
                 return Err(RelayIoError::Unreachable(format!("{url}: send REQ: {e}")));
             }
             let mut out = Vec::new();
-            let mut bytes = 0usize;
-            let _ = tokio::time::timeout(self.timeout, async {
-                while let Some(Ok(msg)) = ws.next().await {
-                    if let Message::Text(t) = msg {
-                        match parse_relay_message(t.as_str()) {
-                            Some(RelayMsg::Event(sub, ev)) if sub == SUB_ID => {
-                                // Hard caps: stop reading once either ceiling is
-                                // hit rather than keep buffering a hostile
-                                // relay's flood (a well-behaved relay never
-                                // reaches either).
-                                if out.len() >= MAX_EVENTS_PER_QUERY || bytes >= MAX_BYTES_PER_QUERY
-                                {
-                                    break;
-                                }
-                                // Re-validate against our own REQ filter; drop any
-                                // event the relay served that does not match.
-                                if accept_event(filter, &ev, out.len(), bytes) {
-                                    bytes = bytes.saturating_add(event_weight(&ev));
-                                    out.push(*ev);
-                                }
-                            }
-                            Some(RelayMsg::Eose(sub)) if sub == SUB_ID => break,
-                            _ => {}
-                        }
-                    }
-                }
-            })
-            .await;
+            let _ =
+                tokio::time::timeout(self.timeout, read_events(&mut ws, filter, &mut out)).await;
             let _ = ws.send(Message::text(close_message(SUB_ID))).await;
             let _ = ws.close(None).await;
             Ok(out)
@@ -748,8 +780,8 @@ mod real {
             // Left at tungstenite's defaults this is 64 MiB / 16 MiB — buffered
             // by the library before any of our accounting can run.
             let cfg = ws_config();
-            assert_eq!(cfg.max_message_size, Some(MAX_WS_MESSAGE_BYTES));
-            assert_eq!(cfg.max_frame_size, Some(MAX_WS_MESSAGE_BYTES));
+            assert_eq!(cfg.max_message_size, Some(MAX_WS_FRAME_BYTES));
+            assert_eq!(cfg.max_frame_size, Some(MAX_WS_FRAME_BYTES));
             // ...and tighter than what the library would have used.
             let library_default = WebSocketConfig::default();
             assert!(
@@ -813,6 +845,58 @@ mod real {
                 publish_outcome(Some(Some(false))),
                 PublishOutcome::Failed("rejected by relay".into())
             );
+        }
+
+        // ---- M1: one bad frame does not end the query ----------------------
+
+        fn event_frame(ev: &NostrEvent) -> Message {
+            let v = serde_json::json!(["EVENT", SUB_ID, serde_json::to_value(ev).unwrap()]);
+            Message::text(v.to_string())
+        }
+
+        #[tokio::test]
+        async fn an_oversize_or_undecodable_frame_is_skipped_and_the_read_goes_on() {
+            let ev = sample_event();
+            let filter = Filter {
+                kinds: vec![ev.kind],
+                ..Filter::default()
+            };
+            assert!(filter.matches(&ev));
+            // A well-formed, filter-matching event — only too big to use.
+            let mut big = sample_event();
+            big.content = "x".repeat(MAX_WS_MESSAGE_BYTES + 1);
+            let oversize = event_frame(&big);
+            let frames: Vec<Result<Message, ()>> = vec![
+                Ok(oversize),
+                Ok(Message::text("not json at all")),
+                Ok(Message::binary(vec![0u8; 16])),
+                Ok(event_frame(&ev)),
+                Ok(Message::text(format!(r#"["EOSE","{SUB_ID}"]"#))),
+                Ok(event_frame(&ev)),
+            ];
+            let mut stream = futures_util::stream::iter(frames);
+            let mut out = Vec::new();
+            read_events(&mut stream, &filter, &mut out).await;
+            assert_eq!(
+                out,
+                vec![ev],
+                "the good event after the junk arrives; EOSE ends it"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_stream_error_still_ends_the_read() {
+            let ev = sample_event();
+            let filter = Filter {
+                kinds: vec![ev.kind],
+                ..Filter::default()
+            };
+            let frames: Vec<Result<Message, ()>> =
+                vec![Ok(event_frame(&ev)), Err(()), Ok(event_frame(&ev))];
+            let mut stream = futures_util::stream::iter(frames);
+            let mut out = Vec::new();
+            read_events(&mut stream, &filter, &mut out).await;
+            assert_eq!(out.len(), 1);
         }
 
         // ---- G1: unreachable ---------------------------------------------

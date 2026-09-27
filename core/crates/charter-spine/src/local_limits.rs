@@ -95,6 +95,33 @@ impl DeviceLimits {
         Ok(())
     }
 
+    /// Load-path repair for an allowed-hours window whose wake is not before
+    /// its bedtime (M5). [`validate`](Self::validate) rightly refuses one at
+    /// the write path, but on LOAD refusing it dropped the whole limits block,
+    /// daily cap and all — and a legacy flat file dropped the child from
+    /// management — so a `bedtime: "00:00"` meaning midnight, or a swapped
+    /// pair, turned into no limits at all. Only the bad window goes: its days
+    /// become open all day (`00:00`–`23:59`, the widest window a clause can
+    /// express, so the last minute of the day locks) and `daily_minutes`, the
+    /// other window and `tz` are kept. Returns whether anything was dropped.
+    pub fn drop_inverted_windows(&mut self) -> bool {
+        let inverted = |wake: &str, bed: &str| valid_hhmm(wake) && valid_hhmm(bed) && wake >= bed;
+        let mut dropped = false;
+        if inverted(&self.wake, &self.bedtime) {
+            self.wake = "00:00".into();
+            self.bedtime = "23:59".into();
+            dropped = true;
+        }
+        if let Some(w) = self.weekend.as_mut() {
+            if inverted(&w.wake, &w.bedtime) {
+                w.wake = "00:00".into();
+                w.bedtime = "23:59".into();
+                dropped = true;
+            }
+        }
+        dropped
+    }
+
     fn weekday_window(&self) -> Vec<GrantScheduleWindow> {
         vec![GrantScheduleWindow {
             start: self.wake.clone(),
@@ -201,6 +228,17 @@ pub fn valid_subject_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// [`DeviceLimits::drop_inverted_windows`], logged, for the load path.
+fn repaired(mut l: DeviceLimits) -> DeviceLimits {
+    if l.drop_inverted_windows() {
+        eprintln!(
+            "charter: a device-only limits file has a wake time at or after its bedtime — \
+             that allowed-hours window is ignored (open all day); the daily cap still applies"
+        );
+    }
+    l
+}
+
 /// Parse a per-child config from JSON, accepting BOTH the structured
 /// `{subject?, limits?}` shape and a legacy flat `DeviceLimits` document. The
 /// binding and the fallback are handled **independently**: an invalid `subject`
@@ -235,6 +273,7 @@ pub fn parse_child_config(text: &str) -> Option<ChildConfig> {
             let limits = raw
                 .limits
                 .and_then(|v| serde_json::from_value::<DeviceLimits>(v).ok())
+                .map(repaired)
                 .filter(|l| l.validate().is_ok());
             // Learning is independent + fail-soft too (invalid → dropped, the
             // fail-closed direction: attribution charges screen without it).
@@ -253,7 +292,7 @@ pub fn parse_child_config(text: &str) -> Option<ChildConfig> {
         }
     }
     // Legacy flat DeviceLimits (no subject/limits keys).
-    let limits: DeviceLimits = serde_json::from_str(text).ok()?;
+    let limits = repaired(serde_json::from_str::<DeviceLimits>(text).ok()?);
     limits.validate().ok()?;
     Some(ChildConfig {
         subject: None,
@@ -683,5 +722,42 @@ mod tests {
         let cfg = parse_child_config(&json).expect("subject survives type-broken limits");
         assert_eq!(cfg.subject.as_deref(), Some(HEX64));
         assert!(cfg.limits.is_none());
+    }
+
+    /// M5: an inverted window on disk drops only that window. The daily cap,
+    /// the tz and the other window survive, so the child is still capped.
+    #[test]
+    fn an_inverted_window_on_load_keeps_the_daily_cap() {
+        let json = r#"{"limits":{"tz":"UTC","wake":"07:00","bedtime":"00:00","dailyMinutes":60,
+            "weekend":{"wake":"09:00","bedtime":"21:00"}}}"#;
+        let l = parse_child_config(json)
+            .unwrap()
+            .limits
+            .expect("limits kept");
+        assert_eq!(l.daily_minutes, 60);
+        assert_eq!((l.wake.as_str(), l.bedtime.as_str()), ("00:00", "23:59"));
+        let w = l.weekend.as_ref().unwrap();
+        assert_eq!((w.wake.as_str(), w.bedtime.as_str()), ("09:00", "21:00"));
+        assert_eq!(l.to_budget(1).daily_minutes, Some(60));
+
+        // Only the weekend inverted: the weekday window is untouched.
+        let json = r#"{"limits":{"tz":"UTC","wake":"07:00","bedtime":"20:00","dailyMinutes":45,
+            "weekend":{"wake":"22:00","bedtime":"09:00"}}}"#;
+        let l = parse_child_config(json).unwrap().limits.unwrap();
+        assert_eq!((l.wake.as_str(), l.bedtime.as_str()), ("07:00", "20:00"));
+        let w = l.weekend.as_ref().unwrap();
+        assert_eq!((w.wake.as_str(), w.bedtime.as_str()), ("00:00", "23:59"));
+        assert_eq!(l.daily_minutes, 45);
+    }
+
+    /// The legacy flat document keeps its cap too, rather than dropping the
+    /// child out of management altogether.
+    #[test]
+    fn an_inverted_legacy_flat_file_keeps_the_daily_cap() {
+        let json = r#"{"tz":"UTC","wake":"21:00","bedtime":"20:00","dailyMinutes":90}"#;
+        let cfg = parse_child_config(json).expect("still managed");
+        let l = cfg.limits.unwrap();
+        assert_eq!(l.daily_minutes, 90);
+        assert!(l.validate().is_ok());
     }
 }

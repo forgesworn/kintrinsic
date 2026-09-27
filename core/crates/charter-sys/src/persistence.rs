@@ -32,6 +32,45 @@ pub trait PendingStore: Send + Sync {
     fn remove(&self, req_id: &str) -> SysResult<()>;
 }
 
+/// A slot's replay floor, and where it came from (R2-7/R2-8).
+///
+/// `Record` is the ordinary case: the floor is the stored clause's own
+/// `issued_at`, and a clause at or below it is a replay. `Sidecar` means the
+/// floor came from the `floor-<kind>` sidecar because the record is torn, or
+/// because a crash between the sidecar write and the record write left the
+/// sidecar ahead of the record. Either way the clause that raised the sidecar
+/// may never have landed, so the pinned guardian's re-send at exactly that
+/// `issued_at` is accepted; anything below it is still a replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayFloor {
+    Record(u64),
+    Sidecar(u64),
+}
+
+impl ReplayFloor {
+    /// The floor itself: the highest `issued_at` the slot has vouched for.
+    pub fn issued_at(self) -> u64 {
+        match self {
+            ReplayFloor::Record(n) | ReplayFloor::Sidecar(n) => n,
+        }
+    }
+
+    /// The `prev_issued_at` to authenticate a new clause against (a clause
+    /// must be strictly above it): the floor for a record, one below it for
+    /// a sidecar, so the guardian's same-`issued_at` re-send is accepted.
+    pub fn verify_bound(self) -> Option<u64> {
+        match self {
+            ReplayFloor::Record(n) => Some(n),
+            ReplayFloor::Sidecar(n) => n.checked_sub(1),
+        }
+    }
+
+    /// Whether a clause at `issued_at` clears this floor.
+    pub fn admits(self, issued_at: u64) -> bool {
+        self.verify_bound().is_none_or(|b| issued_at > b)
+    }
+}
+
 /// Authenticated standing-clause store with per-kind monotonic `issuedAt`
 /// rollback protection. `put_clause` rejects a clause whose `issued_at` is at
 /// or below the highest already seen for that kind.
@@ -43,6 +82,11 @@ pub trait ClauseStore: Send + Sync {
     fn get_clause(&self, kind: u16) -> SysResult<Option<String>>;
     /// The highest `issued_at` ever accepted for `kind`.
     fn highest_issued_at(&self, kind: u16) -> SysResult<Option<u64>>;
+    /// The replay floor for `kind` with its source. A store without a
+    /// sidecar only ever has a record floor.
+    fn replay_floor(&self, kind: u16) -> SysResult<Option<ReplayFloor>> {
+        Ok(self.highest_issued_at(kind)?.map(ReplayFloor::Record))
+    }
 }
 
 /// Cache of signature-verified curator web lists, keyed by an opaque string
@@ -111,6 +155,13 @@ pub trait ChildClauseStore: Send + Sync {
     fn get_child_clause(&self, subject_hex: &str, kind: u16) -> SysResult<Option<String>>;
     /// The highest `issued_at` ever accepted for `(subject_hex, kind)`.
     fn highest_issued_at(&self, subject_hex: &str, kind: u16) -> SysResult<Option<u64>>;
+    /// The replay floor for `(subject_hex, kind)` with its source. A store
+    /// without a sidecar only ever has a record floor.
+    fn replay_floor(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ReplayFloor>> {
+        Ok(self
+            .highest_issued_at(subject_hex, kind)?
+            .map(ReplayFloor::Record))
+    }
     /// Every cached `(kind, json)` for `subject_hex`, in ascending `kind`
     /// order, plus the kinds whose slot is present-but-unreadable — see
     /// [`ChildClauses`]. One bad file never costs the caller the others.
@@ -196,6 +247,8 @@ mod mock {
         clause_writes_fail: bool,
         /// Fault injection — see [`MockDisk::make_unreadable`].
         unreadable_kinds: std::collections::BTreeSet<u16>,
+        /// Fault injection — see [`MockDisk::tear_clause_records`].
+        records_torn: bool,
     }
 
     /// A shared in-memory "disk". Cloning shares the same backing state, so a
@@ -254,6 +307,27 @@ mod mock {
                 .expect("disk lock")
                 .unreadable_kinds
                 .insert(kind);
+        }
+
+        /// Tear every stored clause RECORD while its floor sidecar still
+        /// reads, as a power cut mid-write does on a real disk: from here on
+        /// the clause stores report a [`ReplayFloor::Sidecar`] floor, and so
+        /// take the guardian's re-send at exactly that `issued_at` (R2-7).
+        /// The next accepted put rewrites the record and mends the tear.
+        pub fn tear_clause_records(&self) {
+            self.0.lock().expect("disk lock").records_torn = true;
+        }
+
+        fn records_torn(&self) -> bool {
+            self.0.lock().expect("disk lock").records_torn
+        }
+
+        fn floor_of(&self, floor: Option<u64>) -> Option<ReplayFloor> {
+            if self.records_torn() {
+                floor.map(ReplayFloor::Sidecar)
+            } else {
+                floor.map(ReplayFloor::Record)
+            }
         }
 
         fn clause_reads_broken(&self) -> bool {
@@ -360,10 +434,16 @@ mod mock {
             }
             let mut g = self.disk.0.lock().expect("disk lock");
             if let Some(&high) = g.clause_high.get(&kind) {
-                if issued_at <= high {
+                let floor = if g.records_torn {
+                    ReplayFloor::Sidecar(high)
+                } else {
+                    ReplayFloor::Record(high)
+                };
+                if !floor.admits(issued_at) {
                     return Ok(false);
                 }
             }
+            g.records_torn = false;
             g.clause_high.insert(kind, issued_at);
             g.clauses.insert(kind, (issued_at, json.to_string()));
             Ok(true)
@@ -393,6 +473,10 @@ mod mock {
                 .clause_high
                 .get(&kind)
                 .copied())
+        }
+        fn replay_floor(&self, kind: u16) -> SysResult<Option<ReplayFloor>> {
+            let high = self.highest_issued_at(kind)?;
+            Ok(self.disk.floor_of(high))
         }
     }
 
@@ -453,10 +537,16 @@ mod mock {
             let mut g = self.disk.0.lock().expect("disk lock");
             let key = (subject_hex.to_string(), kind);
             if let Some((prev, _)) = g.child_clauses.get(&key) {
-                if issued_at <= *prev {
+                let floor = if g.records_torn {
+                    ReplayFloor::Sidecar(*prev)
+                } else {
+                    ReplayFloor::Record(*prev)
+                };
+                if !floor.admits(issued_at) {
                     return Ok(false);
                 }
             }
+            g.records_torn = false;
             g.child_clauses.insert(key, (issued_at, json.to_string()));
             Ok(true)
         }
@@ -485,6 +575,10 @@ mod mock {
                 .child_clauses
                 .get(&(subject_hex.to_string(), kind))
                 .map(|(t, _)| *t))
+        }
+        fn replay_floor(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ReplayFloor>> {
+            let high = self.highest_issued_at(subject_hex, kind)?;
+            Ok(self.disk.floor_of(high))
         }
         fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses> {
             if self.disk.clause_reads_broken() {
@@ -745,6 +839,114 @@ mod real {
         json: String,
     }
 
+    // ---- replay-floor sidecar (M3) -----------------------------------------
+    //
+    // Next to every `<kind>.json` record sits `floor-<kind>`, holding only the
+    // record's `issued_at` as decimal text, written atomically BEFORE the
+    // record on every accepted put. A record that no longer parses (a torn
+    // write, a bad sector) used to be a permanent, silent dead end: the floor
+    // was unreadable, so the broker refused every new clause for that slot —
+    // including the guardian's correction — and `put` could not have replaced
+    // the record anyway, since it re-read it first. With the sidecar the floor
+    // survives the record, a strictly newer clause overwrites the torn one,
+    // and replay protection holds. Both unreadable (or a record torn before
+    // this build wrote any sidecar) keeps the old refusal: no floor, no
+    // acceptance. No extension, so directory walkers that look for `.json`
+    // skip it, and its temp file cannot share a name with the record's.
+
+    fn floor_file(dir: &std::path::Path, kind: u16) -> PathBuf {
+        dir.join(format!("floor-{kind}"))
+    }
+
+    fn read_floor(path: &std::path::Path) -> SysResult<Option<u64>> {
+        match read_opt(path)? {
+            Some(s) => s
+                .trim()
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|e| io_err("parse floor", e)),
+            None => Ok(None),
+        }
+    }
+
+    /// The replay floor for one slot: the higher of the record's `issued_at`
+    /// and the sidecar's when both read (R2-8), the sidecar's if the record
+    /// is there but unreadable, and the record's error if that fails too.
+    /// The floor is [`ReplayFloor::Sidecar`] whenever the sidecar supplied it
+    /// — the record torn, or left below the sidecar by a crash between the two
+    /// writes — so the guardian's re-send at that `issued_at` is taken (R2-7).
+    ///
+    /// A readable record whose sidecar is missing (every record written
+    /// before 0.7.9), or unreadable, or below it, has the sidecar written
+    /// here (N2) — atomically, from the record's own `issued_at` — so an
+    /// upgraded install gains torn-record recovery without waiting for the
+    /// guardian to re-issue each kind, and `sidecar >= record` holds from then
+    /// on. A sidecar ABOVE the record is left alone: lowering it would let an
+    /// older clause in beneath the one that raised it. A failed backfill is
+    /// logged, never fatal: the record is still the floor, and the next read
+    /// tries again. Callers hold the store's lock, so a backfill can never
+    /// land after (and below) a concurrent put's raised floor.
+    fn floor_of(
+        rec: SysResult<Option<ClauseRec>>,
+        floor_path: &std::path::Path,
+    ) -> SysResult<Option<ReplayFloor>> {
+        match rec {
+            Ok(Some(r)) => match read_floor(floor_path) {
+                Ok(Some(f)) if f > r.issued_at => Ok(Some(ReplayFloor::Sidecar(f))),
+                Ok(Some(f)) if f == r.issued_at => Ok(Some(ReplayFloor::Record(f))),
+                _ => {
+                    if let Err(e) = atomic_write(floor_path, r.issued_at.to_string().as_bytes()) {
+                        eprintln!(
+                            "charter: could not backfill the replay floor {} ({e}) — the \
+                             record is still the floor; retrying on the next read",
+                            floor_path.display()
+                        );
+                    }
+                    Ok(Some(ReplayFloor::Record(r.issued_at)))
+                }
+            },
+            Ok(None) => Ok(None),
+            Err(e) => match read_floor(floor_path) {
+                Ok(Some(f)) => {
+                    eprintln!(
+                        "charter: clause record beside {} is unreadable ({e}) — using the \
+                         persisted replay floor {f}",
+                        floor_path.display()
+                    );
+                    Ok(Some(ReplayFloor::Sidecar(f)))
+                }
+                _ => Err(e),
+            },
+        }
+    }
+
+    /// The monotonic put shared by both clause stores: refuse what the floor
+    /// does not admit, else raise the sidecar floor, then write the record.
+    fn put_rec(
+        record_path: &std::path::Path,
+        floor_path: &std::path::Path,
+        floor: Option<ReplayFloor>,
+        issued_at: u64,
+        json: &str,
+    ) -> SysResult<bool> {
+        if floor.is_some_and(|f| !f.admits(issued_at)) {
+            return Ok(false);
+        }
+        // Floor first: a crash between the two leaves a floor ABOVE the
+        // record. That is harmless: the floor is then a sidecar floor, which
+        // still takes the guardian's re-send of the clause that raised it and
+        // refuses anything older.
+        atomic_write(floor_path, issued_at.to_string().as_bytes())?;
+        write_json(
+            record_path,
+            &ClauseRec {
+                issued_at,
+                json: json.to_string(),
+            },
+        )?;
+        Ok(true)
+    }
+
     pub struct RealClauseStore {
         base: PathBuf,
         lock: Mutex<()>,
@@ -764,6 +966,9 @@ mod real {
         fn file(&self, kind: u16) -> PathBuf {
             self.base.join("clauses").join(format!("{kind}.json"))
         }
+        fn floor(&self, kind: u16) -> PathBuf {
+            floor_file(&self.base.join("clauses"), kind)
+        }
         fn current(&self, kind: u16) -> SysResult<Option<ClauseRec>> {
             read_json(&self.file(kind))
         }
@@ -771,25 +976,19 @@ mod real {
     impl ClauseStore for RealClauseStore {
         fn put_clause(&self, kind: u16, issued_at: u64, json: &str) -> SysResult<bool> {
             let _g = self.lock.lock().expect("clause lock");
-            if let Some(cur) = self.current(kind)? {
-                if issued_at <= cur.issued_at {
-                    return Ok(false);
-                }
-            }
-            write_json(
-                &self.file(kind),
-                &ClauseRec {
-                    issued_at,
-                    json: json.to_string(),
-                },
-            )?;
-            Ok(true)
+            let floor = floor_of(self.current(kind), &self.floor(kind))?;
+            put_rec(&self.file(kind), &self.floor(kind), floor, issued_at, json)
         }
         fn get_clause(&self, kind: u16) -> SysResult<Option<String>> {
             Ok(self.current(kind)?.map(|r| r.json))
         }
         fn highest_issued_at(&self, kind: u16) -> SysResult<Option<u64>> {
-            Ok(self.current(kind)?.map(|r| r.issued_at))
+            Ok(self.replay_floor(kind)?.map(ReplayFloor::issued_at))
+        }
+        fn replay_floor(&self, kind: u16) -> SysResult<Option<ReplayFloor>> {
+            // Locked: `floor_of` may backfill the sidecar.
+            let _g = self.lock.lock().expect("clause lock");
+            floor_of(self.current(kind), &self.floor(kind))
         }
     }
 
@@ -854,6 +1053,9 @@ mod real {
         fn file(&self, subject_hex: &str, kind: u16) -> SysResult<PathBuf> {
             Ok(self.clauses_dir(subject_hex)?.join(format!("{kind}.json")))
         }
+        fn floor(&self, subject_hex: &str, kind: u16) -> SysResult<PathBuf> {
+            Ok(floor_file(&self.clauses_dir(subject_hex)?, kind))
+        }
         fn current(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ClauseRec>> {
             read_json(&self.file(subject_hex, kind)?)
         }
@@ -867,25 +1069,33 @@ mod real {
             json: &str,
         ) -> SysResult<bool> {
             let _g = self.lock.lock().expect("child clause lock");
-            if let Some(cur) = self.current(subject_hex, kind)? {
-                if issued_at <= cur.issued_at {
-                    return Ok(false);
-                }
-            }
-            write_json(
-                &self.file(subject_hex, kind)?,
-                &ClauseRec {
-                    issued_at,
-                    json: json.to_string(),
-                },
+            let floor = floor_of(
+                self.current(subject_hex, kind),
+                &self.floor(subject_hex, kind)?,
             )?;
-            Ok(true)
+            put_rec(
+                &self.file(subject_hex, kind)?,
+                &self.floor(subject_hex, kind)?,
+                floor,
+                issued_at,
+                json,
+            )
         }
         fn get_child_clause(&self, subject_hex: &str, kind: u16) -> SysResult<Option<String>> {
             Ok(self.current(subject_hex, kind)?.map(|r| r.json))
         }
         fn highest_issued_at(&self, subject_hex: &str, kind: u16) -> SysResult<Option<u64>> {
-            Ok(self.current(subject_hex, kind)?.map(|r| r.issued_at))
+            Ok(self
+                .replay_floor(subject_hex, kind)?
+                .map(ReplayFloor::issued_at))
+        }
+        fn replay_floor(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ReplayFloor>> {
+            // Locked: `floor_of` may backfill the sidecar.
+            let _g = self.lock.lock().expect("child clause lock");
+            floor_of(
+                self.current(subject_hex, kind),
+                &self.floor(subject_hex, kind)?,
+            )
         }
         fn clauses_for(&self, subject_hex: &str) -> SysResult<ChildClauses> {
             let rd = match fs::read_dir(self.clauses_dir(subject_hex)?) {
@@ -1272,6 +1482,179 @@ mod real {
             assert!(s.clauses_for_strict(&aa).is_err(), "torn is not absent");
             // A child nobody has set anything for is still simply empty.
             assert_eq!(s.clauses_for_strict(&subj("b")).unwrap(), vec![]);
+        }
+
+        /// M3: a torn record with its floor sidecar beside it. The floor comes
+        /// from the sidecar, so a strictly newer clause replaces the torn
+        /// record and an older or equal one is still refused.
+        #[test]
+        fn a_torn_record_with_a_floor_sidecar_takes_a_newer_clause() {
+            let base = tmp("childclause-sidecar");
+            let s = RealChildClauseStore::with_base(&base);
+            let aa = subj("a");
+            assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":"good"}"#).unwrap());
+            let dir = base.join("children").join(&aa).join("clauses");
+            assert_eq!(fs::read_to_string(dir.join("floor-2")).unwrap(), "100");
+            fs::write(dir.join("2.json"), r#"{"issued_at":100,"js"#).unwrap();
+
+            assert_eq!(s.highest_issued_at(&aa, 2).unwrap(), Some(100));
+            assert_eq!(
+                s.replay_floor(&aa, 2).unwrap(),
+                Some(ReplayFloor::Sidecar(100))
+            );
+            assert!(!s.put_child_clause(&aa, 2, 99, r#"{"b":"older"}"#).unwrap());
+            // R2-7: the guardian's re-send at the floor itself is taken, once.
+            assert!(s
+                .put_child_clause(&aa, 2, 100, r#"{"b":"resent"}"#)
+                .unwrap());
+            assert_eq!(
+                s.replay_floor(&aa, 2).unwrap(),
+                Some(ReplayFloor::Record(100))
+            );
+            assert!(!s
+                .put_child_clause(&aa, 2, 100, r#"{"b":"replay"}"#)
+                .unwrap());
+            assert!(s.put_child_clause(&aa, 2, 101, r#"{"b":"fixed"}"#).unwrap());
+            assert_eq!(
+                s.get_child_clause(&aa, 2).unwrap().as_deref(),
+                Some(r#"{"b":"fixed"}"#)
+            );
+            // The sidecar is not a record.
+            assert_eq!(s.clauses_for(&aa).unwrap().clauses.len(), 1);
+
+            // The single-child store behaves the same.
+            let c = RealClauseStore::with_base(&base);
+            assert!(c.put_clause(3, 50, "{}").unwrap());
+            fs::write(base.join("clauses").join("3.json"), "{").unwrap();
+            assert_eq!(c.highest_issued_at(3).unwrap(), Some(50));
+            assert!(!c.put_clause(3, 49, "{}").unwrap());
+            assert!(c.put_clause(3, 50, "{}").unwrap(), "the re-send");
+            assert!(!c.put_clause(3, 50, "{}").unwrap(), "then a replay");
+            assert!(c.put_clause(3, 51, r#"{"x":1}"#).unwrap());
+            assert_eq!(c.get_clause(3).unwrap().as_deref(), Some(r#"{"x":1}"#));
+        }
+
+        /// R2-8: a crash between the sidecar write and the record write
+        /// leaves the sidecar above the record. The floor is the higher of
+        /// the two, so an older genuine clause between them cannot slip in
+        /// and lower the sidecar; the guardian's re-send of the clause that
+        /// raised it is taken.
+        #[test]
+        fn a_sidecar_left_above_the_record_is_the_floor() {
+            let base = tmp("childclause-sidecar-ahead");
+            let s = RealChildClauseStore::with_base(&base);
+            let aa = subj("a");
+            assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":"r"}"#).unwrap());
+            let dir = base.join("children").join(&aa).join("clauses");
+            // The crash: the sidecar for 120 landed, the record did not.
+            fs::write(dir.join("floor-2"), "120").unwrap();
+            assert_eq!(
+                s.replay_floor(&aa, 2).unwrap(),
+                Some(ReplayFloor::Sidecar(120))
+            );
+            assert_eq!(s.highest_issued_at(&aa, 2).unwrap(), Some(120));
+            assert!(
+                !s.put_child_clause(&aa, 2, 110, r#"{"b":"between"}"#)
+                    .unwrap(),
+                "an older clause between record and sidecar is refused"
+            );
+            assert_eq!(fs::read_to_string(dir.join("floor-2")).unwrap(), "120");
+            assert!(s
+                .put_child_clause(&aa, 2, 120, r#"{"b":"resent"}"#)
+                .unwrap());
+            assert_eq!(
+                s.get_child_clause(&aa, 2).unwrap().as_deref(),
+                Some(r#"{"b":"resent"}"#)
+            );
+            assert!(!s.put_child_clause(&aa, 2, 120, "{}").unwrap());
+
+            let c = RealClauseStore::with_base(&base);
+            assert!(c.put_clause(3, 50, "{}").unwrap());
+            fs::write(base.join("clauses").join("floor-3"), "60").unwrap();
+            assert_eq!(c.replay_floor(3).unwrap(), Some(ReplayFloor::Sidecar(60)));
+            assert!(!c.put_clause(3, 55, "{}").unwrap());
+            assert!(c.put_clause(3, 60, "{}").unwrap());
+        }
+
+        /// N2: a record written before the sidecar existed gains one on its
+        /// first read, so a later tear is recoverable like any other.
+        #[test]
+        fn a_pre_sidecar_record_is_backfilled_on_read() {
+            let base = tmp("childclause-backfill");
+            let s = RealChildClauseStore::with_base(&base);
+            let aa = subj("a");
+            assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":"good"}"#).unwrap());
+            let dir = base.join("children").join(&aa).join("clauses");
+            // As a pre-0.7.9 install left it: the record and no sidecar.
+            fs::remove_file(dir.join("floor-2")).unwrap();
+            assert_eq!(s.highest_issued_at(&aa, 2).unwrap(), Some(100));
+            assert_eq!(fs::read_to_string(dir.join("floor-2")).unwrap(), "100");
+            // A torn sidecar beside a good record is rewritten too.
+            fs::write(dir.join("floor-2"), "1x").unwrap();
+            assert_eq!(s.highest_issued_at(&aa, 2).unwrap(), Some(100));
+            assert_eq!(fs::read_to_string(dir.join("floor-2")).unwrap(), "100");
+            // Now the record tears: the backfilled floor carries the slot.
+            fs::write(dir.join("2.json"), r#"{"issued_at":100,"js"#).unwrap();
+            assert_eq!(s.highest_issued_at(&aa, 2).unwrap(), Some(100));
+            assert!(!s.put_child_clause(&aa, 2, 99, "{}").unwrap());
+            assert!(s.put_child_clause(&aa, 2, 101, "{}").unwrap());
+
+            // The single-child store behaves the same, via the put path too.
+            let c = RealClauseStore::with_base(&base);
+            assert!(c.put_clause(3, 50, "{}").unwrap());
+            let floor3 = base.join("clauses").join("floor-3");
+            fs::remove_file(&floor3).unwrap();
+            assert!(!c.put_clause(3, 50, "{}").unwrap(), "a replay is refused");
+            assert_eq!(fs::read_to_string(&floor3).unwrap(), "50");
+        }
+
+        /// A backfill that cannot be written is logged, not fatal: the record
+        /// is still the floor.
+        #[test]
+        fn a_failed_backfill_is_not_fatal() {
+            let base = tmp("childclause-backfill-fail");
+            let c = RealClauseStore::with_base(&base);
+            assert!(c.put_clause(3, 50, "{}").unwrap());
+            let floor3 = base.join("clauses").join("floor-3");
+            fs::remove_file(&floor3).unwrap();
+            // A directory where the sidecar belongs: the atomic rename onto it
+            // fails whoever runs the test (root included).
+            fs::create_dir_all(floor3.join("occupied")).unwrap();
+            assert_eq!(c.highest_issued_at(3).unwrap(), Some(50));
+            assert_eq!(c.highest_issued_at(3).unwrap(), Some(50), "and again");
+            assert!(
+                !c.put_clause(3, 50, "{}").unwrap(),
+                "still refuses a replay"
+            );
+            assert!(floor3.is_dir(), "nothing was clobbered");
+        }
+
+        /// A torn record with no sidecar (written before this build, or the
+        /// sidecar is torn too) keeps the old refusal: no floor, no acceptance.
+        #[test]
+        fn a_torn_record_without_a_sidecar_is_still_refused() {
+            let base = tmp("childclause-nosidecar");
+            let s = RealChildClauseStore::with_base(&base);
+            let aa = subj("a");
+            assert!(s.put_child_clause(&aa, 2, 100, r#"{"b":"good"}"#).unwrap());
+            let dir = base.join("children").join(&aa).join("clauses");
+            fs::write(dir.join("2.json"), r#"{"issued_at":100,"js"#).unwrap();
+            fs::remove_file(dir.join("floor-2")).unwrap();
+            assert!(s.highest_issued_at(&aa, 2).is_err());
+            assert!(s.put_child_clause(&aa, 2, 101, "{}").is_err());
+            fs::write(dir.join("floor-2"), "1x").unwrap();
+            assert!(
+                s.highest_issued_at(&aa, 2).is_err(),
+                "a torn sidecar is no floor"
+            );
+            assert!(s.put_child_clause(&aa, 2, 101, "{}").is_err());
+
+            let c = RealClauseStore::with_base(&base);
+            assert!(c.put_clause(3, 50, "{}").unwrap());
+            fs::write(base.join("clauses").join("3.json"), "{").unwrap();
+            fs::remove_file(base.join("clauses").join("floor-3")).unwrap();
+            assert!(c.highest_issued_at(3).is_err());
+            assert!(c.put_clause(3, 51, "{}").is_err());
         }
 
         #[test]

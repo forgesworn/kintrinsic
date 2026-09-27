@@ -23,7 +23,7 @@ use charter_schedule::{
     Remaining, StandDown, UsageLedger, WeekStart,
 };
 
-use crate::child_policy::{EffectivePolicy, PolicySource};
+use crate::child_policy::{fail_safe_budget, EffectivePolicy, PolicySource, UNRESOLVED_TZ};
 
 /// A guardian-approved `time.extend` grant waiting to be applied to the live
 /// per-child enforcer. The broker's `time.extend` enactor deposits these; the
@@ -59,6 +59,50 @@ fn policy_tz(p: &EffectivePolicy) -> String {
         .unwrap_or_else(|| "UTC".into())
 }
 
+/// Fill a fail-safe clause's unresolved tz (see
+/// [`crate::child_policy::UNRESOLVED_TZ`]) with `fallback` — the child's
+/// ledger tz, else the device tz — so an unreadable clause never re-keys the
+/// usage ledger onto a day that is not the ward's (M2: a UTC midnight that is
+/// not a local one used to zero `used_today`).
+fn with_resolved_tz(p: &EffectivePolicy, fallback: &str) -> EffectivePolicy {
+    let mut p = p.clone();
+    if let Some(s) = p.schedule.as_mut().filter(|s| s.tz == UNRESOLVED_TZ) {
+        s.tz = fallback.to_string();
+    }
+    if let Some(b) = p.budget.as_mut().filter(|b| b.tz == UNRESOLVED_TZ) {
+        b.tz = fallback.to_string();
+    }
+    p
+}
+
+/// The device's own IANA tz, for a child with no ledger yet: `$TZ`, else
+/// `/etc/timezone`, else the `/etc/localtime` symlink target, else UTC.
+fn device_tz() -> String {
+    let valid = |t: &str| !t.is_empty() && t.parse::<chrono_tz::Tz>().is_ok();
+    if let Ok(t) = std::env::var("TZ") {
+        let t = t.trim().trim_start_matches(':');
+        if valid(t) {
+            return t.to_string();
+        }
+    }
+    if let Ok(t) = std::fs::read_to_string("/etc/timezone") {
+        if valid(t.trim()) {
+            return t.trim().to_string();
+        }
+    }
+    if let Ok(p) = std::fs::canonicalize("/etc/localtime") {
+        if let Some(t) = p
+            .to_str()
+            .and_then(|s| s.split_once("zoneinfo/").map(|(_, t)| t))
+        {
+            if valid(t) {
+                return t.to_string();
+            }
+        }
+    }
+    "UTC".into()
+}
+
 fn policy_week_start(p: &EffectivePolicy) -> WeekStart {
     p.budget
         .as_ref()
@@ -91,10 +135,15 @@ struct ChildEnforcer {
     /// precedence comment in `tick_attributed`.
     buckets_tz: Option<String>,
     buckets_week_start: Option<WeekStart>,
+    /// The fail-safe paused budget standing in for `budget` while the
+    /// platform cannot persist this child's usage ledger (R3-H1). `None` =
+    /// saves are landing. See [`MultiChildEnforcer::set_usage_unsaved`].
+    unsaved_budget: Option<GrantBudget>,
 }
 
 impl ChildEnforcer {
     fn new(policy: &EffectivePolicy, now: i64) -> Self {
+        let policy = &with_resolved_tz(policy, &device_tz());
         let tz = policy_tz(policy);
         let week_start = policy_week_start(policy);
         ChildEnforcer {
@@ -110,12 +159,29 @@ impl ChildEnforcer {
             stand_down: None,
             buckets_tz: None,
             buckets_week_start: None,
+            unsaved_budget: None,
         }
+    }
+
+    /// The budget the caps are judged against: the fail-safe paused one
+    /// while the usage ledger cannot be saved, else the policy's. Only the
+    /// CAPS — the usage ledger still rolls on the policy budget's tz and
+    /// weekStart, and still charges by its time model, so a stretch of
+    /// failed saves never re-keys the ledger.
+    ///
+    /// The paused stand-in applies only while a budget is in force (R4-2):
+    /// a schedule-only child has no cap for a lost ledger to refill.
+    fn quota_budget(&self) -> Option<&GrantBudget> {
+        self.budget
+            .as_ref()
+            .and(self.unsaved_budget.as_ref())
+            .or(self.budget.as_ref())
     }
 
     /// Replace the effective policy (a parent edit, or a guardian clause now
     /// supersedes device-only) — keep the accrued ledgers across the flip.
     fn relimit(&mut self, policy: &EffectivePolicy) {
+        let policy = &with_resolved_tz(policy, self.usage.tz_name());
         self.tz = policy_tz(policy);
         self.schedule = policy.schedule.clone();
         self.budget = policy.budget.clone();
@@ -199,11 +265,25 @@ pub struct ChildDecision {
 #[derive(Default)]
 pub struct MultiChildEnforcer {
     children: BTreeMap<u32, ChildEnforcer>,
+    /// Whether the platform vouches for the wall clock (N1) — handed to
+    /// every child's usage ledger at the top of each tick. `false` (the
+    /// default) keeps the ledgers' pure high-water day key; see
+    /// [`set_clock_trusted`](Self::set_clock_trusted).
+    clock_trusted: bool,
 }
 
 impl MultiChildEnforcer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the wall clock can be trusted for the coming ticks — on
+    /// Linux, the kernel reports it NTP-synchronised. Only then may a usage
+    /// ledger drop a far-future day/week key back (see
+    /// `UsageLedger::set_clock_trusted`). Never calling this leaves every
+    /// ledger untrusted, which is the fail-safe (and Android's) behaviour.
+    pub fn set_clock_trusted(&mut self, trusted: bool) {
+        self.clock_trusted = trusted;
     }
 
     /// The managed uids currently tracked.
@@ -246,6 +326,9 @@ impl MultiChildEnforcer {
                     if let Some(snap) = extension {
                         child.restore_extension(&snap);
                     }
+                    // Re-apply now the restored ledger's tz is known, so an
+                    // unresolved fail-safe tz takes it rather than the device's.
+                    child.relimit(policy);
                     self.children.insert(*uid, child);
                 }
             }
@@ -309,6 +392,9 @@ impl MultiChildEnforcer {
     /// screen apart from one being played on. See
     /// [`tick_open_with`](Self::tick_open_with) for what changes when
     /// `activity` does not count.
+    // One flat per-tick input list shared with the Linux and JNI callers; a
+    // struct would ripple through both for no behavioural gain.
+    #[allow(clippy::too_many_arguments)]
     pub fn tick_attributed_with(
         &mut self,
         activity: Activity,
@@ -320,7 +406,15 @@ impl MultiChildEnforcer {
         unrecognised: bool,
     ) -> Vec<ChildDecision> {
         let one: Vec<String> = app_bucket.map(str::to_string).into_iter().collect();
-        self.tick_open_with(activity, active_uid, now, elapsed, bucket, Some(&one), unrecognised)
+        self.tick_open_with(
+            activity,
+            active_uid,
+            now,
+            elapsed,
+            bucket,
+            Some(&one),
+            unrecognised,
+        )
     }
 
     /// [`tick_attributed`](Self::tick_attributed) for a device that can have
@@ -409,6 +503,9 @@ impl MultiChildEnforcer {
 
     /// [`tick_open`](Self::tick_open) with an explicit session [`Activity`] —
     /// see the doc section above it ("Locked and idle screens") for the rule.
+    // One flat per-tick input list shared with the Linux and JNI callers; a
+    // struct would ripple through both for no behavioural gain.
+    #[allow(clippy::too_many_arguments)]
     pub fn tick_open_with(
         &mut self,
         activity: Activity,
@@ -440,6 +537,7 @@ impl MultiChildEnforcer {
                 ),
                 (None, None) => (c.tz.clone(), WeekStart::Mon),
             };
+            c.usage.set_clock_trusted(self.clock_trusted);
             c.usage.reconcile(&usage_tz, week_start, now);
             c.extension.reconcile(&c.tz, now);
 
@@ -509,7 +607,14 @@ impl MultiChildEnforcer {
                 stand_down: c.stand_down,
                 now_unix: now,
                 schedule: c.schedule.as_ref(),
-                budget: c.budget.as_ref(),
+                // Field-wise, not `quota_budget()`: `core` is borrowed
+                // mutably below while these borrows are live.
+                // The paused stand-in only while a budget is in force (R4-2).
+                budget: c
+                    .budget
+                    .as_ref()
+                    .and(c.unsaved_budget.as_ref())
+                    .or(c.budget.as_ref()),
                 usage: &c.usage,
                 extension: &c.extension,
                 consolidated: c.consolidated.as_ref(),
@@ -597,11 +702,42 @@ impl MultiChildEnforcer {
             stand_down: c.stand_down,
             now_unix: now,
             schedule: c.schedule.as_ref(),
-            budget: c.budget.as_ref(),
+            budget: c.quota_budget(),
             usage: &c.usage,
             extension: &c.extension,
             consolidated: c.consolidated.as_ref(),
         }))
+    }
+
+    /// Mark whether the platform has been unable to persist this child's
+    /// usage ledger for long enough that it must be treated as lost (R3-H1).
+    /// While `true` the child's budget is judged as the fail-safe paused one
+    /// — zero a day, zero a week, no extension pool — exactly as an
+    /// unreadable budget clause is: time spent now would come back on the
+    /// next restart, so none is granted. The ledger itself keeps metering.
+    /// Survives `sync`'s re-limit; cleared only by passing `false`.
+    /// Untracked uids are a no-op.
+    ///
+    /// Only a child with a budget in force is paused (R4-2): a schedule-only
+    /// child has no daily cap for a lost ledger to hand back, and a disk
+    /// fault that is not theirs must not turn "open until bedtime" into
+    /// locked. For such a child this records nothing, so
+    /// [`usage_unsaved`](Self::usage_unsaved) stays `false`. The caller
+    /// re-asserts every tick, so a budget that arrives later is paused on
+    /// the next call; one that is revoked is released at once, because the
+    /// stand-in is only consulted while `budget` is `Some`.
+    pub fn set_usage_unsaved(&mut self, uid: u32, unsaved: bool) {
+        if let Some(c) = self.children.get_mut(&uid) {
+            c.unsaved_budget = (unsaved && c.budget.is_some()).then(|| fail_safe_budget(&c.tz));
+        }
+    }
+
+    /// Whether [`set_usage_unsaved`](Self::set_usage_unsaved) currently
+    /// holds this child's budget paused. `false` for an untracked uid.
+    pub fn usage_unsaved(&self, uid: u32) -> bool {
+        self.children
+            .get(&uid)
+            .is_some_and(|c| c.budget.is_some() && c.unsaved_budget.is_some())
     }
 
     /// Refresh a tracked child's cross-device usage view (USAGE_SYNC, B3).
@@ -836,6 +972,64 @@ mod tests {
             learning: None,
             source: PolicySource::Guardian,
         }
+    }
+
+    /// M2: a budget that stops parsing must not re-key the usage ledger onto
+    /// the UTC day. In Sydney (UTC+11 in January) 00:00 UTC is 11:00 local on
+    /// the SAME date; a fail-safe carrying `"UTC"` used to roll the ledger
+    /// there and hand the ward a fresh allowance for the rest of the day.
+    #[test]
+    fn a_malformed_budget_across_a_utc_midnight_does_not_zero_used_today() {
+        let sydney_budget = |minutes: u32| GrantBudget {
+            v: 1,
+            tz: "Australia/Sydney".into(),
+            daily_minutes: Some(minutes),
+            weekly_minutes: None,
+            week_start: None,
+            paused: None,
+            revoked: None,
+            model: None,
+            issued_at: 1,
+        };
+        let real = EffectivePolicy {
+            schedule: None,
+            budget: Some(sydney_budget(120)),
+            learning: None,
+            source: PolicySource::Guardian,
+        };
+        let torn = resolve_effective(
+            &charter_sys::persistence::ChildClauses {
+                clauses: vec![(
+                    charter_proto::ClauseKind::Budget.store_key(),
+                    "{not json".into(),
+                )],
+                unreadable: vec![],
+            },
+            None,
+            None,
+        );
+        assert_eq!(torn.budget.as_ref().unwrap().paused, Some(true));
+
+        let t0 = WED_0000 - 2 * 3600; // 22:00 UTC Tue = 09:00 Wed in Sydney
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, real.clone())], t0, |_| (None, None));
+        e.tick(Some(YOUNGER), t0 + 600, 600);
+        assert_eq!(e.used_today(YOUNGER, t0 + 600), Some(600));
+
+        // The budget turns unreadable, and stays so across 00:00 UTC.
+        e.sync(&[(YOUNGER, torn.clone())], t0 + 3600, |_| (None, None));
+        e.tick(None, t0 + 3600, 60);
+        e.sync(&[(YOUNGER, torn)], WED_0000 + 3600, |_| (None, None));
+        e.tick(None, WED_0000 + 3600, 60);
+
+        // The real budget comes back, still the same Sydney day.
+        e.sync(&[(YOUNGER, real)], WED_0000 + 3660, |_| (None, None));
+        e.tick(None, WED_0000 + 3660, 60);
+        assert_eq!(
+            e.used_today(YOUNGER, WED_0000 + 3660),
+            Some(600),
+            "a UTC midnight that is not a local one must not refill the day"
+        );
     }
 
     /// A guardian policy that is out of window right now, with a budget —
@@ -1123,6 +1317,32 @@ mod tests {
         e
     }
 
+    /// N1: the enforcer hands its clock-trust flag to every child's ledger.
+    /// A future excursion stays frozen until the clock is trusted, then
+    /// recovers without a refill.
+    #[test]
+    fn the_clock_trust_flag_reaches_each_childs_ledger() {
+        let now = wed_at(10);
+        let mut e = two_kids(now);
+        e.tick(Some(OLDER), now, 600);
+        let far = now + 30 * 86_400;
+        e.tick(Some(OLDER), far, 60);
+        // Corrected but untrusted: the day key stays ahead, nothing refills.
+        e.tick(Some(OLDER), now + 60, 0);
+        assert_eq!(e.used_today(OLDER, now + 60), Some(60));
+        e.set_clock_trusted(true);
+        e.tick(Some(OLDER), now + 120, 60);
+        // Kept, not zeroed — and the 600 the excursion's roll set aside
+        // comes back too (R2-1), so the trip bought nothing.
+        assert_eq!(
+            e.used_today(OLDER, now + 120),
+            Some(720),
+            "kept, not zeroed, and the pre-trip spend restored"
+        );
+        // The next real day starts fresh again.
+        assert_eq!(e.used_today(OLDER, now + 86_400), Some(0));
+    }
+
     #[test]
     fn independent_curfews_lock_each_child_separately() {
         let now = wed_at(19); // 19:00 — past younger's 18:00, before older's 20:00
@@ -1308,6 +1528,72 @@ mod tests {
             "guardian's 30-min cap locks the child"
         );
         assert_eq!(dec(&d, YOUNGER).source, PolicySource::Guardian);
+    }
+
+    /// R3-H1: a child whose usage ledger cannot be saved is held at the
+    /// fail-safe paused budget — locked, nothing left — through a re-limit,
+    /// and comes back to their real cap with the time already metered once
+    /// the platform clears it. The other child is untouched.
+    #[test]
+    fn an_unsaved_usage_ledger_holds_the_budget_paused_until_cleared() {
+        let now = wed_at(10);
+        let mut e = two_kids(now);
+        e.tick(Some(YOUNGER), now, 10 * 60);
+        assert!(!e.usage_unsaved(YOUNGER));
+        e.set_usage_unsaved(YOUNGER, true);
+        assert!(e.usage_unsaved(YOUNGER));
+        let d = e.tick(Some(YOUNGER), now + 60, 60);
+        assert!(dec(&d, YOUNGER).locked, "an unsaveable ledger locks");
+        assert_eq!(e.remaining(YOUNGER, now + 60).unwrap().budget_secs, 0);
+        assert!(!dec(&d, OLDER).locked, "only the affected child");
+        assert!(!e.usage_unsaved(OLDER));
+        // A re-limit (every tick's sync) does not lift it.
+        e.sync(
+            &[(YOUNGER, child("18:00", 60)), (OLDER, child("20:00", 120))],
+            now + 120,
+            |_| (None, None),
+        );
+        assert!(e.remaining(YOUNGER, now + 120).unwrap().locked);
+        // A save lands: back to the real cap, with the metered time kept.
+        e.set_usage_unsaved(YOUNGER, false);
+        assert!(!e.usage_unsaved(YOUNGER));
+        let d = e.tick(Some(YOUNGER), now + 180, 0);
+        assert!(!dec(&d, YOUNGER).locked);
+        assert_eq!(e.used_today(YOUNGER, now + 180), Some(11 * 60));
+        // Untracked uids are a no-op.
+        e.set_usage_unsaved(4242, true);
+        assert!(!e.usage_unsaved(4242));
+    }
+
+    /// R4-2: a schedule-only child is never paused by an unsaved ledger —
+    /// there is no cap to refill — and a budget revoked while paused
+    /// releases the child at once rather than leaving the stand-in behind.
+    #[test]
+    fn an_unsaved_ledger_never_pauses_a_child_without_a_budget() {
+        let now = wed_at(10);
+        let mut open = child("20:00", 60);
+        open.budget = None;
+        let mut e = MultiChildEnforcer::new();
+        e.sync(
+            &[(YOUNGER, child("18:00", 60)), (OLDER, open.clone())],
+            now,
+            |_| (None, None),
+        );
+        e.set_usage_unsaved(YOUNGER, true);
+        e.set_usage_unsaved(OLDER, true);
+        let d = e.tick(Some(OLDER), now + 60, 60);
+        assert!(dec(&d, YOUNGER).locked, "the budgeted child is paused");
+        assert!(!dec(&d, OLDER).locked, "the schedule-only child is not");
+        assert!(!e.usage_unsaved(OLDER), "and STATUS does not claim it");
+        // The guardian revokes the budget while the pause stands.
+        e.sync(
+            &[(YOUNGER, open), (OLDER, child("20:00", 60))],
+            now + 120,
+            |_| (None, None),
+        );
+        let d = e.tick(Some(YOUNGER), now + 180, 60);
+        assert!(!dec(&d, YOUNGER).locked, "no budget, nothing to pause");
+        assert!(!e.usage_unsaved(YOUNGER));
     }
 
     #[test]

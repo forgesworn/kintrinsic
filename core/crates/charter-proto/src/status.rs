@@ -234,13 +234,48 @@ pub struct StatusPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_unreachable_polls: Option<u32>,
     /// This device could not construct its own relay transport this run (an
-    /// unusable machine secret — B4, `internal/reviews/2026-09-21/01-core-crypto-proto.md`).
+    /// unusable machine secret — B4, the 2026-09-21 review).
     /// Cached clauses are still being enforced; nothing is being polled or
     /// published on the failed transport. Absent (or the machine reporting
     /// it never got out at all — the report itself needs A working
     /// transport) is the ordinary state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_unavailable: Option<bool>,
+    /// The device's wall clock went BACKWARDS since its last STATUS: the
+    /// previous emitted STATUS's `ts` (unix seconds), stamped on the first
+    /// STATUS emitted with a lower `ts` and omitted from the ones after it.
+    ///
+    /// A guardian keeps the highest-`ts` STATUS per device as current, so
+    /// without this a clock set back (an NTP correction, or a ward at the
+    /// firmware RTC) would leave every later STATUS looking stale and the
+    /// feed frozen until wall time climbed back. With it, a lower-`ts` STATUS
+    /// may replace the stored one only when this is at least the stored
+    /// `ts` — the device vouching that it saw that STATUS and has since
+    /// stepped back. Absent in the ordinary state; additive under the open
+    /// STATUS field-set decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_stepped_back_from: Option<u64>,
+    /// The device's STATUS sequence number: strictly increasing per device
+    /// (across every child it reports on, and across restarts), whatever the
+    /// wall clock does. A guardian orders a device's STATUS by this when both
+    /// carry it, so neither a replayed nor a late-delivered STATUS can pass
+    /// for the current one, and a clock set back (or a restart that lost the
+    /// `clockSteppedBackFrom` marker) cannot freeze the feed. Seeded from
+    /// wall-clock unix milliseconds when the device has no stored value, so a
+    /// wiped state still sorts after the old sequence on a sane clock.
+    /// Absent from devices that predate it; additive under the open STATUS
+    /// field-set decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// This device has been unable to save the child's usage ledger for a
+    /// sustained stretch (Linux: five minutes of failed writes), so the
+    /// child's budget is being enforced as paused — nothing allowed — until
+    /// a save succeeds again. Time spent while the ledger cannot be written
+    /// would come back on the next restart, so the warden stops granting it.
+    /// Absent (never `false`) in the ordinary state; additive under the open
+    /// STATUS field-set decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_unsaved: Option<bool>,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -450,7 +485,43 @@ mod tests {
             enforcement_gap_secs: None,
             relay_unreachable_polls: None,
             transport_unavailable: None,
+            clock_stepped_back_from: None,
+            seq: None,
+            usage_unsaved: None,
         }
+    }
+
+    #[test]
+    fn usage_unsaved_omits_when_none_and_round_trips_camel_case() {
+        let mut s = sample();
+        assert!(!s.to_json().contains("usageUnsaved"));
+        s.usage_unsaved = Some(true);
+        let json = s.to_json();
+        assert!(json.contains("\"usageUnsaved\":true"), "got {json}");
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn seq_omits_when_none_and_round_trips_camel_case() {
+        let mut s = sample();
+        assert!(!s.to_json().contains("\"seq\""));
+        s.seq = Some(1_790_000_000_123);
+        let json = s.to_json();
+        assert!(json.contains("\"seq\":1790000000123"), "got {json}");
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn clock_stepped_back_from_omits_when_none_and_round_trips_camel_case() {
+        let mut s = sample();
+        assert!(!s.to_json().contains("clockSteppedBackFrom"));
+        s.clock_stepped_back_from = Some(1_700_000_100);
+        let json = s.to_json();
+        assert!(
+            json.contains("\"clockSteppedBackFrom\":1700000100"),
+            "got {json}"
+        );
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
     }
 
     #[test]

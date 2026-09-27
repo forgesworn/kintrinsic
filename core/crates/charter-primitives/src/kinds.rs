@@ -40,7 +40,7 @@ pub const CHARTER_DEVICE_PAIR_OFFER: u16 = 31117;
 
 /// Addressable (NIP-51-style) curator web-list: a curator's signed allow/deny
 /// entries; parents subscribe by pubkey. PROVISIONAL — final value is design
-/// open-question §10.1 (`docs/superpowers/specs/2026-06-28-charter-web-content-control-design.md`).
+/// open-question §10.1 (internal design spec 2026-06-28-charter-web-content-control-design).
 pub const CHARTER_CURATOR_WEB_LIST: u16 = 30100;
 
 /// Addressable SOFTWARE RELEASE (release key -> everyone): announces the
