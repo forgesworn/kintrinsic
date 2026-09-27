@@ -71,6 +71,7 @@ class CharterService : Service() {
     @Volatile private var lastTickAt = 0L
     @Volatile private var tickStartedAt = 0L
     @Volatile private var lastPollAt = 0L
+    @Volatile private var pollStartedAt = 0L
 
     private var tickWake: PowerManager.WakeLock? = null
     private var pollWake: PowerManager.WakeLock? = null
@@ -93,6 +94,7 @@ class CharterService : Service() {
 
     /** One relay round plus the install drain. Slow worker only. */
     private fun runPoll() {
+        pollStartedAt = SystemClock.elapsedRealtime()
         try {
             val r = controller.pollOnce()
             // Every round logged: this is the bring-up visibility for the
@@ -105,6 +107,7 @@ class CharterService : Service() {
         } catch (t: Throwable) {
             Log.e(TAG, "poll failed", t)
         } finally {
+            pollStartedAt = 0L
             lastPollAt = SystemClock.elapsedRealtime()
         }
     }
@@ -263,6 +266,14 @@ class CharterService : Service() {
                 // was. Restarting is the only move left: START_STICKY and the
                 // alarm bring the service back, and it re-applies everything.
                 Log.e(TAG, "enforcement tick wedged for ${(now - tickStartedAt) / 1000}s: restarting the process")
+                android.os.Process.killProcess(android.os.Process.myPid())
+                return
+            }
+            if (LivenessPolicy.pollWedged(now, pollStartedAt)) {
+                // Same for the slow worker: a poll hung in relay IO stops every
+                // later poll (and with it every guardian clause), and the
+                // queue behind it never drains. Restart, as for the tick.
+                Log.e(TAG, "relay poll hung for ${(now - pollStartedAt) / 1000}s: restarting the process")
                 android.os.Process.killProcess(android.os.Process.myPid())
                 return
             }

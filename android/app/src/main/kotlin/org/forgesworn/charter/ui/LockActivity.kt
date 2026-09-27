@@ -172,8 +172,13 @@ class LockActivity : Activity() {
         askWorker.post {
             val tl = runCatching { CharterCore.timeLeft(null, System.currentTimeMillis() / 1000) }
                 .getOrNull()
+            // A lock standing in for a failed app gate is not the core's lock,
+            // so the core's "unlocked" does not dismiss it; the warden's
+            // HideLock does, once the app gate recovers.
+            val standIn = intent?.getStringExtra("reason") ==
+                org.forgesworn.charter.service.DegradedAppGate.DEGRADED_REASON
             runOnUiThread {
-                if (tl != null && tl.known && !tl.locked) {
+                if (!standIn && tl != null && tl.known && !tl.locked) {
                     runCatching { stopLockTask() }
                     finish()
                 } else {

@@ -31,6 +31,13 @@ internal object LivenessPolicy {
     const val WEDGED_MS = 5 * 60_000L
 
     /**
+     * A relay poll that has run this long is hung. Longer than the tick's
+     * limit: a healthy poll is several relay round trips with 16 s timeouts
+     * each, so minutes are legitimate.
+     */
+    const val POLL_WEDGED_MS = 10 * 60_000L
+
+    /**
      * Whether the alarm should run an enforcement tick now. While lit, the
      * alarm is only a watchdog (the handler ticks every [tickMs]), so it acts
      * when the loop has missed three beats. While dark, the alarm IS the
@@ -56,6 +63,10 @@ internal object LivenessPolicy {
     /** Whether the tick that started at [tickStartedMs] (0 = none running) is wedged. */
     fun wedged(nowMs: Long, tickStartedMs: Long): Boolean =
         tickStartedMs != 0L && nowMs - tickStartedMs >= WEDGED_MS
+
+    /** Whether the poll that started at [pollStartedMs] (0 = none running) is hung. */
+    fun pollWedged(nowMs: Long, pollStartedMs: Long): Boolean =
+        pollStartedMs != 0L && nowMs - pollStartedMs >= POLL_WEDGED_MS
 }
 
 /**

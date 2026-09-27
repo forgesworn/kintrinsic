@@ -13,7 +13,10 @@ package org.forgesworn.charter.service
  * force, and the steps after it still run.
  *
  * A failing step is logged once when it starts failing and once when it
- * recovers, not on every 2 s tick. [failing] names the steps currently failing.
+ * recovers, not on every 2 s tick. The state is kept per ward: with two wards,
+ * one failing and one not, a step shared by name would flip between failed
+ * and recovered on every tick. [failing] names the steps currently failing,
+ * as `step` or `step@ward`.
  */
 internal class StepGuard(
     private val log: (message: String, error: Throwable?) -> Unit,
@@ -23,17 +26,54 @@ internal class StepGuard(
     /** The steps that failed on their last run, in the order they began failing. */
     val failing: Set<String> get() = failingSteps.toSet()
 
-    /** Run [block] as [step]. True when it completed; false when it threw. */
-    fun run(step: String, block: () -> Unit): Boolean = try {
-        FaultInjection.check(step)
-        block()
-        if (failingSteps.remove(step)) log("enforcement step '$step' recovered", null)
-        true
-    } catch (t: Throwable) {
-        if (failingSteps.add(step)) {
-            log("enforcement step '$step' failed; the rest of the tick still runs and it is retried", t)
+    /** Run [block] as [step] for [ward] ("" = not ward-specific). True when
+     *  it completed; false when it threw. */
+    fun run(step: String, ward: String = "", block: () -> Unit): Boolean {
+        val key = if (ward.isEmpty()) step else "$step@$ward"
+        return try {
+            FaultInjection.check(step)
+            block()
+            if (failingSteps.remove(key)) log("enforcement step '$key' recovered", null)
+            true
+        } catch (t: Throwable) {
+            if (failingSteps.add(key)) {
+                log("enforcement step '$key' failed; the rest of the tick still runs and it is retried", t)
+            }
+            false
         }
-        false
+    }
+}
+
+/**
+ * When a ward's app gate has failed long enough that the lock must stand in
+ * for it (review of 05-B1). A reconcile that throws leaves the suspensions it
+ * last applied, but a newly blocked app is not closed, so after [thresholdSecs]
+ * of failures in a row the lock goes up with [DEGRADED_REASON], and comes down
+ * on the first reconcile that succeeds. Break-glass stays the way out.
+ * Per ward, like [StepGuard].
+ */
+internal class DegradedAppGate(private val thresholdSecs: Long = DEGRADED_AFTER_SECS) {
+    private val failingSince = mutableMapOf<String, Long>()
+
+    /** Record this tick's app-gate outcome for [ward]; true while the lock
+     *  must stand in for it. A clock that went back restarts the spell. */
+    fun record(ward: String, ok: Boolean, nowUnix: Long): Boolean {
+        if (ok) {
+            failingSince.remove(ward)
+            return false
+        }
+        val since = failingSince.getOrPut(ward) { nowUnix }
+        if (nowUnix < since) {
+            failingSince[ward] = nowUnix
+            return false
+        }
+        return nowUnix - since >= thresholdSecs
+    }
+
+    companion object {
+        const val DEGRADED_AFTER_SECS = 60L
+        /** The lock reason when the lock stands in for a failed app gate. */
+        const val DEGRADED_REASON = "degraded"
     }
 }
 

@@ -20,7 +20,8 @@
              property — it only avoids fragile UI automation on-metal. -->
         <receiver
             android:name="org.forgesworn.charter.debug.DebugReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="org.forgesworn.charter.debug.PAIR" />
                 <action android:name="org.forgesworn.charter.debug.INSTALL_REQUEST" />

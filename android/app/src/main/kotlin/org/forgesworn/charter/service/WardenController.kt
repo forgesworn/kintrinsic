@@ -79,6 +79,10 @@ class WardenController(
     private val guard = StepGuard { message, error ->
         if (error == null) Log.i(TAG, message) else Log.e(TAG, message, error)
     }
+    /** Whether the lock must stand in for a failing app gate, per ward. */
+    private val degradedAppGate = DegradedAppGate()
+    /** Wards currently locked because their app gate is failing (for the log). */
+    private val degradedWards = mutableSetOf<String>()
     /** When the standing baseline was last re-read (05-G2), unix secs. */
     private var lastPostureAt = 0L
     /** When a pinned-but-dead DNS filter was last re-dispatched (05-B7). */
@@ -453,9 +457,10 @@ class WardenController(
         // here means something outside them failed; the lock is still put up
         // for a locked decision, on its own.
         for (d in decisions) {
-            val applied = guard.run("decision") { applyDecision(d, nowUnix) }
+            val ward = d.subject ?: ""
+            val applied = guard.run("decision", ward) { applyDecision(d, nowUnix) }
             if (!applied && d.locked && d.enforceMode == CharterCore.Mode.ENFORCE) {
-                guard.run("lock") { lock.show(d.reason) }
+                guard.run("lock", ward) { lock.show(d.reason) }
             }
         }
         return decisions
@@ -532,11 +537,12 @@ class WardenController(
         // charted ward keeps the install-lockdown up during allowed hours too
         // (the critical fail-open the review caught). Observe applies nothing.
         val applyRestrictions = d.configured && d.enforceMode != CharterCore.Mode.OBSERVE
-        guard.run("baseline") { syncBaseline(applyRestrictions, nowUnix) }
+        val ward = d.subject ?: ""
+        guard.run("baseline", ward) { syncBaseline(applyRestrictions, nowUnix) }
 
         // Each effect on its own: a notification that throws must not swallow
         // the ones after it either.
-        for (e in d.effects) guard.run("effects") {
+        for (e in d.effects) guard.run("effects", ward) {
             when (e) {
                 // The core re-arms these correctly (once each; after thaw / rising
                 // edge / unbounded spell) — delivery is our only job.
@@ -564,7 +570,7 @@ class WardenController(
         // entirely in Observe. Each is its own charter dimension, independent of
         // schedule/budget. These JNI calls take the warden lock — they run on the
         // slow-safe worker thread (this whole tick is off the main thread).
-        if (d.enforceMode != CharterCore.Mode.OBSERVE) guard.run("appGate") {
+        val appGateOk = if (d.enforceMode == CharterCore.Mode.OBSERVE) true else guard.run("appGate", ward) {
             // Named-times ("buckets"): apps whose OWN bucket allowance is spent
             // right now — its own charter dimension, exactly like the per-app
             // rule suspensions. Spending a bucket closes only ITS apps, never
@@ -720,7 +726,7 @@ class WardenController(
             // Level-triggered against the real restriction state, so a throw
             // here is simply retried next tick (it used to latch the mode
             // before pushing it and never try again).
-            guard.run("tether") { restrictions.applyTetherMode(tetherMode) }
+            guard.run("tether", ward) { restrictions.applyTetherMode(tetherMode) }
         }
         // A filtered clause is PERMISSION, not an instruction to hold an AP up
         // all day: the ward's own switch decides (see HotspotWish — the battery
@@ -730,7 +736,7 @@ class WardenController(
         // Sync the hotspot service UNCONDITIONALLY: a filtered session must be
         // torn down when enforcement stops (charter removed / Observe), not only
         // when a grant expires — otherwise a live AP would outlive its charter.
-        guard.run("hotspot") { syncHotspotService(tetherMode == "filtered" && HotspotWish.on) }
+        guard.run("hotspot", ward) { syncHotspotService(tetherMode == "filtered" && HotspotWish.on) }
 
         // Web-content filter: pin the DNS filter always-on (fail-soft, see
         // VpnDnsFilterOps; a dead tunnel is restarted below) exactly
@@ -744,7 +750,7 @@ class WardenController(
         // reboots, so an in-memory flag would drift). Unlike the app gate, the
         // web filter has no ward to serve until a subject exists.
         val enforcing = d.enforceMode != CharterCore.Mode.OBSERVE && d.subject != null
-        guard.run("dns") {
+        guard.run("dns", ward) {
             syncDnsPin(enforcing)
             if (enforcing) {
                 val plan = runCatching { CharterCore.dnsPlan() }.getOrNull()
@@ -774,9 +780,23 @@ class WardenController(
 
         // Lock surface: level-triggered too (a dropped edge can never strand the
         // ward), and only in full Enforce (FreezeOnly = suspend, no lock UI).
-        // Reached whatever failed above (05-B1).
+        // Reached whatever failed above (05-B1). An app gate that has failed
+        // for a minute on end is stood in for by the lock ("degraded"), and
+        // released on the first reconcile that succeeds.
+        val degraded = degradedAppGate.record(ward, appGateOk, nowUnix)
+        if (degraded && degradedWards.add(ward)) {
+            Log.e(TAG, "app gate failing for ${DegradedAppGate.DEGRADED_AFTER_SECS}s: locking until it recovers")
+        } else if (!degraded && degradedWards.remove(ward)) {
+            Log.i(TAG, "app gate recovered: lifting the degraded lock")
+        }
         if (d.enforceMode == CharterCore.Mode.ENFORCE) {
-            guard.run("lock") { if (d.locked) lock.show(d.reason) else lock.hide() }
+            guard.run("lock", ward) {
+                when {
+                    d.locked -> lock.show(d.reason)
+                    degraded -> lock.show(DegradedAppGate.DEGRADED_REASON)
+                    else -> lock.hide()
+                }
+            }
         }
     }
 

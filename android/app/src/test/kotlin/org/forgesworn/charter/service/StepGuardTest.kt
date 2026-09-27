@@ -48,6 +48,19 @@ class StepGuardTest {
     }
 
     @Test
+    fun `one ward failing and another succeeding does not flap the log`() {
+        repeat(10) {
+            guard.run("appGate", "ward-a") { throw IllegalStateException("a fails") }
+            guard.run("appGate", "ward-b") { }
+        }
+        assertEquals(1, logs.size)
+        assertEquals(setOf("appGate@ward-a"), guard.failing)
+        guard.run("appGate", "ward-a") { }
+        assertEquals(2, logs.size)
+        assertTrue(logs[1].contains("recovered"))
+    }
+
+    @Test
     fun `injected faults fail the named steps only`() {
         FaultInjection.failing = setOf("appGate")
         assertFalse(guard.run("appGate") { })

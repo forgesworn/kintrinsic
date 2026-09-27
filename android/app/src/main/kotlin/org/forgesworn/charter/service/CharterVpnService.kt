@@ -53,6 +53,9 @@ class CharterVpnService : VpnService() {
     // bound a query is dropped, which the querier treats as a lost packet and
     // retries; the filter's decisions are never skipped, only its backlog.
     private val dropped = AtomicLong()
+    /** The last thousand of [dropped] that was logged, so a count that sits
+     *  on a multiple of 1000 is logged once, not on every packet read. */
+    private var droppedLoggedThousands = 0L
     private val pool = boundedDnsPool(DNS_WORKERS, DNS_QUEUE) { dropped.incrementAndGet() }
     // Multiple workers write to the single tun output; each datagram must be
     // written+flushed atomically or replies would interleave and corrupt.
@@ -162,9 +165,10 @@ class CharterVpnService : VpnService() {
                     // Drop the packet; the querier retries. Never propagate.
                 }
             }
-            val d = dropped.get()
-            if (d > 0 && d % DROP_LOG_EVERY == 0L) {
-                Log.w(TAG, "DNS backlog full: $d queries dropped so far")
+            val thousands = dropped.get() / DROP_LOG_EVERY
+            if (thousands > droppedLoggedThousands) {
+                droppedLoggedThousands = thousands
+                Log.w(TAG, "DNS backlog full: ${dropped.get()} queries dropped so far")
             }
         }
         // The read loop only ends when the tunnel is gone: say so, so the

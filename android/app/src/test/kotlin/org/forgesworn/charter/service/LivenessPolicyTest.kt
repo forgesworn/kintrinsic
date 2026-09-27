@@ -58,6 +58,16 @@ class LivenessPolicyTest {
     }
 
     @Test
+    fun `a hung relay poll is detected on its own, longer limit`() {
+        assertFalse(LivenessPolicy.pollWedged(t0 + LivenessPolicy.POLL_WEDGED_MS, 0L))
+        // A slow but healthy poll (several relays, 16 s timeouts) is not hung.
+        assertFalse(LivenessPolicy.pollWedged(t0 + 3 * 60_000L, t0))
+        assertFalse(LivenessPolicy.pollWedged(t0 + LivenessPolicy.POLL_WEDGED_MS - 1, t0))
+        assertTrue(LivenessPolicy.pollWedged(t0 + LivenessPolicy.POLL_WEDGED_MS, t0))
+        assertTrue(LivenessPolicy.POLL_WEDGED_MS >= WEDGED_MS)
+    }
+
+    @Test
     fun `the cadences keep the core's per-tick accrual clamp out of reach`() {
         // The core clamps a single tick's accrual at 300 s; the alarm and the
         // dark handler pace must both stay well under it.
