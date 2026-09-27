@@ -172,6 +172,14 @@ quota or re-open a bucket that already closed, but a spurious **forward** jump
 is not itself detected or corrected — it is accepted as a real boundary
 crossing, the same as `budget`'s and `buckets`' shared day/week arithmetic.
 
+**The usage ledger's own day/week keys are a separate high-water mark, with a
+smaller, bounded residual.** The ward's day and week keys only move forward,
+so a backward clock step never refills a quota. A clock that returns from a
+future excursion of more than a day drops the key back without zeroing usage;
+the next real midnight then resets normally. Residual: each forward-then-back
+clock cycle can gain one refill, which requires control of the clock (root on
+Linux; blocked by the Device Owner on Android).
+
 `charter_set_budget` / `charter_set_default_budget` mirror the schedule methods
 `(dependantId, [...scope keys], GrantBudget | null)`; the device authenticates
 the signed clause against the pinned guardian + monotonic `issuedAt` before
@@ -1333,6 +1341,28 @@ enacts nothing at all (see "App-open ask" above): its `{pkg, minutesGranted}`
 is an answer signal only, and the guardian's ALSO-signed `apps` clause
 carrying an `AppHold` is what actually opens the app.
 
+**Pending-ask lifetime (24h) and per-caller rate caps
+(`charter-spine::broker`, commit 7ba043b).** A REQUEST the device is still
+waiting on an answer for is tracked `Pending`; after **`PENDING_TTL_SECS` =
+24h** from the device's own submit time it ages out to `Expired` (terminal)
+on the device itself, and a GRANT that later arrives for it is
+**authenticated but not enacted** — the pending record already left the state
+a GRANT can act on (002c211, "on_grant respects a concurrent expiry"). A
+guardian holding a signer with no live connection to the device — a phone in
+a pocket, a laptop asleep — can therefore approve an ask the device has
+already given up on; the guardian has no signal that this happened beyond the
+silence itself, which is why a guardian surface MUST treat an ask past this
+age as expired rather than still-actionable (the guardian PWA enforces this
+itself — `domain/askExpiry.ts` — rather than trusting only its own UI to stay
+consistent with it). Separately, caps are keyed on the **local caller**
+(`caller_uid: Option<u32>`, the requesting OS or D-Bus user identity on that
+device; root or an unidentified caller share one bucket) rather than on the
+subject or device: a caller is capped at **8 outstanding** asks (`Pending` or
+`Enacting`, not yet terminal) and **12 submits per rolling hour**; either cap
+over-limit refuses the new REQUEST at the device with
+`BrokerError::RateLimited`, a ward-facing message the device is meant to show
+rather than a bare protocol code.
+
 **Per-child CLAUSE — optional `subject` (additive, back-compat).** A CLAUSE MAY
 carry an optional `subject: Hex32` naming the child it targets (== the Signet
 `dependantId`; the same opaque, PII-free pubkey as `RequestPayload.subject`).
@@ -1355,9 +1385,25 @@ The **trust root is unchanged**: there is still exactly **one pinned guardian**,
 and every CLAUSE is its fully-signed inner event. Per-child keying changes *which
 subject* a clause addresses, never *who* may author it.
 
-**Pairing — `bunker://` grammar.** `charterd`/`charter-cli`/`charter-setup` pin
-the guardian from `bunker://<guardian-pubkey>?relay=wss://…&kind=charter`:
-a valid 64-hex guardian pubkey, ≥1 `wss://` relay, and `kind=charter`.
+**Pairing — `bunker://` grammar, and its https App Link wrapper.**
+`charterd`/`charter-cli`/`charter-setup` pin the guardian from
+`bunker://<guardian-pubkey>?relay=wss://…&kind=charter`: a valid 64-hex
+guardian pubkey, ≥1 `wss://` relay, and `kind=charter`. Query values are
+**percent-decoded before** the `wss://` prefix check runs — a browser
+guardian's `encodeURIComponent` emits `relay=wss%3A%2F%2F…`, and a literal
+prefix check used to reject every PWA-minted link wholesale.
+The **QR-scannable form is an https App Link** wrapping the identical
+`bunker://…` URI in its `#fragment` —
+`https://<any host>/pair#bunker://<guardian-pubkey>?relay=…&kind=charter` — so
+a scan that lands in a browser instead of the app still leaves the ward (or a
+parent pasting into the console) holding something pairable. The wrapper is
+accepted from **any host**: trust rests on the pinned guardian key inside the
+fragment, not the wrapper's origin. Both forms are normalised to the bare
+`bunker://…` string by one shared parser
+(`charter_transport::pairing::validate_and_normalize`, commit 1a6e432) that
+`charterd`'s own pin path and `charter-console`'s pasted-link field both call,
+so the surfaces that accept a pairing link cannot drift on what counts as a
+valid one.
 **[decide]** Whether `kind=charter` rides the `bunker://` URI itself or the
 app-initiated `nostrconnect://` connect-metadata (and whether `ws://localhost`
 is allowed for local dev) is a Signet-coordinated choice; both the daemon
@@ -1441,6 +1487,9 @@ interface StatusPayload {
   enforcementGapSecs?: number;     // Linux: seconds this device went WITHOUT a running warden before it came back
   relayUnreachablePolls?: number;  // consecutive relay polls, most recent run, where every relay was unreachable
   transportUnavailable?: boolean;  // this device could not construct its own relay transport this run
+  usageUnsaved?: boolean;          // this device's usage record has failed to save continuously for >=5 min; screen time is held PAUSED as a fail-safe while true
+  clockSteppedBackFrom?: number;   // present only on the FIRST status after this device's clock stepped below its own previous ts; equals that previous ts
+  seq?: number;                    // per-device sequence, strictly increasing across restarts (incl. a wipe) — the ORDERING signal once present; see below
 }
 ```
 
@@ -1661,6 +1710,78 @@ device's set was unreachable (distinct from `Ok(vec![])`, which is "reached,
 nothing new"). `transportUnavailable` says the device could not even
 construct its relay transport this run (an unusable machine secret, B4) —
 cached clauses are still being enforced regardless of any of these four.
+
+**`usageUnsaved?: boolean`.** Present and `true` only when the ward's usage
+record has failed to save continuously for five minutes or more. While it is
+`true` the ward holds the child's screen time PAUSED as a fail-safe, rather
+than keep enforcing against a count it can no longer persist. Same
+absent-unless-true posture as `pausedByAdmin` and `transportUnavailable`
+above: an older ward that has never seen this condition never sends the
+field, and a consumer must default it to `false`, never leave it undefined.
+
+**`clockSteppedBackFrom?: number` (guardian-admission fix, review
+2026-09-27).** Present **only** on the first STATUS a device emits after its
+own wall clock is found to be below its previously emitted `ts`, and equal to
+that previous `ts` exactly — the device's own signed vouching that a lower
+`ts` is a genuine clock step, not a relay replaying an old wrap out of order.
+Every other STATUS, including the device's own next ordinary heartbeat once
+its clock has moved on again, omits it. It still exists and still decides
+whether a consumer shows a "clock went backwards" note, but — once `seq`
+(below) is present on both sides — it no longer decides which reading is
+current.
+
+**`seq?: number` (guardian-admission fix, review round 2, R2-2/R2-3).** A
+per-device sequence a device MAY send, guaranteed to strictly increase
+across restarts, including a wipe (seeded from wall-clock ms when the
+device's own state is fresh, so a wiped device still sorts after whatever it
+last sent). This closes a hole `ts` + `clockSteppedBackFrom` left open: the
+marker's size is entirely device-controlled and reusable, so a genuine but
+OLD step-back STATUS could be re-published by anyone (the gift wrap is
+public on the relays) and, for as long as its marker still reached the
+consumer's stored `ts`, be admitted as current again and again, displacing a
+newer reading (R2-2). A restart also drops a consumer's in-memory
+`clockSteppedBackFrom` bookkeeping, so a forced reboot alone could freeze a
+consumer's view for as long as the wrap jitter allows (R2-3). A persisted,
+monotonic `seq` is immune to both: a replay's `seq` can never be newer than
+what it already lost to, and it survives a restart by construction.
+
+**Admission rule.** A consumer orders two STATUS readings for the same
+device as follows, in order:
+
+1. **Both readings carry `seq`.** Ordering is by `seq` alone — `ts` is not
+   consulted for ordering at all. A strictly greater `seq` is admitted as
+   current; an equal or lesser `seq` is a duplicate re-delivery or a replay
+   / out-of-order delivery and is ignored.
+2. **Only the incoming reading carries `seq`** (the device just adopted it,
+   so the consumer's stored reading has nothing to compare `seq` against):
+   the incoming reading is admitted if its `ts` is at or after the stored
+   `ts`, or up to five minutes behind it (the upgrade itself — a device
+   restart — can land a hair behind the last pre-upgrade heartbeat), or its
+   `clockSteppedBackFrom` reaches or passes the stored `ts` (rule 4, still
+   available beyond that tolerance). Anything else is a replay from before
+   the device adopted `seq` and is ignored.
+3. **Only the stored reading carries `seq`** (a replay from before the
+   device adopted it, or a device that has regressed and lost its counter):
+   never admitted, however new its `ts` looks — a bare `ts` proves nothing
+   once this device is known to carry a sequence. A consumer SHOULD log this
+   once per occurrence rather than fail silently, since it means either a
+   relay is serving stale traffic or a device has regressed.
+4. **Neither reading carries `seq`** (an older device, e.g. Android until it
+   adopts this field): the pre-`seq` rule, unchanged — the stored current
+   reading is whichever has the larger `ts`, UNLESS a lower-`ts` STATUS
+   carries `clockSteppedBackFrom >= ` the stored `ts` (the device vouching
+   that THIS is the moment its clock stepped back past what's currently
+   shown). Any other lower-`ts` STATUS — no marker, or a stale one that no
+   longer reaches the stored `ts` — is ignored as a replay or an
+   out-of-order delivery. Equal `ts` is always a no-op.
+
+Whenever a reading is admitted under rule 1 or 2 above, a consumer marks it
+as clock-affected ("clock went backwards") when the admitted reading carries
+`clockSteppedBackFrom`, OR its `ts` is below the reading it displaced — and
+clears that note under the same rule as before: once a later admitted
+reading's `ts` reaches or passes the recorded `clockSteppedBackFrom`, or a
+bounded amount of time has passed, whichever comes first. The guardian PWA
+implements all of this in `store/deviceStatusAdmit.ts`.
 
 **Privacy.** Numbers + enums only — **no** child content, exec source path,
 `time.extend` reason, name, or DOB ever appears. Delivery is E2E NIP-59
@@ -1892,7 +2013,7 @@ Charter methods are vendor-prefixed `charter_*`. They live alongside the standar
 }
 ```
 
-Charter pairings are established the same way as regular trusted-app pairings (signet-app-internal#165) but the connecting app advertises `kind: 'charter'` in its `nostrconnect://` connect-metadata. The guardian sees and approves the elevated authority on the pair confirmation screen ("Pair Charter? This app will manage time, spend and content rules for {dep}").
+Charter pairings are established the same way as regular trusted-app pairings (Signet) but the connecting app advertises `kind: 'charter'` in its `nostrconnect://` connect-metadata. The guardian sees and approves the elevated authority on the pair confirmation screen ("Pair Charter? This app will manage time, spend and content rules for {dep}").
 
 Existing pairings (those without a `kind` field) are treated as `'app'` — auto-promotion is explicitly rejected.
 
@@ -2028,7 +2149,7 @@ The deny error string carries the clause + reason but **not** the next-allowed t
 The bunker emits a kind-31000 audit event for every clause-driven decision (allow under clause, blocked by clause). Audit events are **gift-wrapped (NIP-59)** to:
 
 1. The guardian's pubkey (canonical, always emitted).
-2. The dependant's paired-child client pubkey, if one exists AND the dep's `auditVisibility` resolves to visible per signet-app-internal#90 v2.
+2. The dependant's paired-child client pubkey, if one exists AND the dep's `auditVisibility` resolves to visible (Signet's audit-log dual-address gift-wrap).
 3. **(reserved for v1.x)** the consumer app's pubkey, if the dep's grant for this origin opts in. Not implemented in v1.
 
 ### Audit event shape
@@ -2282,7 +2403,7 @@ the audit section above unchanged; `summary` MAY appear in audit content,
 - Signet schedule design (clause-internal implementation) — `forgesworn/signet-app/docs/superpowers/specs/2026-05-08-per-origin-schedule-design.md`
 - NIP-46 — Nostr Connect (the underlying transport)
 - NIP-59 — Gift wrap (used for audit events)
-- signet-app-internal#90 v2 — audit-log dual-address gift-wrap
-- signet-app-internal#143 — per-origin grants + sync
-- signet-app-internal#165 — trusted-app pairings (`kind` field added in `19d538a`)
-- signet-app-internal#172 — Charter clause #1 implementation tracker (this work)
+- Signet — audit-log dual-address gift-wrap
+- Signet — per-origin grants + sync
+- Signet — trusted-app pairings (`kind` field added in `19d538a`)
+- Signet — Charter clause #1 implementation tracker (this work)

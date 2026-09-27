@@ -5,7 +5,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 export function Seal({ size = 32 }: { size?: number }) {
   // The Kintrinsic mark: the flame with a budding second flame off its
-  // upper-right shoulder (kindred-internal/brand `kintrinsic-bud`), gold on
+  // upper-right shoulder (the Kindred brand's `kintrinsic-bud`), gold on
   // the ink ground — the shipped app-icon palette. Replaces the Charter "C".
   const flame =
     "M24 6c5 6.5 8 10.5 8 15.5a8 8 0 0 1-16 0C16 16.5 19 12.5 24 6Z M24 13c2.8 3.7 4.5 5.9 4.5 8.7a4.5 4.5 0 0 1-9 0c0-2.8 1.7-5.1 4.5-8.7Z";

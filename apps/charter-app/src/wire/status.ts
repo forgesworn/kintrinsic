@@ -183,6 +183,47 @@ export interface DeviceStatus {
    *  nothing is being polled or published on the failed transport.
    *  `parseStatus` always fills this in (default `false`). */
   transportUnavailable?: boolean;
+  /** Present and `true` only when the ward's usage record has failed to save
+   *  continuously for five minutes or more — while it is `true` the ward
+   *  holds the child's screen time PAUSED as a fail-safe, rather than risk
+   *  enforcing against a count it can no longer trust. `parseStatus` always
+   *  fills this in (default `false`), same posture as `pausedByAdmin` and
+   *  `transportUnavailable` above. */
+  usageUnsaved?: boolean;
+  /**
+   * Present ONLY on the first STATUS a ward emits after its own wall clock
+   * went below its previous emitted status's `ts` — and equal to that
+   * previous `ts` (`status_emit.rs`'s forced backward-clock emit). This is
+   * the ward's own signed marker that a lower `ts` is a genuine clock step,
+   * not a relay replaying an old wrap out of order — see
+   * `store/deviceStatusAdmit.ts`, which is the only reader. Absent on every
+   * other STATUS, including an older ward's (pre-marker) and the ward's own
+   * next ordinary heartbeat once its clock has moved on again.
+   *
+   * Superseded as the ORDERING signal by `seq` below (review round 3,
+   * R2-2/R2-3) whenever both the incoming and the stored reading carry one:
+   * `clockSteppedBackFrom` still decides whether the guardian shows the
+   * "clock went backwards" note, but no longer decides which reading is
+   * current once `seq` can.
+   */
+  clockSteppedBackFrom?: number;
+  /**
+   * A per-device sequence number (review round 3, R2-2/R2-3): a ward that
+   * sends it guarantees it strictly increases across restarts, including a
+   * wipe (seeded from wall-clock ms when its own state is fresh, so a wiped
+   * ward still sorts after whatever it last sent). Closes the replay hole a
+   * bare `ts` comparison left open — a genuine, ward-signed, but OLD status
+   * (a clock step-back, or anything else) can be re-published by anyone (the
+   * gift wrap is public on the relays) and, on `ts` alone, would out-rank a
+   * newer reading forever. Ordering by `seq` instead makes that impossible,
+   * because a replay's `seq` cannot be newer than what it already lost to.
+   *
+   * Optional and parsed tolerantly: an older ward (pre-`seq`, e.g. Android
+   * until it adopts this) never sends it, and the guardian falls back to the
+   * pre-existing `ts` + `clockSteppedBackFrom` rule for that device. See
+   * `store/deviceStatusAdmit.ts` for the full admission rule.
+   */
+  seq?: number;
 }
 
 /** One installed launchable app on a device. */
@@ -342,6 +383,15 @@ export function parseStatus(json: string): DeviceStatus | null {
     enforcementGapSecs: isNonNegInt(o.enforcementGapSecs) ? o.enforcementGapSecs : 0,
     relayUnreachablePolls: isNonNegInt(o.relayUnreachablePolls) ? o.relayUnreachablePolls : 0,
     transportUnavailable: o.transportUnavailable === true,
+    usageUnsaved: o.usageUnsaved === true,
+    // Tolerant: absent (an older ward, or any ordinary heartbeat) parses as
+    // undefined, never coerced to 0 — 0 would itself be a valid `ts` to have
+    // stepped back from and must not be confused with "not reported".
+    clockSteppedBackFrom: isNonNegInt(o.clockSteppedBackFrom) ? o.clockSteppedBackFrom : undefined,
+    // Tolerant, same reasoning as clockSteppedBackFrom above: absent (an
+    // older ward, or any ordinary heartbeat that predates this field) parses
+    // as undefined, never coerced to 0 — 0 is a valid sequence value.
+    seq: isNonNegInt(o.seq) ? o.seq : undefined,
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)

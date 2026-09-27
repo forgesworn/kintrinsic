@@ -37,6 +37,7 @@ import UnlockDevice from "./UnlockDevice";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
 import { bestLiveness, livenessChip } from "../domain/liveness";
+import { deviceHealthNotes } from "../domain/deviceHealth";
 
 // Accent colors a parent can pick for a child's avatar/chips.
 const CHILD_COLORS = ["#3B6FB2", "#2E7D5B", "#C4860F", "#7A4FB5", "#B23B30"];
@@ -476,6 +477,17 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   const gap = device.devicePubkey
     ? deviceStatus[device.devicePubkey]?.enforcementGap
     : undefined;
+  // Paused-by-admin, an enforcement gap (Linux's seconds-shaped account,
+  // distinct from `gap` above which is Android's boot-count one), relay
+  // trouble, a broken transport, and a ward clock stepping backwards — parsed
+  // off STATUS since de7acb0/ed79b79 but never shown until now (G-2/G-1).
+  // Each note carries the age of the reading it's drawn from, and `stale`
+  // says when that reading itself is too old to trust as "right now" (F5,
+  // review 2026-09-27 second round).
+  const { notes: healthNotes, stale: healthStale } = deviceHealthNotes(
+    device.devicePubkey ? deviceStatus[device.devicePubkey] : undefined,
+    nowUnix * 1000,
+  );
   const openWindow = installWindow(installOpenUntil, nowUnix);
   useEffect(() => {
     if (!installOpenUntil) return;
@@ -575,6 +587,16 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
             <a href="https://charter.signet.you/download">the download page</a>.
           </div>
         )}
+        {healthNotes.length > 0 && healthStale && (
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            This device hasn't reported in a while — the notes below may be out of date.
+          </div>
+        )}
+        {healthNotes.map((n) => (
+          <div key={n.key} className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            {n.text}
+          </div>
+        ))}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto", flexWrap: "wrap", justifyContent: "flex-end" }}>
       <Pill tone={paired ? "ok" : "neutral"}>{paired ? "On" : "Off"}</Pill>

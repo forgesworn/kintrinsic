@@ -88,11 +88,14 @@ import {
   type UsageHistory,
 } from "../insights/usageHistory";
 import { buildUsageSyncForDevice } from "../wire/usageSync";
+import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
+import { isAskExpired } from "../domain/askExpiry";
 
 export { isSetUp, statusFor } from "./statusFor";
 export type { StatusForResult } from "./statusFor";
 export { liveStatusFor, freshestStatusFor } from "./liveStatus";
 export type { DeviceStatus } from "../wire/status";
+export type { LiveDeviceStatus } from "./deviceStatusAdmit";
 
 // ---------------------------------------------------------------------------
 // State + persistence
@@ -437,7 +440,7 @@ export interface CharterContextValue {
   /** Phones heartbeating at this guardian that no child claims (see ./unclaimedDevices). */
   unclaimed: UnclaimedDevice[];
   /** Freshest live STATUS per machine pubkey (the devices' real reports). */
-  deviceStatus: Record<string, DeviceStatus>;
+  deviceStatus: Record<string, LiveDeviceStatus>;
   /** Per-device, per-day screen-time history (design memo B1 — the weekly picture). */
   usageHistory: UsageHistory;
   /** The site's published Kintrinsic artifact manifest; null until fetched (#44). */
@@ -1104,7 +1107,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // notices (the audit-gap surface). Same local-key-only decrypt seam as the
   // REQUEST intake above. A heartbeat echoing the outstanding pairing token
   // resolves the QR-onboarding wait with the device's machine pubkey.
-  const [deviceStatus, setDeviceStatus] = useState<Record<string, DeviceStatus>>({});
+  const [deviceStatus, setDeviceStatus] = useState<Record<string, LiveDeviceStatus>>({});
   // Mirrors deviceStatus for the []-dep callbacks (same pattern as stateRef):
   // giveTime needs the freshest reading to record the ward's standing.
   const deviceStatusRef = useRef(deviceStatus);
@@ -1373,7 +1376,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // recovery read. No usage history for a machine no child claims yet.
       setDeviceStatus((prev) => {
         const cur = prev[status.machine];
-        return cur && cur.ts >= status.ts ? prev : { ...prev, [status.machine]: status };
+        const merged = mergeDeviceStatus(cur, status);
+        return merged === cur ? prev : { ...prev, [status.machine]: merged };
       });
       const waiting = phonePairingRef.current;
       if (waiting && status.pairToken === waiting.token && !waiting.foundMachine) {
@@ -1396,7 +1400,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // REAL state over the local guess while it's fresh (liveStatusFor).
     setDeviceStatus((prev) => {
       const cur = prev[status.machine];
-      return cur && cur.ts >= status.ts ? prev : { ...prev, [status.machine]: status };
+      const merged = mergeDeviceStatus(cur, status);
+      return merged === cur ? prev : { ...prev, [status.machine]: merged };
     });
     const pending = phonePairingRef.current;
     if (pending && status.pairToken === pending.token && !pending.foundMachine) {
@@ -1979,6 +1984,17 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (id: string, minutesGranted?: number) => {
       const req = stateRef.current.requests.find((r) => r.id === id);
       if (!req) return;
+      // G-3 (review 2026-09-27, F3): the buttons disable once an ask is past
+      // the ward's own 24h TTL, but that was the ONLY guard — a caller that
+      // reaches this function any other way (or a UI bug) could still sign
+      // and send an approval the device has already stopped listening for.
+      // Gated on `reqId` (a real, wire-correlated ask): a local/simulated ask
+      // never sat in the ward's broker and has nothing to expire against.
+      if (req.requester === "device" && req.reqId && isAskExpired(req.createdAt, Date.now())) {
+        throw new Error(
+          "This ask expired on the device — it's more than a day old and the device won't act on it now.",
+        );
+      }
       // A real install ask can only be approved for a CURATED app — that's the
       // only place a trusted signing-cert digest to pin comes from. Refuse
       // rather than fake success (the device would get no grant anyway).
@@ -2109,6 +2125,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (id: string, untilUnix: number, window: AppOpenWindow) => {
       const req = stateRef.current.requests.find((r) => r.id === id);
       if (!req || req.kind !== "app.open" || !req.appId) return;
+      // G-3 (review 2026-09-27, F3) — see the matching guard in
+      // `approveRequest` above; this is the second (and only other) path
+      // that signs an approval for an ask.
+      if (req.requester === "device" && req.reqId && isAskExpired(req.createdAt, Date.now())) {
+        throw new Error(
+          "This ask expired on the device — it's more than a day old and the device won't act on it now.",
+        );
+      }
       const child = stateRef.current.children.find((c) => c.id === req.childId);
       const devicePolicy = child?.policies.find((p) => p.scope.kind === "device");
       const currentApps = devicePolicy?.apps;

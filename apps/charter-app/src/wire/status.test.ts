@@ -25,12 +25,13 @@ function sample(machine: string, subject: string): DeviceStatus {
     effectiveSecs: 900,
     locked: false,
     source: "guardian",
-    // `parseStatus` always fills these four in (defaults false/0), so a
+    // `parseStatus` always fills these five in (defaults false/0), so a
     // fixture compared against its own round trip must carry them too.
     pausedByAdmin: false,
     enforcementGapSecs: 0,
     relayUnreachablePolls: 0,
     transportUnavailable: false,
+    usageUnsaved: false,
   };
 }
 
@@ -182,6 +183,26 @@ describe("the four Linux-runtime STATUS fields", () => {
   });
 });
 
+// The usage-save fail-safe (usageUnsaved): same absent-not-zero-but-defaulted
+// posture as the four fields above — a quiet feed and an explicit "nothing
+// wrong" must both read as `false`, never undefined.
+describe("usageUnsaved", () => {
+  it("defaults to false when absent from the wire (an older ward)", () => {
+    const s = sample("ab".repeat(32), "cd".repeat(32));
+    expect(parseStatus(JSON.stringify(s))?.usageUnsaved).toBe(false);
+  });
+
+  it("carries a reported true through", () => {
+    const s = { ...sample("ab".repeat(32), "cd".repeat(32)), usageUnsaved: true };
+    expect(parseStatus(JSON.stringify(s))?.usageUnsaved).toBe(true);
+  });
+
+  it("never coerces a truthy-but-not-true value to true", () => {
+    const s = { ...sample("ab".repeat(32), "cd".repeat(32)), usageUnsaved: 1 };
+    expect(parseStatus(JSON.stringify(s))?.usageUnsaved).toBe(false);
+  });
+});
+
 // Honest attribution (charterd >= 0.7.5): the counter's meaning is a FLOOR,
 // never a total, and its absence must never read as a confident zero — a
 // device that hasn't reported anything unrecognised is not the same as a
@@ -201,6 +222,33 @@ describe("unrecognisedTodaySecs", () => {
     const base = sample("ab".repeat(32), "cd".repeat(32));
     expect(parseStatus(JSON.stringify({ ...base, unrecognisedTodaySecs: -5 }))?.unrecognisedTodaySecs).toBeUndefined();
     expect(parseStatus(JSON.stringify({ ...base, unrecognisedTodaySecs: "lots" }))?.unrecognisedTodaySecs).toBeUndefined();
+  });
+});
+
+// The guardian-admission marker (review 2026-09-27 second round, F1/F2): the
+// ward's own vouching that a lower `ts` is a genuine clock step, not a relay
+// replay. Same parse posture as the other additive, absent-not-zero fields
+// above — an older ward simply never sends it.
+describe("clockSteppedBackFrom", () => {
+  it("parses a present, non-negative value", () => {
+    const s = { ...sample("ab".repeat(32), "cd".repeat(32)), clockSteppedBackFrom: 1_700_000 };
+    expect(parseStatus(JSON.stringify(s))?.clockSteppedBackFrom).toBe(1_700_000);
+  });
+
+  it("stays undefined when absent — never coerced to 0 (0 is itself a valid ts to have stepped back from)", () => {
+    const s = sample("ab".repeat(32), "cd".repeat(32));
+    expect(parseStatus(JSON.stringify(s))?.clockSteppedBackFrom).toBeUndefined();
+  });
+
+  it("drops a negative or non-numeric value rather than trusting it", () => {
+    const base = sample("ab".repeat(32), "cd".repeat(32));
+    expect(
+      parseStatus(JSON.stringify({ ...base, clockSteppedBackFrom: -5 }))?.clockSteppedBackFrom,
+    ).toBeUndefined();
+    expect(
+      parseStatus(JSON.stringify({ ...base, clockSteppedBackFrom: "yesterday" }))
+        ?.clockSteppedBackFrom,
+    ).toBeUndefined();
   });
 });
 

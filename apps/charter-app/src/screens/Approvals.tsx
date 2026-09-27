@@ -28,6 +28,7 @@ import { unrecognisedGuardTz, unrecognisedLine, unrecognisedRows, UNRECOGNISED_E
 import { identityDisplayLabel } from "../domain/launchSignatures";
 import { resolveChildTz } from "../domain/childTz";
 import { appOpenWindowUnix, startOfDayUnix, startOfWeekUnix, type AppOpenWindow } from "../wire/grant";
+import { isAskExpired } from "../domain/askExpiry";
 
 // =============================================================================
 // Approvals — the requests queue. The highest-frequency parent action.
@@ -335,6 +336,13 @@ export default function Approvals() {
                 const isAppOpen = req.kind === "app.open";
                 const granted = grantedFor(req);
                 const askedFor = req.minutesRequested ?? 0;
+                // The ward's own broker ages a Pending ask out to Expired
+                // (terminal) after 24h and refuses to enact a GRANT for it
+                // (7ba043b, 002c211) — approving or denying here would sign
+                // and send a decision the device has already stopped
+                // listening for. Dismiss (the quiet ✕) still works: it signs
+                // nothing and only tidies this list.
+                const expired = isAskExpired(req.createdAt, now);
 
                 // install.app is verifiable only against the CURATED catalog —
                 // that's the trusted source of the signing-cert the phone pins.
@@ -457,6 +465,14 @@ export default function Approvals() {
                       <span>{timeAgo(req.createdAt, now)}</span>
                     </p>
 
+                    {expired && (
+                      <p className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+                        This ask expired on the device — it's more than a day
+                        old and the device won't act on it now. Use Give time
+                        on {child.name}'s card instead.
+                      </p>
+                    )}
+
                     {req.reason && (
                       <p style={{ margin: "10px 0 0" }}>
                         <span className="muted">They said: </span>
@@ -543,7 +559,7 @@ export default function Approvals() {
                           <Button
                             variant="secondary"
                             aria-label="5 minutes less"
-                            disabled={isBusy || granted <= 5}
+                            disabled={isBusy || expired || granted <= 5}
                             onClick={() => stepGrant(req, -5)}
                             style={{ minWidth: 52, padding: 0 }}
                           >
@@ -563,7 +579,7 @@ export default function Approvals() {
                           <Button
                             variant="secondary"
                             aria-label="5 minutes more"
-                            disabled={isBusy || granted >= askedFor}
+                            disabled={isBusy || expired || granted >= askedFor}
                             onClick={() => stepGrant(req, 5)}
                             style={{ minWidth: 52, padding: 0 }}
                           >
@@ -605,7 +621,7 @@ export default function Approvals() {
                               <Button
                                 key={window}
                                 variant="secondary"
-                                disabled={isBusy}
+                                disabled={isBusy || expired}
                                 onClick={() => {
                                   const untilUnix = appOpenWindowUnix(
                                     window,
@@ -635,24 +651,26 @@ export default function Approvals() {
                         <Button
                           variant="primary"
                           block
-                          disabled={isBusy || blockedUnverified}
+                          disabled={isBusy || blockedUnverified || expired}
                           onClick={() => onApprove(req)}
                         >
                           {approving
                             ? "Approving…"
-                            : blockedUnverified
-                              ? "Can't verify this app"
-                              : isExtend && askedFor > 0
-                                ? `Approve ${granted} min`
-                                : isArtifact
-                                  ? `Approve ${artifactVerb(req.kind)} once`
-                                  : "Approve"}
+                            : expired
+                              ? "Expired"
+                              : blockedUnverified
+                                ? "Can't verify this app"
+                                : isExtend && askedFor > 0
+                                  ? `Approve ${granted} min`
+                                  : isArtifact
+                                    ? `Approve ${artifactVerb(req.kind)} once`
+                                    : "Approve"}
                         </Button>
                       )}
                       <Button
                         variant="secondary"
                         block
-                        disabled={isBusy}
+                        disabled={isBusy || expired}
                         onClick={() => onDeny(req)}
                       >
                         {denying ? "Saving…" : "Not now"}

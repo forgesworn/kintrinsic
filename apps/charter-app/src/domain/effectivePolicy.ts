@@ -1,5 +1,5 @@
 // One charter, split where it fits the child (per-device rules, Half A of
-// docs/superpowers/specs/2026-07-24-per-device-rules-design.md).
+// internal design spec 2026-07-24-per-device-rules-design).
 //
 // A child has one base charter that applies to every device they use. For any
 // individual control a family can say "set this separately for this device" —

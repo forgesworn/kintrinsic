@@ -109,8 +109,16 @@ function pendingSignatureText(container: HTMLElement): string | undefined {
 describe("Approvals — dismiss (Task C, approvals-clarity 2026-08-04)", () => {
   let container: HTMLDivElement;
   let root: Root;
+  const realNow = Date.now;
 
   beforeEach(() => {
+    // G-3 (review 2026-09-27) added a 24h ask-expiry gate to Approvals that
+    // disables "Not now" (and Approve) once `Date.now() - req.createdAt`
+    // passes a day. This suite's fixtures are pinned to NOW (2026-08-04), so
+    // the real wall clock must be frozen there too, or every ask here reads
+    // as expired against today's actual date — see Approvals.expiry.test.tsx
+    // for the same pattern.
+    Date.now = () => NOW;
     localStorage.clear();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(seededState()));
     container = document.createElement("div");
@@ -132,6 +140,7 @@ describe("Approvals — dismiss (Task C, approvals-clarity 2026-08-04)", () => {
     });
     container.remove();
     localStorage.clear();
+    Date.now = realNow;
   });
 
   it("renders a quiet ✕ Dismiss control on every request card, distinct from Not now", () => {
