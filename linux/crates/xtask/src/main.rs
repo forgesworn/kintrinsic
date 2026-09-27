@@ -63,9 +63,9 @@ fn control_file(version: &str, arch: &str) -> String {
          Replaces: charter\n\
          Provides: charter\n\
          Homepage: https://kintrinsic.app\n\
-         Depends: systemd, dbus, policykit-1, zenity, qrencode, libwebkit2gtk-4.1-0, x11-utils\n\
+         Depends: systemd, dbus, policykit-1, zenity, qrencode, libwebkit2gtk-4.1-0, x11-utils, fapolicyd, util-linux\n\
          Suggests: chromium | chromium-browser | google-chrome-stable\n\
-         Recommends: fapolicyd, flatpak\n\
+         Recommends: flatpak\n\
          Description: Kintrinsic for Linux — guardian-chartered device warden\n\
          \x20charterd is the privileged broker spine: it verifies guardian-signed\n\
          \x20grants and enforces schedule/budget limits, app-install brokering, and\n\
@@ -73,8 +73,9 @@ fn control_file(version: &str, arch: &str) -> String {
          \x20the Screen Time settings app, no phone needed). Ships the systemd\n\
          \x20service, D-Bus policy, polkit rules, fapolicyd policy, noexec mount\n\
          \x20units, the charter CLI, charter-lock, charter-xclients,\n\
-         \x20charter-settings, and charter-setup. Run 'charter-setup <user>' to\n\
-         \x20lock down an account.\n"
+         \x20charter-settings, charter-setup and charter-applock. Run\n\
+         \x20'charter-setup <user>' to lock down an account. fapolicyd is\n\
+         \x20installed but stays off until 'charter-applock arm' is run.\n"
     )
 }
 
@@ -231,6 +232,13 @@ fn build_deb() -> Result<(), String> {
         &stage_dir.join("usr/sbin/charter-setup"),
         true,
     )?;
+    // The opt-in app lock (fapolicyd arm/disarm/status). Root-only, like
+    // charter-setup, which calls it for `--arm-app-lock`.
+    stage(
+        &pkg.join("setup/charter-applock"),
+        &stage_dir.join("usr/sbin/charter-applock"),
+        true,
+    )?;
     stage(
         &pkg.join("setup/charter-setup-launch"),
         &stage_dir.join("usr/bin/charter-setup-launch"),
@@ -347,14 +355,14 @@ fn build_deb() -> Result<(), String> {
             "usr/share/polkit-1/rules.d/49-charter.rules",
         ),
         (
-            // Shipped as a REFERENCE, not into /etc/fapolicyd/rules.d: the
-            // fragment ends in a default-deny, and the safety model says the
-            // .deb never ships one live. Nothing here loads or enables
-            // fapolicyd, but it is a Recommends (apt installs it), so a file in
-            // rules.d sat one `fagenrules --load` away from a box that cannot
-            // start a desktop. Arming is charter-setup's job, opt-in, after
-            // the VM round (HANDOFF Phase 11). dpkg removes the old rules.d
-            // copy on upgrade (it was never a conffile).
+            // Shipped as a TEMPLATE, not into /etc/fapolicyd/rules.d: the
+            // rendered policy ends in a default-deny, and the safety model
+            // says the .deb never ships one live. Nothing here loads or
+            // enables fapolicyd (a Depends; Debian installs it disabled).
+            // `charter-applock arm` renders it per ward into rules.d after
+            // its permissive self-test; `disarm` removes it. arm and disarm
+            // both delete the old rules.d/72-charter.rules older packages
+            // shipped.
             "fapolicyd/charter.rules",
             "usr/share/charter/fapolicyd/72-charter.rules",
         ),
@@ -481,6 +489,67 @@ mod tests {
                 "{created} must exist before the unit restarts"
             );
         }
+    }
+
+    /// fapolicyd is a Depends, not a Recommends: it is then installed (and,
+    /// on Debian/Ubuntu, left disabled) BEFORE our postinst restarts
+    /// charterd, so the unit's `-/etc/fapolicyd/trust.d` carve-out exists at
+    /// start (R3-7), and `charter-applock arm` never needs the network.
+    /// util-linux supplies the setpriv/prlimit the arm self-test runs.
+    #[test]
+    fn fapolicyd_is_a_hard_dependency_and_never_armed_by_the_package() {
+        let c = control_file("0.1.0", "amd64");
+        let depends = c
+            .lines()
+            .find_map(|l| l.strip_prefix("Depends: "))
+            .expect("Depends line");
+        for dep in ["fapolicyd", "util-linux"] {
+            assert!(
+                depends.split(", ").any(|d| d == dep),
+                "{dep} must be a Depends: {depends}"
+            );
+        }
+        let recommends = c
+            .lines()
+            .find_map(|l| l.strip_prefix("Recommends: "))
+            .unwrap_or("");
+        assert!(
+            !recommends.contains("fapolicyd"),
+            "listed twice: {recommends}"
+        );
+        // Nothing the package runs on install/upgrade may arm the lock.
+        let root = workspace_root().join("packaging");
+        for script in ["postinst", "prerm", "postrm"] {
+            let body = std::fs::read_to_string(root.join("debian").join(script)).unwrap();
+            for arming in [
+                "charter-applock arm",
+                "fagenrules",
+                "enable fapolicyd",
+                "start fapolicyd",
+            ] {
+                assert!(
+                    !body.contains(arming),
+                    "{script} must never arm the app lock ({arming})"
+                );
+            }
+        }
+    }
+
+    /// The pure helpers in charter-applock (rule rendering, config edits,
+    /// denial parsing, .desktop Exec parsing) — no root needed.
+    #[test]
+    fn charter_applock_shell_helpers() {
+        let harness = workspace_root().join("packaging/setup/tests/applock.sh");
+        let out = Command::new("bash")
+            .arg(&harness)
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

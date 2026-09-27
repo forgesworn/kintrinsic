@@ -6,6 +6,13 @@ case "$1" in
     remove|deconfigure)
         systemctl stop charterd.service || true
         systemctl disable charterd.service || true
+        # Removing Kintrinsic must not leave its app lock enforcing with no
+        # charter-applock left to lift it. Only on remove — an upgrade keeps
+        # an armed lock armed, and nothing here ever arms one.
+        if [ "$1" = remove ] && [ -x /usr/sbin/charter-applock ] \
+            && [ -f /etc/fapolicyd/rules.d/72-kintrinsic-applock.rules ]; then
+            /usr/sbin/charter-applock disarm || true
+        fi
         ;;
 esac
 

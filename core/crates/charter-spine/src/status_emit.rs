@@ -109,6 +109,9 @@ pub fn build_status(
         // Stamped by the loop, which alone sees whether the usage ledger's
         // saves are landing.
         usage_unsaved: None,
+        // Stamped by the Linux loop from the fapolicyd probe; Android has no
+        // app lock of this kind and never sends it.
+        app_lock_armed: None,
     }
 }
 

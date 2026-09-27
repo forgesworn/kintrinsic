@@ -5,10 +5,26 @@
 # the child's account); `charter-setup <username>` is the headless form. Both
 # are idempotent (safe to re-run). Guardian pairing is optional — device-only
 # screen-time limits work without it (set them in the Kintrinsic app (The rules)).
+#
+# App lock (opt-in, never automatic): `charter-setup --arm-app-lock <username>`
+# also arms fapolicyd so the ward can only run installed programs — see
+# charter-applock(8) for the self-test it runs first. `charter-setup
+# --disarm-app-lock` (no username) undoes it; so does `charter-applock disarm`.
 set -euo pipefail
 
 GUI=0
-MANAGED_USER="${1:-}"
+MANAGED_USER=""
+ARM_APP_LOCK=0
+DISARM_APP_LOCK=0
+BAD_ARG=""
+for arg in "$@"; do
+    case "$arg" in
+        --arm-app-lock) ARM_APP_LOCK=1 ;;
+        --disarm-app-lock) DISARM_APP_LOCK=1 ;;
+        -*) BAD_ARG="$arg" ;;
+        *) MANAGED_USER="$arg" ;;
+    esac
+done
 
 # Show a graphical error in GUI mode, always log to stderr.
 fail() {
@@ -167,6 +183,16 @@ current_session_uid() {
 # without running the rest of setup.
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
+if [ -n "$BAD_ARG" ]; then
+    echo "usage: charter-setup [--arm-app-lock] <managed-username> | --disarm-app-lock" >&2
+    exit 2
+fi
+
+# The app lock's single undo, needing no account name.
+if [ "$DISARM_APP_LOCK" = 1 ]; then
+    exec /usr/sbin/charter-applock disarm
+fi
+
 # No user named + a desktop available -> graphical wizard.
 if [ -z "$MANAGED_USER" ] && command -v zenity >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
     GUI=1
@@ -183,7 +209,7 @@ if [ -z "$MANAGED_USER" ] && command -v zenity >/dev/null 2>&1 && [ -n "${DISPLA
 fi
 
 if [ -z "$MANAGED_USER" ]; then
-    echo "usage: charter-setup <managed-username>" >&2
+    echo "usage: charter-setup [--arm-app-lock] <managed-username> | --disarm-app-lock" >&2
     exit 2
 fi
 id "$MANAGED_USER" >/dev/null 2>&1 || fail "user '$MANAGED_USER' does not exist"
@@ -379,6 +405,18 @@ else
     fi
 fi
 
+# The app lock, only when asked for. It self-tests before enforcing and puts
+# everything back itself if the self-test fails, so a failure here leaves the
+# account lockdown above in place and the app lock simply off.
+APPLOCK_FAILED=0
+if [ "$ARM_APP_LOCK" = 1 ]; then
+    echo "==> app lock (fapolicyd)"
+    if ! /usr/sbin/charter-applock arm; then
+        APPLOCK_FAILED=1
+        echo "charter-setup: WARN the app lock was NOT armed (see above). Everything else is set up; fix the reason and run 'charter-applock arm'."
+    fi
+fi
+
 NOEXEC_NOTE=""
 if [ "${NOEXEC_PENDING:-0}" = 1 ]; then
     NOEXEC_NOTE="\n\nRestart this computer when convenient — one protection only switches on at the next start."
@@ -429,3 +467,7 @@ else
     echo "==> guardian pairing is optional (device-only limits work without it)."
     echo "==> done. Set limits in the Kintrinsic app (The rules), or pair a phone guardian from the Kintrinsic app -> Connect (needs an admin password)."
 fi
+
+# Setup itself succeeded; say so in the exit status only if the app lock that
+# was explicitly asked for did not arm.
+exit "$APPLOCK_FAILED"

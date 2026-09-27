@@ -152,6 +152,61 @@ sudo -v               # should be refused (not in sudo)
 flatpak install ...   # should be refused (only your approval can install)
 ```
 
+## App lock (optional, off until you arm it)
+
+Without it, the child can download a program into their home folder (or run
+one from a USB stick) and run it. The **app lock** stops that: with it armed,
+the child's account can only run programs installed on the system (under
+`/usr`, `/opt`, `/etc`, system flatpaks) and ones you approve. It uses
+`fapolicyd`, which the package installs but leaves **off**. Nothing arms it
+for you, on install or on upgrade.
+
+Only the children's accounts are restricted. Your own account, the login
+screen and the system itself are never touched by it, so if anything goes
+wrong you can always log in as yourself and undo it.
+
+```sh
+sudo charter-applock arm              # or: sudo charter-setup --arm-app-lock kid
+sudo charter-applock status           # "app lock: ARMED"
+```
+
+Before it switches anything on, `arm` checks that the child can't write
+anywhere the lock trusts. It then trusts the child's session programs that
+live elsewhere but that they can't change, and runs a **self-test** with
+fapolicyd in permissive mode (nothing blocked yet). The self-test tries every
+program the desktop and the child's session start, plus a harmless test
+program placed in the child's own files. It only switches to enforcing if that
+test program **was** caught and nothing the desktop needs was. After
+switching, it checks again for real and undoes itself at once if anything
+needed is refused. If a program the child runs today lives in their own files
+(a game in `~/.local/bin`, say), `arm` lists it and stops; run it again with
+`--accept-blocked` if blocking it is what you want.
+
+To try it with a safety net, `sudo charter-applock arm --trial 15` disarms
+itself after 15 minutes unless you run `sudo charter-applock keep`.
+
+**To undo, one command** (from your desktop, a terminal, a text console, or a
+recovery shell):
+
+```sh
+sudo charter-applock disarm           # or: sudo charter-setup --disarm-app-lock
+```
+
+If the child's session misbehaves after arming, log out of it (or switch
+user), log in as **yourself** and run the command above. If there is no
+desktop at all, press `Ctrl+Alt+F3` at the login screen, log in as yourself
+and run it there. (`Ctrl+Alt+F3` is only turned off while the time's-up lock
+screen is showing.) As a last resort, boot the **Advanced options → recovery
+mode** entry in the boot menu, choose **root**, and run
+`charter-applock disarm`, or just `systemctl disable fapolicyd`. fapolicyd
+not running means nothing is enforced.
+
+**What it does not cover.** A system program given the child's own file is
+not the child's file being run: `python3 ~/game.py`, `bash ~/script.sh`,
+`java -jar ~/game.jar` and web games still work. Files on FUSE mounts, such as
+browsing inside a zip in the file manager, are not watched either (watching
+them can hang the machine).
+
 ## 8. If you get stuck — Recovery
 
 **The parent's account is never governed** — only the child's. The lock

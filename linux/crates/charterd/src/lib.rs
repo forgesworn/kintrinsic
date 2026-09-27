@@ -16,6 +16,7 @@ pub use charter_spine::{
 
 pub mod ancestry;
 pub mod app_inventory;
+pub mod app_lock;
 pub mod app_rules;
 pub mod apps_policy;
 pub mod atomic_file;

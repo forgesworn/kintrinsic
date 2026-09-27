@@ -2786,6 +2786,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         // tick's answer would lag a fresh `apt install chromium` by a minute.
         let site_runtime_present =
             crate::enactors::learning_apps::LearnFs::runtime_path(&learn_fs).is_some();
+        // The app lock is device-wide: one probe per tick (four file reads),
+        // stamped on every child's STATUS below.
+        let app_lock_armed = crate::app_lock::probe(&crate::app_lock::AppLockPaths::default());
         for (user, _cfg) in &configs {
             let Some(uid) = uid_for_user(&passwd, user) else {
                 continue;
@@ -3170,6 +3173,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // R3-H1: the budget is held paused because the ledger will
                 // not save — say why, or the guardian sees an unexplained lock.
                 status.usage_unsaved = multi.usage_unsaved(*uid).then_some(true);
+                // Always sent by a Linux warden (true or false): "not armed"
+                // is something the guardian can act on, unlike "unknown".
+                status.app_lock_armed = Some(app_lock_armed);
                 // Per-bucket ("named time") progress, so the guardian's app
                 // can show "Play: 22 of 60 used" instead of a blank. RAW
                 // meters — not extra-adjusted — because this is the guardian's

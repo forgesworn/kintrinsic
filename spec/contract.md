@@ -1550,6 +1550,7 @@ interface StatusPayload {
   usageUnsaved?: boolean;          // this device's usage record has failed to save continuously for >=5 min; screen time is held PAUSED as a fail-safe while true
   clockSteppedBackFrom?: number;   // present only on the FIRST status after this device's clock stepped below its own previous ts; equals that previous ts
   seq?: number;                    // per-device sequence, strictly increasing across restarts (incl. a wipe) — the ORDERING signal once present; see below
+  appLockArmed?: boolean;          // Linux: the app lock (fapolicyd) is armed and enforcing right now; a Linux warden that has it always sends true/false
 }
 ```
 
@@ -1804,6 +1805,23 @@ newer reading (R2-2). A restart also drops a consumer's in-memory
 consumer's view for as long as the wrap jitter allows (R2-3). A persisted,
 monotonic `seq` is immune to both: a replay's `seq` can never be newer than
 what it already lost to, and it survives a restart by construction.
+
+**`appLockArmed?: boolean` (Linux, charterd releases after 0.7.9).** Whether the
+ward laptop's **app lock** is armed and enforcing right now: fapolicyd
+running, not permissive, with the rules `charter-applock arm` rendered for
+the device's wards, so a program the ward downloaded or wrote into their own
+files (or onto a USB stick) cannot be executed. Arming is a local, opt-in
+guardian action on the device (`charter-applock arm`, or
+`charter-setup --arm-app-lock`), never a clause and never automatic, so this
+field is a report, not a command. Unlike the absent-unless-true fields
+above, a Linux warden that knows about the app lock **always** sends it,
+`true` or `false`, because "not armed" is something a guardian can act on;
+**absent** means the device has no such control (Android, whose platform
+sandbox is the equivalent) or predates the field, and a consumer must show
+it as "unknown", never as "off". `true` requires every link at once
+(Kintrinsic's rules file, the compiled rule set, enforcing mode and a live
+daemon); anything missing reads as `false`. A boolean only: which programs
+were denied never appears on this wire.
 
 **Admission rule.** A consumer orders two STATUS readings for the same
 device as follows, in order:

@@ -276,6 +276,15 @@ pub struct StatusPayload {
     /// STATUS field-set decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_unsaved: Option<bool>,
+    /// Linux: whether the app lock (fapolicyd with Kintrinsic's rules) is
+    /// armed and enforcing on this device right now, so a downloaded binary
+    /// in the ward's own files cannot run. A Linux warden that knows about
+    /// the app lock always sends it, `true` or `false`; absent means the
+    /// device has no such control (Android, whose platform sandbox is the
+    /// equivalent) or predates it. Additive under the open STATUS field-set
+    /// decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_lock_armed: Option<bool>,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -488,6 +497,24 @@ mod tests {
             clock_stepped_back_from: None,
             seq: None,
             usage_unsaved: None,
+            app_lock_armed: None,
+        }
+    }
+
+    #[test]
+    fn app_lock_armed_omits_when_none_and_round_trips_camel_case() {
+        let mut s = sample();
+        let json = s.to_json();
+        assert!(!json.contains("appLockArmed"), "absent when not reported");
+        for armed in [true, false] {
+            s.app_lock_armed = Some(armed);
+            let json = s.to_json();
+            assert!(
+                json.contains(&format!("\"appLockArmed\":{armed}")),
+                "{json}"
+            );
+            let back = StatusPayload::from_json(&json).unwrap();
+            assert_eq!(back.app_lock_armed, Some(armed));
         }
     }
 

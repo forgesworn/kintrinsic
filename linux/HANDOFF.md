@@ -370,3 +370,30 @@ isolation, real-store sort, STATUS `source` enum third value).
 - One-tick latency: a freshly-arrived guardian clause is cached by `poll_once`
   and applied on the next loop tick (~`poll_interval`); acceptable, matches the
   pre-existing enforcer pattern.
+
+---
+
+## App lock: fapolicyd arming is code-ready (2026-09-27, Spike #1)
+
+`charter-applock arm | disarm | status | keep` (`/usr/sbin`, also
+`charter-setup --arm-app-lock <user>` / `--disarm-app-lock`). Opt-in only;
+the package never arms it. fapolicyd is now a **Depends** (Debian installs it
+disabled), so trust.d exists before charterd starts (R3-7) and arming needs
+no network.
+
+- Rules are **ward-scoped** (`uid=`/`auid=` per charter-managed member):
+  wards may execute only from root-only trees (`/usr /etc /opt /snap`, system
+  flatpak, the approved store) or trusted files; everyone else, root included,
+  falls through to `allow perm=any all : all`. `trust = file` replaces debdb.
+- Arm refuses if a ward can write inside an allowed tree, if foreign rules
+  exist, or if an essential session binary is ward-writable. It seeds trust
+  (`trust.d/charter-session`) for root-owned session binaries outside the
+  trees. It runs a permissive `fapolicyd --debug-deny` self-test that exec-probes
+  every session binary as each ward under a 64 KiB address-space limit, plus a
+  canary in the ward's files. It enforces only if the canary is denied and
+  nothing needed is, then re-verifies live and self-reverts on any refusal.
+- STATUS `appLockArmed` (contract updated) comes from `charterd::app_lock::probe`.
+- Verified in an Ubuntu 24.04 container against the real fapolicyd 1.3.2. The
+  Mint VM round is `internal/reviews/2026-09-27-fapolicyd-vm-test.md`.
+- Known gaps (documented in INSTALL.md): root-owned interpreters on ward files,
+  and FUSE mounts, which are deliberately not in `watch_fs`.

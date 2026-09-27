@@ -1,30 +1,66 @@
-# charter.rules — fapolicyd policy fragment. NOT LIVE AS SHIPPED: the package
-# installs it under /usr/share/charter/fapolicyd/ as a reference. It ends in a
-# default-deny, so it only ever goes into /etc/fapolicyd/rules.d through the
-# opt-in arming step (copy -> seed trust -> `fagenrules --load` -> enable),
-# which needs a VM round first: a wrong trust list locks the session out.
+# charter.rules — the Kintrinsic app lock, as a fapolicyd rule TEMPLATE.
 #
-# Model: default-deny execution. Only binaries charterd has approved (copied
-# into the content-addressed store and trusted by sha256) may execute from the
-# approved store. charterd manages the trust entries via fapolicyd-cli; this
-# fragment pins the store as an allow anchor and keeps the system paths working.
+# NOT LIVE AS SHIPPED. The package installs this under
+# /usr/share/charter/fapolicyd/72-charter.rules as a template only. The one
+# thing that makes it live is the opt-in `charter-applock arm` (or
+# `charter-setup --arm-app-lock <user>`), which renders it into
+# /etc/fapolicyd/rules.d/72-kintrinsic-applock.rules, self-tests it with
+# fapolicyd in permissive mode, and only then switches fapolicyd to enforcing.
+# `charter-applock disarm` undoes all of it. Nothing arms it on install or on
+# upgrade.
 #
-# Exact ordering/syntax is validated on the Mint VM (design Spike #1); this is
-# the shipped baseline.
+# How it is rendered: every rule line containing @WARD@ is emitted once per
+# ward selector — `uid=N` and then `auid=N` for each member of the
+# charter-managed group — and the rule lines without @WARD@ are emitted once,
+# at the end. Comments and blank lines are dropped.
+#
+# Model. The lock applies to the WARDS ONLY. Root, the guardian's own account,
+# the login screen and every system service fall through to the final
+# `allow perm=any all : all` and are never restricted — so a mistake here can
+# at worst spoil a ward's session, never the machine: the guardian can always
+# log in (desktop or a TTY) and run `sudo charter-applock disarm`.
+#
+# For a ward, execution is allowed from the trees only root can write to
+# (/usr, /etc, /opt, /snap, the system flatpak tree, the charterd-approved
+# store) and from anything fapolicyd trusts (charterd's approved entries and
+# the session binaries seeded at arm time). Everything else — $HOME, /tmp,
+# /var/tmp, /dev/shm, a USB stick — is denied. `charter-applock arm` refuses to
+# arm if the ward can write anywhere inside an allowed tree, because a
+# path-based allow over a tree the ward can write to would be no lock at all.
+#
+# `uid=` covers the ward's own processes, including their `systemd --user`
+# services (`systemd-run --user ~/game` is still uid=ward); `auid=` covers
+# anything their login session starts under another uid.
+#
+# Known gaps, by design (see linux/docs/INSTALL.md, "App lock"): a root-owned
+# interpreter given the ward's own file (`python3 ~/game.py`, `bash ~/x.sh`,
+# `java -jar ~/x.jar`) is not an execution of that file; and filesystems not
+# in fapolicyd's `watch_fs` (FUSE mounts such as gvfs archive browsing) are not
+# watched at all.
 
-# Allow execution of trusted (charterd-approved, hash-pinned) files anywhere.
-# Subject left of the colon, object right: "anyone may execute a TRUSTED file".
-# This read `trust=1 all : all`, which puts the attribute on the SUBJECT and
-# combines it with `all` (fapolicyd.rules(5) forbids that) — at best a parse
-# error that rejects the whole fragment, at worst "a trusted process may
-# execute anything", i.e. every shell, and no default-deny at all.
-allow perm=execute all : trust=1
+# The dynamic loader run by hand (`/lib64/ld-linux-x86-64.so.2 ~/game`) maps
+# the payload without an execute event of its own; fapolicyd's ld_so pattern
+# catches the process that was started that way.
+deny_log perm=any @WARD@ pattern=ld_so : all
 
-# Allow execution from the Charter approved-exec store (relocated approved bins).
-allow perm=execute all : dir=/var/lib/charter/approved/
+# Root-only trees. Subject left of the colon, object right.
+allow perm=execute @WARD@ : dir=/usr/
+allow perm=execute @WARD@ : dir=/etc/
+allow perm=execute @WARD@ : dir=/opt/
+allow perm=execute @WARD@ : dir=/snap/
+# The system flatpak install tree (charterd's broker installs here).
+allow perm=execute @WARD@ : dir=/var/lib/flatpak/
+# The charterd approved-exec store (content-addressed, root 0700).
+allow perm=execute @WARD@ : dir=/var/lib/charter/approved/
+# Anything fapolicyd trusts: charterd's per-binary approvals
+# (trust.d/charter) and the session binaries seeded at arm time
+# (trust.d/charter-session). The attribute sits on the OBJECT: `trust=1` on
+# the subject side combined with `all` is rejected by fapolicyd.rules(5).
+allow perm=execute @WARD@ : trust=1
 
-# Allow the system flatpak install tree (broker installs here, exec-allowed).
-allow perm=execute all : dir=/var/lib/flatpak/
+# The ward's default: nothing else executes. deny_log = audit + syslog, so a
+# denial is visible in the journal as well as the audit log.
+deny_log perm=execute @WARD@ : all
 
-# Everything else that is not trusted is denied by the default-deny tail.
-deny_audit perm=execute all : all
+# Everyone who is not a ward, and every non-execute access by a ward.
+allow perm=any all : all
