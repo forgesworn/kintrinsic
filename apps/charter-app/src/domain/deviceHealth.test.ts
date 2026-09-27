@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { deviceHealthNotes, humaniseDuration, statusAgeLabel, HEALTH_STALE_SECS } from "./deviceHealth";
+import {
+  appLockNote,
+  deviceHealthNotes,
+  humaniseDuration,
+  statusAgeLabel,
+  HEALTH_STALE_SECS,
+} from "./deviceHealth";
 
 describe("humaniseDuration", () => {
   it("renders sub-hour durations in minutes", () => {
@@ -146,5 +152,26 @@ describe("deviceHealthNotes (G-2: STATUS fields parsed but never shown)", () => 
       const { stale } = deviceHealthNotes({ pausedByAdmin: true });
       expect(stale).toBe(false);
     });
+  });
+});
+
+// The Linux app-lock line ("App lock: on"/"App lock: off"), shown next to
+// health/version on a ward's card. Absent means Android, or a Linux ward
+// that predates the field — never shown as either state.
+describe("appLockNote", () => {
+  it("shows nothing at all when the ward never reported the field", () => {
+    expect(appLockNote(undefined)).toBeUndefined();
+  });
+
+  it("reads armed as a plain, unworried line", () => {
+    const note = appLockNote(true);
+    expect(note).toEqual({ tone: "ok", text: "App lock: on" });
+  });
+
+  it("reads unarmed with warning styling and a short hint on how to arm it", () => {
+    const note = appLockNote(false);
+    expect(note?.tone).toBe("warn");
+    expect(note?.text).toBe("App lock: off");
+    expect(note?.hint).toMatch(/sudo charter-setup --arm-app-lock/);
   });
 });

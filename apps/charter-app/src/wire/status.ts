@@ -224,6 +224,15 @@ export interface DeviceStatus {
    * `store/deviceStatusAdmit.ts` for the full admission rule.
    */
   seq?: number;
+  /**
+   * True only when fapolicyd is enforcing the app-lock rules for every ward
+   * account on this LINUX machine; `false` when charterd is up but the lock
+   * is not armed. Absent means either an Android ward (no such concept) or
+   * an older Linux ward that predates the field — the guardian must show
+   * nothing about it in that case, never read absence as "off". A new
+   * charterd always sends one or the other, true or false.
+   */
+  appLockArmed?: boolean;
 }
 
 /** One installed launchable app on a device. */
@@ -392,6 +401,11 @@ export function parseStatus(json: string): DeviceStatus | null {
     // older ward, or any ordinary heartbeat that predates this field) parses
     // as undefined, never coerced to 0 — 0 is a valid sequence value.
     seq: isNonNegInt(o.seq) ? o.seq : undefined,
+    // Strictly typed: a non-boolean (a stray string, a number, anything else
+    // a malformed or future payload might send) is treated as absent, same
+    // posture as every other tolerant field here — never coerced to `false`,
+    // which would read as "unarmed" for a ward that simply sent junk.
+    appLockArmed: typeof o.appLockArmed === "boolean" ? o.appLockArmed : undefined,
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)

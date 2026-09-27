@@ -164,3 +164,29 @@ export function deviceHealthNotes(
   }
   return { notes, stale };
 }
+
+/** A ward's Linux app-lock line, shown next to health/version on its card. */
+export type AppLockNote = {
+  tone: "ok" | "warn";
+  text: string;
+  /** Only on the "off" state — how the guardian arms it. */
+  hint?: string;
+};
+
+/**
+ * The app-lock line for a ward's card ("App lock: on" / "App lock: off"),
+ * from `DeviceStatus.appLockArmed`. `undefined` (an Android ward, or a Linux
+ * one that predates the field) shows nothing at all — absence is never read
+ * as either state. `false` gets the same warning styling as the notes above,
+ * plus a short hint on how to arm it, since an unarmed lock is the one state
+ * here that calls for the guardian to act.
+ */
+export function appLockNote(appLockArmed: boolean | undefined): AppLockNote | undefined {
+  if (appLockArmed === undefined) return undefined;
+  if (appLockArmed) return { tone: "ok", text: "App lock: on" };
+  return {
+    tone: "warn",
+    text: "App lock: off",
+    hint: "Anyone on this computer can run programs they download. Arm it with `sudo charter-setup --arm-app-lock <user>`.",
+  };
+}

@@ -225,6 +225,34 @@ describe("unrecognisedTodaySecs", () => {
   });
 });
 
+// Linux app-lock arming (fapolicyd enforcing the app-lock rules for every
+// ward account on the machine): a new charterd always sends true or false;
+// absent means Android, or a Linux ward that predates the field, and must
+// never read as either state.
+describe("appLockArmed", () => {
+  it("parses a reported true", () => {
+    const s = { ...sample("ab".repeat(32), "cd".repeat(32)), appLockArmed: true };
+    expect(parseStatus(JSON.stringify(s))?.appLockArmed).toBe(true);
+  });
+
+  it("parses a reported false", () => {
+    const s = { ...sample("ab".repeat(32), "cd".repeat(32)), appLockArmed: false };
+    expect(parseStatus(JSON.stringify(s))?.appLockArmed).toBe(false);
+  });
+
+  it("stays undefined when absent — an Android or older Linux ward", () => {
+    const s = sample("ab".repeat(32), "cd".repeat(32));
+    expect(parseStatus(JSON.stringify(s))?.appLockArmed).toBeUndefined();
+  });
+
+  it("treats a non-boolean value as absent rather than trusting it", () => {
+    const base = sample("ab".repeat(32), "cd".repeat(32));
+    expect(parseStatus(JSON.stringify({ ...base, appLockArmed: "true" }))?.appLockArmed).toBeUndefined();
+    expect(parseStatus(JSON.stringify({ ...base, appLockArmed: 1 }))?.appLockArmed).toBeUndefined();
+    expect(parseStatus(JSON.stringify({ ...base, appLockArmed: null }))?.appLockArmed).toBeUndefined();
+  });
+});
+
 // The guardian-admission marker (review 2026-09-27 second round, F1/F2): the
 // ward's own vouching that a lower `ts` is a genuine clock step, not a relay
 // replay. Same parse posture as the other additive, absent-not-zero fields

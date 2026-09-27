@@ -37,7 +37,7 @@ import UnlockDevice from "./UnlockDevice";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
 import { bestLiveness, livenessChip } from "../domain/liveness";
-import { deviceHealthNotes } from "../domain/deviceHealth";
+import { appLockNote, deviceHealthNotes } from "../domain/deviceHealth";
 
 // Accent colors a parent can pick for a child's avatar/chips.
 const CHILD_COLORS = ["#3B6FB2", "#2E7D5B", "#C4860F", "#7A4FB5", "#B23B30"];
@@ -488,6 +488,11 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
     device.devicePubkey ? deviceStatus[device.devicePubkey] : undefined,
     nowUnix * 1000,
   );
+  // Whether fapolicyd is enforcing the app-lock rules on this LINUX ward.
+  // Absent (Android, or an older Linux ward) shows nothing at all.
+  const appLock = appLockNote(
+    device.devicePubkey ? deviceStatus[device.devicePubkey]?.appLockArmed : undefined,
+  );
   const openWindow = installWindow(installOpenUntil, nowUnix);
   useEffect(() => {
     if (!installOpenUntil) return;
@@ -526,6 +531,24 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
         </div>
         {reportedName && (
           <div className="card-sub">Kintrinsic {reportedName}</div>
+        )}
+        {appLock && (
+          <div
+            className="card-sub"
+            style={appLock.tone === "warn" ? { color: "var(--warn, #8a5a00)" } : undefined}
+          >
+            {appLock.text}
+            {appLock.hint && (
+              <>
+                {" — "}
+                {appLock.hint
+                  .split(/(`[^`]+`)/)
+                  .map((part, i) =>
+                    part.startsWith("`") ? <code key={i}>{part.slice(1, -1)}</code> : part,
+                  )}
+              </>
+            )}
+          </div>
         )}
         {canUpdate && updateSent && (
           <div className="card-sub">
