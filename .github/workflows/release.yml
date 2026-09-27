@@ -1,5 +1,13 @@
 name: release
 
+# The root npm SDK (@forgesworn/charter) ONLY. `release: published` also
+# fires for the ward-v*/guardian-v*/linux-v* GitHub Releases that
+# release-artifacts.yml drafts and a maintainer publishes with
+# publish-release.mjs --from-draft — those are Android/Linux artifacts, not
+# npm packages, and must never reach anvil's npm publish job. SDK tags are
+# always `v<semver>` (anvil's own convention), which none of the three
+# artifact prefixes can ever match, but the exclusion is spelled out anyway
+# so a future prefix can't slip through by accident.
 on:
   release:
     types: [published]
@@ -16,11 +24,16 @@ permissions:
 
 jobs:
   release:
+    if: |
+      startsWith(github.event.release.tag_name || inputs.tag, 'v') &&
+      !startsWith(github.event.release.tag_name || inputs.tag, 'ward-v') &&
+      !startsWith(github.event.release.tag_name || inputs.tag, 'guardian-v') &&
+      !startsWith(github.event.release.tag_name || inputs.tag, 'linux-v')
     uses: forgesworn/anvil/.github/workflows/release.yml@v0
     with:
       tag: ${{ inputs.tag || '' }}
-      # npm requires a public source repo for provenance publishes, and anvil
-      # mandates provenance; this repo is private, so skip the real npm push
-      # (build, reproducibility gate, and GitHub Release still run). Drop this
-      # when the repo goes public.
+      # This repo is public; npm publishing is simply CLOSED for now (a
+      # separate decision from repo visibility) — dry-run keeps the build,
+      # reproducibility gate and GitHub Release running without pushing to
+      # npm. Flip this once npm publishing opens up.
       dry-run: "true"

@@ -28,21 +28,14 @@ cd "$(dirname "$0")/.."   # android/
 # shellcheck source=../../scripts/release/lib.sh
 . ../scripts/release/lib.sh
 
-if [ -z "${CHARTER_KEYSTORE_FILE:-}" ] && [ "${CHARTER_ALPHA_DEBUG_SIGNING:-}" = "1" ]; then
-  echo "WARNING: publishing a DEBUG-SIGNED ward release (alpha bridge)." >&2
-  echo "         Keystore password is the well-known \"android\"; anyone holding" >&2
-  echo "         that file can sign a same-signature update of the Device Owner." >&2
-  echo "         See android/keystore/README.md." >&2
-fi
-
-./scripts/build-jni.sh release
-./gradlew -q assembleRelease
-APK=app/build/outputs/apk/release/app-release.apk
-[ -f "$APK" ] || { echo "FATAL: $APK missing after build" >&2; exit 1; }
-
-VC=$(grep -oE 'versionCode = [0-9]+' app/build.gradle.kts | grep -oE '[0-9]+')
-VN=$(grep -oE 'versionName = "[^"]+"' app/build.gradle.kts | sed 's/.*"\(.*\)"/\1/')
-[ -n "$VC" ] && [ -n "$VN" ] || { echo "FATAL: cannot read version from build.gradle.kts" >&2; exit 1; }
+# The build itself lives in build-apk.sh — the ONE path CI's
+# release-artifacts.yml also runs, so a developer machine and CI produce the
+# same bytes from the same source. See that script for the signing story
+# (alpha bridge, lineage rotation).
+BUILD_VARS=$(./scripts/build-apk.sh)
+# shellcheck disable=SC1090
+. "$BUILD_VARS"
+rm -f "$BUILD_VARS"
 PUB=../apps/charter-app/public
 MANIFEST=$PUB/charter-apk.json
 
@@ -55,12 +48,7 @@ if [ -f "$MANIFEST" ]; then
   fi
 fi
 
-APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
-[ -n "$APKSIGNER" ] || { echo "FATAL: apksigner not found under \$ANDROID_HOME/build-tools" >&2; exit 1; }
-CERT=$("$APKSIGNER" verify --print-certs "$APK" \
-  | grep -oiE 'SHA-256 digest: [0-9a-f]+' | head -1 | awk '{print tolower($3)}')
-[ -n "$CERT" ] || { echo "FATAL: could not read the signing cert digest" >&2; exit 1; }
-
+# CERT (and VC/VN/SHA/SIZE/BUILT) came from build-apk.sh above.
 # The App Link anchor must name THIS cert (S3 item 5). `assetlinks.json` is
 # what tells Android that org.forgesworn.charter may handle charter.mysignet.app
 # links — the verified App Link the one-scan QR pairing rides on. It carries a
@@ -87,10 +75,6 @@ if [ -f "$ASSETLINKS" ]; then
     exit 1
   fi
 fi
-
-SHA=$(sha256sum "$APK" | cut -d' ' -f1)
-SIZE=$(stat -c%s "$APK")
-BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # GitHub Release first, Blossom mirror second, then the signed event — a
 # failed GitHub upload or download check aborts (set -e) before anything is

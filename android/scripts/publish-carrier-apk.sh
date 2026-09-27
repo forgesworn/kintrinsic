@@ -23,25 +23,13 @@ cd "$(dirname "$0")/.."   # android/
 # shellcheck source=../../scripts/release/lib.sh
 . ../scripts/release/lib.sh
 
-if [ -z "${CHARTER_KEYSTORE_FILE:-}" ] && [ "${CHARTER_ALPHA_DEBUG_SIGNING:-}" = "1" ]; then
-  echo "WARNING: publishing a DEBUG-SIGNED Kintrinsic release (alpha bridge)." >&2
-  echo "         This app holds the guardian secret key. Keystore password is the" >&2
-  echo "         well-known \"android\". See android/keystore/README.md." >&2
-fi
-
-# D1: the console is BUNDLED into this APK (gradle stageConsoleAssets), so the
-# APK must always carry a freshly built page — a stale dist/ here would ship
-# an old console under a new versionCode.
-( cd ../apps/charter-app && npm run build )
-
-./scripts/build-jni-guardian.sh release
-./gradlew -q :carrier:assembleRelease
-APK=carrier/build/outputs/apk/release/carrier-release.apk
-[ -f "$APK" ] || { echo "FATAL: $APK missing after build" >&2; exit 1; }
-
-VC=$(grep -oE 'versionCode = [0-9]+' carrier/build.gradle.kts | grep -oE '[0-9]+')
-VN=$(grep -oE 'versionName = "[^"]+"' carrier/build.gradle.kts | sed 's/.*"\(.*\)"/\1/')
-[ -n "$VC" ] && [ -n "$VN" ] || { echo "FATAL: cannot read version from carrier/build.gradle.kts" >&2; exit 1; }
+# The build itself lives in build-carrier-apk.sh — the ONE path CI's
+# release-artifacts.yml also runs. See that script for the signing story
+# (alpha bridge, lineage rotation).
+BUILD_VARS=$(./scripts/build-carrier-apk.sh)
+# shellcheck disable=SC1090
+. "$BUILD_VARS"
+rm -f "$BUILD_VARS"
 PUB=../apps/charter-app/public
 MANIFEST=$PUB/mycharter-apk.json
 
@@ -54,15 +42,7 @@ if [ -f "$MANIFEST" ]; then
   fi
 fi
 
-APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
-[ -n "$APKSIGNER" ] || { echo "FATAL: apksigner not found under \$ANDROID_HOME/build-tools" >&2; exit 1; }
-CERT=$("$APKSIGNER" verify --print-certs "$APK" \
-  | grep -oiE 'SHA-256 digest: [0-9a-f]+' | head -1 | awk '{print tolower($3)}')
-[ -n "$CERT" ] || { echo "FATAL: could not read the signing cert digest" >&2; exit 1; }
-
-SHA=$(sha256sum "$APK" | cut -d' ' -f1)
-SIZE=$(stat -c%s "$APK")
-BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# CERT (and VC/VN/SHA/SIZE/BUILT) came from build-carrier-apk.sh above.
 
 # GitHub Release first, Blossom mirror second, then the signed event; any
 # GitHub failure aborts before the manifest names a URL.

@@ -116,6 +116,24 @@ export function orderReleaseUrls(urls, repo = RELEASE_GITHUB_REPO) {
   ];
 }
 
+/**
+ * Tag -> {channel, version}, the reverse of githubRelease's naming. Used by
+ * `--from-draft <tag>` (publish-release.mjs) to work out what a draft
+ * release's tag names without anything else to go on. Throws on a tag that
+ * matches none of the three artifact prefixes.
+ */
+export function channelAndVersionFromTag(tag) {
+  if (typeof tag !== "string") throw new Error("tag must be a string");
+  for (const [channel, n] of Object.entries(GITHUB_NAMING)) {
+    if (tag.startsWith(n.tagPrefix)) {
+      const version = tag.slice(n.tagPrefix.length);
+      if (!VERSION_RE.test(version)) throw new Error(`tag '${tag}' has a malformed version`);
+      return { channel, version };
+    }
+  }
+  throw new Error(`tag '${tag}' matches none of ward-v*, guardian-v*, linux-v*`);
+}
+
 /** BUD-02 Blossom upload authorization kind. */
 export const BLOSSOM_AUTH_KIND = 24242;
 
@@ -213,4 +231,184 @@ export function buildBlossomAuth({ sha256, createdAt }) {
     ],
     content: "Charter release artifact upload",
   };
+}
+
+// ---- `--from-draft` verification (publish-release.mjs) --------------------
+//
+// The fielded debug certificate — MUST match scripts/release/lib.sh's own
+// DEBUG_CERT_SHA256 (that copy is bash, this one is JS; both are the same
+// well-known public value, verified against a real debug-signed build and
+// against apps/charter-app/public/.well-known/assetlinks.json on
+// 2026-09-27). A v3-rotated release APK's lineage must start here.
+export const DEBUG_CERT_SHA256 = "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42";
+
+// The pinned release-key certificate fingerprint (lowercase hex, 64 chars).
+// Empty until the sysadmin supplies it (see docs/releasing.md) — kept as
+// two copies for the same reason DEBUG_CERT_SHA256 is (this one is JS,
+// scripts/release/lib.sh's own RELEASE_CERT_SHA256 is bash).
+export const RELEASE_CERT_SHA256 = "";
+
+/**
+ * The cert-pin guard `--from-draft` runs for every APK channel, on top of
+ * verifyRotatedApkCert's internal-consistency checks. verifyRotatedApkCert
+ * happily accepts a v3-verified APK whose CURRENT signer IS the debug cert
+ * (its lineage checks only run when the signer differs from the debug
+ * cert) — this is the explicit belt for that: a signer equal to the debug
+ * cert is refused outright, regardless of the pin. Once RELEASE_CERT_SHA256
+ * is set, the signer must equal it exactly; while it is still empty, this
+ * refuses rather than silently accepting anything that merely isn't the
+ * debug cert. Throws on any failure.
+ */
+export function assertPinnedCert(
+  cert,
+  { releaseCertSha256 = RELEASE_CERT_SHA256, debugCertSha256 = DEBUG_CERT_SHA256 } = {},
+) {
+  const c = (cert ?? "").toLowerCase();
+  if (!HEX64.test(c)) throw new Error(`not a valid sha256 cert digest: ${cert}`);
+  if (c === debugCertSha256.toLowerCase())
+    throw new Error(
+      `signing cert ${c} is the DEBUG cert — refusing to publish an APK release signed with it`,
+    );
+  if (!releaseCertSha256)
+    throw new Error("release cert not pinned yet — see docs/releasing.md");
+  if (c !== releaseCertSha256.toLowerCase())
+    throw new Error(`signing cert ${c} does not match the pinned RELEASE_CERT_SHA256 (${releaseCertSha256})`);
+}
+
+/**
+ * Strict tag-name validator for the CI release workflow's shell-injection
+ * guard (release-artifacts.yml's "Validate the tag" step): before ANY value
+ * derived from a workflow_dispatch input or a ref name is used inside a
+ * `run:` shell block, it must match this. Deliberately stricter than TAG_RE
+ * above (which accepts full semver — used only for the JS-side URL/tag
+ * naming that never touches a shell): a plain three-part numeric version,
+ * no pre-release/build suffix, so nothing resembling a shell metacharacter
+ * can ever reach `run:`. The workflow's own regex must stay textually
+ * identical to this one; there is no import across YAML and JS, so the test
+ * for this constant is what keeps the two from drifting apart unnoticed.
+ */
+export const CI_RELEASE_TAG_RE = /^(ward|guardian|linux)-v[0-9]+\.[0-9]+\.[0-9]+$/;
+
+/**
+ * Parse a `sha256sum`-style SHA256SUMS file ("<64 lowercase hex>  <name>"
+ * per line, sha256sum's own two-space — or one-space, or a leading "*" for
+ * binary mode — format) into a Map<filename, hexDigest>. Throws on any
+ * non-blank line that doesn't match.
+ */
+export function parseSha256Sums(text) {
+  const map = new Map();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = /^([0-9a-f]{64})\s+\*?(.+)$/.exec(line);
+    if (!m) throw new Error(`malformed SHA256SUMS line: ${raw}`);
+    map.set(m[2], m[1]);
+  }
+  return map;
+}
+
+/**
+ * Parse `apksigner verify -v --print-certs` output into the facts
+ * android_verify_signing (scripts/release/lib.sh) checks: whether v3
+ * verified, how many CURRENT signers, and the first (current) signer's
+ * SHA-256 digest. Pure — the impure caller runs apksigner and passes its
+ * stdout in.
+ */
+export function parseApksignerVerify(output) {
+  const v3 = /^Verified using v3 scheme \(APK Signature Scheme v3\): true$/m.test(output);
+  const signersMatch = /^Number of signers: (\d+)$/m.exec(output);
+  const certMatch = /^Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]+)$/m.exec(output);
+  return {
+    v3,
+    signers: signersMatch ? Number(signersMatch[1]) : null,
+    cert: certMatch ? certMatch[1].toLowerCase() : null,
+  };
+}
+
+/**
+ * Parse `apksigner lineage --in <apk> --print-certs` output into an ordered
+ * list of `{ index, sha256 }` (lowercase hex), oldest signer first. Pure.
+ */
+export function parseApksignerLineage(output) {
+  const entries = [];
+  const re = /^Signer #(\d+) in lineage certificate SHA-256 digest: ([0-9a-fA-F]+)$/gm;
+  let m;
+  while ((m = re.exec(output)) !== null) {
+    entries.push({ index: Number(m[1]), sha256: m[2].toLowerCase() });
+  }
+  return entries;
+}
+
+/**
+ * The cert guard `--from-draft` runs over an already-captured apksigner
+ * output — pure and testable without a real APK or the apksigner binary.
+ * Unlike lib.sh's `android_verify_signing` (which stays lenient for the
+ * LOCAL alpha-bridge debug build), this ALWAYS requires v3: `--from-draft`
+ * only ever verifies a CI-drafted artifact, and CI's release Environment
+ * makes the rotation lineage mandatory (rotation plan C1/C5) — an
+ * alpha-bridge build can never reach a draft release. Guards, in order:
+ *   1. v3 verified true.
+ *   2. exactly one current signer.
+ *   3. if that signer is not `debugCertSha256`, `lineageOutput` must exist,
+ *      its first signer must be the debug cert, and it must include the
+ *      current signer somewhere in it (a rotation FROM the fielded cert,
+ *      not an unrelated key with a lineage of its own).
+ * Throws on any failure; returns the current signer's sha256 (lowercase
+ * hex) on success.
+ */
+export function verifyRotatedApkCert({ verifyOutput, lineageOutput, debugCertSha256 = DEBUG_CERT_SHA256 }) {
+  const { v3, signers, cert } = parseApksignerVerify(verifyOutput);
+  if (!v3) throw new Error("apk is not v3-verified");
+  if (signers !== 1) throw new Error(`apk reports ${signers} current signers, expected exactly 1`);
+  if (!cert) throw new Error("could not read the signing cert digest");
+  if (cert !== debugCertSha256) {
+    if (!lineageOutput) throw new Error(`apk's signer (${cert}) is not the debug cert and it carries no lineage`);
+    const lineage = parseApksignerLineage(lineageOutput);
+    if (lineage.length === 0 || lineage[0].sha256 !== debugCertSha256)
+      throw new Error(`apk's lineage does not start at the fielded debug cert (${debugCertSha256})`);
+    if (!lineage.some((e) => e.sha256 === cert))
+      throw new Error(`apk's lineage does not include its own current signer (${cert})`);
+  }
+  return cert;
+}
+
+const COMMIT_RE = /^[0-9a-f]{40}$/i;
+
+/**
+ * Extract the attested source commit from `gh attestation verify --format
+ * json` output — an array of verification results, one per matching
+ * attestation. `--from-draft` must refuse to publish unless this commit is
+ * an ancestor of origin/main, so this has to find it reliably and FAIL
+ * CLOSED (throw) rather than silently skip that check when the shape isn't
+ * what it expected.
+ *
+ * Checked, in order, against the two places a GitHub build-provenance
+ * attestation carries it:
+ *   1. the Fulcio signing certificate's `sourceRepositoryDigest` extension,
+ *      as `gh attestation verify --format json` surfaces it under
+ *      `verificationResult.signature.certificate`;
+ *   2. the SLSA provenance statement's resolved build dependency —
+ *      `verificationResult.statement.predicate.buildDefinition
+ *      .resolvedDependencies[].digest.gitCommit` — for the workflow's own
+ *      repository entry (a build can resolve more than one dependency;
+ *      only a full 40-hex commit counts).
+ */
+export function extractAttestedCommit(json) {
+  const results = Array.isArray(json) ? json : [json];
+  for (const r of results) {
+    const cert = r?.verificationResult?.signature?.certificate;
+    const fromCert = cert?.sourceRepositoryDigest;
+    if (typeof fromCert === "string" && COMMIT_RE.test(fromCert)) return fromCert.toLowerCase();
+
+    const deps = r?.verificationResult?.statement?.predicate?.buildDefinition?.resolvedDependencies;
+    if (Array.isArray(deps)) {
+      for (const d of deps) {
+        const c = d?.digest?.gitCommit;
+        if (typeof c === "string" && COMMIT_RE.test(c)) return c.toLowerCase();
+      }
+    }
+  }
+  throw new Error(
+    "could not find an attested source commit in `gh attestation verify --format json` output — refusing to publish",
+  );
 }

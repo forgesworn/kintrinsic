@@ -22,6 +22,62 @@
 // --emit-urls-file  the ordered list (GitHub first, then Blossom), one per
 //                   line — the manifests' `urls` field.
 //
+// ---- --from-draft: the maintainer's half of the CI split -----------------
+//
+// .github/workflows/release-artifacts.yml builds + signs an artifact on a
+// `ward-v*`/`guardian-v*`/`linux-v*` tag and lands it as a DRAFT GitHub
+// Release (never published, never latest) with a SHA256SUMS file and a
+// build-provenance attestation. This is the other half: verify that draft
+// end to end, THEN publish it, THEN run the same Blossom + Nostr flow as
+// above.
+//
+//   node scripts/release/publish-release.mjs --from-draft ward-v0.6.13 \
+//     --version-code 44 [--cert <64hex>] [--notes "…"] [--dry-run] \
+//     [--resume] [--emit-url-file F] [--emit-urls-file F]
+//
+// --version-code   required, same as the default mode: not on the GitHub
+//                   Release itself, so the maintainer supplies it (from the
+//                   CI run, or by reading the built artifact directly).
+// --cert            optional; if given, MUST equal the APK's actual signing
+//                   cert digest (read fresh with apksigner) or this refuses
+//                   to publish. Ignored for the charter-deb channel.
+// --resume          required to re-run against a release that a PREVIOUS
+//                   --from-draft run already flipped to published (e.g. it
+//                   died between publishing and announcing). Every
+//                   verification step below still runs in full; only the
+//                   publish-the-draft step is skipped. Without --resume, an
+//                   already-published release is refused outright — this
+//                   is never the default because it must be a deliberate
+//                   choice, not something a stray re-run does by accident.
+//
+// Verification (steps 1-6), then publish (skipped with --resume), then a
+// device-facing download check, then the mirror + announce — any
+// verification failure aborts before anything is announced or (without
+// --resume) before the draft is touched:
+//   1. the release named by the tag exists, and is still a draft unless
+//      --resume was given;
+//   2. `gh release download` the artifact + SHA256SUMS, and check the
+//      downloaded bytes' sha256 against SHA256SUMS;
+//   3. `gh attestation verify --signer-workflow …/release-artifacts.yml
+//      --source-ref refs/tags/<tag> --deny-self-hosted-runners --format
+//      json` against CHARTER_GITHUB_REPO (build provenance from exactly
+//      this workflow and this tag, on a GitHub-hosted runner);
+//   4. the attested source commit (read from that JSON) must be an
+//      ancestor of origin/main (`git fetch origin main` first) — a CI run
+//      against an unmerged or rewritten ref is refused;
+//   5. for an APK channel, apksigner's v3 + rotation-lineage guard
+//      (verifyRotatedApkCert, release-helpers.mjs) — CI's release
+//      Environment makes the rotation lineage mandatory, so this always
+//      requires v3 — then the RELEASE_CERT_SHA256 pin (assertPinnedCert:
+//      refuses a debug-cert signer outright, refuses while the pin is
+//      empty, requires an exact match once it's set);
+//   6. if --cert was given, it must match the actual signing cert too.
+// Only once all of that passes: publish the draft, verify the GitHub
+// download URL serves it (200, following redirects), THEN mirror to
+// Blossom and sign + announce the Nostr event.
+// --dry-run makes NO network calls at all in this mode (no `gh`, no
+// download): it only resolves the tag and prints the plan.
+//
 // Env:
 //   CHARTER_BLOSSOM_SERVERS  comma-separated (default below)
 //   CHARTER_RELEASE_KEY_FILE key path (default ~/.charter-release/release-key.hex)
@@ -43,18 +99,32 @@
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertPinnedCert,
   buildBlossomAuth,
   buildReleaseEvent,
+  channelAndVersionFromTag,
+  extractAttestedCommit,
   githubRelease,
   isCanonicalBlossomUrl,
   isGithubReleaseUrl,
   orderReleaseUrls,
+  parseSha256Sums,
   releaseRelaysWithExtra,
   RELEASE_GITHUB_REPO,
+  verifyRotatedApkCert,
 } from "./release-helpers.mjs";
 
 // Both live-verified 2026-08-12 with the 10 MB deb (upload + direct-200 GET).
@@ -67,6 +137,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") args.dryRun = true;
+    else if (a === "--resume") args.resume = true;
+    else if (a === "--from-draft") args.fromDraft = argv[++i];
     else if (a === "--channel") args.channel = argv[++i];
     else if (a === "--artifact") args.artifact = argv[++i];
     else if (a === "--version") args.version = argv[++i];
@@ -77,11 +149,48 @@ function parseArgs(argv) {
     else if (a === "--emit-urls-file") args.emitUrlsFile = argv[++i];
     else throw new Error(`unknown argument: ${a}`);
   }
+  if (args.fromDraft) {
+    // --from-draft derives channel + version from the tag itself
+    // (channelAndVersionFromTag); --channel/--artifact/--version make no
+    // sense alongside it and are refused so the two modes can't be confused.
+    if (args.channel || args.artifact || args.version)
+      throw new Error("--from-draft is exclusive with --channel/--artifact/--version");
+    if (args.versionCode === undefined || Number.isNaN(args.versionCode))
+      throw new Error("--version-code is required");
+    return args;
+  }
+  if (args.resume) throw new Error("--resume only makes sense with --from-draft");
   for (const req of ["channel", "artifact", "version", "versionCode"]) {
     if (args[req] === undefined || Number.isNaN(args[req]))
       throw new Error(`--${req.replace("versionCode", "version-code")} is required`);
   }
   return args;
+}
+
+/** Newest apksigner under $ANDROID_HOME/build-tools (mirrors lib.sh's
+ * _android_apksigner). */
+function findApksigner() {
+  const home = process.env.ANDROID_HOME;
+  if (!home) throw new Error("ANDROID_HOME is not set — needed to locate apksigner for --from-draft");
+  const buildToolsDir = join(home, "build-tools");
+  let versions;
+  try {
+    versions = readdirSync(buildToolsDir);
+  } catch (err) {
+    throw new Error(`cannot read ${buildToolsDir}: ${err.message}`);
+  }
+  const withApksigner = versions.filter((v) => existsSync(join(buildToolsDir, v, "apksigner")));
+  if (withApksigner.length === 0) throw new Error(`no apksigner found under ${buildToolsDir}`);
+  withApksigner.sort((a, b) => {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  });
+  return join(buildToolsDir, withApksigner[withApksigner.length - 1], "apksigner");
 }
 
 function loadReleaseKey() {
@@ -237,6 +346,24 @@ function tagTarget() {
 }
 
 /**
+ * Is `commit` an ancestor of origin/main? (Requires a prior `git fetch
+ * origin main`.) `--from-draft` refuses to publish an artifact whose
+ * attested build commit isn't reachable from the branch we actually ship
+ * from — a CI run against an unmerged branch, or a forged/rewritten source
+ * ref, must never be announced as a release.
+ */
+function isAncestorOfOriginMain(commit) {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, "origin/main"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Download `url` the way a CURRENT client does — following redirects (all of
  * them https), full-body sha256. Resolves to the hex digest, or throws.
  */
@@ -322,22 +449,20 @@ function banner(lines) {
   console.error([bar, ...lines.map((l) => `!! ${l}`), bar].join("\n"));
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const sk = loadReleaseKey();
-  console.log(`release key: ${getPublicKey(sk)}`);
-
-  const bytes = readFileSync(args.artifact);
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const sizeBytes = statSync(args.artifact).size;
-  console.log(`${args.artifact}: sha256=${sha256} size=${sizeBytes}`);
-
-  const gr = githubRelease(
-    args.channel,
-    args.version,
-    process.env.CHARTER_GITHUB_REPO ?? RELEASE_GITHUB_REPO,
-  );
-
+/**
+ * Steps 2 onward, shared by the default (upload-it-yourself) mode and
+ * `--from-draft` (the artifact is already the verified GitHub Release
+ * asset): mirror to Blossom, build + sign the kind-30063 event, publish it
+ * to the release relays, emit the manifest URL files. Throws (never calls
+ * process.exit itself) on any of the FATAL conditions the original
+ * single-function version did, so a caller's `finally` cleanup (the
+ * `--from-draft` temp dir) always runs; `main()`'s top-level `.catch`
+ * still turns an uncaught throw into a non-zero exit either way.
+ */
+async function announceRelease(
+  sk,
+  { channel, version, versionCode, cert, notes, sha256, sizeBytes, bytes, gr, dryRun, emitUrlFile, emitUrlsFile },
+) {
   const servers = (process.env.CHARTER_BLOSSOM_SERVERS ?? DEFAULT_BLOSSOM)
     .split(",")
     .map((s) => s.trim().replace(/\/$/, ""))
@@ -346,30 +471,16 @@ async function main() {
   // The LEGACY single device URL (manifests' `url`, and what fielded
   // redirect-refusing clients pick): extension-bearing, verified direct-200
   // with matching bytes — never reconstructed blindly.
-  const ext = args.channel.endsWith("deb") ? "deb" : "apk";
+  const ext = channel.endsWith("deb") ? "deb" : "apk";
   const deviceBase = (process.env.CHARTER_BLOSSOM_DL_BASE ?? "https://nostr.download").replace(
     /\/$/,
     "",
   );
   const deviceUrl = `${deviceBase}/${sha256}.${ext}`;
 
-  // 1. GitHub first. Any failure here aborts before Blossom or an announcement.
-  if (args.dryRun) {
-    console.log(`--dry-run: would ensure release ${gr.tag} on ${gr.repo} ("${gr.title}")`);
-    console.log(`--dry-run: would upload ${gr.asset} (no --clobber) and verify ${gr.url}`);
-  } else {
-    try {
-      await publishToGithub({ gr, artifact: args.artifact, sha256, version: args.version, notes: args.notes });
-    } catch (err) {
-      console.error(`GitHub Release FAILED: ${err.message}`);
-      console.error("refusing to mirror or announce — fix GitHub and re-run (the upload is idempotent)");
-      process.exit(1);
-    }
-  }
-
-  // 2. Blossom as the mirror. Failure is a warning once GitHub verified.
+  // Blossom as the mirror. Failure is a warning once GitHub verified.
   const blossom = [];
-  if (args.dryRun) {
+  if (dryRun) {
     // A dry-run event must still be VALID: derive mirror URLs without uploading.
     blossom.push(deviceUrl);
     for (const s of servers) blossom.push(`${s}/${sha256}`);
@@ -401,10 +512,10 @@ async function main() {
       "refuse redirects and cannot fetch a GitHub download. Re-run once Blossom",
       "serves it (the GitHub step is idempotent).",
     ]);
-    process.exit(1);
+    throw new Error("no Blossom mirror verified — refusing to announce");
   }
   const legacyUrl = blossom.includes(deviceUrl) ? deviceUrl : blossom[0];
-  if (!args.dryRun && !blossom.includes(deviceUrl)) {
+  if (!dryRun && !blossom.includes(deviceUrl)) {
     console.error(`WARNING: preferred mirror ${deviceUrl} did not verify; legacy url is ${legacyUrl}`);
   }
 
@@ -413,32 +524,32 @@ async function main() {
   const bad = urls.filter((u) => !isCanonicalBlossomUrl(u, sha256) && !isGithubReleaseUrl(u, gr.repo));
   if (bad.length) {
     console.error(`refusing to announce non-canonical url(s): ${bad.join(", ")}`);
-    process.exit(1);
+    throw new Error(`refusing to announce non-canonical url(s): ${bad.join(", ")}`);
   }
 
   const event = finalizeEvent(
     buildReleaseEvent({
-      channel: args.channel,
-      versionName: args.version,
-      versionCode: args.versionCode,
+      channel,
+      versionName: version,
+      versionCode,
       sha256,
       sizeBytes,
       urls,
-      certSha256: args.cert,
-      notes: args.notes,
+      certSha256: cert,
+      notes,
       createdAt: Math.floor(Date.now() / 1000),
     }),
     sk,
   );
 
   const emit = () => {
-    if (args.emitUrlFile) writeFileSync(args.emitUrlFile, legacyUrl + "\n");
-    if (args.emitUrlsFile) writeFileSync(args.emitUrlsFile, urls.join("\n") + "\n");
+    if (emitUrlFile) writeFileSync(emitUrlFile, legacyUrl + "\n");
+    if (emitUrlsFile) writeFileSync(emitUrlsFile, urls.join("\n") + "\n");
   };
 
   const relays = releaseRelaysWithExtra();
 
-  if (args.dryRun) {
+  if (dryRun) {
     console.log(`--dry-run: would publish to ${relays.join(", ")}`);
     console.log("--dry-run: signed event follows; nothing uploaded or published");
     console.log(JSON.stringify(event, null, 2));
@@ -453,7 +564,7 @@ async function main() {
   const accepted = results.filter((r) => r.ok).length;
   if (accepted === 0) {
     console.error("every relay refused the release event");
-    process.exit(1);
+    throw new Error("every relay refused the release event");
   }
   if (accepted < 2) {
     banner([
@@ -466,7 +577,227 @@ async function main() {
   console.log(`legacy url: ${legacyUrl}`);
   console.log(`urls: ${urls.join(" ")}`);
   emit();
-  console.log(`announced ${args.channel} ${args.version} (code ${args.versionCode})`);
+  console.log(`announced ${channel} ${version} (code ${versionCode})`);
+}
+
+/** Wrap a `gh` call so a failure carries its stderr, not just an exit code. */
+function ghOrThrow(args, context) {
+  try {
+    return gh(args);
+  } catch (err) {
+    const msg = `${err.stderr ?? ""}${err.message ?? ""}`;
+    throw new Error(`${context}: ${msg.trim()}`);
+  }
+}
+
+/**
+ * `--from-draft <tag>`: verify a CI-drafted release end to end, publish the
+ * draft, verify the GitHub download, then run the same Blossom + Nostr flow
+ * as the default mode. See the module header for the full order.
+ */
+async function runFromDraft(args, sk) {
+  const repo = process.env.CHARTER_GITHUB_REPO ?? RELEASE_GITHUB_REPO;
+  const tag = args.fromDraft;
+  const { channel, version } = channelAndVersionFromTag(tag);
+  const gr = githubRelease(channel, version, repo);
+  console.log(`--from-draft ${tag}: channel=${channel} version=${version} asset=${gr.asset}`);
+
+  if (args.dryRun) {
+    console.log("--dry-run: would `gh release download` the asset + SHA256SUMS, check the sha256,");
+    console.log("--dry-run: `gh attestation verify --format json` it (signer-workflow + source-ref +");
+    console.log("--dry-run: deny-self-hosted-runners), check the attested commit is an ancestor of");
+    console.log("--dry-run: origin/main, and (for an APK channel) verify the signing cert with");
+    console.log("--dry-run: apksigner against the RELEASE_CERT_SHA256 pin — then publish the draft,");
+    console.log("--dry-run: verify the GitHub download, and run the normal Blossom + Nostr flow.");
+    console.log("--dry-run: No network calls made.");
+    return;
+  }
+
+  const view = JSON.parse(
+    ghOrThrow(["release", "view", tag, "--repo", repo, "--json", "isDraft,assets"], `gh release view ${tag}`),
+  );
+  // Already published: this is either a stray re-run (refuse, name --resume)
+  // or an explicit --resume of a run that published the draft but didn't
+  // finish mirroring/announcing (e.g. it died between the two). Either way,
+  // re-verify everything from scratch below — a resume never skips
+  // verification, only the publish step itself.
+  const alreadyPublished = !view.isDraft;
+  if (alreadyPublished && !args.resume) {
+    throw new Error(
+      `${tag} on ${repo} is already published (not a draft) — nothing to verify or publish. ` +
+        "If you are resuming a previous --from-draft run that published the release but did not " +
+        "finish mirroring to Blossom / announcing on Nostr, re-run with --resume.",
+    );
+  }
+  if (!(view.assets ?? []).some((a) => a.name === gr.asset)) {
+    throw new Error(
+      `${alreadyPublished ? "published release" : "draft"} ${tag} on ${repo} has no asset named ${gr.asset}`,
+    );
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "charter-from-draft-"));
+  try {
+    console.log(`downloading ${gr.asset} + SHA256SUMS from ${tag}…`);
+    ghOrThrow(
+      ["release", "download", tag, "--repo", repo, "--dir", dir, "--pattern", gr.asset, "--pattern", "SHA256SUMS"],
+      `gh release download ${tag}`,
+    );
+
+    const artifactPath = join(dir, gr.asset);
+    const bytes = readFileSync(artifactPath);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const sizeBytes = statSync(artifactPath).size;
+
+    const sums = parseSha256Sums(readFileSync(join(dir, "SHA256SUMS"), "utf8"));
+    const expected = sums.get(gr.asset);
+    if (!expected) throw new Error(`SHA256SUMS has no entry for ${gr.asset}`);
+    if (expected !== sha256)
+      throw new Error(`sha256 mismatch: SHA256SUMS says ${expected}, downloaded bytes hash to ${sha256}`);
+    console.log(`sha256 ok: ${sha256}`);
+
+    console.log("verifying build provenance (gh attestation verify)…");
+    const attestOut = ghOrThrow(
+      [
+        "attestation",
+        "verify",
+        artifactPath,
+        "--repo",
+        repo,
+        "--signer-workflow",
+        `${repo}/.github/workflows/release-artifacts.yml`,
+        "--source-ref",
+        `refs/tags/${tag}`,
+        "--deny-self-hosted-runners",
+        "--format",
+        "json",
+      ],
+      "gh attestation verify",
+    );
+    const attestedCommit = extractAttestedCommit(JSON.parse(attestOut));
+    console.log(`attestation ok — attested source commit ${attestedCommit}`);
+
+    try {
+      execFileSync("git", ["fetch", "origin", "main"], { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      throw new Error(`git fetch origin main: ${(err.stderr ?? err.message ?? "").toString().trim()}`);
+    }
+    if (!isAncestorOfOriginMain(attestedCommit)) {
+      throw new Error(
+        `attested source commit ${attestedCommit} is not an ancestor of origin/main — refusing to publish`,
+      );
+    }
+    console.log(`source commit ${attestedCommit} verified as an ancestor of origin/main`);
+
+    let cert = args.cert;
+    if (channel !== "charter-deb") {
+      const apksigner = findApksigner();
+      const verifyOutput = execFileSync(apksigner, ["verify", "-v", "--print-certs", artifactPath], {
+        encoding: "utf8",
+      });
+      let lineageOutput = null;
+      try {
+        lineageOutput = execFileSync(apksigner, ["lineage", "--in", artifactPath, "--print-certs"], {
+          encoding: "utf8",
+        });
+      } catch {
+        lineageOutput = null; // no lineage at all — verifyRotatedApkCert decides if that's fatal
+      }
+      const actualCert = verifyRotatedApkCert({ verifyOutput, lineageOutput });
+      assertPinnedCert(actualCert);
+      console.log(`apk signing cert ok (pinned): ${actualCert}`);
+      if (args.cert && args.cert.toLowerCase() !== actualCert.toLowerCase()) {
+        throw new Error(`--cert ${args.cert} does not match the APK's actual signing cert ${actualCert}`);
+      }
+      cert = actualCert;
+    }
+
+    // Everything above is verification only — nothing announced or touched
+    // yet. From here on, in order (review fix #7): publish the draft FIRST,
+    // then prove the GitHub download URL actually serves it, and only THEN
+    // mirror to Blossom and sign + announce the Nostr event. A Blossom/relay
+    // failure after this point leaves the GitHub Release public (by design:
+    // it is the primary host) but not yet mirrored/announced — safe to
+    // re-run with --resume, since the draft flip and the GitHub upload are
+    // both done.
+    if (alreadyPublished) {
+      console.log(`--resume: ${tag} is already published — skipping the publish step, continuing`);
+    } else {
+      console.log(`publishing the draft release ${tag}…`);
+      ghOrThrow(["release", "edit", tag, "--repo", repo, "--draft=false"], `gh release edit ${tag}`);
+      console.log(`published: ${tag}`);
+    }
+
+    await verifyGithubDownload(gr.url, sha256);
+    console.log(`github ok: ${gr.url}`);
+
+    await announceRelease(sk, {
+      channel,
+      version,
+      versionCode: args.versionCode,
+      cert,
+      notes: args.notes,
+      sha256,
+      sizeBytes,
+      bytes,
+      gr,
+      dryRun: false,
+      emitUrlFile: args.emitUrlFile,
+      emitUrlsFile: args.emitUrlsFile,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const sk = loadReleaseKey();
+  console.log(`release key: ${getPublicKey(sk)}`);
+
+  if (args.fromDraft) {
+    await runFromDraft(args, sk);
+    return;
+  }
+
+  const bytes = readFileSync(args.artifact);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const sizeBytes = statSync(args.artifact).size;
+  console.log(`${args.artifact}: sha256=${sha256} size=${sizeBytes}`);
+
+  const gr = githubRelease(
+    args.channel,
+    args.version,
+    process.env.CHARTER_GITHUB_REPO ?? RELEASE_GITHUB_REPO,
+  );
+
+  // 1. GitHub first. Any failure here aborts before Blossom or an announcement.
+  if (args.dryRun) {
+    console.log(`--dry-run: would ensure release ${gr.tag} on ${gr.repo} ("${gr.title}")`);
+    console.log(`--dry-run: would upload ${gr.asset} (no --clobber) and verify ${gr.url}`);
+  } else {
+    try {
+      await publishToGithub({ gr, artifact: args.artifact, sha256, version: args.version, notes: args.notes });
+    } catch (err) {
+      console.error(`GitHub Release FAILED: ${err.message}`);
+      console.error("refusing to mirror or announce — fix GitHub and re-run (the upload is idempotent)");
+      process.exit(1);
+    }
+  }
+
+  await announceRelease(sk, {
+    channel: args.channel,
+    version: args.version,
+    versionCode: args.versionCode,
+    cert: args.cert,
+    notes: args.notes,
+    sha256,
+    sizeBytes,
+    bytes,
+    gr,
+    dryRun: args.dryRun,
+    emitUrlFile: args.emitUrlFile,
+    emitUrlsFile: args.emitUrlsFile,
+  });
 }
 
 main().catch((err) => {
