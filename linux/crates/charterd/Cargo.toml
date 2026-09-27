@@ -52,7 +52,7 @@ tokio = { workspace = true }
 # — same version and style as charter-lock, so it builds on the headless gate.
 x11rb = { version = "0.13", default-features = false, features = ["res", "dpms", "screensaver"] }
 # real-only: the live org.forgesworn.Charter1 zbus server.
-zbus = { version = "4.4", optional = true, default-features = false, features = [
+zbus = { version = "5.18", optional = true, default-features = false, features = [
     "tokio",
 ] }
 # NOT optional: the exec.allow confused-deputy guard opens every candidate with
