@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import {
   buildBlossomAuth,
   buildReleaseEvent,
+  githubRelease,
   isCanonicalBlossomUrl,
+  isGithubReleaseUrl,
+  orderReleaseUrls,
+  RELEASE_RELAYS,
 } from "./release-helpers.mjs";
 
 const SHA = "a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c";
@@ -94,4 +98,80 @@ test("buildReleaseEvent refuses a non-canonical mirror url", () => {
       }),
     /canonical root address/,
   );
+});
+
+// ---- GitHub Releases as the primary host ----------------------------------
+
+const GH = "https://github.com/forgesworn/kintrinsic/releases/download";
+
+test("githubRelease names one tag per artifact", () => {
+  assert.deepEqual(githubRelease("charter-apk", "0.6.13"), {
+    repo: "forgesworn/kintrinsic",
+    tag: "ward-v0.6.13",
+    asset: "kintrinsic-ward-0.6.13.apk",
+    title: "Ward 0.6.13",
+    url: `${GH}/ward-v0.6.13/kintrinsic-ward-0.6.13.apk`,
+  });
+  assert.equal(
+    githubRelease("mycharter-apk", "0.1.15").url,
+    `${GH}/guardian-v0.1.15/kintrinsic-0.1.15.apk`,
+  );
+  assert.equal(
+    githubRelease("charter-deb", "0.7.10").url,
+    `${GH}/linux-v0.7.10/kintrinsic_0.7.10_amd64.deb`,
+  );
+  assert.throws(() => githubRelease("nope", "1.0.0"), /bad channel/);
+  assert.throws(() => githubRelease("charter-apk", "../x"), /bad version/);
+  assert.throws(() => githubRelease("charter-apk", ""), /bad version/);
+});
+
+test("isGithubReleaseUrl accepts only our repo's per-artifact release downloads", () => {
+  assert.equal(isGithubReleaseUrl(`${GH}/ward-v0.6.13/kintrinsic-ward-0.6.13.apk`), true);
+  assert.equal(isGithubReleaseUrl(`${GH}/linux-v0.7.10/kintrinsic_0.7.10_amd64.deb`), true);
+  // Another repo, another tag scheme, a query, plain http, a CDN target: no.
+  assert.equal(
+    isGithubReleaseUrl("https://github.com/evil/kintrinsic/releases/download/ward-v1/x.apk"),
+    false,
+  );
+  assert.equal(isGithubReleaseUrl(`${GH}/v0.6.13/kintrinsic-ward-0.6.13.apk`), false);
+  assert.equal(isGithubReleaseUrl(`${GH}/ward-v0.6.13/x.apk?raw=1`), false);
+  assert.equal(isGithubReleaseUrl(`http://github.com/forgesworn/kintrinsic/releases/download/ward-v1/x.apk`), false);
+  assert.equal(
+    isGithubReleaseUrl("https://release-assets.githubusercontent.com/github-production-release-asset/1/x"),
+    false,
+  );
+  assert.equal(isGithubReleaseUrl(`${GH}/ward-v0.6.13/a/b.apk`), false);
+  assert.equal(isGithubReleaseUrl(42), false);
+});
+
+test("orderReleaseUrls puts GitHub first and keeps Blossom order", () => {
+  const gh = `${GH}/ward-v0.6.13/kintrinsic-ward-0.6.13.apk`;
+  const a = `https://nostr.download/${SHA}.apk`;
+  const b = `https://blossom.primal.net/${SHA}`;
+  assert.deepEqual(orderReleaseUrls([a, b, gh, a]), [gh, a, b]);
+});
+
+test("buildReleaseEvent carries the GitHub download first, then Blossom", () => {
+  const gh = `${GH}/ward-v0.6.9/kintrinsic-ward-0.6.9.apk`;
+  const ev = buildReleaseEvent({ ...base, urls: [gh, `https://nostr.download/${SHA}.apk`] });
+  assert.deepEqual(
+    ev.tags.filter((t) => t[0] === "url"),
+    [
+      ["url", gh],
+      ["url", `https://nostr.download/${SHA}.apk`],
+    ],
+  );
+  assert.throws(
+    () =>
+      buildReleaseEvent({
+        ...base,
+        urls: ["https://github.com/evil/fork/releases/download/ward-v0.6.9/x.apk"],
+      }),
+    /GitHub Release download or/,
+  );
+});
+
+test("release relays lead with trotters and keep public relays", () => {
+  assert.equal(RELEASE_RELAYS[0], "wss://relay.trotters.cc");
+  assert.ok(RELEASE_RELAYS.length >= 3);
 });

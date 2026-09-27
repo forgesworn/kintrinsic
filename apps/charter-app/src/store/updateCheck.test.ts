@@ -25,6 +25,21 @@ describe("parseManifest", () => {
     expect(parseManifest({ ...GOOD, path: 7 })).toBeNull();
   });
 
+  it("carries the ordered urls list (GitHub first) beside the legacy Blossom url", () => {
+    const gh = "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.13/kintrinsic-ward-0.6.13.apk";
+    const blossom = `https://nostr.download/${"a".repeat(64)}.apk`;
+    expect(parseManifest({ ...GOOD, url: blossom, urls: [gh, blossom] })).toEqual({
+      ...GOOD,
+      url: blossom,
+      urls: [gh, blossom],
+    });
+    // A manifest written before GitHub Releases has no urls — still fine.
+    expect(parseManifest({ ...GOOD, url: blossom })).toEqual({ ...GOOD, url: blossom });
+    expect(parseManifest({ ...GOOD, urls: [] })).toBeNull();
+    expect(parseManifest({ ...GOOD, urls: ["http://x.example/a.apk"] })).toBeNull();
+    expect(parseManifest({ ...GOOD, urls: "https://x.example/a.apk" })).toBeNull();
+  });
+
   it("rejects junk fail-quiet", () => {
     expect(parseManifest(null)).toBeNull();
     expect(parseManifest("nope")).toBeNull();
@@ -87,6 +102,15 @@ describe("parseDebManifest", () => {
       sizeBytes: 6568784,
       builtAt: "2026-07-26T00:00:00Z",
     });
+  });
+
+  it("accepts the urls list publish-deb.sh now writes", () => {
+    const urls = [
+      "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.7.10/kintrinsic_0.7.10_amd64.deb",
+      `https://nostr.download/${"a".repeat(64)}.deb`,
+    ];
+    expect(parseDebManifest({ ...good, url: urls[1], urls })?.urls).toEqual(urls);
+    expect(parseDebManifest({ ...good, urls: [7] })).toBeNull();
   });
 
   it("rejects anything malformed rather than half-trusting it", () => {

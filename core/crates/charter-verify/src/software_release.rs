@@ -42,9 +42,11 @@ pub struct SoftwareRelease {
     pub sha256: Sha256Hex,
     /// Artifact size in bytes (the `size` tag).
     pub size_bytes: u64,
-    /// Every `url` tag, in event order; each is https. Content-addressed
-    /// mirrors — any one that serves bytes matching `sha256` is as good as
-    /// another.
+    /// Every `url` tag, in event order; each is https. The publisher puts
+    /// the GitHub Release download (the primary host) first and the Blossom
+    /// mirrors after; consumers try them in this order. The bytes are pinned
+    /// to `sha256`, so any url that serves matching bytes is as good as
+    /// another — transport is not the trust anchor.
     pub urls: Vec<String>,
     /// APK channels: the Android signing-cert sha256 (the `cert` tag).
     pub cert_sha256: Option<Sha256Hex>,

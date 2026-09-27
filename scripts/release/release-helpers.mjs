@@ -13,6 +13,93 @@ export const RELEASE_RELAYS = [
 ];
 export const RELEASE_CHANNELS = ["charter-apk", "mycharter-apk", "charter-deb"];
 
+/**
+ * The public repository whose GitHub Releases are the PRIMARY artifact host.
+ * Transport is not the trust anchor (the release-event signature, the
+ * artifact sha256 and, for APKs, the signing cert are), so bytes come from
+ * the most reliable HTTPS host first and Blossom second.
+ */
+export const RELEASE_GITHUB_REPO = "forgesworn/kintrinsic";
+
+/** Per-channel GitHub Release naming: one tag per artifact. */
+const GITHUB_NAMING = {
+  "charter-apk": {
+    tagPrefix: "ward-v",
+    title: "Ward",
+    asset: (v) => `kintrinsic-ward-${v}.apk`,
+  },
+  "mycharter-apk": {
+    tagPrefix: "guardian-v",
+    title: "Kintrinsic (guardian)",
+    asset: (v) => `kintrinsic-${v}.apk`,
+  },
+  "charter-deb": {
+    tagPrefix: "linux-v",
+    title: "Kintrinsic for Linux",
+    asset: (v) => `kintrinsic_${v}_amd64.deb`,
+  },
+};
+
+const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+const TAG_RE = /^(ward|guardian|linux)-v[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+const ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
+const REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+
+/**
+ * The GitHub Release coordinates for one artifact: tag (`ward-v0.6.13`),
+ * asset file name, human title, and the public download URL. The URL 302s to
+ * GitHub's asset CDN; clients that follow https redirects fetch it directly,
+ * older ones fall through to the Blossom mirror.
+ */
+export function githubRelease(channel, version, repo = RELEASE_GITHUB_REPO) {
+  const n = GITHUB_NAMING[channel];
+  if (!n) throw new Error(`bad channel: ${channel}`);
+  if (typeof version !== "string" || !VERSION_RE.test(version))
+    throw new Error(`bad version for a release tag: ${version}`);
+  if (!REPO_RE.test(repo)) throw new Error(`bad GitHub repo: ${repo}`);
+  const tag = `${n.tagPrefix}${version}`;
+  const asset = n.asset(version);
+  return {
+    repo,
+    tag,
+    asset,
+    title: `${n.title} ${version}`,
+    url: `https://github.com/${repo}/releases/download/${tag}/${asset}`,
+  };
+}
+
+/**
+ * Is `url` a GitHub Release download address of `repo`
+ * (`https://github.com/<repo>/releases/download/<tag>/<asset>`) with one of
+ * our per-artifact tags? The only non-Blossom address a release event may
+ * name: stable for as long as the release exists, and every client pins the
+ * bytes to the event's sha256 whatever the host serves.
+ */
+export function isGithubReleaseUrl(url, repo = RELEASE_GITHUB_REPO) {
+  if (typeof url !== "string") return false;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.host !== "github.com") return false;
+  if (u.search || u.hash || u.username || u.password) return false;
+  const prefix = `/${repo}/releases/download/`;
+  if (!u.pathname.startsWith(prefix)) return false;
+  const rest = u.pathname.slice(prefix.length).split("/");
+  return rest.length === 2 && TAG_RE.test(rest[0]) && ASSET_RE.test(rest[1]);
+}
+
+/** Order announced download URLs: GitHub Release first, then Blossom, dedup'd. */
+export function orderReleaseUrls(urls, repo = RELEASE_GITHUB_REPO) {
+  const uniq = [...new Set(urls)];
+  return [
+    ...uniq.filter((u) => isGithubReleaseUrl(u, repo)),
+    ...uniq.filter((u) => !isGithubReleaseUrl(u, repo)),
+  ];
+}
+
 /** BUD-02 Blossom upload authorization kind. */
 export const BLOSSOM_AUTH_KIND = 24242;
 
@@ -67,8 +154,10 @@ export function buildReleaseEvent({
   for (const u of urls) {
     if (typeof u !== "string" || !u.startsWith("https://"))
       throw new Error(`mirror url must be https: ${u}`);
-    if (!isCanonicalBlossomUrl(u, sha256))
-      throw new Error(`mirror url must be the blob's canonical root address (https://host/<sha>[.ext]): ${u}`);
+    if (!isCanonicalBlossomUrl(u, sha256) && !isGithubReleaseUrl(u))
+      throw new Error(
+        `mirror url must be a GitHub Release download or the blob's canonical root address (https://host/<sha>[.ext]): ${u}`,
+      );
   }
   if (channel !== "charter-deb" && !HEX64.test(certSha256 ?? ""))
     throw new Error("APK channels require certSha256 (64 lowercase hex chars)");

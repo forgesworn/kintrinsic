@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Build + publish the Kintrinsic for Linux .deb. D3: the .deb is uploaded to
-# BLOSSOM, not committed into the repo; only the manifest (charter-deb.json,
-# naming the Blossom URL) is committed, so the Kintrinsic app can tell a
-# guardian their laptop is behind. charterd installs from the relay channel.
+# Build + publish the Kintrinsic for Linux .deb. The .deb is not committed into
+# the repo: it goes to its GitHub Release (tag linux-v<version>, the primary
+# host) and to BLOSSOM as a mirror; only the manifest (charter-deb.json) is
+# committed, so the Kintrinsic app can tell a guardian their laptop is behind.
+# charterd learns of it from the signed relay event and stages it itself.
+#
+# Rehearsal (builds, signs a throwaway event, uploads nothing, writes no
+# manifest): CHARTER_RELEASE_DRY_RUN=1 ./scripts/publish-deb.sh
 #
 # Until this existed the deb was copied by hand and no manifest was written at
 # all — which is why a paired laptop showed no version and never offered an
@@ -11,6 +15,8 @@
 # Requires the Linux toolchain (see linux/README.md). Run from anywhere.
 set -euo pipefail
 cd "$(dirname "$0")/.."          # repo root
+# shellcheck source=release/lib.sh
+. scripts/release/lib.sh
 PUB=apps/charter-app/public
 MANIFEST=$PUB/charter-deb.json
 
@@ -42,31 +48,20 @@ fi
 SHA=$(sha256sum "$DEB" | cut -d' ' -f1)
 SIZE=$(stat -c%s "$DEB")
 BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-# D3: the .deb is hosted on BLOSSOM, not committed into this repo. Upload +
-# announce + verify the exact device URL FIRST; a failure aborts (set -e)
-# before the manifest claims a URL. charterd installs it from the relay
-# channel; the front door + this manifest reference the verified Blossom URL.
-if [ "${CHARTER_RELEASE_EVENT_SKIP:-0}" != "1" ]; then
-  URLFILE=$(mktemp)
-  node scripts/release/publish-release.mjs \
-    --channel charter-deb --artifact "$DEB" \
-    --version "$VN" --version-code "$VC" \
-    --emit-url-file "$URLFILE"
-  URL=$(cat "$URLFILE"); rm -f "$URLFILE"
-  [ -n "$URL" ] || { echo "FATAL: publisher emitted no verified device URL" >&2; exit 1; }
-else
-  URL="${CHARTER_BLOSSOM_DL_BASE:-https://nostr.download}/$SHA.deb"
-fi
+# GitHub Release first (verified end-to-end), Blossom mirror second, then the
+# signed event; a GitHub failure aborts (set -e) before the manifest claims a
+# URL. `url` stays the direct-200 Blossom address (charterd <= 0.7.9 refuses
+# redirects); `urls` leads with GitHub for the front door and newer clients.
+release_publish . charter-deb "$DEB" "$VN" "$VC" "$SHA"
 
-cat > "$MANIFEST" <<EOF
-{
-  "versionName": "$VN",
-  "versionCode": $VC,
-  "url": "$URL",
-  "sha256": "$SHA",
-  "sizeBytes": $SIZE,
-  "builtAt": "$BUILT"
-}
-EOF
-echo "published: charter-deb.json → $URL (v$VN, code $VC, sha $SHA)"
+write_manifest "$MANIFEST" "{
+  \"versionName\": \"$VN\",
+  \"versionCode\": $VC,
+  \"url\": \"$RELEASE_URL\",
+  \"urls\": $RELEASE_URLS_JSON,
+  \"sha256\": \"$SHA\",
+  \"sizeBytes\": $SIZE,
+  \"builtAt\": \"$BUILT\"
+}"
+echo "published: charter-deb.json → $RELEASE_URLS_JSON (v$VN, code $VC, sha $SHA)"
 echo "next: ./scripts/sync-front-door-downloads.sh, then commit the manifests + site/ and push."

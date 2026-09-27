@@ -1,62 +1,83 @@
 #!/usr/bin/env bash
 # Point the front-door download page (kintrinsic.app, the site/ directory) at
-# the current release artifacts on BLOSSOM. Artifacts are NOT copied into the
-# repo any more (D3 decoupling): they are content-addressed blobs the publish
-# scripts upload to Blossom, and this writes their URLs into downloads.json,
-# which download.html reads to set the download buttons.
+# the current release artifacts. Artifacts are NOT copied into the repo: the
+# publish scripts put them on their GitHub Release (the primary host) and
+# mirror them to Blossom. This writes downloads.json — which download.html
+# reads to set the download buttons — AND rewrites the page's no-JS fallback
+# hrefs, version labels and structured-data downloadUrl to match, so nothing
+# is left to hand-edit.
 #
-# Run AFTER the publish scripts (which upload to Blossom + write the manifests
-# with the artifact sha256). Then commit + push this repo — the deploy-site
-# workflow ships site/ on push to main. This script only stages downloads.json;
-# it pushes nothing and copies no binaries.
+# Per platform the button is the GitHub Release download (the first GitHub
+# entry of the manifest's `urls`), and the secondary "mirror" link is the
+# verified Blossom address (the manifest's `url`). A manifest written before
+# GitHub Releases has no `urls`: the button is then the Blossom URL and the
+# mirror link is hidden.
 #
-# Blossom download base for the browser: nostr.download serves `/<sha>.<ext>`
-# with the right content-type (verified 2026-08-12). Override with
-# CHARTER_BLOSSOM_DL_BASE.
+# Run AFTER the publish scripts. Then commit + push this repo. This script
+# pushes nothing and copies no binaries.
 set -euo pipefail
 cd "$(dirname "$0")/.."          # charter repo root
 PUB=apps/charter-app/public
 CY="${CHARTER_YOU_DIR:-./site}"
-BASE="${CHARTER_BLOSSOM_DL_BASE:-https://nostr.download}"
 
 [ -d "$CY" ] || { echo "front-door site dir not found at $CY (set CHARTER_YOU_DIR)"; exit 1; }
 
-# The two user-facing artifacts: the guardian carrier APK (Android) and the
-# Linux deb. Take the *verified* device URL straight from the manifest the
-# publish script wrote (it verified that exact URL direct-200) — do NOT
-# reconstruct it, so a partial-mirror release can't produce a dead front-door
-# link (the sysadmin, 2026-08-12).
-field() { grep -oE "\"$2\": *\"[^\"]+\"" "$1" | head -1 | sed -E "s/\"$2\": *\"([^\"]+)\"/\1/"; }
+# Take the *verified* URLs straight from the manifests the publish scripts
+# wrote — never reconstruct them, so a partial-mirror release can't produce a
+# dead front-door link.
+node --input-type=module -e '
+  import { readFileSync, writeFileSync } from "node:fs";
+  import { isGithubReleaseUrl } from "./scripts/release/release-helpers.mjs";
+  const [pub, site] = process.argv.slice(1);
+  const HEX64 = /^[0-9a-f]{64}$/;
 
-AVER=$(field "$PUB/mycharter-apk.json" versionName)
-AURL=$(field "$PUB/mycharter-apk.json" url)
-ASHA=$(field "$PUB/mycharter-apk.json" apkSha256)
-LVER=$(field "$PUB/charter-deb.json" versionName)
-LURL=$(field "$PUB/charter-deb.json" url)
-LSHA=$(field "$PUB/charter-deb.json" sha256)
-
-for pair in "$AVER" "$AURL" "$ASHA" "$LVER" "$LURL" "$LSHA"; do
-  [ -n "$pair" ] || { echo "FATAL: a manifest is missing version/url/sha — run the publish scripts first"; exit 1; }
-done
-
-cat > "$CY/downloads.json" <<EOF
-{
-  "android": {
-    "version": "$AVER",
-    "url": "$AURL",
-    "sha256": "$ASHA"
-  },
-  "linux": {
-    "version": "$LVER",
-    "url": "$LURL",
-    "sha256": "$LSHA"
+  function platform(file, shaKey) {
+    const m = JSON.parse(readFileSync(`${pub}/${file}`, "utf8"));
+    const sha = m[shaKey];
+    const legacy = m.url;
+    if (typeof m.versionName !== "string" || !m.versionName || !HEX64.test(sha ?? "") ||
+        typeof legacy !== "string" || !legacy.startsWith("https://")) {
+      throw new Error(`${file} is missing version/url/sha — run the publish scripts first`);
+    }
+    const urls = Array.isArray(m.urls) ? m.urls : [];
+    const github = urls.find((u) => isGithubReleaseUrl(u));
+    const out = { version: m.versionName, url: github ?? legacy, sha256: sha };
+    if (github && legacy !== github) out.mirror = legacy;
+    return out;
   }
-}
-EOF
 
-echo "downloads.json → android $AVER ($AURL)"
-echo "                 linux   $LVER ($LURL)"
+  const dl = {
+    android: platform("mycharter-apk.json", "apkSha256"),
+    linux: platform("charter-deb.json", "sha256"),
+  };
+  writeFileSync(`${site}/downloads.json`, JSON.stringify(dl, null, 2) + "\n");
+
+  // The no-JS fallback: the same values baked into the markup.
+  const page = `${site}/download.html`;
+  let html = readFileSync(page, "utf8");
+  const sub = (re, fn, what) => {
+    let n = 0;
+    html = html.replace(re, (...m) => { n++; return fn(...m); });
+    if (n === 0) throw new Error(`download.html: no ${what} found — markup changed?`);
+  };
+  for (const [key, d] of Object.entries(dl)) {
+    sub(new RegExp(`(<a\\b[^>]*?\\bhref=")[^"]*("[^>]*\\bdata-dl="${key}")`, "g"),
+      (_, a, b) => a + d.url + b, `data-dl="${key}" button`);
+    sub(new RegExp(`(<a\\b[^>]*?\\bhref=")[^"]*("[^>]*\\bdata-dl-mirror="${key}")`, "g"),
+      (_, a, b) => a + (d.mirror ?? d.url) + b, `data-dl-mirror="${key}" link`);
+    sub(new RegExp(`(<span\\b[^>]*\\bdata-mirror="${key}")( hidden)?>`, "g"),
+      (_, a) => a + (d.mirror ? "" : " hidden") + ">", `data-mirror="${key}" wrapper`);
+    sub(new RegExp(`(<span data-ver="${key}">)[^<]*(</span>)`, "g"),
+      (_, a, b) => a + d.version + b, `data-ver="${key}" label`);
+  }
+  sub(/("downloadUrl": ")[^"]*(")/g, (_, a, b) => a + dl.linux.url + b, "structured-data downloadUrl");
+  writeFileSync(page, html);
+
+  for (const [key, d] of Object.entries(dl)) {
+    console.log(`${key.padEnd(8)} ${d.version}  ${d.url}` + (d.mirror ? `\n${" ".repeat(9)}mirror  ${d.mirror}` : ""));
+  }
+' "$PUB" "$CY"
+
 echo
-echo "Also update the no-JS fallback hrefs in site/download.html (data-dl=android|linux)"
-echo "to the two URLs above, then commit site/ and push (deploy-site ships it)."
-echo "Verify the blobs resolve first: curl -sI $LURL | head -1"
+echo "downloads.json and download.html updated. Commit site/ and push."
+echo "Verify the buttons resolve first: curl -sIL <url> | grep -i '^http'"

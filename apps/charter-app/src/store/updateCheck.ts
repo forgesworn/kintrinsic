@@ -10,6 +10,14 @@ export const APK_PATH = "/charter-latest.apk";
 /** The Linux artifact manifest, published beside the .deb by publish-deb.sh. */
 export const DEB_MANIFEST_PATH = "/charter-deb.json";
 
+/** An optional `urls` list: absent is fine; present must be https strings. */
+function parseUrls(v: unknown): string[] | null | undefined {
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.length === 0) return null;
+  if (!v.every((u) => typeof u === "string" && u.startsWith("https://"))) return null;
+  return v as string[];
+}
+
 export function parseManifest(o: unknown): UpdateManifest | null {
   if (typeof o !== "object" || o === null) return null;
   const m = o as Record<string, unknown>;
@@ -22,8 +30,11 @@ export function parseManifest(o: unknown): UpdateManifest | null {
   if (typeof m.builtAt !== "string") return null;
   if (m.path !== undefined && (typeof m.path !== "string" || !m.path.startsWith("/"))) return null;
   if (m.url !== undefined && (typeof m.url !== "string" || !m.url.startsWith("https://"))) return null;
+  const urls = parseUrls(m.urls);
+  if (urls === null) return null;
   return {
     ...(typeof m.url === "string" ? { url: m.url } : {}),
+    ...(urls ? { urls } : {}),
     ...(typeof m.path === "string" ? { path: m.path } : {}),
     versionName: m.versionName,
     versionCode: m.versionCode,
@@ -74,8 +85,10 @@ export interface DebManifest {
   versionCode: number;
   /** Blossom URL of the .deb (D3). The console only uses this manifest for the
    *  version comparison — the download itself is the front door / charterd's
-   *  relay channel — so neither `url` nor `path` is required here. */
+   *  relay channel — so neither `url`, `urls` nor `path` is required here. */
   url?: string;
+  /** Download sources in preference order (GitHub Release first). */
+  urls?: string[];
   /** Legacy same-origin path (pre-D3). */
   path?: string;
   sizeBytes: number;
@@ -92,10 +105,13 @@ export function parseDebManifest(o: unknown): DebManifest | null {
   if (m.url !== undefined && (typeof m.url !== "string" || !m.url.startsWith("https://"))) return null;
   if (typeof m.sizeBytes !== "number" || m.sizeBytes <= 0) return null;
   if (typeof m.builtAt !== "string") return null;
+  const urls = parseUrls(m.urls);
+  if (urls === null) return null;
   return {
     versionName: m.versionName,
     versionCode: m.versionCode,
     ...(typeof m.url === "string" ? { url: m.url } : {}),
+    ...(urls ? { urls } : {}),
     ...(typeof m.path === "string" ? { path: m.path } : {}),
     sizeBytes: m.sizeBytes,
     builtAt: m.builtAt,

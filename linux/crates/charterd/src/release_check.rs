@@ -43,6 +43,36 @@ pub const UPDATES_DIR: &str = "/var/lib/charter/updates";
 /// byte is fetched (the event names `size_bytes`, and the download re-checks).
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// How many HTTP redirects one mirror fetch may follow. A GitHub Release
+/// download (the primary host) 302s once to GitHub's asset CDN; the bound
+/// only stops a loop. Redirects are safe to follow because the bytes are
+/// pinned to the signed event's sha256 and size whoever serves them.
+pub const MAX_REDIRECTS: usize = 5;
+
+/// May a fetch follow a redirect to `next`, having already requested
+/// `requested` URLs (the original counts as one)? Only to https, and only
+/// [`MAX_REDIRECTS`] times — a redirect may never downgrade the transport.
+pub fn redirect_allowed(next: &str, requested: usize) -> Result<(), &'static str> {
+    if !next.starts_with("https://") {
+        return Err("redirect leaves https");
+    }
+    if requested > MAX_REDIRECTS {
+        return Err("too many redirects");
+    }
+    Ok(())
+}
+
+/// Append one downloaded chunk, refusing once the running total would pass
+/// `cap` — the stream is abandoned there, before the whole body is buffered
+/// or hashed.
+pub fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], cap: u64) -> Result<(), String> {
+    if (buf.len() as u64).saturating_add(chunk.len() as u64) > cap {
+        return Err(format!("body exceeds the {cap}-byte cap"));
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
 /// First check a few minutes after boot, then every six hours. Update news
 /// does not need enforcement-loop cadence.
 pub const FIRST_CHECK_DELAY_SECS: u64 = 300;
@@ -148,7 +178,9 @@ pub fn stage_bytes(bytes: &[u8], r: &SoftwareRelease, dir: &Path) -> Option<Stag
 }
 
 /// One full round: query → verify/select → (skip if already staged) → fetch
-/// from mirrors in order → stage. `fetch` is injected so tests never touch a
+/// from the event's urls IN ORDER (GitHub Release first, Blossom after, as
+/// the publisher writes them) → stage. Any failure on one url — transport,
+/// HTTP, or bytes that don't match the pin — moves on to the next. `fetch` is injected so tests never touch a
 /// network (the real one is [`real::fetch_blob`]); `pinned` is
 /// [`pinned_release_key`] in production and a test key in tests.
 pub async fn check_and_stage<T, F, Fut>(
@@ -160,7 +192,7 @@ pub async fn check_and_stage<T, F, Fut>(
 ) -> Option<StagedUpdate>
 where
     T: RelayTransport + ?Sized,
-    F: Fn(String) -> Fut,
+    F: Fn(String, u64) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
 {
     let relays: Vec<String> = RELEASE_RELAYS.iter().map(|s| s.to_string()).collect();
@@ -177,7 +209,8 @@ where
         return None;
     }
     for url in &r.urls {
-        match fetch(url.clone()).await {
+        // The signed size is the byte cap: a source may not stream more.
+        match fetch(url.clone(), r.size_bytes.min(MAX_ARTIFACT_BYTES)).await {
             Ok(bytes) => {
                 if let Some(staged) = stage_bytes(&bytes, &r, dir) {
                     eprintln!(
@@ -207,29 +240,43 @@ pub mod real {
     use super::*;
     use charter_sys::relay::RealRelayTransport;
 
-    /// GET one mirror. Mirrors must answer 200 directly — redirects are
-    /// refused, matching the Android stagers (and the publisher's verify).
-    pub async fn fetch_blob(url: String) -> Result<Vec<u8>, String> {
+    /// GET one mirror, following at most [`MAX_REDIRECTS`] https-only
+    /// redirects (a GitHub Release download 302s to its asset CDN; charterd
+    /// ≤ 0.7.9 refused every redirect and so skipped GitHub for Blossom).
+    /// `cap` is the signed event's size: a body past it is cut off
+    /// mid-stream. The caller pins the bytes to the event's sha256 and size.
+    pub async fn fetch_blob(url: String, cap: u64) -> Result<Vec<u8>, String> {
+        if !url.starts_with("https://") {
+            return Err("not an https url".into());
+        }
+        let policy = reqwest::redirect::Policy::custom(|attempt| {
+            match redirect_allowed(attempt.url().as_str(), attempt.previous().len()) {
+                Ok(()) => attempt.follow(),
+                Err(why) => attempt.error(why),
+            }
+        });
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(policy)
             .connect_timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| e.to_string())?;
-        let res = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let mut res = client.get(&url).send().await.map_err(|e| e.to_string())?;
         if res.status() != reqwest::StatusCode::OK {
             return Err(format!("HTTP {}", res.status()));
         }
         if let Some(len) = res.content_length() {
-            if len > MAX_ARTIFACT_BYTES {
-                return Err(format!("{len} bytes exceeds the artifact cap"));
+            if len > cap {
+                return Err(format!("{len} bytes exceeds the {cap}-byte cap"));
             }
         }
-        let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
-            return Err("body exceeds the artifact cap".into());
+        // Stream chunk by chunk so an undeclared (chunked) or lying body is
+        // cut off at the cap instead of being buffered whole.
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
+            push_capped(&mut body, &chunk, cap)?;
         }
-        Ok(bytes.to_vec())
+        Ok(body)
     }
 
     /// Background task: first check shortly after boot, then every
@@ -399,7 +446,7 @@ mod tests {
         let dir = tmpdir();
 
         let good = bytes.clone();
-        let fetch = move |url: String| {
+        let fetch = move |url: String, _cap: u64| {
             let good = good.clone();
             async move {
                 if url.contains("dead.example") {
@@ -424,6 +471,129 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn redirects_are_https_only_and_bounded() {
+        let cdn = "https://release-assets.githubusercontent.com/x";
+        // The GitHub hop: one redirect after the original request.
+        assert_eq!(redirect_allowed(cdn, 1), Ok(()));
+        assert_eq!(redirect_allowed(cdn, MAX_REDIRECTS), Ok(()));
+        assert_eq!(
+            redirect_allowed(cdn, MAX_REDIRECTS + 1),
+            Err("too many redirects")
+        );
+        assert_eq!(
+            redirect_allowed("http://release-assets.githubusercontent.com/x", 1),
+            Err("redirect leaves https")
+        );
+        assert_eq!(
+            redirect_allowed("ftp://x.example/y", 1),
+            Err("redirect leaves https")
+        );
+    }
+
+    /// GitHub first, Blossom second — the order the publisher announces.
+    fn github_first_event(signer: &SeedSigner, version_code: u64, bytes: &[u8]) -> NostrEvent {
+        let sha = charter_primitives::Sha256Hex::from_bytes(charter_crypto::sha256(bytes));
+        let tags = vec![
+            vec!["d".into(), CHANNEL.into()],
+            vec!["version".into(), format!("0.7.{version_code}")],
+            vec!["version_code".into(), version_code.to_string()],
+            vec!["x".into(), sha.to_hex()],
+            vec!["size".into(), bytes.len().to_string()],
+            vec![
+                "url".into(),
+                format!(
+                    "https://github.com/forgesworn/kintrinsic/releases/download/\
+                     linux-v0.7.{version_code}/kintrinsic_0.7.{version_code}_amd64.deb"
+                ),
+            ],
+            vec![
+                "url".into(),
+                format!("https://nostr.download/{}.deb", sha.to_hex()),
+            ],
+        ];
+        sign_release(signer, tags)
+    }
+
+    async fn round_with(
+        fetch_github: Result<Vec<u8>, String>,
+        bytes: &[u8],
+    ) -> (Option<StagedUpdate>, Vec<String>) {
+        let s = signer();
+        let pin = pin_of(&s);
+        let relay = MockRelayTransport::new();
+        let relays: Vec<String> = RELEASE_RELAYS.iter().map(|s| s.to_string()).collect();
+        let _ = relay
+            .publish(&relays, github_first_event(&s, 730, bytes))
+            .await;
+        let dir = tmpdir();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let good = bytes.to_vec();
+        let fetch = move |url: String, cap: u64| {
+            assert_eq!(cap, good.len() as u64, "the signed size is the cap");
+            log.lock().unwrap().push(url.clone());
+            let gh = fetch_github.clone();
+            let good = good.clone();
+            async move {
+                if url.starts_with("https://github.com/") {
+                    gh
+                } else {
+                    Ok(good)
+                }
+            }
+        };
+        let staged = check_and_stage(&relay, &pin, 706, &dir, fetch).await;
+        let _ = fs::remove_dir_all(&dir);
+        let seen = seen.lock().unwrap().clone();
+        (staged, seen)
+    }
+
+    #[test]
+    fn push_capped_stops_at_the_cap() {
+        let mut buf = Vec::new();
+        assert!(push_capped(&mut buf, &[1; 600], 1_000).is_ok());
+        assert!(push_capped(&mut buf, &[2; 400], 1_000).is_ok());
+        assert_eq!(buf.len(), 1_000);
+        // One more byte is refused, and nothing past the cap is kept.
+        assert!(push_capped(&mut buf, &[3; 1], 1_000).is_err());
+        assert_eq!(buf.len(), 1_000);
+        let mut big = Vec::new();
+        assert!(push_capped(&mut big, &[0; 64], 63).is_err());
+        assert!(big.is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_is_tried_first_and_a_good_download_stops_there() {
+        let bytes = b"deb from github".to_vec();
+        let (staged, seen) = round_with(Ok(bytes.clone()), &bytes).await;
+        assert_eq!(staged.expect("staged").version_code, 730);
+        assert_eq!(
+            seen.len(),
+            1,
+            "stops at the first verified source: {seen:?}"
+        );
+        assert!(seen[0].starts_with("https://github.com/forgesworn/kintrinsic/releases/"));
+    }
+
+    #[tokio::test]
+    async fn a_github_failure_falls_back_to_blossom() {
+        let bytes = b"deb from blossom".to_vec();
+        let (staged, seen) = round_with(Err("HTTP 503".into()), &bytes).await;
+        assert_eq!(staged.expect("staged via Blossom").version_code, 730);
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].starts_with("https://nostr.download/"));
+    }
+
+    #[tokio::test]
+    async fn wrong_bytes_from_github_move_on_to_the_next_url() {
+        let bytes = b"the pinned deb".to_vec();
+        let (staged, seen) = round_with(Ok(b"poisoned bytes".to_vec()), &bytes).await;
+        let staged = staged.expect("the mismatch must not strand the update");
+        assert_eq!(staged.version_code, 730);
+        assert_eq!(seen.len(), 2);
+    }
+
     #[tokio::test]
     async fn check_and_stage_ignores_a_forged_announcement() {
         let s = SeedSigner::from_seed(0x99); // NOT the pin
@@ -435,7 +605,7 @@ mod tests {
             .publish(&relays, two_mirror_event(&s, 999, &bytes))
             .await;
         let dir = tmpdir();
-        let fetch = |_url: String| async { Ok(b"evil".to_vec()) };
+        let fetch = |_url: String, _cap: u64| async { Ok(b"evil".to_vec()) };
         assert!(check_and_stage(&relay, &pin, 0, &dir, fetch)
             .await
             .is_none());

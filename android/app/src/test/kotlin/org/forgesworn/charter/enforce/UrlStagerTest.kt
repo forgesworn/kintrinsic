@@ -43,7 +43,29 @@ class UrlStagerTest {
                                 if (l.isEmpty()) break
                             }
                             val out = s.getOutputStream()
-                            if (requestLine.startsWith("GET /apk")) {
+                            val path = requestLine.split(" ").getOrNull(1) ?: ""
+                            // A GitHub Release download 302s to its asset CDN;
+                            // these stand in for that hop (and its failure modes).
+                            val redirectTo = when (path) {
+                                "/redirect" -> "/apk"
+                                "/redirect-abs" -> "http://127.0.0.1:${server.localPort}/apk"
+                                "/redirect-wrong" -> "/wrong-bytes"
+                                "/redirect-missing" -> "/missing"
+                                "/loop" -> "/loop"
+                                else -> null
+                            }
+                            if (redirectTo != null) {
+                                out.write(
+                                    ("HTTP/1.1 302 Found\r\n" +
+                                        "Location: $redirectTo\r\n" +
+                                        "Content-Length: 0\r\n" +
+                                        "Connection: close\r\n\r\n").toByteArray(),
+                                )
+                            } else if (path == "/nolength") {
+                                // No Content-Length: only the streaming cap can stop it.
+                                out.write("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".toByteArray())
+                                out.write(payload)
+                            } else if (requestLine.startsWith("GET /apk")) {
                                 out.write(
                                     ("HTTP/1.1 200 OK\r\n" +
                                         "Content-Length: ${payload.size}\r\n" +
@@ -200,5 +222,105 @@ class UrlStagerTest {
         )
         assertTrue(UrlStager.contentAddressedFallbacks("not-a-sha").isEmpty())
         assertTrue(UrlStager.contentAddressedFallbacks("").isEmpty())
+    }
+
+    // --- redirects: GitHub Releases (the primary host) answer 302 ---
+
+    /** A stager that may follow redirects onto the loopback http test server. */
+    private fun following() = UrlStager(redirectSchemes = setOf("https", "http"))
+
+    @Test
+    fun followsARedirectAndStillPinsTheHash() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        assertEquals(UrlStager.StageResult.OK, following().stage(url("/redirect"), payloadSha, dest))
+        assertArrayEquals(payload, dest.readBytes())
+        dest.delete()
+        assertEquals(UrlStager.StageResult.OK, following().stage(url("/redirect-abs"), payloadSha, dest))
+        assertArrayEquals(payload, dest.readBytes())
+    }
+
+    @Test
+    fun aRedirectOffHttpsIsRefusedInProduction() {
+        // The default policy is https-only: this hop lands on http, so it is
+        // NETWORK and nothing is fetched — never a downgrade.
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        assertEquals(UrlStager.StageResult.NETWORK, UrlStager().stage(url("/redirect"), payloadSha, dest))
+        assertFalse(dest.exists())
+    }
+
+    @Test
+    fun aRedirectLoopIsBounded() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        assertEquals(UrlStager.StageResult.NETWORK, following().stage(url("/loop"), payloadSha, dest))
+        assertFalse(dest.exists())
+    }
+
+    @Test
+    fun wrongBytesBehindARedirectAreAMismatch() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        assertEquals(
+            UrlStager.StageResult.HASH_MISMATCH,
+            following().stage(url("/redirect-wrong"), payloadSha, dest),
+        )
+        assertFalse("unverified bytes must never remain", dest.exists())
+    }
+
+    @Test
+    fun stageAnyTriesGithubFirstThenFallsBackToBlossom() {
+        // GitHub (named first) redirects to a dead asset → the Blossom mirror.
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        val r = following().stageAny(listOf(url("/redirect-missing"), url("/apk")), payloadSha, dest)
+        assertEquals(UrlStager.StageResult.OK, r)
+        assertArrayEquals(payload, dest.readBytes())
+    }
+
+    @Test
+    fun stageAnyMovesOnWhenTheFirstSourceServesWrongBytesViaRedirect() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        val r = following().stageAny(listOf(url("/redirect-wrong"), url("/apk")), payloadSha, dest)
+        assertEquals(UrlStager.StageResult.OK, r)
+        assertArrayEquals(payload, dest.readBytes())
+    }
+
+    @Test
+    fun aFieldedStyleSourceListStillReachesBlossomWhenGithubIsRefused() {
+        // What a redirect-refusing path sees: GitHub's hop is refused, the
+        // next source serves the pinned bytes directly.
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        val r = UrlStager().stageAny(listOf(url("/redirect"), url("/apk")), payloadSha, dest)
+        assertEquals(UrlStager.StageResult.OK, r)
+    }
+
+    // --- byte cap: an inflated or endless body never fills storage ---
+
+    @Test
+    fun aDeclaredLengthOverTheCapIsRefusedBeforeReading() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        val r = UrlStager().stage(url("/apk"), payloadSha, dest, maxBytes = 1_000)
+        assertEquals(UrlStager.StageResult.HASH_MISMATCH, r)
+        assertFalse(dest.exists())
+        assertFalse(File(tmpDir, "org.forgesworn.charter.apk.part").exists())
+    }
+
+    @Test
+    fun anUndeclaredBodyIsAbortedMidStreamAtTheCap() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        val r = UrlStager().stage(url("/nolength"), payloadSha, dest, maxBytes = 1_000)
+        assertEquals(UrlStager.StageResult.HASH_MISMATCH, r)
+        assertFalse(dest.exists())
+        assertFalse(File(tmpDir, "org.forgesworn.charter.apk.part").exists())
+        // At or under the cap the same body stages fine.
+        val ok = UrlStager().stage(url("/nolength"), payloadSha, dest, maxBytes = payload.size.toLong())
+        assertEquals(UrlStager.StageResult.OK, ok)
+        assertArrayEquals(payload, dest.readBytes())
+    }
+
+    @Test
+    fun everyOversizeSourceIsTerminalAndTheDefaultCapIs256MiB() {
+        val dest = File(tmpDir, "org.forgesworn.charter.apk")
+        assertEquals(256L * 1024 * 1024, UrlStager.DEFAULT_MAX_BYTES)
+        val r = UrlStager().stageAny(listOf(url("/nolength"), url("/apk")), payloadSha, dest, maxBytes = 1_000)
+        assertEquals(UrlStager.StageResult.HASH_MISMATCH, r)
+        assertFalse(dest.exists())
     }
 }

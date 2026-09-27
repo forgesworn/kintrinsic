@@ -13,8 +13,9 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
- * The carrier's own update path: download from a Blossom mirror (sha256
- * pinned by the signed release event), then hand the staged APK to
+ * The carrier's own update path: download from the named source (its GitHub
+ * Release, normally) or a Blossom mirror (sha256 pinned by the signed release
+ * event), then hand the staged APK to
  * [PackageInstaller]. Unlike the ward — a Device Owner that installs
  * silently — this app is unprivileged, so commit lands at
  * STATUS_PENDING_USER_ACTION and we surface the system's confirm dialog;

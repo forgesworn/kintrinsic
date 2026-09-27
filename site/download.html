@@ -69,7 +69,7 @@
       <div class="download__card">
         <div>
           <p class="t-eyebrow">Start here · your child's computer · Linux</p>
-          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for Linux <span data-ver="linux">0.7.8</span></h2>
+          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for Linux <span data-ver="linux">0.7.9</span></h2>
           <p style="color: var(--ink-2); max-width: 30rem;">
             One installer: the warden, the lock screen and the Kintrinsic app —
             where you set up, adjust limits, connect a phone and recover access,
@@ -82,6 +82,7 @@
           <p class="download__meta">
             64-bit · about 11 MB · then in a terminal, from your Downloads folder:
             <code>sudo apt install ./the-downloaded-file.deb</code>
+            <span data-mirror="linux" hidden> · or from the <a href="https://nostr.download/bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb.deb" data-dl-mirror="linux" style="color: var(--kin-accent);">Blossom mirror</a></span>
           </p>
         </div>
         <div>
@@ -106,7 +107,7 @@
       <div class="download__card">
         <div>
           <p class="t-eyebrow">Optional · your phone · Android</p>
-          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for Android <span data-ver="android">0.1.12</span></h2>
+          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for Android <span data-ver="android">0.1.14</span></h2>
           <p style="color: var(--ink-2); max-width: 30rem;">
             <b>The parent app — for your phone, not your child's.</b> Approve “more time”,
             get an alert the moment your child asks — even with the screen off — and change
@@ -119,6 +120,7 @@
           <p class="download__meta">
             About 12 MB · Android 10+ and GrapheneOS · already have it? Installing over
             the top keeps your key and your family — nothing to set up again.
+            <span data-mirror="android" hidden> · or from the <a href="https://nostr.download/f42e77bf80e3920d565a8c6be9f9102304841781c3c5a52268da8e19d07568a3.apk" data-dl-mirror="android" style="color: var(--kin-accent);">Blossom mirror</a></span>
           </p>
           <div class="callout" style="margin-top: 1.2rem;">
             <b>A note on the name under the hood.</b> Everything you see says <em>Kintrinsic</em> — the
@@ -284,9 +286,10 @@
     fetch("/downloads.json?t=" + Date.now(), { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; }).then(function (v) {
       if (!v) return;
-      // Each platform is { version, url, sha256 }. The artifacts live on
-      // Blossom (content-addressed), not in this site — the markup href is a
-      // no-JS fallback that this refreshes to the current release.
+      // Each platform is { version, url, sha256, mirror? }. The artifacts
+      // live on their GitHub Release (`url`) with a Blossom mirror (`mirror`),
+      // not in this site — the markup hrefs are a no-JS fallback that
+      // scripts/sync-front-door-downloads.sh keeps current and this refreshes.
       document.querySelectorAll("[data-ver]").forEach(function (el) {
         var d = v[el.getAttribute("data-ver")];
         if (d && d.version) el.textContent = d.version;
@@ -294,6 +297,14 @@
       document.querySelectorAll("[data-dl]").forEach(function (el) {
         var d = v[el.getAttribute("data-dl")];
         if (d && d.url) el.href = d.url;
+      });
+      document.querySelectorAll("[data-dl-mirror]").forEach(function (el) {
+        var d = v[el.getAttribute("data-dl-mirror")];
+        if (d && d.mirror) el.href = d.mirror;
+      });
+      document.querySelectorAll("[data-mirror]").forEach(function (el) {
+        var d = v[el.getAttribute("data-mirror")];
+        if (d) el.hidden = !d.mirror;
       });
     }).catch(function () {});
   </script>

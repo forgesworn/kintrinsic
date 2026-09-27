@@ -4,10 +4,15 @@ import { join } from "node:path";
 import { finalizeEvent } from "nostr-tools/pure";
 import { getPublicKey } from "nostr-tools";
 import {
+  allFollowRedirects,
   isCanonicalBlossomUrl,
+  isGithubReleaseUrl,
   latestRelease,
   pickInstallUrl,
   releaseFromEvent,
+  shellInstallUrl,
+  SHELL_FOLLOWS_REDIRECTS_FROM,
+  WARD_FOLLOWS_REDIRECTS_FROM,
 } from "./releaseEvent";
 
 const SHA = "a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c";
@@ -155,6 +160,17 @@ describe("golden vector parity with the Rust verifier", () => {
     expect(r!.sizeBytes).toBe(v.expected.sizeBytes);
     expect(r!.urls).toEqual(v.expected.urls);
   });
+
+  it("the fixture leads with the GitHub Release; only a redirect-following client is handed it", () => {
+    const raw = readFileSync(
+      join(process.cwd(), "../../core/crates/charter-testkit/vectors/nostr/software_release.json"),
+      "utf8",
+    );
+    const v = JSON.parse(raw);
+    expect(isGithubReleaseUrl(v.expected.urls[0])).toBe(true);
+    expect(pickInstallUrl(v.expected.urls, v.expected.sha256, true)).toBe(v.expected.urls[0]);
+    expect(pickInstallUrl(v.expected.urls, v.expected.sha256)).toBe(v.expected.urls[1]);
+  });
 });
 
 describe("isCanonicalBlossomUrl", () => {
@@ -195,5 +211,66 @@ describe("pickInstallUrl", () => {
       `https://x.example/dl/${SHA}`,
     );
     expect(pickInstallUrl([], SHA)).toBeNull();
+  });
+});
+
+const GH = "https://github.com/forgesworn/kintrinsic/releases/download";
+
+describe("isGithubReleaseUrl", () => {
+  it("accepts only our repo's per-artifact release downloads", () => {
+    expect(isGithubReleaseUrl(`${GH}/ward-v0.6.13/kintrinsic-ward-0.6.13.apk`)).toBe(true);
+    expect(isGithubReleaseUrl(`${GH}/guardian-v0.1.15/kintrinsic-0.1.15.apk`)).toBe(true);
+    expect(isGithubReleaseUrl(`${GH}/linux-v0.7.10/kintrinsic_0.7.10_amd64.deb`)).toBe(true);
+    expect(
+      isGithubReleaseUrl("https://github.com/evil/kintrinsic/releases/download/ward-v1/x.apk"),
+    ).toBe(false);
+    expect(isGithubReleaseUrl(`${GH}/v0.6.13/x.apk`)).toBe(false);
+    expect(isGithubReleaseUrl(`${GH}/ward-v0.6.13/x.apk?raw=1`)).toBe(false);
+    expect(isGithubReleaseUrl(`${GH.replace("https", "http")}/ward-v1/x.apk`)).toBe(false);
+    expect(
+      isGithubReleaseUrl("https://release-assets.githubusercontent.com/github-production-release-asset/1/x"),
+    ).toBe(false);
+    expect(isGithubReleaseUrl("not a url")).toBe(false);
+  });
+});
+
+describe("pickInstallUrl with GitHub Releases", () => {
+  const gh = `${GH}/ward-v0.6.13/kintrinsic-ward-0.6.13.apk`;
+  const blossom = `https://nostr.download/${SHA}.apk`;
+  const urls = [gh, blossom, `https://blossom.primal.net/${SHA}`];
+  const forWard = (...codes: (number | undefined)[]) =>
+    pickInstallUrl(urls, SHA, allFollowRedirects(codes, WARD_FOLLOWS_REDIRECTS_FROM));
+
+  it("an old ward (0.6.12 and earlier) is named the direct Blossom address", () => {
+    expect(forWard(43)).toBe(blossom);
+    expect(forWard(40)).toBe(blossom);
+  });
+
+  it("a new ward (0.6.13+) is named the GitHub Release", () => {
+    expect(forWard(44)).toBe(gh);
+    expect(forWard(50)).toBe(gh);
+  });
+
+  it("an unknown or mixed ward is named Blossom", () => {
+    expect(forWard(undefined)).toBe(blossom);
+    expect(forWard()).toBe(blossom); // no phones reported at all
+    expect(forWard(44, 43)).toBe(blossom); // one old phone holds the line
+    expect(forWard(44, undefined)).toBe(blossom);
+  });
+
+  it("an old guardian shell (0.1.14 and earlier) gets Blossom, a new one GitHub", () => {
+    expect(shellInstallUrl(urls, SHA, 15)).toBe(blossom);
+    expect(shellInstallUrl(urls, SHA, 12)).toBe(blossom);
+    expect(shellInstallUrl(urls, SHA, undefined)).toBe(blossom);
+    expect(shellInstallUrl(urls, SHA, SHELL_FOLLOWS_REDIRECTS_FROM)).toBe(gh);
+  });
+
+  it("GitHub wherever it sits, for a client that follows redirects", () => {
+    expect(pickInstallUrl([blossom, `https://blossom.primal.net/${SHA}`, gh], SHA, true)).toBe(gh);
+  });
+
+  it("never prefers a foreign GitHub repo over a canonical Blossom address", () => {
+    const foreign = "https://github.com/evil/fork/releases/download/ward-v0.6.13/x.apk";
+    expect(pickInstallUrl([foreign, blossom], SHA, true)).toBe(blossom);
   });
 });

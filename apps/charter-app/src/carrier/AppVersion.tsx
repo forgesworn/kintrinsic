@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { UpdateManifest } from "../wire/types";
-import { pickInstallUrl } from "../release/releaseEvent";
+import { shellInstallUrl } from "../release/releaseEvent";
 import {
   MYCHARTER_DOWNLOAD_URL,
   fetchKintrinsicManifest,
@@ -74,7 +74,11 @@ export default function AppVersion() {
       return line(`Kintrinsic ${state.installed.versionName} — couldn't check for updates`);
     case "behind":
       return (
-        <BehindNotice installed={state.installed.versionName} latest={state.latest}>
+        <BehindNotice
+          installed={state.installed.versionName}
+          installedCode={state.installed.versionCode}
+          latest={state.latest}
+        >
           {line}
         </BehindNotice>
       );
@@ -117,10 +121,12 @@ function readInstallState(): InstallState | null {
  */
 function BehindNotice({
   installed,
+  installedCode,
   latest,
   children: line,
 }: {
   installed: string;
+  installedCode: number;
   latest: UpdateManifest;
   children: LineFn;
 }) {
@@ -135,13 +141,15 @@ function BehindNotice({
   );
 
   const carrier = window.CharterCarrier;
-  // A relay ReleaseManifest carries `urls[]`; the origin-JSON fallback carries
-  // a single Blossom `url` (D3). Either supplies the self-install source —
-  // the canonical Blossom address, never a CDN redirect target (2026-08-27).
+  // A relay ReleaseManifest (and a current origin JSON) carries `urls[]`,
+  // GitHub Release first; older origin JSON a single Blossom `url`. GitHub
+  // only for a shell that follows its redirect (≥ 0.1.15); an older one gets
+  // the directly-servable canonical Blossom address — shells ≤ 0.1.12 have no
+  // fallback beyond it. Never a CDN redirect target (2026-08-27).
   const rm = latest as Partial<{ urls: string[]; url: string }>;
   const mirrors =
     rm.urls && rm.urls.length > 0 ? rm.urls : rm.url ? [rm.url] : [];
-  const installUrl = pickInstallUrl(mirrors, latest.apkSha256);
+  const installUrl = shellInstallUrl(mirrors, latest.apkSha256, installedCode);
   const canSelfInstall =
     Boolean(carrier && typeof carrier.installUpdate === "function") && installUrl !== null;
 

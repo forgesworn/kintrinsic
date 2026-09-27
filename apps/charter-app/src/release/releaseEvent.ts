@@ -11,9 +11,10 @@ import { verifyEvent } from "nostr-tools/pure";
 import type { UpdateManifest } from "../wire/types";
 import { RELEASE_PUBKEY_HEX, SOFTWARE_RELEASE_KIND, type ReleaseChannel } from "./releaseTrust";
 
-/** An UpdateManifest that additionally names its Blossom mirrors. */
+/** An UpdateManifest that always names its download sources. */
 export interface ReleaseManifest extends UpdateManifest {
-  /** Content-addressed mirror URLs (https, ≥1), in event order. */
+  /** Download URLs (https, ≥1) in event order: the GitHub Release first,
+   *  then the content-addressed Blossom mirrors. */
   urls: string[];
 }
 
@@ -150,20 +151,84 @@ export function isCanonicalBlossomUrl(url: string, sha256: string): boolean {
   return m !== null && m[1] === sha256;
 }
 
+/** The public repository whose GitHub Releases are the primary artifact host. */
+export const RELEASE_GITHUB_REPO = "forgesworn/kintrinsic";
+
 /**
- * The one URL to hand a device (the update clause carries exactly one):
- * canonical Blossom addresses beat anything else, extension-bearing beats
- * bare (blossom.primal.net serves `<sha>.apk` direct-200 where the bare form
- * 302s, and the stagers refuse redirects), and within a class the event's
- * order stands. Falls back to `urls[0]` when nothing is canonical — the
- * device still pins the bytes to `sha256`, so a wrong mirror fails closed.
- * Empty input → null.
+ * Is `url` a GitHub Release download of our repo with one of the per-artifact
+ * tags (`https://github.com/forgesworn/kintrinsic/releases/download/
+ * ward-v0.6.13/kintrinsic-ward-0.6.13.apk`)? Mirrors
+ * scripts/release/release-helpers.mjs. It 302s to GitHub's asset CDN, so only
+ * clients that follow https redirects (ward ≥ 0.6.13, shell ≥ 0.1.15) may be
+ * handed it; older ones are named a directly-servable Blossom address.
  */
-export function pickInstallUrl(urls: readonly string[], sha256: string): string | null {
+export function isGithubReleaseUrl(url: string, repo: string = RELEASE_GITHUB_REPO): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.host !== "github.com") return false;
+  if (u.search || u.hash || u.username || u.password) return false;
+  const prefix = `/${repo}/releases/download/`;
+  if (!u.pathname.startsWith(prefix)) return false;
+  const rest = u.pathname.slice(prefix.length).split("/");
+  return (
+    rest.length === 2 &&
+    /^(ward|guardian|linux)-v[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(rest[0]) &&
+    /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(rest[1])
+  );
+}
+
+/**
+ * The first ward app versionCode (0.6.13) whose stager follows https
+ * redirects. Earlier wards refuse them, and wards up to 0.6.9 have no
+ * Blossom fallback of their own either — a GitHub url in their clause would
+ * strand them retrying a 302 forever.
+ */
+export const WARD_FOLLOWS_REDIRECTS_FROM = 44;
+/** The first guardian shell versionCode (0.1.15) that follows https redirects. */
+export const SHELL_FOLLOWS_REDIRECTS_FROM = 16;
+
+/**
+ * Can EVERY target follow a GitHub download's redirect? Only when each one
+ * has reported a versionCode at or above `min`. No targets, or any that has
+ * not reported, is "no" — silence must never pick the URL an old client
+ * cannot fetch.
+ */
+export function allFollowRedirects(
+  reported: readonly (number | undefined | null)[],
+  min: number,
+): boolean {
+  return reported.length > 0 && reported.every((c) => typeof c === "number" && c >= min);
+}
+
+/**
+ * The one URL to hand a device (the update clause carries exactly one).
+ *
+ * With `followsRedirects` (the target is known to be new enough — see
+ * allFollowRedirects), our GitHub Release download comes first: the primary
+ * host. Otherwise — an older or unknown target — the directly-servable
+ * canonical Blossom address comes first, exactly as before GitHub Releases:
+ * wards ≤ 0.6.12 and shells ≤ 0.1.14 refuse redirects, and wards ≤ 0.6.9 /
+ * shells ≤ 0.1.12 have no fallback beyond the url they are named.
+ *
+ * Within Blossom, extension-bearing beats bare (the bare form 302s on
+ * blossom.primal.net); a CDN redirect target is never preferred over a
+ * canonical address (2026-08-27); within a class the event's order stands.
+ * Every source is held to `sha256` on the device. Empty input → null.
+ */
+export function pickInstallUrl(
+  urls: readonly string[],
+  sha256: string,
+  followsRedirects = false,
+): string | null {
   if (urls.length === 0) return null;
   const rank = (u: string): number => {
-    if (!isCanonicalBlossomUrl(u, sha256)) return 2;
-    return new URL(u).pathname.includes(".") ? 0 : 1;
+    if (isGithubReleaseUrl(u)) return followsRedirects ? 0 : 3;
+    if (!isCanonicalBlossomUrl(u, sha256)) return 4;
+    return new URL(u).pathname.includes(".") ? 1 : 2;
   };
   let best = urls[0];
   let bestRank = rank(best);
@@ -175,4 +240,17 @@ export function pickInstallUrl(urls: readonly string[], sha256: string): string 
     }
   }
   return best;
+}
+
+/** The self-install source for the guardian's own shell at `shellVersionCode`. */
+export function shellInstallUrl(
+  urls: readonly string[],
+  sha256: string,
+  shellVersionCode: number | undefined,
+): string | null {
+  return pickInstallUrl(
+    urls,
+    sha256,
+    allFollowRedirects([shellVersionCode], SHELL_FOLLOWS_REDIRECTS_FROM),
+  );
 }

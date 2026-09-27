@@ -183,9 +183,12 @@ grant("grant_time_extend_allow.json", "time.extend", "allow", {
   const RELEASE_PK = getPublicKey(RELEASE_SK);
   const sha = "a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c";
   const cert = "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42";
+  // Publisher order: the GitHub Release download (primary host) first, then
+  // the Blossom mirrors. Consumers try them in this order.
   const urls = [
-    `https://blossom.example/${sha}`,
-    `https://mirror.example/${sha}`,
+    "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.9/kintrinsic-ward-0.6.9.apk",
+    `https://nostr.download/${sha}.apk`,
+    `https://blossom.primal.net/${sha}`,
   ];
   const event = signWith(
     RELEASE_SK,

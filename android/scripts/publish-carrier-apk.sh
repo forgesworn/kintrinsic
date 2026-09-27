@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build + publish the Kintrinsic carrier APK (the GUARDIAN-side app, spec D5).
-# D3: the APK is uploaded to BLOSSOM, not committed into the repo; only the
-# manifest (mycharter-apk.json, naming the Blossom URL) is committed.
+# The APK is not committed into the repo: it goes to its GitHub Release (tag
+# guardian-v<version>, the primary host, asset kintrinsic-<version>.apk) and to
+# BLOSSOM as a mirror; only the manifest (mycharter-apk.json) is committed.
+# Same conventions as the ward artifact (publish-apk.sh), same reasons.
 #
-# Same conventions as the ward artifact, same reasons:
-# - `.txt` extension: the vhost's static allowlist has no `apk` yet (#46).
-# - Versioned filename: a CDN edge can never serve a stale binary against a
-#   new manifest's sha256.
+# Rehearsal (builds, signs a throwaway event, uploads nothing, writes no
+# manifest): CHARTER_RELEASE_DRY_RUN=1 ./scripts/publish-carrier-apk.sh
 #
 # SIGNING (S3, review 2026-08-07). This app holds the GUARDIAN SECRET KEY, so
 # its signing key is the family's root of trust twice over. The carrier used to
@@ -20,6 +20,8 @@
 # Requires: `source ~/Android/env.sh` (SDK + NDK on PATH).
 set -euo pipefail
 cd "$(dirname "$0")/.."   # android/
+# shellcheck source=../../scripts/release/lib.sh
+. ../scripts/release/lib.sh
 
 if [ -z "${CHARTER_KEYSTORE_FILE:-}" ] && [ "${CHARTER_ALPHA_DEBUG_SIGNING:-}" = "1" ]; then
   echo "WARNING: publishing a DEBUG-SIGNED Kintrinsic release (alpha bridge)." >&2
@@ -62,33 +64,23 @@ SHA=$(sha256sum "$APK" | cut -d' ' -f1)
 SIZE=$(stat -c%s "$APK")
 BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# D3: the carrier APK is hosted on BLOSSOM, never committed into this repo.
-# Upload + announce FIRST so a failed upload aborts before the manifest names
-# a URL that isn't there.
-if [ "${CHARTER_RELEASE_EVENT_SKIP:-0}" != "1" ]; then
-  URLFILE=$(mktemp)
-  ( cd .. && node scripts/release/publish-release.mjs \
-      --channel mycharter-apk --artifact "android/$APK" \
-      --version "$VN" --version-code "$VC" --cert "$CERT" \
-      --emit-url-file "$URLFILE" )
-  URL=$(cat "$URLFILE"); rm -f "$URLFILE"
-  [ -n "$URL" ] || { echo "FATAL: publisher emitted no verified device URL" >&2; exit 1; }
-else
-  URL="${CHARTER_BLOSSOM_DL_BASE:-https://nostr.download}/$SHA.apk"
-fi
+# GitHub Release first, Blossom mirror second, then the signed event; any
+# GitHub failure aborts before the manifest names a URL.
+release_publish .. mycharter-apk "android/$APK" "$VN" "$VC" "$SHA" "$CERT"
 
-# Origin-JSON fallback (guardian console reads it when relay events are down);
-# names the Blossom URL directly. Direct-200 mirror (stagers refuse redirects).
-cat > "$MANIFEST" <<EOF
-{
-  "versionName": "$VN",
-  "versionCode": $VC,
-  "url": "$URL",
-  "apkSha256": "$SHA",
-  "certSha256": "$CERT",
-  "sizeBytes": $SIZE,
-  "builtAt": "$BUILT"
-}
-EOF
-echo "published: mycharter-apk.json → $URL (v$VN, code $VC, sha $SHA)"
-echo "next:   commit the manifest and push. The artifact lives on Blossom."
+# Origin-JSON fallback (guardian console reads it when relay events are down).
+# `url`: the direct-200 Blossom address for redirect-refusing fielded shells;
+# `urls`: GitHub first, then Blossom.
+write_manifest "$MANIFEST" "{
+  \"versionName\": \"$VN\",
+  \"versionCode\": $VC,
+  \"url\": \"$RELEASE_URL\",
+  \"urls\": $RELEASE_URLS_JSON,
+  \"apkSha256\": \"$SHA\",
+  \"certSha256\": \"$CERT\",
+  \"sizeBytes\": $SIZE,
+  \"builtAt\": \"$BUILT\"
+}"
+echo "published: mycharter-apk.json → $RELEASE_URLS_JSON (v$VN, code $VC, sha $SHA)"
+echo "next:   commit the manifest and push. The artifact lives on GitHub Releases"
+echo "        (guardian-v$VN) and Blossom."

@@ -47,7 +47,12 @@ import { devicesToRelease } from "./releaseOnRemove";
 import { runApproveAppOpenFlow } from "./approveAppOpenFlow";
 import { getPublicKey, SimplePool } from "nostr-tools";
 import { fetchAllReleaseManifests } from "../release/fetchReleases";
-import { pickInstallUrl, type ReleaseManifest } from "../release/releaseEvent";
+import {
+  allFollowRedirects,
+  pickInstallUrl,
+  WARD_FOLLOWS_REDIRECTS_FROM,
+  type ReleaseManifest,
+} from "../release/releaseEvent";
 import { SignerCancelled, type ConfirmGate } from "../signer/mockSigner";
 import type { DecisionContext, InstallDecision, Signer } from "../signer/Signer";
 import { catalogLookup } from "../data/appCatalog";
@@ -1338,15 +1343,26 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (childId: string): Promise<boolean> => {
       const manifest = updateManifest;
       if (!manifest || !signer.current!.status().connected) return false;
-      // A relay-announced release names absolute Blossom mirrors — the clause
-      // carries ONE, so pick the canonical address, never a CDN redirect
-      // target (the 0.6.9 event led with one; it 404'd for every ward,
-      // 2026-08-27). The origin JSON fallback names a single Blossom `url`
-      // (D3); only very old manifests fall back to a same-origin path. Either
-      // way the ward re-verifies the bytes against the clause's sha256 + cert pins.
+      // A relay-announced release (and a current origin JSON) names every
+      // source, GitHub Release first — the clause carries ONE. GitHub only
+      // when every one of this ward's phones has reported a version that
+      // follows its redirect (≥ 0.6.13); otherwise, or when any is silent,
+      // the directly-servable canonical Blossom address, as before — wards
+      // ≤ 0.6.9 have no fallback beyond the named url. Never a CDN redirect
+      // target (2026-08-27). Older origin JSON names a single Blossom `url`;
+      // only very old manifests fall back to a same-origin path. Either way
+      // the ward re-verifies the bytes against the clause's sha256 + cert pins.
+      const phones =
+        stateRef.current.children
+          .find((c) => c.id === childId)
+          ?.devices.filter((d) => d.platform === "android") ?? [];
+      const followsRedirects = allFollowRedirects(
+        phones.map((d) => deviceStatusRef.current[d.devicePubkey as string]?.appVersionCode),
+        WARD_FOLLOWS_REDIRECTS_FROM,
+      );
       const mirrors = (manifest as Partial<ReleaseManifest>).urls;
       const url =
-        (mirrors && pickInstallUrl(mirrors, manifest.apkSha256)) ??
+        (mirrors && pickInstallUrl(mirrors, manifest.apkSha256, followsRedirects)) ??
         (manifest.url
           ? manifest.url
           : new URL(manifest.path ?? APK_PATH, window.location.origin).toString());

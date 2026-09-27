@@ -167,6 +167,11 @@ export interface UpdateManifest {
   url?: string;
   /** Legacy same-origin path (pre-D3 manifests). Fallback only; `url` wins. */
   path?: string;
+  /** Every download source, in preference order: the GitHub Release first,
+   *  then Blossom. Absent on manifests written before GitHub Releases; when
+   *  present, consumers pick from it (see pickInstallUrl) over `url`, which
+   *  stays the direct-200 Blossom address for redirect-refusing clients. */
+  urls?: string[];
   versionName: string;
   versionCode: number;
   apkSha256: string;

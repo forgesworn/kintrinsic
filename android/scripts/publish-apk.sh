@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Build + publish the ward self-update artifact (#44). D3: the APK is uploaded
-# to BLOSSOM (content-addressed), NOT committed into the repo; only the tiny
-# manifest (charter-apk.json, naming the Blossom URL) is committed. The signed
-# relay release event is the primary update channel; this manifest is the
-# console's fallback when relays are unreachable.
+# Build + publish the ward self-update artifact (#44). The APK is NOT committed
+# into the repo: it goes to its GitHub Release (tag ward-v<version>, the
+# primary host) and to BLOSSOM as a mirror; only the tiny manifest
+# (charter-apk.json) is committed. The signed relay release event is the
+# primary update channel; this manifest is the console's fallback when relays
+# are unreachable. See scripts/release/lib.sh for the url/urls split.
+#
+# Rehearsal (builds, signs a throwaway event, uploads nothing, writes no
+# manifest): CHARTER_RELEASE_DRY_RUN=1 ./scripts/publish-apk.sh
 #
 # SIGNING (S3, review 2026-08-07). This publishes the artifact a Device Owner
 # installs over itself, so the key it is signed with is the whole trust story.
@@ -21,6 +25,8 @@
 # Requires: `source ~/Android/env.sh` (SDK + NDK on PATH).
 set -euo pipefail
 cd "$(dirname "$0")/.."   # android/
+# shellcheck source=../../scripts/release/lib.sh
+. ../scripts/release/lib.sh
 
 if [ -z "${CHARTER_KEYSTORE_FILE:-}" ] && [ "${CHARTER_ALPHA_DEBUG_SIGNING:-}" = "1" ]; then
   echo "WARNING: publishing a DEBUG-SIGNED ward release (alpha bridge)." >&2
@@ -86,39 +92,27 @@ SHA=$(sha256sum "$APK" | cut -d' ' -f1)
 SIZE=$(stat -c%s "$APK")
 BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# D3: the APK is hosted on BLOSSOM (content-addressed), never committed into
-# this repo. Upload + announce the signed release event FIRST, so a failed
-# upload aborts (set -e) before the manifest can name a URL that isn't there.
-if [ "${CHARTER_RELEASE_EVENT_SKIP:-0}" != "1" ]; then
-  URLFILE=$(mktemp)
-  ( cd .. && node scripts/release/publish-release.mjs \
-      --channel charter-apk --artifact "android/$APK" \
-      --version "$VN" --version-code "$VC" --cert "$CERT" \
-      --emit-url-file "$URLFILE" )
-  URL=$(cat "$URLFILE"); rm -f "$URLFILE"
-  [ -n "$URL" ] || { echo "FATAL: publisher emitted no verified device URL" >&2; exit 1; }
-else
-  # Offline build: nothing uploaded/verified — use the deterministic URL.
-  URL="${CHARTER_BLOSSOM_DL_BASE:-https://nostr.download}/$SHA.apk"
-fi
+# GitHub Release first, Blossom mirror second, then the signed event — a
+# failed GitHub upload or download check aborts (set -e) before anything is
+# announced or the manifest names a URL.
+release_publish .. charter-apk "android/$APK" "$VN" "$VC" "$SHA" "$CERT"
 
 # The origin-JSON manifest is the guardian console's FALLBACK when the signed
-# relay release events are unreachable; it names the Blossom URL directly (no
-# same-origin binary any more). On-device stagers refuse redirects, so the URL
-# must be a direct-200 mirror — nostr.download serves `/<sha>.apk` as 200.
-cat > "$MANIFEST" <<EOF
-{
-  "versionName": "$VN",
-  "versionCode": $VC,
-  "url": "$URL",
-  "apkSha256": "$SHA",
-  "certSha256": "$CERT",
-  "sizeBytes": $SIZE,
-  "builtAt": "$BUILT"
-}
-EOF
+# relay release events are unreachable. `url` stays the direct-200 Blossom
+# address fielded guardians (<= 0.1.14) hand to wards that refuse redirects;
+# `urls` is the ordered list (GitHub first) newer consoles read.
+write_manifest "$MANIFEST" "{
+  \"versionName\": \"$VN\",
+  \"versionCode\": $VC,
+  \"url\": \"$RELEASE_URL\",
+  \"urls\": $RELEASE_URLS_JSON,
+  \"apkSha256\": \"$SHA\",
+  \"certSha256\": \"$CERT\",
+  \"sizeBytes\": $SIZE,
+  \"builtAt\": \"$BUILT\"
+}"
 
-echo "published: charter-apk.json → $URL"
+echo "published: charter-apk.json → $RELEASE_URLS_JSON"
 echo "  version: $VN ($VC)   size: $SIZE bytes   apkSha256: $SHA   certSha256: $CERT"
 echo "Next: commit the manifest (apps/charter-app/public/charter-apk.json) and push."
-echo "The artifact lives on Blossom, not in the repo."
+echo "The artifact lives on GitHub Releases (ward-v$VN) and Blossom, not in the repo."

@@ -1,6 +1,6 @@
 {
   "event": {
-    "id": "57edac979be2535bae6d1b1568de8aec3baf23111f72474586a4ac012b41f7fd",
+    "id": "7eb4fce7b854217d7c29b1351bd103b470f731d27aa04ee82a7259d3af67babf",
     "pubkey": "463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b",
     "created_at": 1700000000,
     "kind": 30063,
@@ -31,15 +31,19 @@
       ],
       [
         "url",
-        "https://blossom.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+        "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.9/kintrinsic-ward-0.6.9.apk"
       ],
       [
         "url",
-        "https://mirror.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+        "https://nostr.download/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c.apk"
+      ],
+      [
+        "url",
+        "https://blossom.primal.net/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
       ]
     ],
     "content": "test release notes",
-    "sig": "141a061dc3d4f2a705402256942e77a1264ac9c7c44c85f5c5f382e83d9c5801dd98ddac07abd67da5c5668e5f099162dbf889d60a7f2dda9ac868686ed8842b"
+    "sig": "8ff7c2fa97eb66079b329b5403d5323448dd80dbd3fd331491466779d5c808f03653687c401489e613e09fa67d9f0dc9824726bc23ccff441b4d7a929ad55cf1"
   },
   "release_pubkey": "463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b",
   "expected": {
@@ -50,9 +54,10 @@
     "sizeBytes": 27693181,
     "certSha256": "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42",
     "urls": [
-      "https://blossom.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c",
-      "https://mirror.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
+      "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.9/kintrinsic-ward-0.6.9.apk",
+      "https://nostr.download/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c.apk",
+      "https://blossom.primal.net/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c"
     ]
   },
-  "canonical": "[0,\"463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b\",1700000000,30063,[[\"d\",\"charter-apk\"],[\"version\",\"0.6.9\"],[\"version_code\",\"40\"],[\"x\",\"a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"],[\"size\",\"27693181\"],[\"cert\",\"d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42\"],[\"url\",\"https://blossom.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"],[\"url\",\"https://mirror.example/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"]],\"test release notes\"]"
+  "canonical": "[0,\"463b3d9f662621fb1b4be8fbbe2520125a216cdfc9dae3debcba4850c690d45b\",1700000000,30063,[[\"d\",\"charter-apk\"],[\"version\",\"0.6.9\"],[\"version_code\",\"40\"],[\"x\",\"a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"],[\"size\",\"27693181\"],[\"cert\",\"d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42\"],[\"url\",\"https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.9/kintrinsic-ward-0.6.9.apk\"],[\"url\",\"https://nostr.download/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c.apk\"],[\"url\",\"https://blossom.primal.net/a1ea84592cccd0e0356c1183c62d81d59c007bb8ce3b26f401c2500a122f768c\"]],\"test release notes\"]"
 }

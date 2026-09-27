@@ -1099,12 +1099,71 @@ to be able to say so.
 by `apkSha256`, so a device MAY also try the canonical Blossom address of that
 hash on the release mirrors (`https://<server>/<sha256>[.apk]`) when the named
 `url` fails; every source is held to the same sha256 + signing-cert pins, so a
-wrong mirror fails closed. Guardians SHOULD name a canonical Blossom address,
-never a CDN redirect target (one was purged under the 0.6.9 release and every
-ward that trusted it alone retried HTTP 404 indefinitely, 2026-08-27).
+wrong mirror fails closed. That Blossom fallback exists from ward 0.6.10; older
+wards fetch the named `url` alone, so they rely on the guardian naming a
+directly-servable Blossom address. A device MAY follow redirects, https to
+https only and at most five hops; wards up to 0.6.12 follow none. So a guardian
+names the release's GitHub Release download (see *Software release
+announcements* below) only when every one of the ward's phones has reported
+version 0.6.13 (versionCode 44) or later, and otherwise — older or unreported
+— a canonical Blossom address that answers 200 directly. Never a CDN redirect
+target (one was purged under the 0.6.9 release and every ward that trusted it
+alone retried HTTP 404 indefinitely, 2026-08-27). The guardian's own shell is
+handled the same way: GitHub from shell 0.1.15, Blossom below it.
 
 **Platform scope: Android only.** Charter for Linux updates through `apt` /
 the published `.deb`, so `charterd` stores this clause and never reads it.
+
+### Software release announcements (kind 30063)
+
+Releases of the apps themselves are announced by an addressable kind-30063
+event signed by the **release key** — a trust anchor compiled into every
+client, separate from any guardian key (it signs "the latest artifact on
+channel X is these bytes", never device policy). Channels (the `d` tag):
+`charter-apk` (the ward app), `mycharter-apk` (the Kintrinsic guardian app),
+`charter-deb` (Kintrinsic for Linux).
+
+```text
+kind 30063, content = release notes
+["d", <channel>]
+["version", <versionName>]          e.g. "0.6.13"
+["version_code", <positive int>]    strictly-greater comparison only
+["x", <sha256 of the artifact>]     lowercase hex
+["size", <bytes>]
+["cert", <signing-cert sha256>]     APK channels only; required there
+["url", <https url>]                one or more, in preference order
+```
+
+**Transport is not the trust anchor.** The event signature, the `x` hash and
+(for APKs) the `cert` are; any host that serves bytes matching `x` is as good
+as another. So the `url` tags are ordered by reliability: first the GitHub
+Release download,
+`https://github.com/forgesworn/kintrinsic/releases/download/<tag>/<asset>`,
+with one tag per artifact (`ward-v<ver>`, `guardian-v<ver>`, `linux-v<ver>`);
+then the canonical Blossom addresses (`https://<server>/<sha256>[.ext]`, the
+blob's root address, never a CDN redirect target). Publishers name nothing
+else.
+
+A consumer tries the urls **in order**, verifies the sha256 (and size; for an
+APK, the signing cert before install) of whatever it fetched, and on any
+failure — transport, HTTP status, wrong bytes, a body larger than the signed
+`size` — moves on to the next. It MAY
+follow redirects (a GitHub download answers 302 to GitHub's asset CDN), but
+only to https and at most five hops. Clients fielded before GitHub Releases
+(ward ≤ 0.6.12, charterd ≤ 0.7.9, guardian ≤ 0.1.14) refuse every redirect:
+charterd skips the GitHub url and fetches from Blossom, and wards and shells
+are named a Blossom address by the guardian. That is why a release is not
+announced unless a Blossom mirror answers 200 directly. The same split shows in the
+origin-JSON manifests (`charter-apk.json`, `mycharter-apk.json`,
+`charter-deb.json`): `url` is that direct-200 Blossom address, `urls` the
+ordered list.
+
+There is no freshness window: downgrade safety is the strictly-greater
+`version_code` comparison, so a replayed old event is a no-op. Announcements
+are published to `wss://relay.trotters.cc` first and to public relays beside
+it; trotters is never load-bearing, and a publish that fewer than two relays
+accepted is flagged. Golden vector:
+`core/crates/charter-testkit/vectors/nostr/software_release.json`.
 
 ### Enforcement parity — which warden reads which clause
 
