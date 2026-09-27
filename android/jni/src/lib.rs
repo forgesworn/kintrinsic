@@ -20,7 +20,8 @@ use jni::JNIEnv;
 use warden::{Warden, WARDEN};
 
 /// Bump on any breaking change to this surface; Kotlin refuses a mismatch.
-pub const ABI_VERSION: jint = 1;
+/// 2: `charterInit` takes the app's versionName (STATUS `appVersionName`).
+pub const ABI_VERSION: jint = 2;
 
 // ---- helpers --------------------------------------------------------------
 
@@ -47,6 +48,17 @@ fn err_json(msg: &str) -> String {
     format!("{{\"error\":{}}}", serde_json::Value::String(msg.into()))
 }
 
+/// A package list for an enforcement path, or `{"error":…}` when it could not
+/// be worked out. Never `""` or `[]` on a failure: to Kotlin an empty list
+/// means "suspend nothing", and a read error must keep what it last applied
+/// (F1).
+fn policy_list_json(res: Result<Vec<String>, String>) -> String {
+    match res.and_then(|v| serde_json::to_string(&v).map_err(|e| e.to_string())) {
+        Ok(json) => json,
+        Err(e) => err_json(&e),
+    }
+}
+
 // ---- entry points ---------------------------------------------------------
 
 #[no_mangle]
@@ -64,25 +76,33 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterI
     base_dir: JString,
     enforce_mode: JString,
     app_version_code: jlong,
+    app_version_name: JString,
 ) -> jstring {
     let base = match jstr(&mut env, base_dir) {
         Ok(s) => s,
         Err(e) => return out(&env, &err_json(&e)),
     };
     let mode = jstr(&mut env, enforce_mode).unwrap_or_else(|_| "enforce".into());
+    // Diagnostic only (STATUS `appVersionName`): a bad string is just unknown.
+    let version_name = opt_jstr(&mut env, app_version_name).unwrap_or_default();
     let mut guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
     // Idempotent: never clobber a live warden (e.g. MainActivity relaunching
     // while the service holds the locked enforcer state) — return the existing
     // one. A second init only updates the enforce mode.
     if let Some(w) = guard.as_mut() {
         w.set_enforce_mode(&mode);
+        w.set_app_version_name(&version_name);
         return out(
             &env,
             &serde_json::to_string(&w.init_result()).unwrap_or_default(),
         );
     }
+    // `Warden::init` no longer fails on the machine key (M6: it comes up
+    // degraded instead); what is left is a base dir it cannot create or a
+    // runtime it cannot build. Kotlin retries init on its tick either way.
     match Warden::init(&base, &mode, app_version_code.max(0) as u64) {
-        Ok(w) => {
+        Ok(mut w) => {
+            w.set_app_version_name(&version_name);
             let res = serde_json::to_string(&w.init_result()).unwrap_or_default();
             *guard = Some(w);
             out(&env, &res)
@@ -189,7 +209,7 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterS
     };
     with_warden(&env, |w| match w.submit_request(&op, &params) {
         Ok(req_id) => format!("{{\"reqId\":\"{req_id}\"}}"),
-        Err(e) => err_json(&e),
+        Err(e) => e.to_json(),
     })
 }
 
@@ -288,7 +308,8 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterI
 }
 
 /// The sole ward's standing per-app policy AS ENFORCED AT `now` (`GrantApps`
-/// JSON), or "" when none applies. Any live time-boxed hold is already folded
+/// JSON), "" when none applies, or `{"error":…}` when the clause cannot be
+/// read (F1: Kotlin then keeps what it last applied). Any live time-boxed hold is already folded
 /// into the lists, so Kotlin suspends the resulting package set exactly as
 /// before, level-triggered. Takes the clock because a hold ends at an absolute
 /// instant and must be re-resolved each tick.
@@ -298,7 +319,7 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterA
     _class: JClass,
     now: jlong,
 ) -> jstring {
-    with_warden(&env, |w| w.app_policy(now))
+    with_warden(&env, |w| w.app_policy(now).unwrap_or_else(|e| err_json(&e)))
 }
 
 /// The sole ward's LIVE app holds at `now` — a JSON array of
@@ -316,7 +337,8 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterA
 
 /// The sole ward's per-app RULE suspensions for `now_unix` — the packages whose
 /// `appRules` access is `Blocked` right now (blocked outright, or outside their
-/// allowed hours) — as a JSON array of package ids, or `[]` when none. Schedule-
+/// allowed hours) — as a JSON array of package ids, `[]` when none, or
+/// `{"error":…}` when the clause cannot be read (F1). Schedule-
 /// dependent, so it is recomputed each call. Kotlin unions this with the standing
 /// per-app policy and suspends the union, level-triggered.
 #[no_mangle]
@@ -325,14 +347,13 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterA
     _class: JClass,
     now_unix: jlong,
 ) -> jstring {
-    with_warden(&env, |w| {
-        serde_json::to_string(&w.app_rule_suspensions(now_unix)).unwrap_or_default()
-    })
+    with_warden(&env, |w| policy_list_json(w.app_rule_suspensions(now_unix)))
 }
 
 /// The sole ward's per-bucket ("named time") suspensions at `now_unix` — the
 /// packages whose bucket has spent either axis (day or week) right now — as a
-/// JSON array of package ids, or `[]` when none. Extra-adjusted (a granted
+/// JSON array of package ids, `[]` when none, or `{"error":…}` when the clause
+/// cannot be read (F1). Extra-adjusted (a granted
 /// `time.extend`/gift to a bucket lifts both walls today) and recomputed each
 /// call, like [`charterAppRuleSuspensions`]. Kotlin unions this into the same
 /// suspend set: spending a bucket suspends only ITS apps, never the device.
@@ -342,9 +363,7 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterB
     _class: JClass,
     now_unix: jlong,
 ) -> jstring {
-    with_warden(&env, |w| {
-        serde_json::to_string(&w.bucket_suspensions(now_unix)).unwrap_or_default()
-    })
+    with_warden(&env, |w| policy_list_json(w.bucket_suspensions(now_unix)))
 }
 
 /// Every named bucket's day/week picture plus the labelled `askFirst` list —
@@ -416,7 +435,13 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterD
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    with_warden(&env, |w| w.web_dns_plan())
+    // N1: with the pairing unreadable there is no subject, and the plan would
+    // be "" — "not paired", which the VPN serves as unrestricted. An error
+    // instead: Kotlin's `dnsPlan` reads that as the locked (block-all) plan.
+    with_warden(&env, |w| match w.require_readable_pairing() {
+        Ok(()) => w.web_dns_plan(),
+        Err(e) => err_json(&e),
+    })
 }
 
 /// The install window as THIS DEVICE saw it:
@@ -622,4 +647,20 @@ fn with_warden_mut(env: &JNIEnv, f: impl FnOnce(&mut Warden) -> String) -> jstri
     }))
     .unwrap_or_else(|_| err_json("internal error (panic recovered)"));
     out(env, &res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F1: a policy list that could not be worked out reaches Kotlin as an
+    /// error, never as the `[]` that means "suspend nothing".
+    #[test]
+    fn a_failed_policy_list_is_an_error_not_an_empty_list() {
+        assert_eq!(policy_list_json(Ok(vec!["a.b".into()])), r#"["a.b"]"#);
+        assert_eq!(policy_list_json(Ok(Vec::new())), "[]");
+        let e = policy_list_json(Err("apps clause unreadable".into()));
+        let v: serde_json::Value = serde_json::from_str(&e).unwrap();
+        assert_eq!(v["error"], "apps clause unreadable");
+    }
 }

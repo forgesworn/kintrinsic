@@ -19,6 +19,7 @@ import android.widget.TextView
 import org.forgesworn.charter.admin.Provisioning
 import org.forgesworn.charter.enforce.hotspot.HotspotWish
 import org.forgesworn.charter.native.CharterCore
+import org.forgesworn.charter.native.wardMessageOr
 import org.forgesworn.charter.ui.AskLifecycle
 import org.forgesworn.charter.ui.CharterTheme
 import org.forgesworn.charter.ui.GroupMirror
@@ -209,7 +210,7 @@ class MainActivity : Activity() {
         // deviceCode is meaningful, and this post precedes refresh()'s
         // pairingState read on the same single worker, preserving ordering.
         worker.post {
-            val init = runCatching { CharterCore.init(Provisioning.baseDir(this), "enforce", Provisioning.ownVersionCode(this)) }.getOrNull()
+            val init = runCatching { CharterCore.init(Provisioning.baseDir(this), "enforce", Provisioning.ownVersionCode(this), Provisioning.ownVersionName(this)) }.getOrNull()
             val code = runCatching { CharterCore.deviceCode() }.getOrNull()
                 ?: init?.machinePubkey ?: "(unavailable)"
             runOnUiThread {
@@ -715,7 +716,7 @@ class MainActivity : Activity() {
             } else {
                 runOnUiThread {
                     button.isEnabled = true
-                    statusView.text = "Couldn't reach your guardian — try again."
+                    statusView.text = res.wardMessageOr("Couldn't reach your guardian — try again.")
                 }
             }
         }
@@ -736,7 +737,7 @@ class MainActivity : Activity() {
             } else {
                 runOnUiThread {
                     button.isEnabled = true
-                    statusView.text = "Couldn't reach your guardian — try again."
+                    statusView.text = res.wardMessageOr("Couldn't reach your guardian — try again.")
                 }
             }
         }

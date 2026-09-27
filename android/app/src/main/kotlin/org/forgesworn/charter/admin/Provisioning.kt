@@ -29,6 +29,12 @@ object Provisioning {
         context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
     }.getOrDefault(0L)
 
+    /** This build's human versionName ("0.6.12") — reported in STATUS so the
+     *  guardian can say which version each ward runs. "" if unreadable. */
+    fun ownVersionName(context: Context): String = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    }.getOrNull() ?: ""
+
     fun baseDir(context: Context): String {
         val ctx = context.createDeviceProtectedStorageContext()
         val dir = java.io.File(ctx.filesDir, "charter")

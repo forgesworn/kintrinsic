@@ -46,7 +46,15 @@ class CharterVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Always re-read the plan on (re)start; apply calls just restart us.
-        val plan = CharterCore.dnsPlan()
+        // A throw (a refused native core, F3/N4) is not "no policy": keep the
+        // tunnel up and block everything rather than crash-loop or pass through.
+        val plan = runCatching { CharterCore.dnsPlan() }.getOrElse {
+            Log.e(TAG, "web plan unavailable: failing closed", it)
+            CharterCore.DnsPlan(
+                "", "locked", emptyList(), emptyList(),
+                emptyList(), emptyList(), true, "off", emptyList(),
+            )
+        }
         if (plan == null) {
             // Not paired / no policy: keep the tunnel UP (fail-closed under
             // lockdown) but pass everything through — resolver = unrestricted.

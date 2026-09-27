@@ -31,6 +31,10 @@ interface AppGateOps {
      * so the sources never fight. Everything is best-effort over the live
      * launchable surface. Returns packages that could not be changed (never
      * fatal).
+     *
+     * [suspendOnly] is the degraded form (F1): some per-app input could not be
+     * read this tick, so the set is only ADDED to — whatever is suspended
+     * stays suspended until every input reads again.
      */
     fun reconcile(
         locked: Boolean,
@@ -39,6 +43,7 @@ interface AppGateOps {
         listeningExempt: Set<String> = emptySet(),
         bucketSuspensions: Set<String> = emptySet(),
         alwaysAvailable: Set<String> = emptySet(),
+        suspendOnly: Boolean = false,
     ): List<String>
     fun isSuspended(pkg: String): Boolean
 
@@ -474,6 +479,7 @@ class DpmAppGateOps(
         listeningExempt: Set<String>,
         bucketSuspensions: Set<String>,
         alwaysAvailable: Set<String>,
+        suspendOnly: Boolean,
     ): List<String> {
         val deny = denyListPackages(context)
         val launchable = launchablePackages(context).filter { it !in deny }
@@ -493,7 +499,10 @@ class DpmAppGateOps(
             alwaysAvailable,
         )
         val toSuspend = launchable.filter { it in suspendSet }.toTypedArray()
-        val toUnsuspend = launchable.filter { it !in suspendSet }.toTypedArray()
+        // Degraded (F1): never lift a suspension on a tick that could not read
+        // every per-app input — the previous state is the stricter answer.
+        val toUnsuspend =
+            if (suspendOnly) emptyArray() else launchable.filter { it !in suspendSet }.toTypedArray()
         // setPackagesSuspended returns the packages it FAILED to change — treat
         // as "does not exist / retry next tick", log every one, never swallow.
         val failed = mutableListOf<String>()

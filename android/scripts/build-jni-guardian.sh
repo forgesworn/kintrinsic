@@ -6,8 +6,8 @@ cd "$(dirname "$0")/../jni-guardian"
 
 PROFILE="${1:-release}"
 case "$PROFILE" in
-  release) cargo ndk -t arm64-v8a -t x86_64 -o ../carrier/src/main/jniLibs build --release ;;
-  debug)   cargo ndk -t arm64-v8a -t x86_64 -o ../carrier/src/main/jniLibs build ;;
+  release) cargo ndk -t arm64-v8a -t x86_64 -o ../carrier/src/main/jniLibs build --locked --release ;;
+  debug)   cargo ndk -t arm64-v8a -t x86_64 -o ../carrier/src/main/jniLibs build --locked ;;
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 

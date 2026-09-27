@@ -103,7 +103,7 @@ class AboutActivity : Activity() {
         worker.post {
             // init is idempotent and must precede deviceCode / pairingState.
             val init = runCatching {
-                CharterCore.init(Provisioning.baseDir(this), "enforce", Provisioning.ownVersionCode(this))
+                CharterCore.init(Provisioning.baseDir(this), "enforce", Provisioning.ownVersionCode(this), Provisioning.ownVersionName(this))
             }.getOrNull()
             val code = runCatching { CharterCore.deviceCode() }.getOrNull()
                 ?: init?.machinePubkey ?: "(unavailable)"

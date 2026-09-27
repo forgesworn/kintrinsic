@@ -20,7 +20,7 @@ rm -rf "$OUT"
 case "$PROFILE" in
   release)
     cargo ndk -t arm64-v8a -t x86_64 -o "$OUT" \
-      build --release --no-default-features --features real-relay
+      build --locked --release --no-default-features --features real-relay
     # Gate: the shipped graph must carry no `mock`.
     if cargo tree -e features --no-default-features --features real-relay | grep -q ' mock'; then
       echo "FATAL: mock feature leaked into the release graph" >&2
@@ -29,7 +29,7 @@ case "$PROFILE" in
     ;;
   debug)
     cargo ndk -t arm64-v8a -t x86_64 -o "$OUT" \
-      build --no-default-features --features real-relay,mock
+      build --locked --no-default-features --features real-relay,mock
     ;;
   *)
     echo "usage: $0 [release|debug]" >&2

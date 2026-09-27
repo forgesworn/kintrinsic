@@ -28,7 +28,7 @@ class DebugReceiver : BroadcastReceiver() {
         val pending = goAsync() // network/JNI IO must leave the main thread
         Thread {
             try {
-                CharterCore.init(Provisioning.baseDir(context), "enforce", Provisioning.ownVersionCode(context))
+                CharterCore.init(Provisioning.baseDir(context), "enforce", Provisioning.ownVersionCode(context), Provisioning.ownVersionName(context))
                 val now = System.currentTimeMillis() / 1000
                 when (action) {
                     ACTION_PAIR -> {

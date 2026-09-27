@@ -1,5 +1,5 @@
-//! The break-glass override (design memo
-//! `docs/superpowers/specs/2026-07-24-lifeline-incall-and-break-glass.md`).
+//! The break-glass override (internal design spec
+//! 2026-07-24-lifeline-incall-and-break-glass).
 //!
 //! The fire-alarm model: nothing stops the ward breaking the glass, but
 //! breaking it is LOUD. Two durable pieces live here:

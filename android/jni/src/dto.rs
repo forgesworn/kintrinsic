@@ -12,12 +12,26 @@ pub struct InitResult {
     pub guardian: Option<String>,
     pub subject: Option<String>,
     pub enforce_mode: String,
+    /// The warden came up DEGRADED (M6): its machine key would not load, so
+    /// it enforces the cached clauses with no relay, broker or pairing. Not an
+    /// init failure — Kotlin must run the warden exactly as usual.
+    pub transport_unavailable: bool,
+    /// Why, while degraded (diagnostic text, never shown to the ward).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_error: Option<String>,
+    /// The pairing record exists but would not READ (F2). `paired` is then
+    /// true with no guardian: Kotlin holds the device exactly as paired.
+    pub pairing_unreadable: bool,
 }
 
 /// Result of `charterPairingState` / the pairing setters.
 #[derive(Debug, Serialize)]
 pub struct PairingState {
+    /// True for an unreadable pairing too ([`PairingState::pairing_unreadable`]):
+    /// the install lock and the Device Owner restrictions hang off this.
     pub paired: bool,
+    /// The pairing record exists but would not READ (F2); retried each poll.
+    pub pairing_unreadable: bool,
     /// 8-char guardian fingerprint, never the full key.
     pub guardian_short: Option<String>,
     pub guardian: Option<String>,

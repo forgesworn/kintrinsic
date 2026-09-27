@@ -133,7 +133,24 @@ pub struct Warden {
     /// or a second bug — so this is depth, not a fix for anything reachable;
     /// it costs one wrapper type and removes a copy that had no reason to
     /// outlive its owner. Derefs to `[u8; 32]`, so every caller is unchanged.
-    machine_sk: zeroize::Zeroizing<[u8; 32]>,
+    ///
+    /// `None` when the key could not be loaded (M6): the warden runs degraded
+    /// — enforcing its cached clauses with no transport — until a retry
+    /// loads it. `signer` then answers the zero pubkey, which cannot sign.
+    machine_sk: Option<zeroize::Zeroizing<[u8; 32]>>,
+    /// Why the machine key would not load, while it will not. Reported on
+    /// `InitResult` and, as `transportUnavailable`, on STATUS.
+    key_error: Option<String>,
+    /// Why the pairing record would not READ at init, while it will not (F2).
+    ///
+    /// An unreadable pairing is not an absent one. Reading it as "unpaired"
+    /// used to stand the install lock down for the life of the process (an
+    /// EIO at boot was enough), and let the device be pinned to a new
+    /// guardian over the top of the real one. While this is `Some` the warden
+    /// reports itself PAIRED (so Kotlin keeps the install lock and the Device
+    /// Owner restrictions up), refuses every pairing change, and retries the
+    /// read on each slow poll ([`Warden::retry_pairing`]).
+    pairing_error: Option<String>,
     /// The live relay facade; `None` until paired with ≥1 relay (or when the
     /// build carries no relay feature — host mock tests inject one). Behind an
     /// `Arc` so the poll orchestrator clones it out and runs the network half
@@ -152,6 +169,22 @@ pub struct Warden {
     /// This build's own versionCode (from Kotlin BuildConfig) — reported in
     /// STATUS and compared against the `update` clause (#44). 0 = unknown.
     app_version_code: u64,
+    /// This build's human versionName ("0.6.12"), set by Kotlin at init and
+    /// reported in STATUS so the guardian can name what each ward runs.
+    /// Empty = unknown (omitted from STATUS).
+    app_version_name: String,
+    /// Consecutive broker rounds that reached no relay at all — STATUS
+    /// `relayUnreachablePolls` (absent while 0), charterd's counter.
+    consecutive_unreachable: u32,
+    /// A `clockSteppedBackFrom` stamp whose STATUS reached no relay, carried
+    /// until one lands (`status_emit::clock_stepped_back_from`). Memory only:
+    /// after a restart nothing is carried, and the guardian keeps its older,
+    /// higher-`ts` status as current — the fail-safe direction.
+    status_step_undelivered: Option<u64>,
+    /// The STATUS `seq` counter (R2-2/R2-3): the arithmetic is core's
+    /// `StatusSeq`, the storage is `<base>/status-seq`, written before each
+    /// publish so the sequence survives a restart and a clock set back.
+    status_seq: charter_spine::status_emit::StatusSeq,
     /// QR-onboarding echo: `(token, expires_unix)` from the scanned pairing
     /// URI, stamped on STATUS until it expires so the guardian app can match
     /// the device that scanned its QR (then never again).
@@ -213,15 +246,24 @@ impl Warden {
         let base = PathBuf::from(base_dir);
         std::fs::create_dir_all(&base).map_err(|e| format!("create base dir: {e}"))?;
 
-        let signer = RealMachineSigner::load_or_create(base.join("machine.key"))
-            .map_err(|e| format!("machine identity: {e:?}"))?;
-        let machine_sk = zeroize::Zeroizing::new(
-            RealMachineSigner::load_or_create_secret(base.join("machine.key"))
-                .map_err(|e| format!("machine secret: {e:?}"))?,
-        );
+        // M6: a machine key we cannot load (owned by another uid after a
+        // restored backup or a manual push, an EIO) must NEVER stop the warden
+        // existing. Failing init here used to leave Kotlin with no warden at
+        // all: no tick, no lock, no accrual, the device frozen in whatever
+        // state it was last left. Instead come up DEGRADED, as charterd does
+        // (G3/B4): no identity, so no relay, no broker and no pairing — but
+        // every clause already cached on disk goes on being enforced by the
+        // tick, which reads the store directly. The load is retried on each
+        // slow poll ([`Warden::retry_machine_key`]).
+        let (signer, machine_sk, key_error) = load_machine_key(&base);
+        let base_for_seq = base.clone();
 
         let pairing = RealPairingStore::with_base(&base);
-        let (guardian, subject, relays, paired_at) = load_pairing(&pairing);
+        // F2: a pairing that will not READ must never come up as "unpaired".
+        let ((guardian, subject, relays, paired_at), pairing_error) = match load_pairing(&pairing) {
+            Ok(p) => (p, None),
+            Err(e) => ((None, None, Vec::new(), 0), Some(e)),
+        };
         let pair_token = load_pair_token(&base);
         let boot_watch = load_boot_watch(&base).unwrap_or_default();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -247,6 +289,8 @@ impl Warden {
             relays,
             paired_at,
             machine_sk,
+            key_error,
+            pairing_error,
             relay: None,
             last_status: None,
             pair_token,
@@ -259,6 +303,13 @@ impl Warden {
             installed_apps: Vec::new(),
             install_window: None,
             app_version_code,
+            app_version_name: String::new(),
+            consecutive_unreachable: 0,
+            status_step_undelivered: None,
+            status_seq: charter_spine::status_emit::StatusSeq::resume(
+                load_status_seq(&base_for_seq),
+                now_unix_ms(),
+            ),
             rt: std::sync::Arc::new(rt),
             mode: EnforceMode::parse(enforce_mode),
             enforcer: EnforcerCore::new(),
@@ -281,10 +332,14 @@ impl Warden {
     fn rebuild_relay(&mut self) {
         #[cfg(feature = "real-relay")]
         {
-            if let (Some(g), false) = (self.guardian, self.relays.is_empty()) {
-                self.relay =
-                    crate::relay::real_relay(*self.machine_sk, g, self.relays.clone(), &self.base)
-                        .ok();
+            // No machine key (M6) means no identity to seal or sign with, so
+            // no transport at all: the tick still enforces the cached clauses.
+            if let (Some(g), false, Some(sk)) = (
+                self.guardian,
+                self.relays.is_empty(),
+                self.machine_sk.as_deref().copied(),
+            ) {
+                self.relay = crate::relay::real_relay(sk, g, self.relays.clone(), &self.base).ok();
                 self.broker = self
                     .build_broker(Box::new(charter_sys::relay::RealRelayTransport::default()))
                     .ok();
@@ -305,10 +360,14 @@ impl Warden {
     ) -> Result<std::sync::Arc<AndroidBroker>, String> {
         let guardian = self.guardian.ok_or("not paired")?;
         let subject = self.subject.ok_or("no sole ward")?;
+        let machine_sk = self
+            .machine_sk
+            .as_deref()
+            .copied()
+            .ok_or("machine key unavailable")?;
         let sys = AndroidSystem::with_base(&self.base).map_err(|e| format!("system: {e:?}"))?;
-        let facade =
-            AndroidTransportFacade::new(relay, *self.machine_sk, guardian, self.relays.clone())?
-                .with_outbox(&self.base);
+        let facade = AndroidTransportFacade::new(relay, machine_sk, guardian, self.relays.clone())?
+            .with_outbox(&self.base);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -568,7 +627,12 @@ impl Warden {
             )
             .ok()
             .flatten()?;
-        serde_json::from_str::<charter_proto::MaintenanceBody>(&stored).ok()
+        // A version this build does not implement is no window at all — the
+        // same answer `MaintenanceBody::is_open` gives, so the notice can
+        // never quote an expiry from a body the lock itself ignored.
+        serde_json::from_str::<charter_proto::MaintenanceBody>(&stored)
+            .ok()
+            .filter(|b| b.v == charter_proto::CLAUSE_VERSION)
     }
 
     /// What the guardian needs to see about a stuck update: the oldest install
@@ -607,16 +671,31 @@ impl Warden {
     /// [`charter_schedule::spent_bucket_apps`] already fail-safe on pause
     /// internally (credit/suspend nothing), so every caller shares one rule.
     fn buckets_clause(&self) -> Option<charter_schedule::GrantBuckets> {
-        let subject = self.subject?;
-        let stored = self
+        self.buckets_clause_checked().ok().flatten()
+    }
+
+    /// [`Warden::buckets_clause`], keeping a store READ failure distinct from
+    /// "no usable clause". The enforcement path must never mistake the one
+    /// for the other: an unreadable clause is not an absent one (F1).
+    fn buckets_clause_checked(&self) -> Result<Option<charter_schedule::GrantBuckets>, String> {
+        self.require_readable_pairing()?;
+        let Some(subject) = self.subject else {
+            return Ok(None);
+        };
+        let Some(stored) = self
             .child_clauses
             .get_child_clause(
                 &subject.to_hex(),
                 charter_proto::ClauseKind::Buckets.store_key(),
             )
-            .ok()??;
-        let body: charter_schedule::GrantBuckets = serde_json::from_str(&stored).ok()?;
-        body.is_valid().then_some(body)
+            .map_err(|e| format!("buckets clause unreadable: {e:?}"))?
+        else {
+            return Ok(None);
+        };
+        let Ok(body) = serde_json::from_str::<charter_schedule::GrantBuckets>(&stored) else {
+            return Ok(None);
+        };
+        Ok(body.is_valid().then_some(body))
     }
 
     /// The sole ward's per-bucket ("named time") suspensions at `now_unix`:
@@ -630,6 +709,10 @@ impl Warden {
     /// nothing — an unreadable cap must never confiscate an app the ward is
     /// entitled to).
     ///
+    /// A store READ failure is the exception: it is `Err`, never "empty", so
+    /// Kotlin keeps the suspensions it last applied rather than lifting them
+    /// for the tick (F1).
+    ///
     /// Same shape as charterd's twin, so the same dependency holds here: this
     /// subtracts `extra` from spent before comparing to the RAW cap, while
     /// the ward's own view adds `extra` onto the DISPLAYED cap instead —
@@ -637,15 +720,15 @@ impl Warden {
     /// `saturating_sub` floor at 0 never bites, which itself only holds
     /// because `GrantBuckets::is_valid` rejects a 0-minute cap. See
     /// `runtime.rs`'s identical sweep for the worked-through reasoning.
-    pub fn bucket_suspensions(&self, now_unix: i64) -> Vec<String> {
-        let Some(body) = self.buckets_clause() else {
-            return Vec::new();
+    pub fn bucket_suspensions(&self, now_unix: i64) -> Result<Vec<String>, String> {
+        let Some(body) = self.buckets_clause_checked()? else {
+            return Ok(Vec::new());
         };
         let Some(usage) = self.usage.as_ref() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let extension = self.extension.as_ref();
-        charter_schedule::spent_bucket_apps(&body, |id| {
+        Ok(charter_schedule::spent_bucket_apps(&body, |id| {
             let extra = extension
                 .map(|e| e.bucket_extra_secs(now_unix, id))
                 .unwrap_or(0);
@@ -657,7 +740,7 @@ impl Warden {
                     .app_bucket_week_secs(now_unix, id)
                     .saturating_sub(extra),
             }
-        })
+        }))
     }
 
     /// The `askFirst` apps still gated right now, labelled from the device's
@@ -757,24 +840,40 @@ impl Warden {
     /// not. Only [`Warden::app_policy`] wants the paused one (for `hidden`,
     /// which `paused` does not lift); everything else reads [`Warden::apps_clause`].
     fn stored_apps_clause(&self) -> Option<charter_proto::GrantApps> {
-        let subject = self.subject?;
-        let stored = self
+        self.stored_apps_clause_checked().ok().flatten()
+    }
+
+    /// [`Warden::stored_apps_clause`], keeping a store READ failure distinct
+    /// from "no usable clause". Only the enforcement path
+    /// ([`Warden::app_policy`]) needs the difference: there an unreadable
+    /// clause read as "none" unsuspended and unhid every app for a tick (F1).
+    fn stored_apps_clause_checked(&self) -> Result<Option<charter_proto::GrantApps>, String> {
+        self.require_readable_pairing()?;
+        let Some(subject) = self.subject else {
+            return Ok(None);
+        };
+        let Some(stored) = self
             .child_clauses
             .get_child_clause(
                 &subject.to_hex(),
                 charter_proto::ClauseKind::Apps.store_key(),
             )
-            .ok()??;
-        match serde_json::from_str::<charter_proto::GrantApps>(&stored) {
-            // A future clause version this build does not understand is
-            // treated exactly like a malformed body — matches Linux's
-            // `blocked_pkgs_from_apps`/`ask_first_apps_from_apps`
-            // (`apps_policy.rs`), so a version bump behaves identically on
-            // both platforms: the loosening direction (a blocked-list simply
-            // stops being enforced) rather than confiscating on a guess.
-            Ok(g) if g.v == charter_proto::APPS_VERSION => Some(g),
-            _ => None,
-        }
+            .map_err(|e| format!("apps clause unreadable: {e:?}"))?
+        else {
+            return Ok(None);
+        };
+        Ok(
+            match serde_json::from_str::<charter_proto::GrantApps>(&stored) {
+                // A future clause version this build does not understand is
+                // treated exactly like a malformed body — matches Linux's
+                // `blocked_pkgs_from_apps`/`ask_first_apps_from_apps`
+                // (`apps_policy.rs`), so a version bump behaves identically on
+                // both platforms: the loosening direction (a blocked-list simply
+                // stops being enforced) rather than confiscating on a guess.
+                Ok(g) if g.v == charter_proto::APPS_VERSION => Some(g),
+                _ => None,
+            },
+        )
     }
 
     /// The sole ward's stored `apps` clause, if there is a usable one.
@@ -804,21 +903,25 @@ impl Warden {
     /// (which reads posture + lists and knows nothing of `paused`) blocks
     /// nothing, while its hide reconcile still sees the list. A paused
     /// clause hiding nothing stays "" exactly as before (2026-08-27).
-    pub fn app_policy(&self, now_unix: i64) -> String {
-        let Some(g) = self.stored_apps_clause() else {
-            return String::new();
+    ///
+    /// `Err` when the stored clause cannot be READ (F1). That is not "no
+    /// policy": Kotlin keeps the suspended and hidden sets it last applied
+    /// until a read succeeds, rather than lifting every block for the tick.
+    pub fn app_policy(&self, now_unix: i64) -> Result<String, String> {
+        let Some(g) = self.stored_apps_clause_checked()? else {
+            return Ok(String::new());
         };
         let mut eff = g.effective_at(now_unix.max(0) as u64);
         if eff.is_paused() {
             if eff.hidden.is_empty() {
-                return String::new();
+                return Ok(String::new());
             }
             eff.blocked.clear();
             eff.allowed.clear();
             eff.holds.clear();
             eff.ask_first.clear();
         }
-        serde_json::to_string(&eff).unwrap_or_default()
+        serde_json::to_string(&eff).map_err(|e| format!("serialise app policy: {e}"))
     }
 
     /// The sole ward's LIVE app holds at `now_unix`, as a JSON array of
@@ -845,32 +948,37 @@ impl Warden {
     /// blocked outright, OR outside their per-app allowed hours. Schedule-
     /// dependent, so it is recomputed each call (unlike the standing
     /// [`Warden::app_policy`]). Fail-safe: no ward / no clause / a malformed
-    /// clause ⇒ an empty set (suspend nothing). Kotlin unions this with the
+    /// clause ⇒ an empty set (suspend nothing); a store READ failure ⇒ `Err`,
+    /// so Kotlin keeps what it last applied (F1). Kotlin unions this with the
     /// standing per-app policy and suspends the union level-triggered — a package
     /// suspended by EITHER source stays suspended (the D3 per-app dimension).
-    pub fn app_rule_suspensions(&self, now_unix: i64) -> Vec<String> {
+    pub fn app_rule_suspensions(&self, now_unix: i64) -> Result<Vec<String>, String> {
+        self.require_readable_pairing()?;
         let Some(subject) = self.subject else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let stored = self.child_clauses.get_child_clause(
-            &subject.to_hex(),
-            charter_proto::ClauseKind::AppRules.store_key(),
-        );
-        let Ok(Some(body)) = stored else {
-            return Vec::new();
+        let stored = self
+            .child_clauses
+            .get_child_clause(
+                &subject.to_hex(),
+                charter_proto::ClauseKind::AppRules.store_key(),
+            )
+            .map_err(|e| format!("appRules clause unreadable: {e:?}"))?;
+        let Some(body) = stored else {
+            return Ok(Vec::new());
         };
         // Fail-safe: an absent or unparseable rule set suspends nothing.
         let rules = match serde_json::from_str::<charter_schedule::GrantAppRules>(&body) {
             Ok(r) => r,
-            Err(_) => return Vec::new(),
+            Err(_) => return Ok(Vec::new()),
         };
-        charter_schedule::evaluate_app_rules(&rules, now_unix)
+        Ok(charter_schedule::evaluate_app_rules(&rules, now_unix)
             .into_iter()
             .filter_map(|(pkg, access)| match access {
                 charter_schedule::AppAccess::Blocked => Some(pkg),
                 charter_schedule::AppAccess::Allowed => None,
             })
-            .collect()
+            .collect())
     }
 
     /// The sole ward's tethering posture at `now_unix`: `"blocked"`, `"raw"`,
@@ -911,7 +1019,7 @@ impl Warden {
         let Ok(clauses) = self.child_clauses.clauses_for_strict(&subject.to_hex()) else {
             return String::new();
         };
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses, &self.ledger_tz);
         // A valid `buckets` clause is its own liveness signal here too — the
         // same fourth condition `tick()`/`time_left()` already carry (Task 9
         // review round): this is the D8 "Your charter" mirror BOTH the phone
@@ -985,7 +1093,7 @@ impl Warden {
         let parsed = match &stored {
             Ok(Some(body)) => serde_json::from_str::<charter_proto::LifelineBody>(body)
                 .ok()
-                .filter(|p: &charter_proto::LifelineBody| p.validate().is_ok()),
+                .filter(lifeline_usable),
             _ => None,
         };
         let Some(parsed) = parsed else {
@@ -1065,7 +1173,7 @@ impl Warden {
             .ok()
             .flatten()
             .and_then(|body| serde_json::from_str::<charter_proto::LifelineBody>(&body).ok())
-            .filter(|p| p.validate().is_ok())
+            .filter(lifeline_usable)
             .and_then(|p| p.break_glass)
             .unwrap_or_else(charter_proto::BreakGlassCfg::safety_net);
         if !bg.enabled || bg.duration_minutes == 0 {
@@ -1109,7 +1217,13 @@ impl Warden {
             Ok(b) => b,
             Err(_) => return,
         };
-        if body.validate().is_err() || body.package_name != OWN_PACKAGE {
+        // An unknown body version installs nothing (fail-closed): serde drops
+        // fields it does not know, so a future shape could otherwise read as
+        // a perfectly valid v1 directive.
+        if body.v != charter_proto::CLAUSE_VERSION
+            || body.validate().is_err()
+            || body.package_name != OWN_PACKAGE
+        {
             return;
         }
         if body.version_code <= self.app_version_code {
@@ -1345,8 +1459,18 @@ impl Warden {
 
     /// Submit a brokered request ("ask for more time"). Persists Pending
     /// BEFORE publishing (M16); returns the reqId hex.
-    pub fn submit_request(&self, op: &str, params_json: &str) -> Result<String, String> {
-        let broker = self.broker.as_ref().ok_or("not paired (no relay)")?;
+    ///
+    /// A refusal comes back TYPED (G-7): the broker's rate-limit wording is
+    /// written for the ward to read, and it used to reach Kotlin as the
+    /// `Debug` string `RateLimited("…")`, so every refusal read "Couldn't
+    /// reach your guardian" — telling a ward who had asked twelve times to
+    /// try again at once.
+    pub fn submit_request(&self, op: &str, params_json: &str) -> Result<String, SubmitError> {
+        let broker = self
+            .broker
+            .as_ref()
+            .ok_or_else(|| SubmitError::new(SubmitError::NOT_PAIRED, "not paired (no relay)"))?;
+        let invalid = |m: String| SubmitError::new(SubmitError::INVALID, m);
         let op = match op {
             "time.extend" => charter_proto::OpType::TimeExtend,
             "install.apk" => charter_proto::OpType::InstallApk,
@@ -1358,27 +1482,27 @@ impl Warden {
             // halves of the loop had to be broken for the button to look like
             // it did nothing.
             "app.open" => charter_proto::OpType::AppOpen,
-            other => return Err(format!("unsupported op: {other}")),
+            other => return Err(invalid(format!("unsupported op: {other}"))),
         };
         let params: serde_json::Value =
-            serde_json::from_str(params_json).map_err(|e| format!("bad params: {e}"))?;
+            serde_json::from_str(params_json).map_err(|e| invalid(format!("bad params: {e}")))?;
         // Fail-closed on malformed request params (the broker only shape-checks
         // that params is an object; validate the typed contract here).
         if op == charter_proto::OpType::InstallApk {
             let p: charter_proto::params::InstallApkRequestParams =
                 serde_json::from_value(params.clone())
-                    .map_err(|e| format!("bad install.apk params: {e}"))?;
-            p.validate().map_err(|e| format!("{e:?}"))?;
+                    .map_err(|e| invalid(format!("bad install.apk params: {e}")))?;
+            p.validate().map_err(|e| invalid(format!("{e:?}")))?;
         }
         if op == charter_proto::OpType::AppOpen {
             let p: charter_proto::AppOpenRequestParams = serde_json::from_value(params.clone())
-                .map_err(|e| format!("bad app.open params: {e}"))?;
-            p.validate().map_err(|e| format!("{e:?}"))?;
+                .map_err(|e| invalid(format!("bad app.open params: {e}")))?;
+            p.validate().map_err(|e| invalid(format!("{e:?}")))?;
         }
         self.rt
             .block_on(broker.submit(op, params, None))
             .map(|id| id.to_hex())
-            .map_err(|e| format!("{e:?}"))
+            .map_err(SubmitError::from_broker)
     }
 
     /// Newest-first request records (the child/UI surface).
@@ -1414,10 +1538,15 @@ impl Warden {
         mock: charter_sys::relay::MockRelayTransport,
     ) -> Result<(), String> {
         let guardian = self.guardian.ok_or("pair first")?;
+        let machine_sk = self
+            .machine_sk
+            .as_deref()
+            .copied()
+            .ok_or("machine key unavailable")?;
         self.relay = Some(std::sync::Arc::new(
             crate::relay::BlockingRelay::new(
                 mock.clone(),
-                *self.machine_sk,
+                machine_sk,
                 guardian,
                 self.relays.clone(),
             )?
@@ -1434,6 +1563,82 @@ impl Warden {
     pub fn inject_relay(&mut self, relay: std::sync::Arc<dyn WardenRelay>) {
         self.relay = Some(relay);
         self.broker = None;
+    }
+
+    /// Degraded mode (M6): try the machine key again, and on success bring the
+    /// transport up. A no-op once a key is loaded. Called at the top of each
+    /// slow poll, so a transient failure (an EIO at boot) heals itself without
+    /// waiting for the process to restart, and a permanent one (a key owned
+    /// by another uid) keeps saying so without ever stopping enforcement.
+    pub fn retry_machine_key(&mut self) {
+        if self.machine_sk.is_some() {
+            return;
+        }
+        let (signer, machine_sk, key_error) = load_machine_key(&self.base);
+        self.key_error = key_error;
+        if machine_sk.is_some() {
+            self.signer = signer;
+            self.machine_sk = machine_sk;
+            self.rebuild_relay();
+        }
+    }
+
+    /// True while the warden runs without a machine key (M6).
+    pub fn transport_unavailable(&self) -> bool {
+        self.machine_sk.is_none()
+    }
+
+    /// The pairing record failed to READ at init (F2): try it again, and on
+    /// success take it up exactly as init would have. A no-op once it has
+    /// been read. Called at the top of each slow poll, beside
+    /// [`Warden::retry_machine_key`], so a transient EIO heals itself while a
+    /// permanent one keeps the device locked down rather than released.
+    pub fn retry_pairing(&mut self) {
+        if self.pairing_error.is_none() {
+            return;
+        }
+        match load_pairing(&self.pairing) {
+            Ok((guardian, subject, relays, paired_at)) => {
+                self.guardian = guardian;
+                self.subject = subject;
+                self.relays = relays;
+                self.paired_at = paired_at;
+                self.pairing_error = None;
+                self.rebuild_relay();
+            }
+            Err(e) => self.pairing_error = Some(e),
+        }
+    }
+
+    /// `Err` while the pairing record will not read (N1). With no subject
+    /// every per-ward read would answer "none", which Kotlin applies as "lift
+    /// it"; an error sends it down the degraded, suspend-only path instead.
+    pub fn require_readable_pairing(&self) -> Result<(), String> {
+        match &self.pairing_error {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Paired, as far as enforcement is concerned: a pinned guardian, OR a
+    /// pairing record that exists but will not read (F2). The second must
+    /// hold the device exactly as the first does, never release it.
+    fn is_paired(&self) -> bool {
+        self.guardian.is_some() || self.pairing_error.is_some()
+    }
+
+    /// Refuse a pairing change while the existing record cannot be read: a
+    /// fresh pin over an unreadable one would hand the device to whoever
+    /// scanned first (F2).
+    fn refuse_while_pairing_unreadable(&self) -> Result<(), String> {
+        match self.pairing_error {
+            Some(_) => Err(
+                "This device's pairing can't be read right now, so it can't be paired again. \
+                 Restart Kintrinsic; if that doesn't help, ask your guardian."
+                    .into(),
+            ),
+            None => Ok(()),
+        }
     }
 
     pub fn machine_pubkey_hex(&self) -> String {
@@ -1453,16 +1658,20 @@ impl Warden {
     pub fn init_result(&self) -> dto::InitResult {
         dto::InitResult {
             machine_pubkey: self.machine_pubkey_hex(),
-            paired: self.guardian.is_some(),
+            paired: self.is_paired(),
             guardian: self.guardian.map(|g| g.to_hex()),
             subject: self.subject.map(|s| s.to_hex()),
             enforce_mode: self.mode.as_str().into(),
+            transport_unavailable: self.transport_unavailable(),
+            key_error: self.key_error.clone(),
+            pairing_unreadable: self.pairing_error.is_some(),
         }
     }
 
     pub fn pairing_state(&self) -> dto::PairingState {
         dto::PairingState {
-            paired: self.guardian.is_some(),
+            paired: self.is_paired(),
+            pairing_unreadable: self.pairing_error.is_some(),
             guardian_short: self.guardian.map(|g| g.to_hex()[..8].to_string()),
             guardian: self.guardian.map(|g| g.to_hex()),
             subject: self.subject.map(|s| s.to_hex()),
@@ -1478,6 +1687,16 @@ impl Warden {
     /// works — the machine key needs no extra setup step. Pin once: refuse to
     /// silently re-point an existing pairing to a different guardian.
     pub fn pair(&mut self, bunker_uri: &str, now: u64) -> Result<dto::PairingState, String> {
+        self.refuse_while_pairing_unreadable()?;
+        // Degraded (M6): the machine pubkey is the zero placeholder, and a
+        // pairing pinned to it could never be honoured. Refuse, and say why.
+        if self.machine_sk.is_none() {
+            return Err(
+                "This device's identity key can't be read, so it can't be paired right now. \
+                 Restart Kintrinsic; if that doesn't help, it needs to be set up again."
+                    .into(),
+            );
+        }
         let machine = self.signer.pubkey();
         let subject = self.subject.unwrap_or(machine);
         let pairing = pin_from_connect(bunker_uri.trim(), machine, subject, now)
@@ -1512,6 +1731,10 @@ impl Warden {
     /// relays, so no polling — [`Warden::pair`] is the production route). Pin
     /// once: refuse to silently re-point an existing pairing to a new guardian.
     pub fn set_pairing(&mut self, guardian_hex: &str, subject_hex: &str) -> Result<(), String> {
+        self.refuse_while_pairing_unreadable()?;
+        if self.machine_sk.is_none() {
+            return Err("machine key unavailable".into());
+        }
         let guardian =
             PubKey::from_hex(guardian_hex).map_err(|_| "bad guardian hex".to_string())?;
         let subject = PubKey::from_hex(subject_hex).map_err(|_| "bad subject hex".to_string())?;
@@ -1569,7 +1792,11 @@ impl Warden {
                 self.broker.clone(),
                 self.rt.clone(),
             )),
-            None => Err(if self.guardian.is_none() {
+            None => Err(if let Some(e) = &self.key_error {
+                // Degraded (M6): still enforcing, but nothing can be sent or
+                // received until the key loads.
+                e.clone()
+            } else if self.guardian.is_none() {
                 "not paired".into()
             } else {
                 "no relays pinned".into()
@@ -1611,25 +1838,91 @@ impl Warden {
                 accepted += 1;
             }
         }
-        let due = self.build_status(now).filter(|status| {
-            charter_spine::status_emit::should_emit_status(
-                self.last_status.as_ref(),
-                status,
-                STATUS_HEARTBEAT_SECS,
-            )
-        });
+        let mut due = self
+            .build_status(now)
+            .map(|mut status| {
+                // The clock went backwards since the last emit: say from
+                // where, so the guardian takes this lower-`ts` status as
+                // current (the shared rule — Linux stamps it identically).
+                status.clock_stepped_back_from =
+                    charter_spine::status_emit::clock_stepped_back_from(
+                        self.last_status.as_ref(),
+                        status.ts,
+                        self.status_step_undelivered,
+                    );
+                status
+            })
+            .filter(|status| {
+                charter_spine::status_emit::should_emit_status(
+                    self.last_status.as_ref(),
+                    status,
+                    STATUS_HEARTBEAT_SECS,
+                )
+            });
+        // Only a status that is actually going out takes a number, stored
+        // before it is published (a number spent on an emit that reaches no
+        // relay is just a gap: the guardian needs order, not density).
+        if let Some(status) = due.as_mut() {
+            status.seq = Some(self.next_status_seq());
+        }
         (seen, accepted, due)
     }
 
+    /// Take the next STATUS `seq` and store it durably BEFORE the caller
+    /// publishes it. A store that fails is logged and the value still used —
+    /// withholding the STATUS would blind the guardian, which is worse; this
+    /// run stays strictly increasing in memory, and a restart re-seeds from
+    /// the higher of the stored value and the clock in milliseconds (charterd's
+    /// `status_seq::next_durable`, same rule).
+    fn next_status_seq(&mut self) -> u64 {
+        let n = self.status_seq.advance();
+        if let Err(e) = store_status_seq(&self.base, n) {
+            eprintln!("charter: could not store the STATUS seq ({e}); publishing anyway");
+        }
+        n
+    }
+
     fn mark_status_emitted(&mut self, status: StatusPayload) {
+        // Delivered: any carried clock-step stamp has now reached a relay.
+        self.status_step_undelivered = None;
         self.last_status = Some(status);
+    }
+
+    /// A due STATUS reached no relay: carry its clock-step stamp (if any) to
+    /// the next attempt, so a failed publish cannot lose the only one.
+    fn note_status_undelivered(&mut self, status: &StatusPayload) {
+        if let Some(from) = status.clock_stepped_back_from {
+            self.status_step_undelivered = Some(from);
+        }
+    }
+
+    /// One relay round's reachability, for STATUS `relayUnreachablePolls`:
+    /// consecutive rounds that reached no relay, reset by one that did.
+    fn note_relay_health(&mut self, unreachable: bool) {
+        self.consecutive_unreachable = if unreachable {
+            self.consecutive_unreachable.saturating_add(1)
+        } else {
+            0
+        };
+    }
+
+    /// Set by Kotlin at init (the package's versionName). Empty is ignored,
+    /// so a caller that has none cannot blank a name already known.
+    pub fn set_app_version_name(&mut self, name: &str) {
+        let name = name.trim();
+        if !name.is_empty() {
+            self.app_version_name = name.chars().take(64).collect();
+        }
     }
 
     /// The ward's live STATUS payload, when enough state exists to report one.
     fn build_status(&self, now: u64) -> Option<StatusPayload> {
         let subject = self.subject?;
-        let clauses = self.child_clauses.clauses_for_strict(&subject.to_hex()).ok()?;
-        let (schedule, budget) = resolve_effective(&clauses);
+        let clauses = self
+            .child_clauses
+            .clauses_for_strict(&subject.to_hex())
+            .ok()?;
+        let (schedule, budget) = resolve_effective(&clauses, &self.ledger_tz);
         let source = if schedule.is_some() || budget.is_some() {
             PolicySource::Guardian
         } else {
@@ -1702,6 +1995,17 @@ impl Warden {
         if self.app_version_code > 0 {
             status.app_version_code = Some(self.app_version_code);
         }
+        if !self.app_version_name.is_empty() {
+            status.app_version_name = Some(self.app_version_name.clone());
+        }
+        // Relay health, charterd's two fields: each absent unless actually
+        // true / non-zero ("absent is the ordinary state").
+        status.relay_unreachable_polls =
+            (self.consecutive_unreachable > 0).then_some(self.consecutive_unreachable);
+        // An unreadable pairing (F2) rides the same flag. It cannot reach the
+        // guardian while it lasts (no pairing, no relay), but it is true.
+        status.transport_unavailable =
+            (self.transport_unavailable() || self.pairing_error.is_some()).then_some(true);
         // …and, if our own update is stuck, WHY. Without this the phone retries
         // in silence and the guardian sees only an Update button that keeps
         // reappearing (two days lost, 2026-07-24..26).
@@ -1821,11 +2125,19 @@ impl Warden {
         let store_key = kind.store_key();
         let subject_hex = subject.to_hex();
 
-        let prev = self
+        // A floor we cannot read is not "no floor". Collapsing the `Err` into
+        // `None` handed `verify_clause` nothing to compare against, so on a
+        // transient read error a replayed OLDER clause verified and was
+        // accepted. Refuse instead, as the shared broker does (ba34056, M7):
+        // the guardian's clause is redelivered on the next poll, and a
+        // refusal costs one round where an accepted rollback costs the rule.
+        let prev = match self
             .child_clauses
             .highest_issued_at(&subject_hex, store_key)
-            .ok()
-            .flatten();
+        {
+            Ok(p) => p,
+            Err(_) => return reject("replay floor unreadable"),
+        };
 
         match charter_verify::verify_clause(event, &guardian, kind, prev, now) {
             Ok(vc) => {
@@ -1859,6 +2171,17 @@ impl Warden {
         now: i64,
         foreground_pkg: Option<&str>,
     ) -> Vec<dto::ChildDecision> {
+        // N1: a pairing record that exists but will not read is NOT "no
+        // ward". The release below would unsuspend, unhide, drop the lock and
+        // unpin the web filter. Hold instead: no decision at all, so Kotlin
+        // re-asserts nothing and lifts nothing, and the device stays exactly
+        // as it stood — the same posture as before the first pairing sync.
+        // `pairing_error` is only ever set at init (and kept by a failed
+        // retry), so there is no earlier decision this process to replay.
+        // Nothing accrues meanwhile, which only ever errs towards less time.
+        if self.pairing_error.is_some() {
+            return Vec::new();
+        }
         let subject = match self.subject {
             // No ward (never paired, or released): emit an explicit inert +
             // UNLOCKED decision so the Kotlin enforcer actively lifts every
@@ -1885,7 +2208,7 @@ impl Warden {
             // I22: an unreadable store preserves prior state, skips accrual.
             Err(_) => return self.hold_decision(&subject_hex),
         };
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses, &self.ledger_tz);
         // The stand-down is consulted BEFORE the inert early-return: a paired
         // ward with no time rules yet is still stoppable ("an unbounded
         // charter is capped too"). Going inert first while STATUS reported
@@ -2189,7 +2512,7 @@ impl Warden {
             Ok(c) => c,
             Err(_) => return dto::TimeLeftView::unknown(),
         };
-        let (schedule, budget) = resolve_effective(&clauses);
+        let (schedule, budget) = resolve_effective(&clauses, &self.ledger_tz);
         // Same order as the tick: a standing stand-down means there IS a view
         // to report, even for a ward with no time rules. A valid `buckets`
         // clause is its own liveness signal too — tick()'s fourth condition,
@@ -2296,11 +2619,17 @@ impl Warden {
         match (self.usage.as_ref(), self.budget_now()) {
             (Some(u), Some(b)) => {
                 let used = u.used_today(now);
-                let cap = b.daily_minutes.map(|m| m as u64 * 60);
+                let cap = effective_daily_cap_secs(&b);
                 // Sub-minute usage would render as raw seconds ("0s used
                 // today") on the ward-facing lock screen — omit it below one
                 // minute, matching the spine's lock_info wording (issue #41).
                 match (cap, used >= 60) {
+                    // Paused, or a body this build cannot read: the device
+                    // allows NONE today, so say that rather than "up to 0s".
+                    (Some(0), true) => {
+                        format!("no screen time today — {} used", humanize(used as i64))
+                    }
+                    (Some(0), false) => "no screen time today".to_string(),
                     (Some(c), true) => format!(
                         "up to {} a day — {} used today",
                         humanize(c as i64),
@@ -2317,8 +2646,11 @@ impl Warden {
 
     fn budget_now(&self) -> Option<GrantBudget> {
         let subject = self.subject?;
-        let clauses = self.child_clauses.clauses_for_strict(&subject.to_hex()).ok()?;
-        resolve_effective(&clauses).1
+        let clauses = self
+            .child_clauses
+            .clauses_for_strict(&subject.to_hex())
+            .ok()?;
+        resolve_effective(&clauses, &self.ledger_tz).1
     }
 
     /// Which packages may keep playing through the lock, and how long is left.
@@ -2410,8 +2742,11 @@ impl Warden {
 
     fn schedule_now(&self) -> Option<GrantSchedule> {
         let subject = self.subject?;
-        let clauses = self.child_clauses.clauses_for_strict(&subject.to_hex()).ok()?;
-        resolve_effective(&clauses).0
+        let clauses = self
+            .child_clauses
+            .clauses_for_strict(&subject.to_hex())
+            .ok()?;
+        resolve_effective(&clauses, &self.ledger_tz).0
     }
 
     fn ensure_ledgers(&mut self, tz: &str, week_start: WeekStart, now: i64) {
@@ -2566,36 +2901,39 @@ impl Warden {
     }
 }
 
-/// The effective schedule + budget from the cached clauses (child_policy.rs
-/// resolve_effective, replicated): a present-but-unparseable **schedule**
-/// fail-SAFES to paused (locks); an unparseable **budget** fail-OPENS to no cap.
-fn resolve_effective(clauses: &[(u16, String)]) -> (Option<GrantSchedule>, Option<GrantBudget>) {
-    use charter_proto::ClauseKind;
-    let mut schedule = None;
-    let mut budget = None;
-    for (kind, json) in clauses {
-        if *kind == ClauseKind::Schedule.store_key() {
-            schedule = Some(
-                serde_json::from_str::<GrantSchedule>(json)
-                    .unwrap_or_else(|_| fail_safe_schedule()),
-            );
-        } else if *kind == ClauseKind::Budget.store_key() {
-            budget = serde_json::from_str::<GrantBudget>(json).ok();
-        }
+/// The effective schedule + budget from the cached clauses, through the SHARED
+/// resolver (`child_policy::resolve_effective`) rather than a replica of it, so
+/// the two wardens cannot drift again (H3/G-4: the replica here went on reading
+/// a present-but-unparseable budget as "no cap" after core had fixed it). A
+/// schedule OR budget that is present but will not parse fail-SAFES: paused
+/// (locks) for the schedule, paused at 0/0 for the budget. For a budget-only
+/// ward the old reading meant nothing at all was enforced.
+///
+/// Unreadable slots never reach here: every caller reads with
+/// `clauses_for_strict` and HOLDS its last decision on `Err` (3cee217), which
+/// is the stricter of the two answers.
+///
+/// A synthesised fail-safe carries no tz of its own when no readable sibling
+/// names one (core's `UNRESOLVED_TZ`); it takes `fallback_tz`, the ledger's
+/// current tz, so an unreadable body never re-keys the usage ledger onto a day
+/// that is not the ward's (M2).
+fn resolve_effective(
+    clauses: &[(u16, String)],
+    fallback_tz: &str,
+) -> (Option<GrantSchedule>, Option<GrantBudget>) {
+    let policy = charter_spine::child_policy::resolve_effective(
+        &charter_sys::persistence::ChildClauses::from(clauses.to_vec()),
+        None,
+        None,
+    );
+    let (mut schedule, mut budget) = (policy.schedule, policy.budget);
+    if let Some(s) = schedule.as_mut().filter(|s| s.tz.is_empty()) {
+        s.tz = fallback_tz.to_string();
+    }
+    if let Some(b) = budget.as_mut().filter(|b| b.tz.is_empty()) {
+        b.tz = fallback_tz.to_string();
     }
     (schedule, budget)
-}
-
-/// `paused` blocks all time regardless of tz, so the ward locks.
-fn fail_safe_schedule() -> GrantSchedule {
-    GrantSchedule {
-        v: 1,
-        tz: "UTC".into(),
-        paused: Some(true),
-        weekly: Default::default(),
-        overrides: None,
-        issued_at: 0,
-    }
 }
 
 /// Build one named bucket's ward-facing view from its cap and this tick's
@@ -2804,6 +3142,42 @@ pub(crate) struct BootWatch {
     pub last_noticed_at: u64,
 }
 
+/// Where the last emitted STATUS `seq` lives: the app's own device-protected
+/// files dir, beside the machine key — not a cache dir the platform may clear.
+fn status_seq_path(base: &Path) -> PathBuf {
+    base.join("status-seq")
+}
+
+/// The stored `seq`, or `None` when missing or unreadable (which
+/// `StatusSeq::resume` answers from the wall clock).
+fn load_status_seq(base: &Path) -> Option<u64> {
+    std::fs::read_to_string(status_seq_path(base))
+        .ok()
+        .and_then(|s| charter_spine::status_emit::StatusSeq::parse_stored(&s))
+}
+
+/// Store `seq` atomically (temp → fsync → rename), so a torn write can never
+/// leave a smaller number behind: the file holds the old value or the new.
+fn store_status_seq(base: &Path, seq: u64) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let path = status_seq_path(base);
+    let tmp = base.join("status-seq.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(charter_spine::status_emit::StatusSeq::format_stored(seq).as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)
+}
+
+/// Wall-clock unix milliseconds (0 if the clock reads before the epoch).
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn load_boot_watch(base: &std::path::Path) -> Option<BootWatch> {
     let text = std::fs::read_to_string(boot_watch_path(base)).ok()?;
     serde_json::from_str(&text).ok()
@@ -2815,26 +3189,141 @@ fn save_boot_watch(base: &std::path::Path, w: &BootWatch) {
     }
 }
 
-fn load_pairing(store: &RealPairingStore) -> (Option<PubKey>, Option<PubKey>, Vec<String>, u64) {
+/// The daily cap the enforcer actually applies, for the ward's lock copy
+/// (G-8), decided in the same order as `quota_parts_signed_pooled`: a version
+/// this build does not implement enforces ZERO, `revoked` lifts the cap, and
+/// `paused` enforces ZERO — whatever caps the body names, so the raw
+/// `dailyMinutes` ("up to 2h a day") would be a promise the device is not
+/// keeping. Otherwise it is the signed daily figure. `None` = no daily cap.
+fn effective_daily_cap_secs(b: &GrantBudget) -> Option<u64> {
+    if !b.is_supported_version() {
+        return Some(0);
+    }
+    if b.revoked == Some(true) {
+        return None;
+    }
+    if b.paused == Some(true) {
+        return Some(0);
+    }
+    b.daily_minutes.map(|m| u64::from(m) * 60)
+}
+
+/// Why an ask could not be submitted, as it crosses to Kotlin (G-7).
+///
+/// `code` is for the app to branch on; `message` is shown to the ward ONLY
+/// for [`SubmitError::RATE_LIMITED`], whose wording the broker writes for
+/// them. Every other code is a fault the ward cannot act on, and the app keeps
+/// its own "try again" copy for those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl SubmitError {
+    /// Over the per-caller ask cap: outstanding asks or asks per hour.
+    pub const RATE_LIMITED: &'static str = "rate-limited";
+    /// No broker: unpaired, no relay pinned, or degraded (no machine key).
+    pub const NOT_PAIRED: &'static str = "not-paired";
+    /// The request itself is malformed (a bug on the calling side).
+    pub const INVALID: &'static str = "invalid";
+    /// Anything else the broker refused with (store or transport fault).
+    pub const FAILED: &'static str = "failed";
+
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        SubmitError {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn from_broker(e: charter_spine::BrokerError) -> Self {
+        use charter_spine::BrokerError;
+        match e {
+            // Verbatim: the broker words this for the ward.
+            BrokerError::RateLimited(msg) => Self::new(Self::RATE_LIMITED, msg),
+            BrokerError::NotPaired => Self::new(Self::NOT_PAIRED, "not paired"),
+            BrokerError::Invalid(m) => Self::new(Self::INVALID, m),
+            other => Self::new(Self::FAILED, other.to_string()),
+        }
+    }
+
+    /// The `{"error":…,"code":…}` envelope Kotlin's `submitRequest` reads.
+    pub fn to_json(&self) -> String {
+        serde_json::json!({ "error": self.message, "code": self.code }).to_string()
+    }
+}
+
+/// Whether a stored lifeline body can be used at all: this build's version
+/// and valid by its own rules. Anything else is treated exactly as a body that
+/// would not parse — no numbers (a garbage dial string is never rendered) and
+/// the break-glass SAFETY NET (the escape hatch never depends on a clause we
+/// cannot read). An unknown `v` is deliberately the malformed case, not a v1
+/// one: serde drops fields it does not know, so a future `enabled: false`
+/// renamed in v2 must not be half-read as something else (contract
+/// §Versioning: an unknown version takes that kind's fail-safe).
+fn lifeline_usable(p: &charter_proto::LifelineBody) -> bool {
+    p.v == charter_proto::CLAUSE_VERSION && p.validate().is_ok()
+}
+
+/// Load (or, when absent, provision) the machine key under `base`.
+///
+/// Never an error (M6): a key that will not load leaves the warden degraded —
+/// an unprovisioned signer (the zero pubkey, which cannot sign), no raw
+/// secret, and the reason. `load_or_create_secret` already refuses to mint
+/// over a key it merely failed to read, so a degraded start never orphans the
+/// device's real identity; the next successful load picks it straight back up.
+fn load_machine_key(
+    base: &Path,
+) -> (
+    RealMachineSigner,
+    Option<zeroize::Zeroizing<[u8; 32]>>,
+    Option<String>,
+) {
+    match RealMachineSigner::load_or_create_secret(base.join("machine.key")) {
+        Ok(sk) => (
+            RealMachineSigner::from_secret(sk),
+            Some(zeroize::Zeroizing::new(sk)),
+            None,
+        ),
+        Err(e) => (
+            // An all-zero scalar is not a valid key, so this is the
+            // unprovisioned signer: its pubkey is zero and `sign` refuses.
+            RealMachineSigner::from_secret([0u8; 32]),
+            None,
+            Some(format!("machine key unavailable: {e:?}")),
+        ),
+    }
+}
+
+/// A pairing read from disk: `(guardian, subject, relays, paired_at)`.
+type LoadedPairing = (Option<PubKey>, Option<PubKey>, Vec<String>, u64);
+
+/// `Err` when the record exists but cannot be READ, or reads but does not
+/// parse to a guardian (F2, N3) — the caller holds the device as paired then.
+/// Only an ABSENT record is unpaired: a release removes the file, it never
+/// leaves a body behind.
+fn load_pairing(store: &RealPairingStore) -> Result<LoadedPairing, String> {
     let json = match store.load() {
         Ok(Some(j)) => j,
-        _ => return (None, None, Vec::new(), 0),
+        Ok(None) => return Ok((None, None, Vec::new(), 0)),
+        Err(e) => return Err(format!("pairing unreadable: {e:?}")),
     };
     // The full pinned `Pairing` (what `pair`/`set_pairing` write today).
     if let Ok(p) = serde_json::from_str::<Pairing>(&json) {
-        return (
+        return Ok((
             Some(p.guardian_pubkey),
             Some(p.subject_pubkey),
             p.relays,
             p.paired_at,
-        );
+        ));
     }
     // Legacy `{guardian, subject}` shape from the pre-relay onboarding builds:
     // still paired for enforcement, no relays until re-paired. No paired_at
     // on this shape (0 = "unknown/always stale-checkable" — see try_apply_releases).
     let v: serde_json::Value = match serde_json::from_str(&json) {
         Ok(v) => v,
-        Err(_) => return (None, None, Vec::new(), 0),
+        Err(_) => return Err("pairing unreadable: record does not parse".into()),
     };
     let g = v
         .get("guardian")
@@ -2844,7 +3333,10 @@ fn load_pairing(store: &RealPairingStore) -> (Option<PubKey>, Option<PubKey>, Ve
         .get("subject")
         .and_then(|x| x.as_str())
         .and_then(|s| PubKey::from_hex(s).ok());
-    (g, s, Vec::new(), 0)
+    if g.is_none() {
+        return Err("pairing unreadable: record names no guardian".into());
+    }
+    Ok((g, s, Vec::new(), 0))
 }
 
 /// The process-global warden.
@@ -2870,18 +3362,24 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
 
     // Phase 1 (locked): snapshot the relay + broker handles + cursor.
     let (relay, since, broker, rt) = {
-        match guard(lock).as_ref() {
+        match guard(lock).as_mut() {
             None => {
                 out.reason = "warden not initialized".into();
                 return out;
             }
-            Some(w) => match w.poll_prepare(now) {
-                Ok(x) => x,
-                Err(reason) => {
-                    out.reason = reason;
-                    return out;
+            Some(w) => {
+                // Degraded (M6): each slow round tries the key again first,
+                // and an unreadable pairing (F2) with it.
+                w.retry_machine_key();
+                w.retry_pairing();
+                match w.poll_prepare(now) {
+                    Ok(x) => x,
+                    Err(reason) => {
+                        out.reason = reason;
+                        return out;
+                    }
                 }
-            },
+            }
         }
     };
     out.polled = true;
@@ -2928,6 +3426,9 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
             Err(e) => {
                 // Offline is routine on a phone: keep enforcing from the
                 // cached clauses; report and retry next slow tick.
+                if let Some(w) = guard(lock).as_mut() {
+                    w.note_relay_health(true);
+                }
                 out.reason = e;
                 return out;
             }
@@ -2950,6 +3451,9 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
                 return out;
             }
             Some(w) => {
+                // Before the STATUS below is built, so it carries this round.
+                // The legacy path leaves the counts at default (reached).
+                w.note_relay_health(broker_counts.relays_unreachable);
                 let (seen, accepted, due) = w.poll_absorb(received, now);
                 // Exactly one of these is ever non-zero: the broker path leaves
                 // `received` empty, the legacy path leaves the broker counts at
@@ -3002,9 +3506,17 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
                         w.mark_status_emitted(status);
                     }
                 }
-                Ok(_) => out.publish_failures += 1,
+                Ok(_) => {
+                    out.publish_failures += 1;
+                    if let Some(w) = guard(lock).as_mut() {
+                        w.note_status_undelivered(&status);
+                    }
+                }
                 Err(e) => {
                     out.publish_failures += 1;
+                    if let Some(w) = guard(lock).as_mut() {
+                        w.note_status_undelivered(&status);
+                    }
                     out.reason = if out.reason.is_empty() {
                         e
                     } else {
@@ -3425,7 +3937,7 @@ mod tests {
 
         // No apps clause yet → no per-app policy.
         assert!(
-            w.app_policy(100).is_empty(),
+            w.app_policy(100).unwrap().is_empty(),
             "no policy before any apps clause"
         );
 
@@ -3437,7 +3949,7 @@ mod tests {
         let res = w.ingest_clause(&serde_json::to_string(&ev).unwrap(), 100);
         assert!(res.accepted, "apps clause rejected: {}", res.reason);
 
-        let policy = w.app_policy(100);
+        let policy = w.app_policy(100).unwrap();
         assert!(policy.contains("blocklist"), "policy: {policy}");
         assert!(policy.contains("app.example.block"), "policy: {policy}");
 
@@ -3449,7 +3961,7 @@ mod tests {
         let res2 = w.ingest_clause(&serde_json::to_string(&ev2).unwrap(), 200);
         assert!(res2.accepted, "paused clause rejected: {}", res2.reason);
         assert!(
-            w.app_policy(200).is_empty(),
+            w.app_policy(200).unwrap().is_empty(),
             "paused apps clause suspends nothing"
         );
 
@@ -3481,25 +3993,40 @@ mod tests {
         let res = w.ingest_clause(&serde_json::to_string(&ev).unwrap(), 100);
         assert!(res.accepted, "clause rejected: {}", res.reason);
 
-        let policy: serde_json::Value =
-            serde_json::from_str(&w.app_policy(100)).expect("paused-with-hidden is surfaced");
+        let policy: serde_json::Value = serde_json::from_str(&w.app_policy(100).unwrap())
+            .expect("paused-with-hidden is surfaced");
         assert_eq!(policy["hidden"], json!(["com.samsung.android.bixby.agent"]));
         assert_eq!(policy["paused"], json!(true));
         // Nothing to suspend: the lists are emptied, not merely flagged.
-        assert!(policy.get("blocked").map_or(true, |b| b.as_array().unwrap().is_empty()));
-        assert!(policy.get("allowed").map_or(true, |a| a.as_array().unwrap().is_empty()));
+        assert!(policy
+            .get("blocked")
+            .is_none_or(|b| b.as_array().unwrap().is_empty()));
+        assert!(policy
+            .get("allowed")
+            .is_none_or(|a| a.as_array().unwrap().is_empty()));
         assert!(policy.get("holds").is_none(), "holds dissolved: {policy}");
-        assert!(policy.get("askFirst").is_none(), "askFirst dropped: {policy}");
+        assert!(
+            policy.get("askFirst").is_none(),
+            "askFirst dropped: {policy}"
+        );
 
         // A live one keeps the whole policy AND the hidden list.
         let ev2 = ClauseBuilder::apps(2)
             .subject(ward.pubkey())
-            .body(json!({"v":1,"posture":"blocklist","blocked":["app.example.block"],
-                "hidden":["com.samsung.android.bixby.agent"],"issuedAt":2}))
+            .body(
+                json!({"v":1,"posture":"blocklist","blocked":["app.example.block"],
+                "hidden":["com.samsung.android.bixby.agent"],"issuedAt":2}),
+            )
             .build(&guardian);
-        assert!(w.ingest_clause(&serde_json::to_string(&ev2).unwrap(), 200).accepted);
-        let live = w.app_policy(200);
-        assert!(live.contains("app.example.block") && live.contains("bixby"), "live: {live}");
+        assert!(
+            w.ingest_clause(&serde_json::to_string(&ev2).unwrap(), 200)
+                .accepted
+        );
+        let live = w.app_policy(200).unwrap();
+        assert!(
+            live.contains("app.example.block") && live.contains("bixby"),
+            "live: {live}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -3541,7 +4068,7 @@ mod tests {
         );
 
         // During the hold: Vanadium is not in the enforced set, the other app is.
-        let during = w.app_policy(issued + 60);
+        let during = w.app_policy(issued + 60).unwrap();
         assert!(
             !during.contains("org.chromium.vanadium"),
             "held app still enforced as blocked: {during}"
@@ -3558,7 +4085,7 @@ mod tests {
         assert!(holds.contains("allowed"), "holds: {holds}");
 
         // AT the instant it ends — no new clause, no guardian action.
-        let after = w.app_policy(issued + 3600);
+        let after = w.app_policy(issued + 3600).unwrap();
         assert!(
             after.contains("org.chromium.vanadium"),
             "hold did not end on its own: {after}"
@@ -4127,7 +4654,7 @@ mod tests {
 
         // No appRules clause yet → nothing to suspend (fail-safe).
         assert!(
-            w.app_rule_suspensions(IN_WINDOW).is_empty(),
+            w.app_rule_suspensions(IN_WINDOW).unwrap().is_empty(),
             "no suspensions before any appRules clause"
         );
 
@@ -4158,7 +4685,7 @@ mod tests {
         // app is suspended — the scheduled app is inside its window (allowed),
         // and the always-allowed app is never touched.
         assert_eq!(
-            w.app_rule_suspensions(IN_WINDOW),
+            w.app_rule_suspensions(IN_WINDOW).unwrap(),
             vec!["app.example.block".to_string()],
             "inside the window only the blocked app suspends"
         );
@@ -4166,7 +4693,7 @@ mod tests {
         // AFTER the window (22:00 BST): the scheduled app is now outside its
         // allowed hours, so it joins the blocked app; the allowed app never does.
         assert_eq!(
-            w.app_rule_suspensions(AFTER_WINDOW),
+            w.app_rule_suspensions(AFTER_WINDOW).unwrap(),
             vec![
                 "app.example.block".to_string(),
                 "app.example.sched".to_string(),
@@ -4514,7 +5041,7 @@ mod tests {
         // The real package's own rule keeps working exactly as it would
         // alone; the cmdline: entry rides along inertly (Kotlin has no
         // Android package literally named `cmdline:…` to ever suspend).
-        let suspensions = w.app_rule_suspensions(IN_WINDOW);
+        let suspensions = w.app_rule_suspensions(IN_WINDOW).unwrap();
         assert!(
             suspensions.contains(&"app.example.block".to_string()),
             "the real package must still be blocked: {suspensions:?}"
@@ -4783,7 +5310,7 @@ mod tests {
         // Device-side: drive the poll over the injected mock relay.
         let relay = crate::relay::BlockingRelay::new(
             mock.clone(),
-            *w.machine_sk,
+            *w.machine_sk.clone().expect("machine key"),
             guardian.pubkey(),
             vec!["wss://relay.example".into()],
         )
@@ -4872,7 +5399,7 @@ mod tests {
         let mock = MockRelayTransport::new();
         let relay = crate::relay::BlockingRelay::new(
             mock.clone(),
-            *w.machine_sk,
+            *w.machine_sk.clone().expect("machine key"),
             guardian.pubkey(),
             vec!["wss://relay.example".into()],
         )
@@ -6437,7 +6964,7 @@ mod bucket_tests {
         let d = w.tick(Some(&hex), true, T0 + 61, Some("com.mojang.play"));
         assert!(!locked(&d), "the DEVICE must stay unlocked");
 
-        let suspended = w.bucket_suspensions(T0 + 61);
+        let suspended = w.bucket_suspensions(T0 + 61).unwrap();
         assert_eq!(suspended, vec!["com.mojang.play".to_string()]);
 
         let play = view(&w, T0 + 61, "play");
@@ -6456,7 +6983,7 @@ mod bucket_tests {
         w.tick(Some(&hex), true, T0, Some("com.mojang.play"));
         w.tick(Some(&hex), true, T0 + 61, Some("com.mojang.play"));
 
-        let suspended = w.bucket_suspensions(T0 + 61);
+        let suspended = w.bucket_suspensions(T0 + 61).unwrap();
         assert_eq!(
             suspended,
             vec!["com.mojang.play".to_string()],
@@ -6484,7 +7011,7 @@ mod bucket_tests {
         w.tick(Some(&hex), true, T0, Some("com.mojang.play"));
         w.tick(Some(&hex), true, T0 + 60, Some("com.mojang.play"));
         assert_eq!(
-            w.bucket_suspensions(T0 + 60),
+            w.bucket_suspensions(T0 + 60).unwrap(),
             vec!["com.mojang.play".to_string()],
             "spent before the gift"
         );
@@ -6499,7 +7026,7 @@ mod bucket_tests {
             d[0].effects
         );
         assert!(
-            w.bucket_suspensions(T0 + 60).is_empty(),
+            w.bucket_suspensions(T0 + 60).unwrap().is_empty(),
             "a group gift must reopen the bucket the same tick"
         );
         let v1 = view(&w, T0 + 60, "play");
@@ -6521,7 +7048,7 @@ mod bucket_tests {
             "the device must stay unlocked in the surplus"
         );
         assert!(
-            w.bucket_suspensions(T0 + 120).is_empty(),
+            w.bucket_suspensions(T0 + 120).unwrap().is_empty(),
             "the surplus must still be open"
         );
         let v2 = view(&w, T0 + 120, "play");
@@ -6552,7 +7079,7 @@ mod bucket_tests {
             w.tick(Some(&hex), true, t, Some("com.mojang.play"));
         }
         assert_eq!(
-            w.bucket_suspensions(T0 + 660),
+            w.bucket_suspensions(T0 + 660).unwrap(),
             vec!["com.mojang.play".to_string()],
             "spent only after the FULL cap+extra is used: {}",
             view(&w, T0 + 660, "play")
@@ -6575,7 +7102,7 @@ mod bucket_tests {
         w.tick(Some(&hex), true, T0, Some("com.mojang.play"));
         w.tick(Some(&hex), true, T0 + 60, Some("com.mojang.play"));
         assert_eq!(
-            w.bucket_suspensions(T0 + 60),
+            w.bucket_suspensions(T0 + 60).unwrap(),
             vec!["com.mojang.play".to_string()]
         );
 
@@ -6596,7 +7123,7 @@ mod bucket_tests {
              (before={before}, after={after})"
         );
         assert_eq!(
-            w.bucket_suspensions(T0 + 60),
+            w.bucket_suspensions(T0 + 60).unwrap(),
             vec!["com.mojang.play".to_string()],
             "the unrelated bucket must stay exactly as spent as it was"
         );
@@ -6619,7 +7146,7 @@ mod bucket_tests {
             play["usedSeconds"], 0,
             "an unrelated app must credit nothing"
         );
-        assert!(w.bucket_suspensions(T0 + 300).is_empty());
+        assert!(w.bucket_suspensions(T0 + 300).unwrap().is_empty());
     }
 
     /// A malformed `buckets` clause must suspend nothing — a cap that cannot
@@ -6633,7 +7160,7 @@ mod bucket_tests {
         w.tick(Some(&hex), true, T0, Some("com.mojang.play"));
         let d = w.tick(Some(&hex), true, T0 + 3700, Some("com.mojang.play"));
         assert!(!locked(&d));
-        assert!(w.bucket_suspensions(T0 + 3700).is_empty());
+        assert!(w.bucket_suspensions(T0 + 3700).unwrap().is_empty());
         assert!(
             w.bucket_views_json(T0 + 3700).contains("\"buckets\":[]"),
             "an unreadable clause must show no buckets, not guess: {}",
@@ -6654,7 +7181,7 @@ mod bucket_tests {
         w.tick(Some(&hex), true, T0, Some("com.mojang.play"));
         w.tick(Some(&hex), true, T0 + 61, Some("com.mojang.play"));
         assert_eq!(
-            w.bucket_suspensions(T0 + 61),
+            w.bucket_suspensions(T0 + 61).unwrap(),
             vec!["com.mojang.play".to_string()],
             "spent while live"
         );
@@ -6665,7 +7192,7 @@ mod bucket_tests {
             &buckets_body(vec![play_bucket(Some(1), None)], true),
         );
         assert!(
-            w.bucket_suspensions(T0 + 61).is_empty(),
+            w.bucket_suspensions(T0 + 61).unwrap().is_empty(),
             "pausing must lift the confiscation immediately"
         );
         let play = view(&w, T0 + 61, "play");
@@ -6769,7 +7296,7 @@ mod bucket_tests {
         w.tick(Some(&hex), true, T0, Some("com.mojang.play"));
         let d = w.tick(Some(&hex), true, T0 + 61, Some("com.mojang.play"));
         assert!(!locked(&d), "the DEVICE must stay unlocked");
-        let suspended = w.bucket_suspensions(T0 + 61);
+        let suspended = w.bucket_suspensions(T0 + 61).unwrap();
         assert!(
             suspended.contains(&"com.mojang.play".to_string()),
             "the real package still spends and suspends normally: {suspended:?}"
@@ -6789,7 +7316,7 @@ mod bucket_tests {
         // would extract from the identity, minus the `cmdline:` prefix) must
         // NOT be treated as a match either — Android attribution never does
         // prefix/substring reasoning on identities, only exact equality.
-        let before = w.bucket_suspensions(T0 + 61);
+        let before = w.bucket_suspensions(T0 + 61).unwrap();
         w.tick(
             Some(&hex),
             true,
@@ -6797,7 +7324,7 @@ mod bucket_tests {
             Some("net.minecraft.client.main.Main"),
         );
         assert_eq!(
-            w.bucket_suspensions(T0 + 61),
+            w.bucket_suspensions(T0 + 61).unwrap(),
             before,
             "a foreground pkg equal to the cmdline needle must not match the cmdline: identity"
         );
@@ -6831,7 +7358,7 @@ mod bucket_tests {
         let d = w.tick(Some(&hex), true, T0 + 3700, Some("com.mojang.play"));
         assert!(!locked(&d), "no crash, no lock");
         assert!(
-            w.bucket_suspensions(T0 + 3700).is_empty(),
+            w.bucket_suspensions(T0 + 3700).unwrap().is_empty(),
             "a cmdline-only bucket has no real Android package to suspend"
         );
         let play = view(&w, T0 + 3700, "play");
@@ -6969,7 +7496,7 @@ mod bucket_tests {
         );
 
         assert_eq!(
-            w.bucket_suspensions(T0 + 61),
+            w.bucket_suspensions(T0 + 61).unwrap(),
             vec!["com.mojang.play".to_string()],
             "the daily cap must close the bucket even with no other clause in force"
         );
@@ -7038,7 +7565,7 @@ mod bucket_tests {
         );
         assert!(!locked(&d), "pausing never locks the device");
         assert!(
-            w.bucket_suspensions(T0).is_empty(),
+            w.bucket_suspensions(T0).unwrap().is_empty(),
             "a paused set confiscates nothing"
         );
 
@@ -7259,5 +7786,676 @@ mod boot_watch_tests {
         assert_eq!(w.enforcement_gap(), None);
         let status = w.build_status(2_000).expect("status");
         assert_eq!(status.enforcement_gap, None, "absent, not a zero");
+    }
+}
+
+/// The 2026-09-27 parity ports from the Linux warden and the shared core:
+/// H3/G-4 (a malformed budget locks), M7 (an unreadable replay floor
+/// refuses), M6 (a machine key that will not load degrades, never fails
+/// init), unknown clause versions for the kinds this crate parses itself,
+/// G-7 (typed ask refusals), G-8 (the lock copy shows the enforced cap) and
+/// the STATUS relay-health / version / clock-step fields.
+#[cfg(test)]
+mod parity_port_tests {
+    use super::*;
+    use charter_proto::ClauseKind;
+    use charter_verify::test_support::{ClauseBuilder, TestGuardian};
+    use serde_json::json;
+
+    // Mon 2026-06-29 18:00 BST.
+    const NOW: i64 = 1_782_752_400;
+
+    fn temp_base(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "charter-jni-parity-{}-{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    /// A warden paired (no relays) to a fresh guardian and ward.
+    fn paired(tag: &str) -> (Warden, String, PathBuf, TestGuardian) {
+        let base = temp_base(tag);
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x61);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+        (w, ward.pubkey().to_hex(), base, guardian)
+    }
+
+    fn put(w: &Warden, subj: &str, kind: ClauseKind, body: serde_json::Value) {
+        assert!(w
+            .child_clauses
+            .put_child_clause(subj, kind.store_key(), 1, &body.to_string())
+            .unwrap());
+    }
+
+    // ---- H3 / G-4 ---------------------------------------------------------
+
+    /// A budget-only ward whose stored budget will not parse. The replica
+    /// read it as "no cap", and with no schedule the tick then took the
+    /// INERT path: configured false, nothing enforced at all. Through the
+    /// shared resolver it is the fail-safe budget — paused at 0/0 — so the
+    /// ward locks, the charter stays configured, and STATUS says so.
+    #[test]
+    fn a_malformed_budget_locks_a_budget_only_ward() {
+        let (mut w, subj, base, _) = paired("malformed-budget");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Budget,
+            json!({"v": 1, "tz": "Europe/London", "dailyMinutes": "lots", "issuedAt": 1}),
+        );
+        let d = w.tick(Some(&subj), true, NOW, None);
+        assert!(d[0].configured, "a present budget is a charter, not inert");
+        assert!(d[0].locked, "an unreadable cap is zero, not unlimited");
+        assert_eq!(d[0].reason, "budget");
+        // The synthesised budget carries no tz of its own; the ledger keeps a
+        // real one rather than being re-keyed onto "".
+        assert!(!w.ledger_tz.is_empty());
+        let tl = w.time_left(NOW);
+        assert!(tl.known && tl.locked);
+        let status = w.build_status(NOW as u64).expect("status");
+        assert!(status.locked);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The resolver itself: exactly core's answer, tz filled from the ledger.
+    #[test]
+    fn resolve_effective_is_the_shared_resolver() {
+        let bad_budget = vec![(ClauseKind::Budget.store_key(), "{\"v\":1".to_string())];
+        let (s, b) = resolve_effective(&bad_budget, "Europe/London");
+        assert!(s.is_none());
+        let b = b.expect("fail-safe budget");
+        assert_eq!(b.paused, Some(true));
+        assert_eq!((b.daily_minutes, b.weekly_minutes), (Some(0), Some(0)));
+        assert_eq!(b.tz, "Europe/London", "unresolved tz takes the fallback");
+
+        // A readable sibling's tz wins over the fallback.
+        let mixed = vec![
+            (
+                ClauseKind::Schedule.store_key(),
+                json!({"v":1,"tz":"Asia/Tokyo","weekly":{},"issuedAt":1}).to_string(),
+            ),
+            (ClauseKind::Budget.store_key(), "not json".to_string()),
+        ];
+        let (s, b) = resolve_effective(&mixed, "UTC");
+        assert_eq!(s.unwrap().tz, "Asia/Tokyo");
+        assert_eq!(b.unwrap().tz, "Asia/Tokyo");
+
+        // A non-time clause alone governs nothing.
+        let content_only = vec![(ClauseKind::Gift.store_key(), "{}".to_string())];
+        assert_eq!(resolve_effective(&content_only, "UTC"), (None, None));
+    }
+
+    // ---- M7 ---------------------------------------------------------------
+
+    /// An unreadable replay floor refuses the clause (the broker's rule),
+    /// rather than verifying it against no floor at all.
+    #[test]
+    fn an_unreadable_replay_floor_refuses_the_clause() {
+        let (mut w, subj, base, guardian) = paired("floor");
+        let dir = base.join("children").join(&subj).join("clauses");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.json", ClauseKind::Budget.store_key())),
+            b"{torn",
+        )
+        .unwrap();
+        let ward = PubKey::from_hex(&subj).unwrap();
+        let ev = ClauseBuilder::budget(5)
+            .subject(ward)
+            .body(json!({"v": 1, "tz": "Europe/London", "dailyMinutes": 60, "issuedAt": 5}))
+            .build(&guardian);
+        let res = w.ingest_clause(&serde_json::to_string(&ev).unwrap(), NOW as u64);
+        assert!(!res.accepted);
+        assert_eq!(res.reason, "replay floor unreadable");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- M6 ---------------------------------------------------------------
+
+    /// A machine key that will not load (here: replaced by a symlink, which
+    /// the signer refuses to use or replace) must not stop the warden
+    /// existing. It comes up degraded: the cached clauses go on being
+    /// enforced, pairing is refused, polling says why — and once the key is
+    /// back, the next poll picks the SAME identity up again.
+    #[test]
+    fn an_unloadable_machine_key_degrades_and_keeps_enforcing() {
+        let (w, subj, base, _) = paired("m6");
+        let machine_before = w.machine_pubkey_hex();
+        put(
+            &w,
+            &subj,
+            ClauseKind::Schedule,
+            json!({"v": 1, "tz": "Europe/London", "weekly": {}, "paused": true, "issuedAt": 1}),
+        );
+        drop(w);
+
+        let key = base.join("machine.key");
+        let saved = base.join("machine.key.saved");
+        std::fs::rename(&key, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &key).unwrap();
+
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20)
+            .expect("init must never fail on the machine key");
+        assert!(w.transport_unavailable());
+        let init = w.init_result();
+        assert!(init.transport_unavailable && init.key_error.is_some());
+        assert!(init.paired, "the pairing on disk is still read");
+
+        // Still enforcing what it had.
+        let d = w.tick(Some(&subj), true, NOW, None);
+        assert!(
+            d[0].configured && d[0].locked,
+            "cached clause still enforced"
+        );
+        assert_eq!(
+            w.build_status(NOW as u64).unwrap().transport_unavailable,
+            Some(true)
+        );
+
+        // Nothing can be pinned to a zero identity.
+        assert!(w.pair("bunker://00?relay=wss://relay.example", 1).is_err());
+        assert!(w.set_pairing(&"1".repeat(64), &subj).is_err());
+
+        let lock = Mutex::new(Some(w));
+        let r = poll_once_locked(&lock, NOW as u64);
+        assert!(!r.polled);
+        assert!(r.reason.contains("machine key"), "reason: {}", r.reason);
+
+        // The key comes back: the next poll reloads the same identity.
+        std::fs::remove_file(&key).unwrap();
+        std::fs::rename(&saved, &key).unwrap();
+        let _ = poll_once_locked(&lock, NOW as u64 + 15);
+        let g = lock.lock().unwrap();
+        let w = g.as_ref().unwrap();
+        assert!(!w.transport_unavailable());
+        assert_eq!(w.machine_pubkey_hex(), machine_before);
+        drop(g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- F1 / F2: an unreadable store is not an empty one -----------------
+
+    /// Swap a stored clause for a directory, so the next read is an IO error
+    /// (EISDIR) rather than "absent" — the shape of an EIO at the wrong moment.
+    fn make_unreadable(base: &Path, subj: &str, kind: ClauseKind) {
+        let file = base
+            .join("children")
+            .join(subj)
+            .join("clauses")
+            .join(format!("{}.json", kind.store_key()));
+        let _ = std::fs::remove_file(&file);
+        std::fs::create_dir_all(&file).unwrap();
+    }
+
+    /// F1: each per-app enforcement input answers `Err` for an unreadable
+    /// clause, never the empty answer that told Kotlin to lift every block.
+    #[test]
+    fn an_unreadable_per_app_clause_is_an_error_not_an_empty_policy() {
+        let (mut w, subj, base, _) = paired("f1-unreadable");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Apps,
+            json!({"v": 1, "posture": "blocklist", "blocked": ["app.example.block"], "issuedAt": 1}),
+        );
+        put(
+            &w,
+            &subj,
+            ClauseKind::AppRules,
+            json!({"v": 1, "tz": "Europe/London", "rules": [], "issuedAt": 1}),
+        );
+        put(
+            &w,
+            &subj,
+            ClauseKind::Buckets,
+            json!({"v": 1, "tz": "Europe/London", "buckets": [
+                {"id": "play", "label": "Play", "apps": ["app.example.game"], "dailyMinutes": 30}
+            ], "issuedAt": 1}),
+        );
+        // Seed the usage ledger so the bucket read is really consulted.
+        let _ = w.tick(Some(&subj), true, NOW, None);
+        assert!(w.app_policy(NOW).unwrap().contains("app.example.block"));
+        assert!(w.app_rule_suspensions(NOW).is_ok());
+        assert!(w.bucket_suspensions(NOW).is_ok());
+
+        for kind in [ClauseKind::Apps, ClauseKind::AppRules, ClauseKind::Buckets] {
+            make_unreadable(&base, &subj, kind);
+        }
+        let e = w.app_policy(NOW).expect_err("unreadable apps clause");
+        assert!(e.contains("unreadable"), "{e}");
+        assert!(w.app_rule_suspensions(NOW).is_err());
+        assert!(w.bucket_suspensions(NOW).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// F2 / N1: a pairing record that will not READ at init reports the device
+    /// as paired (so Kotlin keeps the install lock up), the tick HOLDS rather
+    /// than emitting the release, every per-app and web read is an error
+    /// rather than "none", a fresh pin is refused, and the next poll picks the
+    /// record back up once it reads.
+    #[test]
+    fn an_unreadable_pairing_holds_the_device_paired_and_heals_on_poll() {
+        let (w, _subj, base, guardian) = paired("f2-unreadable");
+        drop(w);
+        let file = base.join("pairing.json");
+        let saved = base.join("pairing.json.saved");
+        std::fs::rename(&file, &saved).unwrap();
+        std::fs::create_dir(&file).unwrap();
+
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20)
+            .expect("an unreadable pairing never fails init");
+        let init = w.init_result();
+        assert!(init.paired, "unreadable is NOT unpaired");
+        assert!(init.pairing_unreadable);
+        let state = w.pairing_state();
+        assert!(state.paired && state.pairing_unreadable);
+        assert!(state.guardian.is_none(), "no guardian is invented");
+
+        // N1: the tick must not release — no `subject: None, locked: false`.
+        let d = w.tick(None, true, NOW, None);
+        assert!(
+            !d.iter().any(|d| d.subject.is_none() && !d.locked),
+            "an unreadable pairing released the device"
+        );
+        assert!(d.is_empty(), "a hold re-asserts nothing and lifts nothing");
+        assert!(w.app_policy(NOW).is_err());
+        assert!(w.app_rule_suspensions(NOW).is_err());
+        assert!(w.bucket_suspensions(NOW).is_err());
+        assert!(w.require_readable_pairing().is_err());
+
+        // Nothing may be pinned over the top of a record we cannot read.
+        let intruder = TestGuardian::from_seed(0x77);
+        assert!(w
+            .set_pairing(&intruder.pubkey().to_hex(), &intruder.pubkey().to_hex())
+            .is_err());
+        assert!(w.pair("bunker://00?relay=wss://relay.example", 1).is_err());
+
+        // Still unreadable: a poll leaves it held, not released.
+        let lock = Mutex::new(Some(w));
+        let _ = poll_once_locked(&lock, NOW as u64);
+        {
+            let g = lock.lock().unwrap();
+            let w = g.as_ref().unwrap();
+            assert!(w.pairing_state().paired && w.pairing_state().pairing_unreadable);
+        }
+
+        // Readable again: the next poll takes the real pairing straight back.
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::rename(&saved, &file).unwrap();
+        let _ = poll_once_locked(&lock, NOW as u64 + 15);
+        let g = lock.lock().unwrap();
+        let w = g.as_ref().unwrap();
+        let state = w.pairing_state();
+        assert!(state.paired && !state.pairing_unreadable);
+        assert_eq!(state.guardian, Some(guardian.pubkey().to_hex()));
+        drop(g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// N3: a pairing record that reads but will not parse is unreadable, not
+    /// unpaired. Only an absent record is unpaired.
+    #[test]
+    fn a_pairing_that_will_not_parse_is_unreadable_not_unpaired() {
+        let (w, _subj, base, _) = paired("n3-garbled");
+        drop(w);
+        for body in ["{not json", "{}", r#"{"guardian":"zz"}"#] {
+            std::fs::write(base.join("pairing.json"), body).unwrap();
+            let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+            let state = w.pairing_state();
+            assert!(state.paired && state.pairing_unreadable, "{body}");
+            assert!(w.tick(None, true, NOW, None).is_empty(), "{body}: held");
+        }
+        std::fs::remove_file(base.join("pairing.json")).unwrap();
+        let w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let state = w.pairing_state();
+        assert!(
+            !state.paired && !state.pairing_unreadable,
+            "absent is unpaired"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- unknown clause versions -----------------------------------------
+
+    /// Every kind this crate parses itself takes its fail-safe on a `v` it
+    /// does not implement: the loosening kinds (gift, maintenance, listening,
+    /// always-available, update) grant nothing; the lifeline renders no
+    /// numbers and keeps the break-glass safety net, exactly as a body that
+    /// will not parse does — even when the unknown body says `enabled:false`.
+    #[test]
+    fn unknown_versions_take_each_kinds_fail_safe() {
+        let (mut w, subj, base, _) = paired("versions");
+        let now = NOW as u64;
+
+        // v1 controls first, so the v2 answers below are the guard, not a
+        // malformed fixture.
+        let gift = |v: u32| json!({"v": v, "issuedAt": 1, "id": "g1", "minutes": 30, "expiresAt": now + 3600});
+        put(&w, &subj, ClauseKind::Gift, gift(1));
+        assert!(w.gift_now(now).is_some());
+        let maint = |v: u32| json!({"v": v, "untilUnix": now + 600, "issuedAt": 1});
+        put(&w, &subj, ClauseKind::Maintenance, maint(1));
+        assert!(w.maintenance_open(now));
+        assert!(w.maintenance_body().is_some());
+        let listening = |v: u32| json!({"v": v, "issuedAt": 1, "mode": "continue", "apps": ["app.example.audio"]});
+        put(&w, &subj, ClauseKind::Listening, listening(1));
+        assert!(w
+            .listening_view(now, true, true)
+            .contains("app.example.audio"));
+        let always = |v: u32| json!({"v": v, "issuedAt": 1, "apps": [{"pkg": "app.example.book"}]});
+        put(&w, &subj, ClauseKind::AlwaysAvailable, always(1));
+        assert!(w
+            .always_available_view(now, true, "schedule")
+            .contains("app.example.book"));
+        let lifeline = |v: u32| {
+            json!({"v": v, "issuedAt": 1,
+                   "numbers": [{"label": "Mum", "number": "07700900123"}],
+                   "breakGlass": {"enabled": false, "scope": "full", "durationMinutes": 30}})
+        };
+        put(&w, &subj, ClauseKind::Lifeline, lifeline(1));
+        let view: serde_json::Value = serde_json::from_str(&w.lifeline()).unwrap();
+        assert_eq!(view["numbers"].as_array().unwrap().len(), 1);
+        assert!(
+            w.break_glass_cfg().is_none(),
+            "v1 enabled:false is honoured"
+        );
+
+        // Now the same bodies at v2 (the store's floor needs a newer issuedAt).
+        let put2 = |w: &Warden, kind: ClauseKind, body: serde_json::Value| {
+            assert!(w
+                .child_clauses
+                .put_child_clause(&subj, kind.store_key(), 2, &body.to_string())
+                .unwrap());
+        };
+        put2(&w, ClauseKind::Gift, gift(2));
+        assert!(w.gift_now(now).is_none(), "unknown-v gift gives nothing");
+        put2(&w, ClauseKind::Maintenance, maint(2));
+        assert!(!w.maintenance_open(now), "unknown-v window is shut");
+        assert!(w.maintenance_body().is_none(), "and quotes no expiry");
+        put2(&w, ClauseKind::Listening, listening(2));
+        assert!(!w
+            .listening_view(now, true, true)
+            .contains("app.example.audio"));
+        put2(&w, ClauseKind::AlwaysAvailable, always(2));
+        assert!(!w
+            .always_available_view(now, true, "schedule")
+            .contains("app.example.book"));
+        put2(&w, ClauseKind::Lifeline, lifeline(2));
+        let view: serde_json::Value = serde_json::from_str(&w.lifeline()).unwrap();
+        assert_eq!(
+            view["numbers"],
+            json!([]),
+            "no numbers from an unknown body"
+        );
+        assert_eq!(view["breakGlass"]["enabled"], true, "safety net stays up");
+        assert!(w.break_glass_cfg().is_some());
+
+        // update: an unknown version installs nothing.
+        let sha = "a".repeat(64);
+        put2(
+            &w,
+            ClauseKind::Update,
+            json!({"v": 2, "packageName": "org.forgesworn.charter", "versionCode": 99,
+                   "versionName": "9.9", "url": "https://example.org/k.apk",
+                   "apkSha256": sha, "signerCertSha256": sha}),
+        );
+        w.check_self_update(now);
+        assert!(w.drain_installs(now).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- G-7 --------------------------------------------------------------
+
+    #[test]
+    fn a_rate_limited_ask_reaches_kotlin_typed_and_readable() {
+        let e = SubmitError::from_broker(charter_spine::BrokerError::RateLimited(
+            "you've asked a lot recently — try again in a while".into(),
+        ));
+        assert_eq!(e.code, SubmitError::RATE_LIMITED);
+        let v: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(v["code"], "rate-limited");
+        assert_eq!(
+            v["error"], "you've asked a lot recently — try again in a while",
+            "verbatim, never a Debug string"
+        );
+        assert!(!v["error"].as_str().unwrap().contains("RateLimited"));
+
+        // An unpaired warden refuses with its own code.
+        let (w, _, base, _) = paired("g7");
+        let e = w
+            .submit_request("time.extend", "{}")
+            .expect_err("no broker");
+        assert_eq!(e.code, SubmitError::NOT_PAIRED);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- G-8 --------------------------------------------------------------
+
+    /// A paused budget enforces zero, so the lock copy must not quote the
+    /// body's raw cap ("up to 2h a day") at the ward.
+    #[test]
+    fn the_lock_copy_shows_the_enforced_cap_not_the_raw_one() {
+        let (mut w, subj, base, _) = paired("g8");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Budget,
+            json!({"v": 1, "tz": "Europe/London", "dailyMinutes": 120,
+                   "paused": true, "issuedAt": 1}),
+        );
+        let d = w.tick(Some(&subj), true, NOW, None);
+        assert!(d[0].locked);
+        let line = w.lock_info(NOW).used_line;
+        assert!(!line.contains("2h"), "raw cap leaked: {line:?}");
+        assert!(line.contains("no screen time today"), "got {line:?}");
+
+        let b = |v: serde_json::Value| serde_json::from_value::<GrantBudget>(v).unwrap();
+        let base_b = json!({"v":1,"tz":"UTC","dailyMinutes":120,"issuedAt":1});
+        assert_eq!(effective_daily_cap_secs(&b(base_b.clone())), Some(7200));
+        let mut v2 = base_b.clone();
+        v2["v"] = json!(2);
+        assert_eq!(effective_daily_cap_secs(&b(v2)), Some(0));
+        let mut revoked = base_b.clone();
+        revoked["revoked"] = json!(true);
+        revoked["paused"] = json!(true);
+        assert_eq!(effective_daily_cap_secs(&b(revoked)), None, "core order");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- STATUS -----------------------------------------------------------
+
+    /// A relay that is never there: every query unreachable, every publish
+    /// refused.
+    #[derive(Clone)]
+    struct DeadRelay;
+
+    #[async_trait::async_trait]
+    impl charter_sys::relay::RelayTransport for DeadRelay {
+        async fn publish(
+            &self,
+            relays: &[charter_sys::relay::RelayUrl],
+            _ev: NostrEvent,
+        ) -> Vec<(
+            charter_sys::relay::RelayUrl,
+            charter_sys::relay::PublishOutcome,
+        )> {
+            relays
+                .iter()
+                .map(|r| {
+                    (
+                        r.clone(),
+                        charter_sys::relay::PublishOutcome::Failed("down".into()),
+                    )
+                })
+                .collect()
+        }
+        async fn query(
+            &self,
+            _relays: &[charter_sys::relay::RelayUrl],
+            _filter: charter_sys::relay::Filter,
+        ) -> Result<Vec<NostrEvent>, charter_sys::relay::RelayIoError> {
+            Err(charter_sys::relay::RelayIoError::Unreachable(
+                "no route".into(),
+            ))
+        }
+    }
+
+    fn relay_paired(tag: &str) -> (Warden, PathBuf) {
+        let base = temp_base(tag);
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        w.pair(&uri, NOW as u64 - 100).unwrap();
+        (w, base)
+    }
+
+    /// Unreachable broker rounds are counted (consecutively) onto STATUS
+    /// `relayUnreachablePolls`, and a round that reaches a relay resets it.
+    #[test]
+    fn unreachable_polls_are_counted_onto_status_and_reset() {
+        let (mut w, base) = relay_paired("unreachable");
+        let sk = *w.machine_sk.clone().unwrap();
+        let guardian = w.guardian.unwrap();
+        let relays = w.relays.clone();
+        w.relay = Some(std::sync::Arc::new(
+            crate::relay::BlockingRelay::new(DeadRelay, sk, guardian, relays).unwrap(),
+        ));
+        w.broker = Some(w.build_broker(Box::new(DeadRelay)).unwrap());
+        assert_eq!(
+            w.build_status(NOW as u64).unwrap().relay_unreachable_polls,
+            None
+        );
+        let lock = Mutex::new(Some(w));
+
+        let r = poll_once_locked(&lock, NOW as u64);
+        assert!(r.polled && !r.status_emitted);
+        let polls = |lock: &Mutex<Option<Warden>>, at: u64| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .build_status(at)
+                .unwrap()
+                .relay_unreachable_polls
+        };
+        assert_eq!(polls(&lock, NOW as u64), Some(1));
+        let _ = poll_once_locked(&lock, NOW as u64 + 15);
+        assert_eq!(polls(&lock, NOW as u64 + 15), Some(2));
+
+        // The network comes back.
+        {
+            let mut g = lock.lock().unwrap();
+            let w = g.as_mut().unwrap();
+            w.wire_test_relay(charter_sys::relay::MockRelayTransport::new())
+                .unwrap();
+        }
+        let r = poll_once_locked(&lock, NOW as u64 + 30);
+        assert!(r.status_emitted);
+        assert_eq!(
+            polls(&lock, NOW as u64 + 30),
+            None,
+            "reset by a reached round"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `appVersionName` rides STATUS; `clockSteppedBackFrom` is stamped on
+    /// the one status after a backwards step, and a stamp whose status did
+    /// not reach a relay is carried.
+    #[test]
+    fn status_carries_version_name_and_the_clock_step() {
+        let (mut w, base) = relay_paired("clockstep");
+        w.set_app_version_name("0.6.12");
+        w.set_app_version_name("  "); // blank never clears a known name
+        let mock = charter_sys::relay::MockRelayTransport::new();
+        w.wire_test_relay(mock.clone()).unwrap();
+        let lock = Mutex::new(Some(w));
+        let last = |lock: &Mutex<Option<Warden>>| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_status_for_tests()
+                .cloned()
+                .unwrap()
+        };
+
+        let t = NOW as u64;
+        assert!(poll_once_locked(&lock, t).status_emitted);
+        let s = last(&lock);
+        assert_eq!(s.app_version_name.as_deref(), Some("0.6.12"));
+        assert_eq!(s.clock_stepped_back_from, None);
+
+        // The clock steps back an hour: emitted at once, stamped with where from.
+        assert!(poll_once_locked(&lock, t - 3600).status_emitted);
+        assert_eq!(last(&lock).clock_stepped_back_from, Some(t));
+
+        // A heartbeat later: no step, no stamp.
+        assert!(poll_once_locked(&lock, t - 3600 + 61).status_emitted);
+        assert_eq!(last(&lock).clock_stepped_back_from, None);
+
+        // A step whose status reaches no relay is carried for the retry.
+        let _ = mock.clone().with_failing_relay("wss://relay.example");
+        let r = poll_once_locked(&lock, t - 7200);
+        assert!(!r.status_emitted);
+        let g = lock.lock().unwrap();
+        assert_eq!(
+            g.as_ref().unwrap().status_step_undelivered,
+            Some(t - 3600 + 61)
+        );
+        drop(g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- STATUS seq -------------------------------------------------------
+
+    /// Every emitted STATUS carries a `seq`, strictly increasing, stored
+    /// before publishing, and it survives a restart with the clock set back.
+    #[test]
+    fn status_seq_is_stamped_increasing_and_survives_a_restart() {
+        let (mut w, base) = relay_paired("seq");
+        let mock = charter_sys::relay::MockRelayTransport::new();
+        w.wire_test_relay(mock.clone()).unwrap();
+        let lock = Mutex::new(Some(w));
+        let seq = |lock: &Mutex<Option<Warden>>| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_status_for_tests()
+                .and_then(|s| s.seq)
+                .expect("seq stamped")
+        };
+        let t = NOW as u64;
+        assert!(poll_once_locked(&lock, t).status_emitted);
+        let a = seq(&lock);
+        assert!(a > 1_000_000_000_000, "seeded from the clock in ms: {a}");
+        assert_eq!(load_status_seq(&base), Some(a), "stored before publishing");
+        assert!(poll_once_locked(&lock, t + 61).status_emitted);
+        let b = seq(&lock);
+        assert_eq!(b, a + 1);
+
+        // Restart with the stored value far above any clock: it wins.
+        drop(lock);
+        store_status_seq(&base, u64::MAX / 2).unwrap();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        w.wire_test_relay(mock).unwrap();
+        let lock = Mutex::new(Some(w));
+        assert!(poll_once_locked(&lock, t + 122).status_emitted);
+        assert_eq!(seq(&lock), u64::MAX / 2 + 1);
+
+        // A torn file reads as missing, not as zero.
+        std::fs::write(status_seq_path(&base), b"12\x00junk").unwrap();
+        assert_eq!(load_status_seq(&base), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

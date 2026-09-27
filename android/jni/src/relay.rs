@@ -253,12 +253,24 @@ impl RelayTransport for DynRelay {
 /// The spine broker's `TransportFacade` over the shared `CharterTransport`:
 /// publish REQUESTs/AUDITs, poll GRANTs/CLAUSEs/curator lists — the exact
 /// facade shape charterd's `RealTransportFacade` has on Linux.
+///
+/// Poll failures still surface as empty batches (offline is "nothing
+/// delivered", never a crash), but they are no longer thrown away: an
+/// unreachable relay set is recorded for [`poll_health`] to report once per
+/// broker round, as charterd's facade does. Without it the guardian could not
+/// tell "the phone is on a dead relay" from "nothing new" (parity row 8).
+///
+/// [`poll_health`]: charter_spine::TransportFacade::poll_health
 pub struct AndroidTransportFacade {
     transport: CharterTransport<DynRelay, OsEntropy>,
     guardian: PubKey,
     machine: PubKey,
     /// The durable offline spool (§2.2) — REQUESTs parked on total failure.
     outbox: Option<crate::outbox::Outbox>,
+    /// At least one poll this round reached NO relay in the set.
+    relay_unreachable: std::sync::atomic::AtomicBool,
+    /// Per-relay publish failures this round.
+    publish_failed: std::sync::atomic::AtomicU32,
 }
 
 impl AndroidTransportFacade {
@@ -282,6 +294,8 @@ impl AndroidTransportFacade {
             guardian,
             machine,
             outbox: None,
+            relay_unreachable: std::sync::atomic::AtomicBool::new(false),
+            publish_failed: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -289,6 +303,31 @@ impl AndroidTransportFacade {
     pub fn with_outbox(mut self, base: &std::path::Path) -> Self {
         self.outbox = Some(crate::outbox::Outbox::new(base));
         self
+    }
+
+    /// A poll's batch, with an unreachable relay set noted for
+    /// [`charter_spine::TransportFacade::poll_health`] rather than swallowed.
+    fn record_poll<T>(&self, r: Result<Vec<T>, charter_sys::relay::RelayIoError>) -> Vec<T> {
+        match r {
+            Ok(v) => v,
+            Err(charter_sys::relay::RelayIoError::Unreachable(_)) => {
+                self.relay_unreachable
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Fold a publish's per-relay `Failed` outcomes into the round's count.
+    fn record_publish(&self, outcomes: &[(RelayUrl, PublishOutcome)]) {
+        let failed = outcomes
+            .iter()
+            .filter(|(_, o)| matches!(o, PublishOutcome::Failed(_)))
+            .count() as u32;
+        if failed > 0 {
+            self.publish_failed
+                .fetch_add(failed, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -303,6 +342,7 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
             return;
         };
         let outcomes = self.transport.publish_prebuilt(wrap.clone()).await;
+        self.record_publish(&outcomes);
         let accepted = outcomes
             .iter()
             .any(|(_, o)| matches!(o, charter_sys::relay::PublishOutcome::Ok));
@@ -313,26 +353,17 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
         }
     }
     async fn poll_grants(&self, since: u64, now: u64) -> Vec<charter_transport::ReceivedGrant> {
-        self.transport
-            .poll_grants(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.transport.poll_grants(since, now).await)
     }
     async fn poll_clauses(&self, since: u64, now: u64) -> Vec<charter_transport::ReceivedClause> {
-        self.transport
-            .poll_clauses(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.transport.poll_clauses(since, now).await)
     }
     async fn poll_usage_syncs(
         &self,
         since: u64,
         now: u64,
     ) -> Vec<(charter_primitives::NostrEvent, PubKey)> {
-        self.transport
-            .poll_usage_syncs(since, now)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.transport.poll_usage_syncs(since, now).await)
     }
     /// RELEASE polling exists on this facade for the trait's sake, but the
     /// Android warden does NOT route its unpair through the broker: it polls
@@ -356,18 +387,27 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
         curators: &[PubKey],
         since: u64,
     ) -> Vec<charter_transport::FetchedCuratorList> {
-        self.transport
-            .poll_curator_lists(curators, since)
-            .await
-            .unwrap_or_default()
+        self.record_poll(self.transport.poll_curator_lists(curators, since).await)
     }
     async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) {
-        let _ = self.transport.emit_audit(tags, now).await;
+        let outcomes = self.transport.emit_audit(tags, now).await;
+        self.record_publish(&outcomes);
     }
     fn pinned_guardian(&self) -> PubKey {
         self.guardian
     }
     fn machine_pubkey(&self) -> PubKey {
         self.machine
+    }
+    /// Read-and-reset, once per broker `poll_once` round.
+    fn poll_health(&self) -> charter_spine::transport_facade::PollHealth {
+        charter_spine::transport_facade::PollHealth {
+            relays_unreachable: self
+                .relay_unreachable
+                .swap(false, std::sync::atomic::Ordering::Relaxed),
+            publish_failed: self
+                .publish_failed
+                .swap(0, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 }

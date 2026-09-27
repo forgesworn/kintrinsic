@@ -16,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import org.forgesworn.charter.native.CharterCore
+import org.forgesworn.charter.native.wardMessageOr
 import org.json.JSONObject
 import java.io.File
 
@@ -124,7 +125,7 @@ class RequestAppsActivity : Activity() {
                     status.text = "Asked! Your guardian will see it shortly."
                 } else {
                     button.isEnabled = true
-                    status.text = "Couldn't reach your guardian — try again."
+                    status.text = res.wardMessageOr("Couldn't reach your guardian — try again.")
                 }
             }
         }

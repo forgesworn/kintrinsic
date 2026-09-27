@@ -56,6 +56,10 @@ class WardenController(
     private val ruleMemory: org.forgesworn.charter.enforce.RuleMemoryStore? = null,
 ) {
     private var initialized = false
+    /** When [init] last ran (unix secs), and with which mode — so a failed
+     *  init is retried from the tick at [INIT_RETRY_SECS], not abandoned. */
+    private var lastInitAttempt = 0L
+    private var enforceMode = "enforce"
     private var baselineApplied = false
     /** Whether we believe the hotspot service is running. Starts null (UNKNOWN):
      *  after a process restart a sticky-restarted service may be up while a
@@ -66,6 +70,11 @@ class WardenController(
     private var appliedDnsRevision: String? = null
     /** Latched true once the usage-access app-op is VERIFIED allowed. */
     private var usageAccessOk = false
+    /** The per-app inputs last read successfully, so a read error keeps them
+     *  rather than lifting every block for the tick (F1). */
+    private val appGateMemory = org.forgesworn.charter.enforce.AppGateMemory()
+    /** Logged once per unreadable-pairing spell (F2), not once a tick. */
+    private var pairingUnreadableLogged = false
 
     /** Interface over the lock surface so tests don't launch a real activity. */
     interface LockController {
@@ -84,12 +93,28 @@ class WardenController(
 
     /** Initialize the Rust warden over device-protected storage. */
     fun init(enforceMode: String = "enforce"): CharterCore.InitResult {
-        val res = CharterCore.init(
-            Provisioning.baseDir(context),
-            enforceMode,
-            Provisioning.ownVersionCode(context),
-        )
+        lastInitAttempt = System.currentTimeMillis() / 1000
+        this.enforceMode = enforceMode
+        val res = runCatching {
+            CharterCore.init(
+                Provisioning.baseDir(context),
+                enforceMode,
+                Provisioning.ownVersionCode(context),
+                Provisioning.ownVersionName(context),
+            )
+        }.getOrElse { t ->
+            CharterCore.InitResult("", false, null, null, enforceMode, t.toString())
+        }
         initialized = res.error == null
+        if (!initialized) {
+            // Nothing here is enforcing: no tick, no lock, no accrual. Loud,
+            // and retried from the tick (see `tickAndApply`), never left for a
+            // process restart that may not come.
+            Log.e(TAG, "warden init failed (will retry): ${res.error}")
+        } else if (res.transportUnavailable) {
+            // Degraded, not failed (M6): cached clauses are still enforced.
+            Log.e(TAG, "warden running WITHOUT transport: ${res.keyError}")
+        }
         if (initialized) {
             // Count the boots we did NOT run through (S1). Safe mode disables
             // every third-party package, this one included, so a safe-mode
@@ -335,7 +360,15 @@ class WardenController(
         nowUnix: Long = System.currentTimeMillis() / 1000,
         screenWas: Boolean? = null,
     ): List<CharterCore.ChildDecision> {
-        if (!initialized) return emptyList()
+        if (!initialized) {
+            // A warden that failed to come up must not stay down for the life
+            // of the process: until it exists nothing is enforced at all, and
+            // the DPM state is frozen wherever it was last left. Retry, paced.
+            if (nowUnix - lastInitAttempt >= INIT_RETRY_SECS || nowUnix < lastInitAttempt) {
+                init(enforceMode)
+            }
+            if (!initialized) return emptyList()
+        }
         ensureUsageAccess()
         // The install lock, every tick and independent of the one-shot
         // baseline: a guardian's signed, expiring maintenance window stands it
@@ -352,14 +385,36 @@ class WardenController(
         // (the baseline had stood down) and `adb install` refused
         // (INSTALL_FAILED_USER_RESTRICTED) — with no window to open, because
         // an unpaired ward has no guardian to sign one (2026-09-07).
-        val pairing = CharterCore.pairingState()
+        //
+        // "Paired" includes a pairing record that exists but will not READ
+        // (F2): the core reports it as paired, so the lock stays up while it
+        // retries. A pairing answer that is itself an error, or a throw, is
+        // treated the same way — held, never released on a read failure.
+        val pairingRead = runCatching { CharterCore.pairingState() }
+        val pairing = pairingRead.getOrNull()?.takeIf { it.error == null }
+        if (pairing == null || pairing.pairingUnreadable) {
+            if (!pairingUnreadableLogged) {
+                Log.e(TAG, "pairing unreadable: holding the device as paired")
+                pairingUnreadableLogged = true
+            }
+        } else if (pairingUnreadableLogged) {
+            Log.i(TAG, "pairing readable again")
+            pairingUnreadableLogged = false
+        }
         if (Provisioning.isDeviceOwner(context)) {
-            val locked = pairing.paired && !CharterCore.maintenanceOpen(nowUnix)
+            val maintenance = runCatching { CharterCore.maintenanceOpen(nowUnix) }.getOrDefault(false)
+            val locked = installLockWanted(pairing, maintenance)
             runCatching { restrictions.setInstallLock(locked) }
             // Never let the account or the ward's notice break enforcement: a
             // PackageManager that throws must not stop the lock coming back.
             runCatching { accountForInstallWindow(nowUnix) }
         }
+        // N1, second line: while the pairing cannot be read there is no ward
+        // to decide for, and every "no ward" answer downstream means "release"
+        // (unsuspend, unhide, drop the lock, unpin the web filter). Apply
+        // nothing: the device stays as it stood, the same posture as a failed
+        // init, until a poll reads the pairing again. The core holds too.
+        if (pairing == null || pairing.pairingUnreadable) return emptyList()
         val subject = pairing.subject
         // Ward-on-primary (D1): the WHOLE phone is the ward's surface, so ANY
         // foreground app while the screen is interactive is the ward using
@@ -485,15 +540,31 @@ class WardenController(
         // schedule/budget. These JNI calls take the warden lock — they run on the
         // slow-safe worker thread (this whole tick is off the main thread).
         if (d.enforceMode != CharterCore.Mode.OBSERVE) {
-            val appPolicy = runCatching { CharterCore.appPolicy(nowUnix) }.getOrNull()
-            val ruleSuspensions =
-                runCatching { CharterCore.appRuleSuspensions(nowUnix) }.getOrDefault(emptyList())
             // Named-times ("buckets"): apps whose OWN bucket allowance is spent
             // right now — its own charter dimension, exactly like the per-app
-            // rule suspensions above. Spending a bucket closes only ITS apps,
-            // never the whole device.
-            val bucketSuspensions =
-                runCatching { CharterCore.bucketSuspensions(nowUnix) }.getOrDefault(emptyList())
+            // rule suspensions. Spending a bucket closes only ITS apps, never
+            // the whole device.
+            //
+            // F1: a read that FAILED (a store error, a JNI error reply, a
+            // throw) is not an empty answer. It keeps the last good one, and
+            // the tick runs degraded: suspend-only, the hidden set untouched,
+            // no "your app is open" notices — the previous DPM state is the
+            // stricter answer until every input reads again.
+            val inputs = appGateMemory.resolve(
+                runCatching { CharterCore.appPolicy(nowUnix) },
+                runCatching { CharterCore.appRuleSuspensions(nowUnix) },
+                runCatching { CharterCore.bucketSuspensions(nowUnix) },
+            )
+            if (appGateMemory.transitioned) {
+                if (inputs.degraded) {
+                    Log.e(TAG, "per-app policy unreadable: keeping the last applied app state")
+                } else {
+                    Log.i(TAG, "per-app policy readable again")
+                }
+            }
+            val appPolicy = inputs.appPolicy
+            val ruleSuspensions = inputs.ruleSuspensions
+            val bucketSuspensions = inputs.bucketSuspensions
             // Audio the family agreed may finish (spec 2026-07-29). The PLATFORM
             // says whether anything is actually sounding — a named app that
             // isn't playing is suspended like everything else, so the exemption
@@ -519,10 +590,11 @@ class WardenController(
             appGate.reconcile(
                 locked = d.locked,
                 appPolicy = appPolicy,
-                ruleSuspensions = ruleSuspensions.toSet(),
+                ruleSuspensions = ruleSuspensions,
                 listeningExempt = listening?.exempt ?: emptySet(),
-                bucketSuspensions = bucketSuspensions.toSet(),
+                bucketSuspensions = bucketSuspensions,
                 alwaysAvailable = alwaysAvailable,
+                suspendOnly = inputs.degraded,
             )
 
             // "Remove from device" (2026-08-27): the apps clause's `hidden` list,
@@ -546,7 +618,10 @@ class WardenController(
             // posture lists emptied, so the suspend set above blocks nothing
             // while `hidden` here stays in force. A paused clause hiding
             // nothing arrives as null exactly as it always did.
-            runCatching {
+            //
+            // Only on a FRESH read of the policy (F1): a failed one would read
+            // as "hide nothing" and put every hidden app back.
+            if (inputs.appPolicyFresh) runCatching {
                 val hidden = appPolicy?.hidden.orEmpty()
                 appGate.reconcileHidden(
                     org.forgesworn.charter.enforce.appHideSet(
@@ -562,7 +637,9 @@ class WardenController(
             // Kintrinsic's transparency invariant forbids. Both edges are told.
             // `appPolicy` above has ALREADY dissolved live holds into its lists,
             // so it answers "and what is it now?" for a hold that just ended.
-            val notifier = holdNotifier
+            // Not on a degraded tick (F1): nothing actually moved, and the
+            // live-holds read shares the store that just failed.
+            val notifier = holdNotifier.takeUnless { inputs.degraded }
             val memory = holdMemory
             if (notifier != null && memory != null) {
                 runCatching {
@@ -806,6 +883,9 @@ class WardenController(
     companion object {
         private const val TAG = "WardenController"
 
+        /** How often a warden that failed to initialise is tried again. */
+        private const val INIT_RETRY_SECS = 30L
+
         /** Enumerating every installed package costs real time on a phone, so
          *  an open window's account refreshes on this cadence rather than every
          *  tick. A window that shuts is always accounted once more regardless. */
@@ -867,3 +947,13 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
         const val ACTION_HIDE_LOCK = "org.forgesworn.charter.HIDE_LOCK"
     }
 }
+
+/**
+ * Whether the install lock must be up (F2). [pairing] is null when the pairing
+ * answer could not be had at all (an error reply or a throw): that is held as
+ * paired, like a record that exists but will not read, because releasing a
+ * device is never the answer to a read failure. Only a readable "unpaired"
+ * stands it down, and a guardian's open maintenance window.
+ */
+internal fun installLockWanted(pairing: CharterCore.PairingState?, maintenanceOpen: Boolean): Boolean =
+    (pairing?.paired ?: true) && !maintenanceOpen

@@ -14,6 +14,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.forgesworn.charter.native.CharterCore
+import org.forgesworn.charter.native.wardMessageOr
 import org.forgesworn.charter.service.ActivityLockController
 
 /**
@@ -700,7 +701,7 @@ class LockActivity : Activity() {
                             asked = false
                             askOutcome = null
                             paintAsk()
-                            askStatus.text = "Couldn't reach your guardian — try again."
+                            askStatus.text = res.wardMessageOr("Couldn't reach your guardian — try again.")
                         }
                     }
                 }

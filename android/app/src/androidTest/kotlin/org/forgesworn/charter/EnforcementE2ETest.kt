@@ -62,7 +62,7 @@ class EnforcementE2ETest {
 
     @Test
     fun abiVersionMatches() {
-        assertEquals(1, CharterCore.abiVersion())
+        assertEquals(2, CharterCore.abiVersion())
     }
 
     /**

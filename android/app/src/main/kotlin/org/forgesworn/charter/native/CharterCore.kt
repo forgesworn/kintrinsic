@@ -17,15 +17,28 @@ object CharterCore {
         val subject: String?,
         val enforceMode: String,
         val error: String?,
+        /** The warden is up but DEGRADED (M6): its machine key would not load,
+         *  so it enforces the cached clauses with no relay and cannot pair.
+         *  NOT an init failure — run the warden exactly as usual. */
+        val transportUnavailable: Boolean = false,
+        /** Why, while degraded (diagnostic; never shown to the ward). */
+        val keyError: String? = null,
+        /** The pairing record exists but would not READ (F2). [paired] is
+         *  then true: the device is held exactly as paired while it retries. */
+        val pairingUnreadable: Boolean = false,
     )
 
     data class PairingState(
+        /** True for an unreadable pairing too ([pairingUnreadable]): the
+         *  install lock hangs off this and must never drop on a read error. */
         val paired: Boolean,
         val guardianShort: String?,
         val subject: String?,
         val relays: List<String> = emptyList(),
         /** Parent-facing rejection text when a `pair` call was refused. */
         val error: String? = null,
+        /** The pairing record exists but would not READ (F2); retried each poll. */
+        val pairingUnreadable: Boolean = false,
     )
 
     data class PollResult(
@@ -90,10 +103,68 @@ object CharterCore {
         val dormant: Boolean,
     )
 
+    private const val TAG = "CharterCore"
+
     fun abiVersion(): Int = CharterNative.charterAbiVersion()
 
-    fun init(baseDir: String, enforceMode: String, appVersionCode: Long): InitResult {
-        val o = JSONObject(CharterNative.charterInit(baseDir, enforceMode, appVersionCode))
+    /** The JNI surface this build was written against: `ABI_VERSION` in
+     *  `android/jni/src/lib.rs`. Bump the two together. */
+    const val EXPECTED_ABI_VERSION = 2
+
+    /** The native core was refused (F3): a `.so` from another ABI, or none. */
+    class AbiMismatch(message: String) : IllegalStateException(message)
+
+    /**
+     * Why the native core is refused, or null when it answered
+     * [EXPECTED_ABI_VERSION]. Pure, so the comparison is host-testable.
+     *
+     * `jniLibs` is not rebuilt by gradle, so a plain `assembleRelease` can
+     * package a stale `.so`. A mismatched surface may read arguments that were
+     * never passed, so nothing past the probe may be called into it.
+     */
+    fun abiRefusal(reported: Result<Int>): String? = reported.fold(
+        onSuccess = {
+            if (it == EXPECTED_ABI_VERSION) {
+                null
+            } else {
+                "native core ABI $it, this build expects $EXPECTED_ABI_VERSION"
+            }
+        },
+        onFailure = { "native core unavailable: $it" },
+    )
+
+    /** Probed once per process: the `.so` cannot change under a running one. */
+    private val refusal: String? by lazy {
+        abiRefusal(runCatching { CharterNative.charterAbiVersion() }).also {
+            // runCatching: `Log` is a stub off-device (host unit tests).
+            if (it != null) runCatching { android.util.Log.e(TAG, "refusing the native core: $it") }
+        }
+    }
+
+    /** Every JNI call goes through here, so a refused core is never called
+     *  past its ABI probe. Throws [AbiMismatch], which every caller already
+     *  treats as a failed call. */
+    private fun jni(): CharterNative {
+        refusal?.let { throw AbiMismatch(it) }
+        return CharterNative
+    }
+
+    /**
+     * Start the warden. A refused native core (F3) comes back as an init
+     * FAILURE, exactly like one that would not start: the caller then holds
+     * the device in the failed-init state and retries, and no further JNI is
+     * made.
+     */
+    fun init(
+        baseDir: String,
+        enforceMode: String,
+        appVersionCode: Long,
+        appVersionName: String = "",
+    ): InitResult {
+        refusal?.let { return InitResult("", false, null, null, enforceMode, it) }
+        val o = JSONObject(
+            jni().charterInit(baseDir, enforceMode, appVersionCode, appVersionName),
+        )
         return InitResult(
             machinePubkey = o.optString("machine_pubkey", o.optString("machinePubkey", "")),
             paired = o.optBoolean("paired", false),
@@ -101,16 +172,19 @@ object CharterCore {
             subject = o.optStringOrNull("subject"),
             enforceMode = o.optString("enforce_mode", o.optString("enforceMode", "enforce")),
             error = o.optStringOrNull("error"),
+            transportUnavailable = o.optBoolean("transport_unavailable", false),
+            keyError = o.optStringOrNull("key_error"),
+            pairingUnreadable = o.optBoolean("pairing_unreadable", false),
         )
     }
 
-    fun deviceCode(): String = CharterNative.charterDeviceCode()
+    fun deviceCode(): String = jni().charterDeviceCode()
 
     fun pairingState(): PairingState =
-        parsePairingState(JSONObject(CharterNative.charterPairingState()))
+        parsePairingState(JSONObject(jni().charterPairingState()))
 
     fun setPairing(guardianHex: String, subjectHex: String): PairingState =
-        parsePairingState(JSONObject(CharterNative.charterSetPairing(guardianHex, subjectHex)))
+        parsePairingState(JSONObject(jni().charterSetPairing(guardianHex, subjectHex)))
 
     /**
      * Pin the guardian from a pasted `bunker://` link. On refusal the returned
@@ -118,7 +192,7 @@ object CharterCore {
      * reflects the unchanged prior state.
      */
     fun pair(bunkerUri: String, nowUnix: Long): PairingState {
-        val o = JSONObject(CharterNative.charterPair(bunkerUri, nowUnix))
+        val o = JSONObject(jni().charterPair(bunkerUri, nowUnix))
         return if (o.has("error")) {
             pairingState().copy(error = o.optString("error"))
         } else {
@@ -128,7 +202,7 @@ object CharterCore {
 
     /** One relay round. Blocking network IO — call from the slow worker only. */
     fun pollOnce(nowUnix: Long): PollResult {
-        val o = JSONObject(CharterNative.charterPollOnce(nowUnix))
+        val o = JSONObject(jni().charterPollOnce(nowUnix))
         return PollResult(
             polled = o.optBoolean("polled", false),
             clausesSeen = o.optInt("clauses_seen", 0),
@@ -147,6 +221,7 @@ object CharterCore {
             subject = o.optStringOrNull("subject"),
             relays = (0 until relaysArr.length()).map { relaysArr.getString(it) },
             error = o.optStringOrNull("error"),
+            pairingUnreadable = o.optBoolean("pairing_unreadable", false),
         )
     }
 
@@ -180,7 +255,7 @@ object CharterCore {
      * which has already dissolved these into its lists.
      */
     fun appHolds(nowUnix: Long): List<AppHold> {
-        val raw = CharterNative.charterAppHolds(nowUnix)
+        val raw = jni().charterAppHolds(nowUnix)
         if (raw.isBlank()) return emptyList()
         return try {
             val a = JSONArray(raw)
@@ -196,14 +271,32 @@ object CharterCore {
     }
 
     /**
-     * Parse the per-app policy AS ENFORCED AT [nowUnix]; null when none applies
-     * (empty / paused). Live holds are already folded into the lists.
+     * A per-app enforcement answer the core could not give (F1): an
+     * `{"error":…}` reply, or one that will not parse. NEVER read as the empty
+     * answer: to the app gate "no policy" and "no suspensions" mean "lift every
+     * block", which a store read error must not do. The caller keeps what it
+     * last applied instead.
      */
-    fun appPolicy(nowUnix: Long): AppPolicy? {
-        val raw = CharterNative.charterAppPolicy(nowUnix)
+    class Unreadable(message: String) : RuntimeException(message)
+
+    /**
+     * Parse the per-app policy AS ENFORCED AT [nowUnix]; null when none applies
+     * (empty / paused). Live holds are already folded into the lists. Throws
+     * [Unreadable] when the core could not read it (F1).
+     */
+    fun appPolicy(nowUnix: Long): AppPolicy? = parseAppPolicy(jni().charterAppPolicy(nowUnix))
+
+    /** [appPolicy]'s parse, pure so it is host-testable. "" is "none applies";
+     *  an error reply or a malformed one throws [Unreadable]. */
+    fun parseAppPolicy(raw: String): AppPolicy? {
         if (raw.isBlank()) return null
+        val o = try {
+            JSONObject(raw)
+        } catch (t: Throwable) {
+            throw Unreadable("app policy: malformed reply")
+        }
+        if (o.has("error")) throw Unreadable("app policy: ${o.optString("error")}")
         return try {
-            val o = JSONObject(raw)
             fun list(key: String): List<String> {
                 val a = o.optJSONArray(key) ?: return emptyList()
                 return (0 until a.length()).map { a.getString(it) }
@@ -216,42 +309,46 @@ object CharterCore {
                 // key parses to an empty list, never a failure.
                 hidden = list("hidden"),
             )
-        } catch (_: Throwable) {
-            null
+        } catch (t: Throwable) {
+            throw Unreadable("app policy: malformed reply")
         }
     }
 
     /**
      * The packages the per-app RULE clause blocks RIGHT NOW at [nowUnix] —
      * blocked outright, or outside their allowed hours. Schedule-dependent, so
-     * it is recomputed each tick. Empty when none apply / no clause / malformed
-     * (fail-safe: never suspend on a parse error).
+     * it is recomputed each tick. Empty when none apply / no clause / a
+     * malformed clause (the core's fail-safe); throws [Unreadable] when the
+     * core could not read the clause at all (F1).
      */
-    fun appRuleSuspensions(nowUnix: Long): List<String> {
-        val raw = CharterNative.charterAppRuleSuspensions(nowUnix)
-        if (raw.isBlank()) return emptyList()
-        return try {
-            val a = JSONArray(raw)
-            (0 until a.length()).map { a.getString(it) }
-        } catch (_: Throwable) {
-            emptyList()
-        }
-    }
+    fun appRuleSuspensions(nowUnix: Long): List<String> =
+        parsePackageList("app rules", jni().charterAppRuleSuspensions(nowUnix))
 
     /**
      * The packages a named-times bucket has spent (either axis) right now —
-     * empty when none apply / no clause / malformed (fail-safe: never
-     * suspend on a parse error). Spending a bucket suspends only ITS apps,
-     * never the whole device.
+     * empty when none apply / no clause / a malformed clause; throws
+     * [Unreadable] when the core could not read it (F1). Spending a bucket
+     * suspends only ITS apps, never the whole device.
      */
-    fun bucketSuspensions(nowUnix: Long): List<String> {
-        val raw = CharterNative.charterBucketSuspensions(nowUnix)
-        if (raw.isBlank()) return emptyList()
+    fun bucketSuspensions(nowUnix: Long): List<String> =
+        parsePackageList("buckets", jni().charterBucketSuspensions(nowUnix))
+
+    /**
+     * A package-list answer from the core, pure so it is host-testable. The
+     * core always sends a JSON array (`[]` for none), so anything else — an
+     * `{"error":…}`, a blank or a malformed reply — throws [Unreadable] (F1).
+     */
+    fun parsePackageList(what: String, raw: String): List<String> {
+        val trimmed = raw.trim()
+        if (trimmed.startsWith("{")) {
+            val err = runCatching { JSONObject(trimmed).optString("error", "") }.getOrDefault("")
+            throw Unreadable("$what: ${err.ifBlank { "unexpected reply" }}")
+        }
         return try {
-            val a = JSONArray(raw)
+            val a = JSONArray(trimmed)
             (0 until a.length()).map { a.getString(it) }
-        } catch (_: Throwable) {
-            emptyList()
+        } catch (t: Throwable) {
+            throw Unreadable("$what: malformed reply")
         }
     }
 
@@ -275,7 +372,7 @@ object CharterCore {
     /** Every named bucket's picture plus the labelled `askFirst` list — the
      *  ward's own mirror surface (Task 9 UI consumes this). */
     fun bucketViews(nowUnix: Long): Pair<List<BucketView>, List<AskFirstApp>> {
-        val raw = CharterNative.charterBucketViews(nowUnix)
+        val raw = jni().charterBucketViews(nowUnix)
         if (raw.isBlank()) return emptyList<BucketView>() to emptyList()
         return try {
             val o = JSONObject(raw)
@@ -308,7 +405,7 @@ object CharterCore {
     /** The ward's tethering posture right now — anything unexpected reads as
      *  "blocked" (fail-safe, matching the Rust side's every-direction default). */
     fun tetheringMode(nowUnix: Long): String =
-        when (val m = CharterNative.charterTetheringMode(nowUnix)) {
+        when (val m = jni().charterTetheringMode(nowUnix)) {
             "raw", "filtered" -> m
             else -> "blocked"
         }
@@ -335,7 +432,7 @@ object CharterCore {
 
     /** Parse the current DNS plan; null when not paired (blank) or malformed. */
     fun dnsPlan(): DnsPlan? {
-        val raw = CharterNative.charterDnsPlan()
+        val raw = jni().charterDnsPlan()
         if (raw.isBlank()) return null
         return try {
             val root = JSONObject(raw)
@@ -368,17 +465,17 @@ object CharterCore {
 
     /** Report the device's installed launchable apps (JSON `[{pkg,label}]`). */
     fun setInstalledApps(appsJson: String) {
-        CharterNative.charterSetInstalledApps(appsJson)
+        jni().charterSetInstalledApps(appsJson)
     }
 
     /** Report the boot this warden is running under, so it can count the ones
      *  it wasn't running for. See [CharterNative.charterNoteBoot]. */
     fun noteBoot(bootCount: Long, nowUnix: Long) {
-        CharterNative.charterNoteBoot(bootCount, nowUnix)
+        jni().charterNoteBoot(bootCount, nowUnix)
     }
 
     fun ingestClause(eventJson: String, nowUnix: Long): ClauseResult {
-        val o = JSONObject(CharterNative.charterIngestClause(eventJson, nowUnix))
+        val o = JSONObject(jni().charterIngestClause(eventJson, nowUnix))
         return ClauseResult(
             accepted = o.optBoolean("accepted", false),
             kind = o.optStringOrNull("kind"),
@@ -398,13 +495,13 @@ object CharterCore {
         foregroundPkg: String? = null,
     ): List<ChildDecision> {
         val arr = JSONArray(
-            CharterNative.charterTick(activeSubjectHex, screenInteractive, nowUnix, foregroundPkg),
+            jni().charterTick(activeSubjectHex, screenInteractive, nowUnix, foregroundPkg),
         )
         return (0 until arr.length()).map { parseDecision(arr.getJSONObject(it)) }
     }
 
     fun timeLeft(subjectHex: String?, nowUnix: Long): TimeLeft {
-        val o = JSONObject(CharterNative.charterTimeLeft(subjectHex, nowUnix))
+        val o = JSONObject(jni().charterTimeLeft(subjectHex, nowUnix))
         return TimeLeft(
             known = o.optBoolean("known", false),
             locked = o.optBoolean("locked", true),
@@ -419,7 +516,7 @@ object CharterCore {
     data class ListeningView(val exempt: Set<String>, val secsLeft: Long?)
 
     fun listeningView(nowUnix: Long, locked: Boolean, audioPlaying: Boolean): ListeningView {
-        val o = JSONObject(CharterNative.charterListeningView(nowUnix, locked, audioPlaying))
+        val o = JSONObject(jni().charterListeningView(nowUnix, locked, audioPlaying))
         val arr = o.optJSONArray("exempt")
         val pkgs = buildSet {
             for (i in 0 until (arr?.length() ?: 0)) arr!!.optString(i)?.let { add(it) }
@@ -434,7 +531,7 @@ object CharterCore {
      *  whenever the clause is absent, unusable, expired, or the lock is one
      *  this clause may not outlive. */
     fun alwaysAvailable(nowUnix: Long, locked: Boolean, lockReason: String): Set<String> {
-        val arr = JSONObject(CharterNative.charterAlwaysAvailable(nowUnix, locked, lockReason))
+        val arr = JSONObject(jni().charterAlwaysAvailable(nowUnix, locked, lockReason))
             .optJSONArray("open")
         return buildSet {
             for (i in 0 until (arr?.length() ?: 0)) arr!!.optString(i)?.let { add(it) }
@@ -442,7 +539,7 @@ object CharterCore {
     }
 
     fun lockInfo(subjectHex: String?, nowUnix: Long): LockInfo {
-        val o = JSONObject(CharterNative.charterLockInfo(subjectHex, nowUnix))
+        val o = JSONObject(jni().charterLockInfo(subjectHex, nowUnix))
         return LockInfo(
             locked = o.optBoolean("locked", true),
             reason = o.optString("reason", "unknown"),
@@ -456,7 +553,7 @@ object CharterCore {
         )
     }
 
-    fun setEnforceMode(mode: String) = CharterNative.charterSetEnforceMode(mode)
+    fun setEnforceMode(mode: String) = jni().charterSetEnforceMode(mode)
 
     /** One lifeline entry the lock screen can dial (spec D9). */
     data class LifelineNumber(val label: String, val number: String)
@@ -500,7 +597,7 @@ object CharterCore {
      * feature exists to prevent.
      */
     fun lifelineView(): LifelineView {
-        val raw = CharterNative.charterLifeline()
+        val raw = jni().charterLifeline()
         if (raw.isEmpty()) return LifelineView()
         return runCatching {
             if (raw.trimStart().startsWith("[")) {
@@ -541,7 +638,7 @@ object CharterCore {
      * hasn't enabled it.
      */
     fun breakGlass(nowUnix: Long): BreakGlassResult {
-        val raw = CharterNative.charterBreakGlass(nowUnix)
+        val raw = jni().charterBreakGlass(nowUnix)
         if (raw.isEmpty()) return BreakGlassResult(false, reason = "unavailable")
         return runCatching {
             val o = org.json.JSONObject(raw)
@@ -577,7 +674,7 @@ object CharterCore {
 
     /** Null when no charter is configured yet ("no charter yet", never a guess). */
     fun scheduleView(nowUnix: Long): ScheduleView? {
-        val raw = CharterNative.charterScheduleView(nowUnix)
+        val raw = jni().charterScheduleView(nowUnix)
         if (raw.isEmpty()) return null
         return runCatching {
             val o = JSONObject(raw)
@@ -599,7 +696,23 @@ object CharterCore {
         }.getOrNull()
     }
 
-    data class SubmitResult(val reqId: String?, val error: String?)
+    data class SubmitResult(
+        val reqId: String?,
+        val error: String?,
+        /** Machine-readable refusal (G-7): "rate-limited", "not-paired",
+         *  "invalid", "failed"; null on success or from an older core. */
+        val code: String? = null,
+    ) {
+        /** What to tell the ward when the ask did not go: the core's own
+         *  words for a rate-limit refusal (written for the ward to read), and
+         *  [fallback] for every fault they cannot act on. */
+        fun wardMessage(fallback: String): String =
+            if (code == RATE_LIMITED && !error.isNullOrBlank()) error else fallback
+
+        companion object {
+            const val RATE_LIMITED = "rate-limited"
+        }
+    }
 
     data class RequestRecord(
         val reqId: String,
@@ -611,16 +724,17 @@ object CharterCore {
 
     /** Ask the guardian ("time.extend"). Blocking network IO — worker only. */
     fun submitRequest(op: String, paramsJson: String): SubmitResult {
-        val o = JSONObject(CharterNative.charterSubmitRequest(op, paramsJson))
+        val o = JSONObject(jni().charterSubmitRequest(op, paramsJson))
         return SubmitResult(
             reqId = o.optStringOrNull("reqId"),
             error = o.optStringOrNull("error"),
+            code = o.optStringOrNull("code"),
         )
     }
 
     /** Newest-first request records. */
     fun listRequests(limit: Int): List<RequestRecord> {
-        val arr = JSONArray(CharterNative.charterListRequests(limit))
+        val arr = JSONArray(jni().charterListRequests(limit))
         return (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
             RequestRecord(
@@ -662,7 +776,7 @@ object CharterCore {
 
     /** Every parked install, oldest-first. */
     fun drainInstalls(nowUnix: Long): List<PendingInstall> {
-        val arr = JSONArray(CharterNative.charterDrainInstalls(nowUnix))
+        val arr = JSONArray(jni().charterDrainInstalls(nowUnix))
         return (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
             PendingInstall(
@@ -683,7 +797,7 @@ object CharterCore {
 
     /** Report an install outcome so the core clears or retries the directive. */
     fun installResult(reqId: String, outcome: InstallOutcome, reason: String = "") {
-        CharterNative.charterInstallResult(reqId, outcome.wire, reason)
+        jni().charterInstallResult(reqId, outcome.wire, reason)
     }
 
     private fun parseDecision(o: JSONObject): ChildDecision {
@@ -719,11 +833,11 @@ object CharterCore {
      * than an Update button that silently reappears.
      */
     fun installHealth(nowUnix: Long): String =
-        runCatching { CharterNative.charterInstallHealth(nowUnix) }.getOrDefault("")
+        runCatching { jni().charterInstallHealth(nowUnix) }.getOrDefault("")
 
     /** Is a guardian's signed maintenance window open? Fail-closed to false. */
     fun maintenanceOpen(nowUnix: Long): Boolean = runCatching {
-        org.json.JSONObject(CharterNative.charterMaintenanceOpen(nowUnix)).optBoolean("open", false)
+        org.json.JSONObject(jni().charterMaintenanceOpen(nowUnix)).optBoolean("open", false)
     }.getOrDefault(false)
 
     /** One install window as this device saw it. `null` when none has opened
@@ -739,7 +853,7 @@ object CharterCore {
     )
 
     fun maintenanceSpan(nowUnix: Long): MaintenanceSpan? = runCatching {
-        val o = org.json.JSONObject(CharterNative.charterMaintenanceSpan(nowUnix))
+        val o = org.json.JSONObject(jni().charterMaintenanceSpan(nowUnix))
         val started = o.optLong("startedAt", 0L)
         if (started <= 0L) return@runCatching null
         MaintenanceSpan(
@@ -752,6 +866,11 @@ object CharterCore {
 
     /** Report the guardian's account of what came through their window. */
     fun setInstallWindow(reportJson: String) {
-        CharterNative.charterSetInstallWindow(reportJson)
+        jni().charterSetInstallWindow(reportJson)
     }
 }
+
+/** [CharterCore.SubmitResult.wardMessage] for a result that may not exist at
+ *  all (the native call threw): no result is a fault, so [fallback]. */
+fun CharterCore.SubmitResult?.wardMessageOr(fallback: String): String =
+    this?.wardMessage(fallback) ?: fallback

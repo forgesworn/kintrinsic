@@ -10,6 +10,6 @@ import org.junit.runner.RunWith
 class CharterNativeTest {
     @Test
     fun rustCoreLoadsAndAnswers() {
-        assertEquals(1, CharterNative.charterAbiVersion())
+        assertEquals(2, CharterNative.charterAbiVersion())
     }
 }

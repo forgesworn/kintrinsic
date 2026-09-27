@@ -16,8 +16,14 @@ object CharterNative {
     /** Surface version; Kotlin refuses to run on a mismatch. */
     external fun charterAbiVersion(): Int
 
-    /** Initialize the warden over [baseDir]; returns init JSON. */
-    external fun charterInit(baseDir: String, enforceMode: String, appVersionCode: Long): String
+    /** Initialize the warden over [baseDir]; returns init JSON. [appVersionName]
+     *  rides STATUS as `appVersionName` (diagnostic; "" = unknown). */
+    external fun charterInit(
+        baseDir: String,
+        enforceMode: String,
+        appVersionCode: Long,
+        appVersionName: String,
+    ): String
 
     /** Machine pubkey grouped 8×8 for the pairing display. */
     external fun charterDeviceCode(): String
