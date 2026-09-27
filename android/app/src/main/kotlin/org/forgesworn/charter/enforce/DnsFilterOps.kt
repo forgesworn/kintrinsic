@@ -16,19 +16,29 @@ interface DnsFilterOps {
      * retries (the DNS-filter analog of the lock-surface success-only latch).
      */
     fun apply(revision: String): Boolean
-    /** Pin the filter always-on with lockdown (fail-closed). Idempotent. */
+    /** Pin the filter always-on (without lockdown; see [VpnDnsFilterOps.pinAlwaysOn]). Idempotent. */
     fun pinAlwaysOn()
     /** Unpin + stop (used on release / clear). */
     fun clear()
     /** True iff the filter is currently pinned always-on (real OS state). */
     fun isPinned(): Boolean
+    /**
+     * True iff the filter's tunnel is actually up in this process (05-B7).
+     * Being pinned says nothing about that: a revoked or crashed tunnel, or
+     * an `establish()` that returned null, leaves the pin in place while DNS
+     * flows unfiltered.
+     */
+    fun isLive(): Boolean
 }
 
 /**
- * Production impl: a DO-pinned always-on VpnService. `pinAlwaysOn` sets lockdown
- * so if the VpnService dies the OS blocks the ward's data until it self-heals —
- * the fail-closed posture (a filter crash must never be an unfiltered window).
- * The captive-portal login app is lockdown-exempt so joining Wi-Fi still works.
+ * Production impl: a DO-pinned always-on VpnService, pinned WITHOUT lockdown
+ * (see [pinAlwaysOn] for why). That makes it fail-soft, not fail-closed: if the
+ * tunnel dies, DNS flows unfiltered until it is back. The warden narrows that
+ * window by checking [isLive] every tick and restarting a dead tunnel (05-B7).
+ * What the tunnel sees is the system resolver plus the well-known public
+ * resolvers it routes to itself (05-G4); a resolver outside that list, reached
+ * directly by an app, is not seen.
  */
 class VpnDnsFilterOps(
     private val context: Context,
@@ -74,6 +84,8 @@ class VpnDnsFilterOps(
     override fun isPinned(): Boolean =
         runCatching { dpm.getAlwaysOnVpnPackage(admin) == context.packageName }.getOrDefault(false)
 
+    override fun isLive(): Boolean = CharterVpnService.tunnelUp
+
     companion object {
         private const val TAG = "VpnDnsFilterOps"
     }
@@ -93,4 +105,6 @@ class FakeDnsFilterOps : DnsFilterOps {
     override fun pinAlwaysOn() { pinned = true }
     override fun clear() { cleared = true }
     override fun isPinned(): Boolean = pinned
+    var live = true
+    override fun isLive(): Boolean = live
 }

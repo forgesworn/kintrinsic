@@ -195,8 +195,23 @@ fun <T> syncOnChange(next: T, lastPushed: T?, push: (T) -> Boolean): T? =
 
 /** Own the install-lockdown + anti-tamper restrictions (port-spec §3.4). */
 interface RestrictionOps {
-    /** Apply the baseline restriction set — only once a charter exists (I17). */
-    fun applyBaseline()
+    /**
+     * Apply the whole baseline restriction set — only once a charter exists
+     * (I17). Every restriction is attempted on its own: one the platform
+     * refuses no longer stops the ones after it being set (05-B1/05-G2).
+     */
+    fun applyBaseline(): PostureReport
+
+    /**
+     * The spec's `posture()` check (05-G2): re-read the standing part of the
+     * baseline and put back anything that is missing. Level-triggered and
+     * cheap (one read, writes only on a difference), so the warden calls it
+     * on a slow cadence for as long as a charter exists. Leaves alone the
+     * restrictions another level-triggered path owns: the install lock (a
+     * guardian's maintenance window stands it down) and the tethering config
+     * (a tethering grant lifts it).
+     */
+    fun reassertPosture(): PostureReport
 
     /**
      * Set ONLY the install lock, level-triggered every tick and independent of
@@ -220,6 +235,52 @@ interface RestrictionOps {
      * local-only AP legal. Anything unrecognized is treated as "blocked".
      */
     fun applyTetherMode(mode: String)
+}
+
+/**
+ * What one baseline pass did: the restrictions it had to (re)set because they
+ * were not in force, and the ones the platform refused. On a re-assertion a
+ * non-empty [reasserted] is drift — something took a restriction away.
+ */
+data class PostureReport(
+    val reasserted: List<String> = emptyList(),
+    val failed: List<String> = emptyList(),
+)
+
+/**
+ * The writes that bring the user restrictions to [desired], in [desired]'s
+ * order (the order is load-bearing for tethering; see
+ * [DpmRestrictionOps.applyTetherMode]). [isSet] reads the current state; null
+ * means the state could not be read, and then every restriction is written,
+ * because an unread state is never assumed to be right (fail-closed). Writes
+ * happen only on a difference, so a level-triggered caller costs one read a
+ * pass rather than a binder write per restriction.
+ */
+internal fun restrictionWrites(
+    desired: List<Pair<String, Boolean>>,
+    isSet: ((String) -> Boolean)?,
+): List<Pair<String, Boolean>> =
+    desired.filter { (key, on) -> isSet == null || isSet(key) != on }
+
+/**
+ * The tethering posture as ordered restriction targets. "filtered" locks the
+ * system Wi-Fi hotspot BEFORE freeing the config, and "blocked" locks config
+ * before freeing the hotspot key, so there is never a moment where both are
+ * clear and raw system tethering is legal. Anything unrecognised is "blocked".
+ */
+internal fun tetherTargets(mode: String): List<Pair<String, Boolean>> = when (mode) {
+    "raw" -> listOf(
+        UserManager.DISALLOW_CONFIG_TETHERING to false,
+        UserManager.DISALLOW_WIFI_TETHERING to false,
+    )
+    "filtered" -> listOf(
+        UserManager.DISALLOW_WIFI_TETHERING to true,
+        UserManager.DISALLOW_CONFIG_TETHERING to false,
+    )
+    else -> listOf(
+        UserManager.DISALLOW_CONFIG_TETHERING to true,
+        UserManager.DISALLOW_WIFI_TETHERING to false,
+    )
 }
 
 /** The budget loop's input: foreground package + screen interactivity. */
@@ -569,13 +630,20 @@ class DpmAppGateOps(
 class DpmRestrictionOps(
     private val dpm: DevicePolicyManager,
     private val admin: ComponentName,
+    /**
+     * True only for a debuggable (debug) build: `DISALLOW_DEBUGGING_FEATURES`
+     * is then left out of the baseline, so the on-metal liveness rounds
+     * (Doze, crash, drift) can keep an adb session on a charted test phone.
+     * A release build is never debuggable, so this is always false there.
+     */
+    allowDebugging: Boolean = false,
 ) : RestrictionOps {
 
     /**
      * The load-bearing install-lockdown (I28) + the clock-tamper close
      * (DISALLOW_CONFIG_DATE_TIME, I7) + casual-tamper guards.
      */
-    private val baseline = listOf(
+    private val fullBaseline = listOf(
         UserManager.DISALLOW_INSTALL_APPS,
         UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
         UserManager.DISALLOW_CONFIG_DATE_TIME,
@@ -613,25 +681,48 @@ class DpmRestrictionOps(
         UserManager.DISALLOW_DEBUGGING_FEATURES,
     )
 
+    private val baseline =
+        if (allowDebugging) fullBaseline - UserManager.DISALLOW_DEBUGGING_FEATURES else fullBaseline
+
     /**
-     * Level-triggered, but only ACTS on a difference. This runs every tick, and
-     * blindly re-adding restrictions that are already set cost a child's phone
-     * ~68 redundant binder calls a minute, all day, each one logged by the
-     * system (observed on Robin's phone, 2026-07-26).
+     * Only ACTS on a difference. Blindly re-adding restrictions that are
+     * already set cost a child's phone ~68 redundant binder calls a minute,
+     * all day, each one logged by the system (observed on Robin's phone,
+     * 2026-07-26).
      *
-     * `maintenanceOpen` is the one deliberate loosening: while a guardian's
-     * signed, expiring window is open, the install lock stands down so a cabled
-     * phone can be repaired. Everything else in the baseline stays on, and the
-     * lock is re-applied the moment the window shuts — including after a
-     * reboot, because it is re-derived from the clause every tick.
+     * Each restriction is set on its own: an OEM that refuses one key used to
+     * throw out of the loop and leave every key after it unset, and the
+     * warden latched the baseline as applied anyway (05-B1/05-G2).
      */
-    override fun applyBaseline() {
+    override fun applyBaseline(): PostureReport = assertRestrictions(baseline)
+
+    override fun reassertPosture(): PostureReport = assertRestrictions(postureKeys)
+
+    private fun assertRestrictions(keys: List<String>): PostureReport {
         val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
-        for (r in baseline) {
-            // Unknown current state (a read that failed) → apply, never assume.
-            if (current?.getBoolean(r, false) != true) dpm.addUserRestriction(admin, r)
+        val isSet: ((String) -> Boolean)? = current?.let { b -> { k: String -> b.getBoolean(k, false) } }
+        val done = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+        // Unknown current state (a read that failed) → apply, never assume.
+        for ((key, _) in restrictionWrites(keys.map { it to true }, isSet)) {
+            runCatching { dpm.addUserRestriction(admin, key) }
+                .onSuccess { done += key }
+                .onFailure {
+                    failed += key
+                    Log.e(TAG, "could not set $key", it)
+                }
         }
-        dpm.setAutoTimeRequired(admin, true)
+        @Suppress("DEPRECATION")
+        runCatching {
+            if (!dpm.autoTimeRequired) {
+                dpm.setAutoTimeRequired(admin, true)
+                done += AUTO_TIME_REQUIRED
+            }
+        }.onFailure {
+            failed += AUTO_TIME_REQUIRED
+            Log.e(TAG, "could not require automatic time", it)
+        }
+        return PostureReport(done, failed)
     }
 
     /**
@@ -655,6 +746,13 @@ class DpmRestrictionOps(
         UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
     )
 
+    /** The standing part of the baseline that [reassertPosture] owns: all of
+     *  it except the install lock ([setInstallLock]) and the tethering config
+     *  ([applyTetherMode]), which are re-derived every tick by their own
+     *  paths and are deliberately lifted by guardian grants. */
+    private val postureKeys: List<String> =
+        baseline - installLock.toSet() - UserManager.DISALLOW_CONFIG_TETHERING
+
     override fun setInstallLock(locked: Boolean) {
         val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
         for (r in installLock) {
@@ -670,44 +768,40 @@ class DpmRestrictionOps(
     }
 
     override fun clearBaseline() {
-        baseline.forEach { dpm.clearUserRestriction(admin, it) }
+        fullBaseline.forEach { dpm.clearUserRestriction(admin, it) }
         // Not in the baseline list (only a filtered-tethering session sets it),
         // but un-chartering must leave NO Kintrinsic restriction behind.
         dpm.clearUserRestriction(admin, UserManager.DISALLOW_WIFI_TETHERING)
         dpm.setAutoTimeRequired(admin, false)
     }
 
-    /** The last mode actually pushed to the platform, so a level-triggered
-     *  caller doesn't re-issue identical DPM calls every tick. Robin's phone
-     *  logged ~68 redundant restriction changes a minute doing exactly that
-     *  (2026-07-26) — pure binder traffic and battery on a child's device. */
-    @Volatile private var lastTetherMode: String? = null
-
+    /**
+     * Level-triggered against the platform's REAL state, not a remembered
+     * mode. This used to latch the mode before pushing it, so one throw left
+     * the posture wrong for the rest of the process, and a restriction that
+     * drifted was never put back (05-B1/05-G2). Now each pass reads the
+     * restrictions and writes only the difference, which keeps the binder
+     * cost the old latch was there to save (Robin's phone, 2026-07-26) and
+     * heals drift within a tick. The write order is [tetherTargets]'s.
+     */
     override fun applyTetherMode(mode: String) {
-        if (mode == lastTetherMode) return
-        lastTetherMode = mode
-        when (mode) {
-            "raw" -> {
-                dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING)
-                dpm.clearUserRestriction(admin, UserManager.DISALLOW_WIFI_TETHERING)
-            }
-            "filtered" -> {
-                // Lock the SYSTEM Wi-Fi hotspot FIRST, then free config — never
-                // leave a window where both are clear and raw system tethering
-                // is momentarily legal.
-                dpm.addUserRestriction(admin, UserManager.DISALLOW_WIFI_TETHERING)
-                dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING)
-            }
-            else -> {
-                dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING)
-                dpm.clearUserRestriction(admin, UserManager.DISALLOW_WIFI_TETHERING)
-            }
+        val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
+        val isSet: ((String) -> Boolean)? = current?.let { b -> { k: String -> b.getBoolean(k, false) } }
+        for ((key, on) in restrictionWrites(tetherTargets(mode), isSet)) {
+            if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
         }
     }
 
     override fun isRestrictionActive(key: String): Boolean {
         val bundle = dpm.getUserRestrictions(admin)
         return bundle.getBoolean(key, false)
+    }
+
+    companion object {
+        private const val TAG = "DpmRestrictionOps"
+        /** How [PostureReport] names the automatic-time requirement, which is
+         *  a DPM policy rather than a user restriction. */
+        const val AUTO_TIME_REQUIRED = "auto_time_required"
     }
 }
 

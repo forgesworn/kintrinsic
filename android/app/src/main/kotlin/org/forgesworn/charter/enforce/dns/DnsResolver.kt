@@ -24,14 +24,25 @@ sealed class DnsDecision {
  * skew between the Rust DnsMode enum and this APK; the shipped enum is a closed
  * 4-variant set, so this fallback is unreachable today.
  * Domain matching is suffix-aware: "bad.example" also blocks "x.bad.example".
+ *
+ * Whenever the plan restricts anything, the public DNS-over-HTTPS endpoints in
+ * [DOH_ENDPOINTS] are refused too (05-G4), below a rewrite and a guardian's
+ * explicit exception but above the mode. A browser set to a custom secure-DNS
+ * provider would otherwise resolve every name through it, round this filter.
  */
 class DnsResolver(private val plan: DnsPlan) {
     private val rewrites = plan.rewrites.associate { it.host.lowercase() to it.answer }
+
+    /** Anything to protect: a restricting mode, or a forced rewrite. A plan
+     *  that restricts nothing (the unpaired pass-through) leaves DoH alone. */
+    private val guardsBypass =
+        plan.mode != "unrestricted" || plan.rewrites.isNotEmpty() || plan.safeSearch
 
     fun decide(q: DnsQuestion): DnsDecision {
         val name = q.name.lowercase()
         rewrites[name]?.let { return DnsDecision.Rewrite(it) }
         if (matches(name, plan.allowExceptions)) return DnsDecision.PassThrough
+        if (guardsBypass && matches(name, DOH_ENDPOINTS)) return DnsDecision.Block
         return when (plan.mode) {
             "locked" -> DnsDecision.Block
             "allowlist" -> if (matches(name, plan.allowDomains)) DnsDecision.PassThrough else DnsDecision.Block
@@ -48,3 +59,35 @@ class DnsResolver(private val plan: DnsPlan) {
             name == dl || name.endsWith(".$dl")
         }
 }
+
+/**
+ * Public DNS-over-HTTPS / DNS-over-TLS endpoints (suffix-matched). Refusing
+ * their names stops a browser's custom secure-DNS setting from taking every
+ * lookup round the filter; the resolvers' addresses are routed into the tunnel
+ * as well (`KnownResolvers`), for a client that dials them by address.
+ */
+internal val DOH_ENDPOINTS = listOf(
+    "dns.google",
+    "dns64.dns.google",
+    "cloudflare-dns.com",
+    "one.one.one.one",
+    "dns.quad9.net",
+    "dns9.quad9.net",
+    "dns10.quad9.net",
+    "dns11.quad9.net",
+    "doh.opendns.com",
+    "doh.familyshield.opendns.com",
+    "adguard-dns.com",
+    "dns.adguard.com",
+    "dns.nextdns.io",
+    "doh.cleanbrowsing.org",
+    "dns.mullvad.net",
+    "dns.controld.com",
+    "freedns.controld.com",
+    "doh.libredns.gr",
+    "dns.alidns.com",
+    "doh.pub",
+    "dns.twnic.tw",
+    // Firefox's canary: NXDOMAIN here tells it to leave DoH off.
+    "use-application-dns.net",
+)

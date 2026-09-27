@@ -72,6 +72,34 @@ class DnsResolverTest {
         assertTrue(DnsResolver(plan).decide(q("anything.example")) is DnsDecision.PassThrough)
     }
 
+    // 05-G4: a browser's custom secure-DNS provider must not take every lookup
+    // round the filter.
+    @Test fun doh_endpoints_are_refused_under_a_restricting_plan() {
+        val r = DnsResolver(blocklistPlan())
+        for (host in listOf("dns.google", "cloudflare-dns.com", "mozilla.cloudflare-dns.com",
+                "dns.quad9.net", "dns.nextdns.io", "use-application-dns.net")) {
+            assertTrue(host, r.decide(q(host)) is DnsDecision.Block)
+        }
+        // The provider's ordinary sites are not endpoints.
+        assertTrue(r.decide(q("www.google.com")) is DnsDecision.Rewrite)
+        assertTrue(r.decide(q("quad9.net")) is DnsDecision.PassThrough)
+    }
+
+    @Test fun doh_endpoints_are_refused_when_only_safesearch_is_forced() {
+        val plan = blocklistPlan().copy(mode = "unrestricted", blockDomains = emptyList())
+        assertTrue(DnsResolver(plan).decide(q("dns.google")) is DnsDecision.Block)
+    }
+
+    @Test fun a_plan_that_restricts_nothing_leaves_doh_alone() {
+        val plan = blocklistPlan().copy(mode = "unrestricted", rewrites = emptyList(), safeSearch = false)
+        assertTrue(DnsResolver(plan).decide(q("dns.google")) is DnsDecision.PassThrough)
+    }
+
+    @Test fun a_guardian_exception_overrides_the_doh_block() {
+        val plan = blocklistPlan().copy(allowExceptions = listOf("dns.google"))
+        assertTrue(DnsResolver(plan).decide(q("dns.google")) is DnsDecision.PassThrough)
+    }
+
     @Test fun unknown_mode_fails_closed() {
         // Version skew: a mode this APK doesn't recognize must block, not pass.
         val plan = blocklistPlan().copy(mode = "some-future-mode", rewrites = emptyList())

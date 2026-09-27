@@ -133,6 +133,7 @@ class LockActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        org.forgesworn.charter.service.ActivityLockController.lockAlive = true
         askThread = android.os.HandlerThread("charter-ask").apply { start() }
         askWorker = android.os.Handler(askThread.looper)
         // Best-effort pin; the service also asserts LockTask level-triggered.
@@ -190,6 +191,7 @@ class LockActivity : Activity() {
     }
 
     override fun onDestroy() {
+        org.forgesworn.charter.service.ActivityLockController.lockAlive = false
         runCatching { cameraManager?.unregisterTorchCallback(torchCallback) }
         ui.removeCallbacks(clockTick)
         runCatching { unregisterReceiver(hideReceiver) }

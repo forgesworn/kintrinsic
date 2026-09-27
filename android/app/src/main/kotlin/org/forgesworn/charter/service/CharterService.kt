@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import org.forgesworn.charter.MainActivity
 
@@ -39,6 +40,17 @@ import org.forgesworn.charter.MainActivity
  * charter, so a slow tick lands the same lock a fast one would, only later —
  * and "later" is bounded by the screen coming on, which is the first moment a
  * lock could matter. The relay poll's own cursor self-heals a missed window.
+ *
+ * ## Why an alarm as well
+ *
+ * A `Handler` timer runs on the uptime clock, which stops while the CPU
+ * sleeps, so in Doze the dark tick and the dark poll did not happen for hours
+ * (05-B2), and nothing brought the warden back if the process was killed
+ * (05-G1). [LivenessAlarm] fires through Doze every minute and [kick]s the
+ * loops: it runs a tick or a poll that is overdue, holding a wake lock only
+ * for as long as that takes, and restarts the service if it had died. It is
+ * also the watchdog the port-spec names: a tick wedged for
+ * [LivenessPolicy.WEDGED_MS] restarts the process.
  */
 class CharterService : Service() {
 
@@ -53,17 +65,54 @@ class CharterService : Service() {
     /** Both loops are running and may be re-paced — see [repace]. */
     @Volatile private var armed = false
 
+    /** When the last enforcement tick / relay poll finished, and when the
+     *  running tick (if any) started — `elapsedRealtime`, which counts deep
+     *  sleep. 0 = never / none. Read by [kick]. */
+    @Volatile private var lastTickAt = 0L
+    @Volatile private var tickStartedAt = 0L
+    @Volatile private var lastPollAt = 0L
+
+    private var tickWake: PowerManager.WakeLock? = null
+    private var pollWake: PowerManager.WakeLock? = null
+
+    /** One enforcement tick, timed for the watchdog. Worker thread only. */
+    private fun runTick(screenWas: Boolean? = null) {
+        tickStartedAt = SystemClock.elapsedRealtime()
+        try {
+            controller.tickAndApply(screenWas = screenWas)
+            // The D8 widget rides the tick (worker thread — JNI-safe);
+            // level-triggered inside push(), so unchanged minutes are free.
+            if (screenWas == null) org.forgesworn.charter.ui.TimeLeftWidget.push(this)
+        } catch (t: Throwable) {
+            Log.e(TAG, "tick failed", t)
+        } finally {
+            tickStartedAt = 0L
+            lastTickAt = SystemClock.elapsedRealtime()
+        }
+    }
+
+    /** One relay round plus the install drain. Slow worker only. */
+    private fun runPoll() {
+        try {
+            val r = controller.pollOnce()
+            // Every round logged: this is the bring-up visibility for the
+            // on-metal gates (offline reasons are routine, not silent).
+            Log.i(TAG, "poll: $r")
+            // Same worker (both are blocking IO): enact any guardian-approved
+            // installs the poll just delivered a grant for.
+            val installed = controller.drainAndInstall()
+            if (installed > 0) Log.i(TAG, "drained $installed install(s)")
+        } catch (t: Throwable) {
+            Log.e(TAG, "poll failed", t)
+        } finally {
+            lastPollAt = SystemClock.elapsedRealtime()
+        }
+    }
+
     private val tick = object : Runnable {
         override fun run() {
             if (!running) return
-            try {
-                controller.tickAndApply()
-                // The D8 widget rides the tick (worker thread — JNI-safe);
-                // level-triggered inside push(), so unchanged minutes are free.
-                org.forgesworn.charter.ui.TimeLeftWidget.push(this@CharterService)
-            } catch (t: Throwable) {
-                Log.e(TAG, "tick failed", t)
-            }
+            runTick()
             handler.postDelayed(this, if (interactive) TICK_MS else DARK_TICK_MS)
         }
     }
@@ -106,8 +155,7 @@ class CharterService : Service() {
         handler.removeCallbacks(tick)
         handler.post {
             // Bank the closing interval as what it WAS, not what it is now.
-            runCatching { controller.tickAndApply(screenWas = wasInteractive) }
-                .onFailure { Log.e(TAG, "boundary tick failed", it) }
+            runTick(screenWas = wasInteractive)
         }
         handler.post(tick)
         slowHandler.removeCallbacks(slowTick)
@@ -127,18 +175,7 @@ class CharterService : Service() {
     private val slowTick = object : Runnable {
         override fun run() {
             if (!running) return
-            try {
-                val r = controller.pollOnce()
-                // Every round logged: this is the bring-up visibility for the
-                // on-metal gates (offline reasons are routine, not silent).
-                Log.i(TAG, "poll: $r")
-                // Same worker (both are blocking IO): enact any guardian-approved
-                // installs the poll just delivered a grant for.
-                val installed = controller.drainAndInstall()
-                if (installed > 0) Log.i(TAG, "drained $installed install(s)")
-            } catch (t: Throwable) {
-                Log.e(TAG, "poll failed", t)
-            }
+            runPoll()
             slowHandler.postDelayed(this, if (interactive) SLOW_TICK_MS else DARK_SLOW_TICK_MS)
         }
     }
@@ -165,21 +202,113 @@ class CharterService : Service() {
             },
             Context.RECEIVER_NOT_EXPORTED,
         )
+        val pm = getSystemService(PowerManager::class.java)
+        tickWake = runCatching {
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "charter:tick").apply { setReferenceCounted(false) }
+        }.getOrNull()
+        pollWake = runCatching {
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "charter:poll").apply { setReferenceCounted(false) }
+        }.getOrNull()
+        // Outside the power-save allowlist Doze rate-limits the liveness
+        // alarm to roughly one every nine minutes. Said once, loudly, so a
+        // phone test can tell the two cases apart.
+        if (runCatching { pm.isIgnoringBatteryOptimizations(packageName) }.getOrDefault(false)) {
+            Log.i(TAG, "on the power-save allowlist: the liveness alarm runs every minute in Doze")
+        } else {
+            Log.w(TAG, "NOT on the power-save allowlist: Doze may pace the liveness alarm to ~9 min")
+        }
         running = true
+        LivenessAlarm.arm(this)
         handler.post {
-            controller.init()
+            // A native-load failure (a missing or mismatched library) throws
+            // out of init; it must not kill the process into a START_STICKY
+            // crash loop with the loops never armed (05-B13). The tick retries
+            // a failed init on its own pace.
+            tickStartedAt = SystemClock.elapsedRealtime()
+            try {
+                controller.init()
+            } catch (t: Throwable) {
+                Log.e(TAG, "warden init threw (the tick retries it)", t)
+            } finally {
+                tickStartedAt = 0L
+            }
             armed = true
             handler.post(tick)
             slowHandler.post(slowTick)
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Every start may arrive through startForegroundService (the alarm,
+        // the boot receiver, the DNS filter), so the foreground promise is
+        // kept on every one, not only the first.
+        runCatching { startForeground(NOTIF_ID, notification()) }
+            .onFailure { Log.e(TAG, "startForeground failed", it) }
+        LivenessAlarm.arm(this)
+        if (intent?.action == ACTION_KICK) kick()
+        return START_STICKY
+    }
+
+    /**
+     * The liveness alarm's visit (05-B2/05-G1): run whatever the frozen
+     * `Handler` loops have missed, each under a wake lock held only until it
+     * finishes, and restart a wedged process. Main thread; the work itself is
+     * posted to the loops' own workers, so it is serialised with them.
+     */
+    private fun kick() {
+        try {
+            val now = SystemClock.elapsedRealtime()
+            if (LivenessPolicy.wedged(now, tickStartedAt)) {
+                // A tick stuck this long holds every lock and decision where it
+                // was. Restarting is the only move left: START_STICKY and the
+                // alarm bring the service back, and it re-applies everything.
+                Log.e(TAG, "enforcement tick wedged for ${(now - tickStartedAt) / 1000}s: restarting the process")
+                android.os.Process.killProcess(android.os.Process.myPid())
+                return
+            }
+            if (!running || !armed) return
+            val tickDue = LivenessPolicy.tickDue(now, lastTickAt, interactive, TICK_MS)
+            val pollDue = LivenessPolicy.pollDue(now, lastPollAt, interactive, SLOW_TICK_MS, DARK_SLOW_TICK_MS)
+            Log.i(TAG, "liveness kick: tick due=$tickDue poll due=$pollDue screen=${if (interactive) "on" else "off"}")
+            if (tickDue) {
+                val wl = tickWake
+                runCatching { wl?.acquire(TICK_WAKE_MS) }
+                val posted = handler.post {
+                    try {
+                        val n = SystemClock.elapsedRealtime()
+                        if (LivenessPolicy.tickDue(n, lastTickAt, interactive, TICK_MS)) runTick()
+                    } finally {
+                        runCatching { wl?.takeIf { it.isHeld }?.release() }
+                    }
+                }
+                if (!posted) runCatching { wl?.takeIf { it.isHeld }?.release() }
+            }
+            if (pollDue) {
+                val wl = pollWake
+                runCatching { wl?.acquire(POLL_WAKE_MS) }
+                val posted = slowHandler.post {
+                    try {
+                        val n = SystemClock.elapsedRealtime()
+                        if (LivenessPolicy.pollDue(n, lastPollAt, interactive, SLOW_TICK_MS, DARK_SLOW_TICK_MS)) {
+                            runPoll()
+                        }
+                    } finally {
+                        runCatching { wl?.takeIf { it.isHeld }?.release() }
+                    }
+                }
+                if (!posted) runCatching { wl?.takeIf { it.isHeld }?.release() }
+            }
+        } finally {
+            LivenessReceiver.releaseBridge()
+        }
+    }
 
     override fun onDestroy() {
         running = false
         armed = false
         runCatching { unregisterReceiver(screenReceiver) }
+        runCatching { tickWake?.takeIf { it.isHeld }?.release() }
+        runCatching { pollWake?.takeIf { it.isHeld }?.release() }
         if (::worker.isInitialized) worker.quitSafely()
         if (::slowWorker.isInitialized) slowWorker.quitSafely()
         super.onDestroy()
@@ -206,7 +335,12 @@ class CharterService : Service() {
         private const val TAG = "CharterService"
         private const val CHANNEL = "charter-warden"
         private const val NOTIF_ID = 1001
-        private const val TICK_MS = 2_000L
+        internal const val TICK_MS = 2_000L
+        const val ACTION_KICK = "org.forgesworn.charter.KICK"
+        /** Upper bounds on the kick's wake locks; each is released as soon as
+         *  its tick or poll finishes. A poll is several relay round trips. */
+        private const val TICK_WAKE_MS = 20_000L
+        private const val POLL_WAKE_MS = 90_000L
 
         /**
          * The enforcement pace while the screen is off. Nothing accrues in the
@@ -215,7 +349,7 @@ class CharterService : Service() {
          * core's 300s per-tick accrual clamp, or a long dark stretch would
          * silently drop the interval it is meant to credit as idle.
          */
-        private const val DARK_TICK_MS = 60_000L
+        internal const val DARK_TICK_MS = 60_000L
 
         /** Every Kintrinsic notification taps through to the app (ward request:
          *  a notification you can't act on is a dead end). */
@@ -227,7 +361,7 @@ class CharterService : Service() {
         )
 
         /** Relay poll cadence (D4: connection-per-poll; 2-day cursor self-heals). */
-        private const val SLOW_TICK_MS = 15_000L
+        internal const val SLOW_TICK_MS = 15_000L
 
         /**
          * The relay pace while the screen is off. Each poll is a fresh
@@ -236,11 +370,19 @@ class CharterService : Service() {
          * nobody waiting on the answer: what matters is that the poll happens
          * the moment the screen lights, which [repace] guarantees.
          */
-        private const val DARK_SLOW_TICK_MS = 120_000L
+        internal const val DARK_SLOW_TICK_MS = 120_000L
 
         fun start(context: Context) {
             val intent = Intent(context, CharterService::class.java)
             context.startForegroundService(intent)
+        }
+
+        /** The liveness alarm's entry: starts the service if it is not
+         *  running, and asks it to run whatever is overdue. */
+        fun kick(context: Context) {
+            context.startForegroundService(
+                Intent(context, CharterService::class.java).setAction(ACTION_KICK),
+            )
         }
     }
 }

@@ -20,6 +20,14 @@ class TimeLeftWidget : AppWidgetProvider() {
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray,
     ) {
+        // One more edge that brings a killed warden back (05-G1): the widget
+        // update arrives on its own cadence whether or not the app is running.
+        // Idempotent for a running service.
+        runCatching {
+            if (org.forgesworn.charter.admin.Provisioning.isDeviceOwner(context)) {
+                org.forgesworn.charter.service.CharterService.start(context)
+            }
+        }
         // Launcher callbacks arrive on the main thread — JNI stays off it.
         Thread { push(context, force = true) }.start()
     }

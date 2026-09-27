@@ -75,6 +75,14 @@ class WardenController(
     private val appGateMemory = org.forgesworn.charter.enforce.AppGateMemory()
     /** Logged once per unreadable-pairing spell (F2), not once a tick. */
     private var pairingUnreadableLogged = false
+    /** Each enforcement step runs on its own (05-B1): see [StepGuard]. */
+    private val guard = StepGuard { message, error ->
+        if (error == null) Log.i(TAG, message) else Log.e(TAG, message, error)
+    }
+    /** When the standing baseline was last re-read (05-G2), unix secs. */
+    private var lastPostureAt = 0L
+    /** When a pinned-but-dead DNS filter was last re-dispatched (05-B7). */
+    private var lastDnsRedispatchAt = 0L
 
     /** Interface over the lock surface so tests don't launch a real activity. */
     interface LockController {
@@ -440,7 +448,16 @@ class WardenController(
         // here is safe: an idle/frozen tick simply credits nothing.
         val decisions = CharterCore.tick(active, screen, nowUnix, fg)
 
-        for (d in decisions) applyDecision(d, nowUnix)
+        // One ward's decision that throws must not drop the others' (05-B1).
+        // applyDecision guards each of its own steps, so reaching the catch
+        // here means something outside them failed; the lock is still put up
+        // for a locked decision, on its own.
+        for (d in decisions) {
+            val applied = guard.run("decision") { applyDecision(d, nowUnix) }
+            if (!applied && d.locked && d.enforceMode == CharterCore.Mode.ENFORCE) {
+                guard.run("lock") { lock.show(d.reason) }
+            }
+        }
         return decisions
     }
 
@@ -507,28 +524,36 @@ class WardenController(
      * nothing and FreezeOnly suspends without a lock surface (port-spec §3.3).
      */
     private fun applyDecision(d: CharterCore.ChildDecision, nowUnix: Long) {
+        // Every step below runs under [guard] (05-B1): one that throws is
+        // logged and retried next tick, and never stops the steps after it —
+        // the lock surface at the end is ALWAYS reached.
+        //
         // Restrictions gate on a charter EXISTING, never on lock activity — a
         // charted ward keeps the install-lockdown up during allowed hours too
         // (the critical fail-open the review caught). Observe applies nothing.
         val applyRestrictions = d.configured && d.enforceMode != CharterCore.Mode.OBSERVE
-        syncBaseline(applyRestrictions)
+        guard.run("baseline") { syncBaseline(applyRestrictions, nowUnix) }
 
-        for (e in d.effects) when (e) {
-            // The core re-arms these correctly (once each; after thaw / rising
-            // edge / unbounded spell) — delivery is our only job.
-            is CharterCore.Effect.Warn -> {
-                Log.i(TAG, "warn ${e.level}")
-                warn.warn(e.level)
+        // Each effect on its own: a notification that throws must not swallow
+        // the ones after it either.
+        for (e in d.effects) guard.run("effects") {
+            when (e) {
+                // The core re-arms these correctly (once each; after thaw / rising
+                // edge / unbounded spell) — delivery is our only job.
+                is CharterCore.Effect.Warn -> {
+                    Log.i(TAG, "warn ${e.level}")
+                    warn.warn(e.level)
+                }
+                is CharterCore.Effect.Granted -> {
+                    Log.i(TAG, "granted ${e.minutes}")
+                    warn.granted(e.minutes)
+                }
+                is CharterCore.Effect.Denied -> {
+                    Log.i(TAG, "denied")
+                    warn.denied()
+                }
+                is CharterCore.Effect.Audit -> Log.i(TAG, "audit ${e.outcome}")
             }
-            is CharterCore.Effect.Granted -> {
-                Log.i(TAG, "granted ${e.minutes}")
-                warn.granted(e.minutes)
-            }
-            is CharterCore.Effect.Denied -> {
-                Log.i(TAG, "denied")
-                warn.denied()
-            }
-            is CharterCore.Effect.Audit -> Log.i(TAG, "audit ${e.outcome}")
         }
 
         // Suspend: level-triggered from `locked` (whole device) PLUS the standing
@@ -539,7 +564,7 @@ class WardenController(
         // entirely in Observe. Each is its own charter dimension, independent of
         // schedule/budget. These JNI calls take the warden lock — they run on the
         // slow-safe worker thread (this whole tick is off the main thread).
-        if (d.enforceMode != CharterCore.Mode.OBSERVE) {
+        if (d.enforceMode != CharterCore.Mode.OBSERVE) guard.run("appGate") {
             // Named-times ("buckets"): apps whose OWN bucket allowance is spent
             // right now — its own charter dimension, exactly like the per-app
             // rule suspensions. Spending a bucket closes only ITS apps, never
@@ -587,6 +612,9 @@ class WardenController(
             // changes and entries expire, so the allowlist is re-derived here
             // rather than pinned at boot.
             syncLockTaskPackages(alwaysAvailable)
+            // A reconcile that throws leaves the suspensions already in force
+            // standing (the DPM state persists) and is retried next tick; the
+            // lock surface below is reached regardless.
             appGate.reconcile(
                 locked = d.locked,
                 appPolicy = appPolicy,
@@ -689,7 +717,10 @@ class WardenController(
                 "blocked" // no charter / Observe ⇒ the baseline owns the state
             }
         if (applyRestrictions && Provisioning.isDeviceOwner(context)) {
-            restrictions.applyTetherMode(tetherMode)
+            // Level-triggered against the real restriction state, so a throw
+            // here is simply retried next tick (it used to latch the mode
+            // before pushing it and never try again).
+            guard.run("tether") { restrictions.applyTetherMode(tetherMode) }
         }
         // A filtered clause is PERMISSION, not an instruction to hold an AP up
         // all day: the ward's own switch decides (see HotspotWish — the battery
@@ -699,9 +730,10 @@ class WardenController(
         // Sync the hotspot service UNCONDITIONALLY: a filtered session must be
         // torn down when enforcement stops (charter removed / Observe), not only
         // when a grant expires — otherwise a live AP would outlive its charter.
-        syncHotspotService(tetherMode == "filtered" && HotspotWish.on)
+        guard.run("hotspot") { syncHotspotService(tetherMode == "filtered" && HotspotWish.on) }
 
-        // Web-content filter: pin the DNS filter always-on (fail-closed) exactly
+        // Web-content filter: pin the DNS filter always-on (fail-soft, see
+        // VpnDnsFilterOps; a dead tunnel is restarted below) exactly
         // while enforcing a PAIRED ward, and un-pin otherwise so staged bring-up
         // and an unpaired device truly touch nothing (I17: inert until paired).
         // Gating on a subject — not just mode — is load-bearing: an unpaired DO
@@ -712,31 +744,75 @@ class WardenController(
         // reboots, so an in-memory flag would drift). Unlike the app gate, the
         // web filter has no ward to serve until a subject exists.
         val enforcing = d.enforceMode != CharterCore.Mode.OBSERVE && d.subject != null
-        syncDnsPin(enforcing)
-        if (enforcing) {
-            val plan = runCatching { CharterCore.dnsPlan() }.getOrNull()
-            val rev = plan?.revision ?: ""
-            // Latch the revision ONLY on a successful dispatch — a swallowed
-            // background-start failure must not mark an unreached plan as
-            // applied, or the new clause is silently dropped until the next
-            // revision change (mirrors the lock-surface success-only latch).
-            if (rev != appliedDnsRevision && dnsFilter.apply(rev)) {
-                appliedDnsRevision = rev
+        guard.run("dns") {
+            syncDnsPin(enforcing)
+            if (enforcing) {
+                val plan = runCatching { CharterCore.dnsPlan() }.getOrNull()
+                val rev = plan?.revision ?: ""
+                // A pinned filter whose tunnel is down lets DNS through
+                // unfiltered while every setting still reads "pinned" (05-B7),
+                // so the tunnel's liveness is checked too, not only the pin.
+                val live = runCatching { dnsFilter.isLive() }.getOrDefault(false)
+                if (dnsDispatchWanted(
+                        rev, appliedDnsRevision, live, nowUnix,
+                        lastDnsRedispatchAt, DNS_REDISPATCH_SECS,
+                    )
+                ) {
+                    if (rev == appliedDnsRevision) {
+                        Log.w(TAG, "DNS filter pinned but its tunnel is down: restarting it")
+                        lastDnsRedispatchAt = nowUnix
+                    }
+                    // Latch the revision ONLY on a successful dispatch — a
+                    // swallowed background-start failure must not mark an
+                    // unreached plan as applied, or the new clause is silently
+                    // dropped until the next revision change (mirrors the
+                    // lock-surface success-only latch).
+                    if (dnsFilter.apply(rev)) appliedDnsRevision = rev
+                }
             }
         }
 
         // Lock surface: level-triggered too (a dropped edge can never strand the
         // ward), and only in full Enforce (FreezeOnly = suspend, no lock UI).
+        // Reached whatever failed above (05-B1).
         if (d.enforceMode == CharterCore.Mode.ENFORCE) {
-            if (d.locked) lock.show(d.reason) else lock.hide()
+            guard.run("lock") { if (d.locked) lock.show(d.reason) else lock.hide() }
         }
     }
 
-    private fun syncBaseline(apply: Boolean) {
+    /**
+     * The Device Owner baseline: applied in full when a charter first appears,
+     * then its standing part re-read and re-asserted every
+     * [POSTURE_INTERVAL_SECS] for as long as the charter exists (05-G2, the
+     * spec's `posture()`). It used to be applied once per process and never
+     * looked at again, so a restriction that failed to set, or one the
+     * platform later dropped, stayed missing until the next restart.
+     *
+     * Drift is logged loudly. Riding it on STATUS as an audit tag, as the spec
+     * asks, needs a JNI entry point and a contract field; that is not done
+     * here.
+     */
+    private fun syncBaseline(apply: Boolean, nowUnix: Long) {
         if (!Provisioning.isDeviceOwner(context)) return
         if (apply && !baselineApplied) {
-            restrictions.applyBaseline()
+            // Latched before the call on purpose: a partial apply must still
+            // be cleared if the charter goes away, and the keys that failed
+            // are retried by the posture pass below.
             baselineApplied = true
+            lastPostureAt = nowUnix
+            val report = restrictions.applyBaseline()
+            if (report.failed.isNotEmpty()) {
+                Log.e(TAG, "baseline: the platform refused ${report.failed}; retrying on the posture cadence")
+            }
+        } else if (apply && postureDue(nowUnix, lastPostureAt, POSTURE_INTERVAL_SECS)) {
+            lastPostureAt = nowUnix
+            val report = restrictions.reassertPosture()
+            if (report.reasserted.isNotEmpty()) {
+                Log.w(TAG, "posture drift: re-asserted ${report.reasserted}")
+            }
+            if (report.failed.isNotEmpty()) {
+                Log.e(TAG, "posture: the platform refused ${report.failed}")
+            }
         } else if (!apply && baselineApplied) {
             restrictions.clearBaseline()
             baselineApplied = false
@@ -891,16 +967,25 @@ class WardenController(
          *  tick. A window that shuts is always accounted once more regardless. */
         private const val ACCOUNT_REFRESH_SECS = 30L
 
+        /** How often the standing baseline is re-read and re-asserted (05-G2):
+         *  the spec's "each slow tick". One restriction read per pass. */
+        internal const val POSTURE_INTERVAL_SECS = 30L
+
+        /** How often a pinned DNS filter whose tunnel is down is restarted. */
+        private const val DNS_REDISPATCH_SECS = 30L
+
         /** The production wiring: DPM-backed ops + the real lock activity. */
         fun real(context: Context): WardenController {
             val dpm = Provisioning.dpm(context)
             val admin = Provisioning.adminComponent(context)
+            val debuggable =
+                (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
             return WardenController(
                 context = context,
                 dpm = dpm,
                 admin = admin,
                 appGate = DpmAppGateOps(context, dpm, admin),
-                restrictions = DpmRestrictionOps(dpm, admin),
+                restrictions = DpmRestrictionOps(dpm, admin, allowDebugging = debuggable),
                 usage = UsageStatsSource(context),
                 install = DpmApkInstallOps(context),
                 dnsFilter = VpnDnsFilterOps(context, dpm, admin),
@@ -920,7 +1005,10 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
     @Volatile private var shown = false
 
     override fun show(reason: String) {
-        if (shown) return
+        // Level-triggered against the activity's real life, not only the
+        // latch (05-B9): a lock the system destroyed, or one whose launch was
+        // quietly refused, is launched again on the next tick.
+        if (shown && lockAlive) return
         val intent = Intent(context, LockActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra("reason", reason)
@@ -945,6 +1033,10 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
 
     companion object {
         const val ACTION_HIDE_LOCK = "org.forgesworn.charter.HIDE_LOCK"
+
+        /** Whether a [LockActivity] instance exists right now: set in its
+         *  onCreate, cleared in its onDestroy. Same process, so a plain flag. */
+        @Volatile var lockAlive = false
     }
 }
 
