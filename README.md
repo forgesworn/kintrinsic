@@ -65,12 +65,17 @@ accountable, time-limited authority that grants scoped powers trending toward
 In one sentence: **a guardian holds wardship over a ward; the charter defines it;
 the warden enforces it.**
 
-## Consumer SDK (`@forgesworn/charter` on npm)
+## Consumer SDK (`@forgesworn/charter`)
 
 Any Nostr-aware app can honour a schedule clause without the rest of Kintrinsic:
 
+The copy on the npm registry (0.3.0) is out of date; until a new release is
+published there, build the package from this repository:
+
 ```bash
-npm install @forgesworn/charter nostr-tools
+git clone https://github.com/forgesworn/kintrinsic && cd kintrinsic
+npm ci && npm run build && npm pack          # writes forgesworn-charter-<version>.tgz
+cd /path/to/your-app && npm install /path/to/kintrinsic/forgesworn-charter-*.tgz nostr-tools
 ```
 
 ```typescript

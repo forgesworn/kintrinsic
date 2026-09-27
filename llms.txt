@@ -15,8 +15,13 @@ flow) that wants to respect a Charter schedule clause issued by a guardian.
 
 ## Getting Started
 
+The copy on the npm registry (0.3.0) is out of date; until a new release is
+published there, build the package from this repository:
+
 ```bash
-npm install @forgesworn/charter nostr-tools
+git clone https://github.com/forgesworn/kintrinsic && cd kintrinsic
+npm ci && npm run build && npm pack          # writes forgesworn-charter-<version>.tgz
+cd /path/to/your-app && npm install /path/to/kintrinsic/forgesworn-charter-*.tgz nostr-tools
 ```
 
 ```typescript
