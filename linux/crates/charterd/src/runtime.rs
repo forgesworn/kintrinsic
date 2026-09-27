@@ -2031,6 +2031,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // any tick that reaches a relay at all, so a climbing count means the
     // relay set itself has gone bad, not one bad poll.
     let mut consecutive_unreachable: u32 = 0;
+    // Why the app lock last read as not armed (None = armed or simply off),
+    // so the reason is logged once per change rather than every tick.
+    let mut app_lock_last_reason: Option<String> = None;
     // L5: the last-enforced stamp, written at most once a minute off the async
     // worker (two fsyncs and a directory scan per write).
     let mut stamp = crate::watchdog::Stamp::default();
@@ -2786,9 +2789,19 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         // tick's answer would lag a fresh `apt install chromium` by a minute.
         let site_runtime_present =
             crate::enactors::learning_apps::LearnFs::runtime_path(&learn_fs).is_some();
-        // The app lock is device-wide: one probe per tick (four file reads),
-        // stamped on every child's STATUS below.
-        let app_lock_armed = crate::app_lock::probe(&crate::app_lock::AppLockPaths::default());
+        // The app lock is device-wide: one probe per tick (a few file reads
+        // and a two-level lstat of the trusted trees), stamped on every
+        // child's STATUS below.
+        let app_lock = crate::app_lock::probe(&crate::app_lock::AppLockPaths::default());
+        if app_lock.reason != app_lock_last_reason {
+            match &app_lock.reason {
+                Some(why) => eprintln!("charterd: app lock reported NOT armed: {why}"),
+                None if app_lock.armed => eprintln!("charterd: app lock armed"),
+                None => {}
+            }
+            app_lock_last_reason = app_lock.reason.clone();
+        }
+        let app_lock_armed = app_lock.armed;
         for (user, _cfg) in &configs {
             let Some(uid) = uid_for_user(&passwd, user) else {
                 continue;

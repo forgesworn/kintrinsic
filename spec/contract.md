@@ -1820,7 +1820,10 @@ above, a Linux warden that knows about the app lock **always** sends it,
 sandbox is the equivalent) or predates the field, and a consumer must show
 it as "unknown", never as "off". `true` requires every link at once
 (Kintrinsic's rules file, the compiled rule set, enforcing mode and a live
-daemon); anything missing reads as `false`. A boolean only: which programs
+daemon, rules that cover **every** current ward account on the device, and
+no ward able to write near the top of a tree the rules trust by path);
+anything missing reads as `false`, so a ward added after arming reads
+`false` until the lock is extended to them. A boolean only: which programs
 were denied never appears on this wire.
 
 **Admission rule.** A consumer orders two STATUS readings for the same

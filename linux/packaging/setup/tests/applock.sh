@@ -106,5 +106,47 @@ if under_allowed_tree /usr/bin/bash; then ok "/usr/bin/bash is in a tree"; else 
 if under_allowed_tree /usrx/evil; then bad "/usrx is not /usr"; else ok "/usrx is not /usr"; fi
 if under_allowed_tree /var/tmp/x; then bad "/var/tmp is not a tree"; else ok "/var/tmp is not a tree"; fi
 
+# --- shared libraries (H1) and fusermount (H3) in the rendered rules --------------------
+so_deny_at="$(grep -n 'deny_log perm=open uid=1001 : ftype=application/x-sharedlib' <<< "$rules" | cut -d: -f1)"
+so_allow_at="$(grep -n 'allow perm=open uid=1001 : ftype=application/x-sharedlib dir=/usr/' <<< "$rules" | cut -d: -f1)"
+if [ -n "$so_deny_at" ] && [ -n "$so_allow_at" ] && [ "$so_allow_at" -lt "$so_deny_at" ]; then
+    ok "ward library opens: tree allows precede the sharedlib deny"
+else
+    bad "ward library opens: tree allows precede the sharedlib deny ($so_allow_at vs $so_deny_at)"
+fi
+expect_eq "$(grep -c 'deny_log perm=open all' <<< "$rules")" 0 "no library deny for everyone"
+for fm in "${INTENDED_DENY[@]}"; do
+    fm_at="$(grep -n "deny_log perm=execute uid=1001 : path=$fm\$" <<< "$rules" | cut -d: -f1)"
+    if [ -n "$fm_at" ] && [ "$fm_at" -lt "$allow_at" ]; then
+        ok "$fm is denied to wards before the /usr allow"
+    else
+        bad "$fm is denied to wards before the /usr allow"
+    fi
+done
+# Every dir= in a sharedlib allow is an audited tree too (the dir= loop above
+# covers the whole template).
+if rules_cover_uid "$rules_file" 1001 && rules_cover_uid "$rules_file" 1002; then
+    ok "rules_cover_uid finds each rendered ward"
+else
+    bad "rules_cover_uid finds each rendered ward"
+fi
+if rules_cover_uid "$rules_file" 100; then bad "rules_cover_uid is exact (100 vs 1001)"; else ok "rules_cover_uid is exact (100 vs 1001)"; fi
+
+# --- seed_forbidden (H2) ---------------------------------------------------------------------
+for p in "${SEED_FORBIDDEN[@]/%//x/game}" /media/x/USB/game; do
+    if seed_forbidden "$p"; then ok "never seeded: $p"; else bad "never seeded: $p"; fi
+done
+for p in /srv/tools/app /usr/local/games/x /homework/app; do
+    if seed_forbidden "$p"; then bad "seedable: $p"; else ok "seedable: $p"; fi
+done
+
+# --- file_is_ours ---------------------------------------------------------------------------
+printf '%s udisks\n[defaults]\n' "$OURS_TAG" > "$TMP/u.conf"
+printf '// %s apt\n' "${OURS_TAG#\# }" > "$TMP/apt.conf"
+printf '[defaults]\ndefaults=exec\n' > "$TMP/admin.conf"
+if file_is_ours "$TMP/u.conf"; then ok "file_is_ours: our udisks conf"; else bad "file_is_ours: our udisks conf"; fi
+if file_is_ours "$TMP/apt.conf"; then ok "file_is_ours: our apt hook"; else bad "file_is_ours: our apt hook"; fi
+if file_is_ours "$TMP/admin.conf"; then bad "file_is_ours: an admin's file is not ours"; else ok "file_is_ours: an admin's file is not ours"; fi
+
 echo "$checks checks, $fails failed"
 [ "$fails" -eq 0 ]

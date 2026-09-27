@@ -156,8 +156,9 @@ flatpak install ...   # should be refused (only your approval can install)
 
 Without it, the child can download a program into their home folder (or run
 one from a USB stick) and run it. The **app lock** stops that: with it armed,
-the child's account can only run programs installed on the system (under
-`/usr`, `/opt`, `/etc`, system flatpaks) and ones you approve. It uses
+the child's account can only run programs, and load program libraries,
+installed on the system (under `/usr`, `/opt`, `/etc`, system flatpaks) and
+ones you approve. It uses
 `fapolicyd`, which the package installs but leaves **off**. Nothing arms it
 for you, on install or on upgrade.
 
@@ -171,19 +172,30 @@ sudo charter-applock status           # "app lock: ARMED"
 ```
 
 Before it switches anything on, `arm` checks that the child can't write
-anywhere the lock trusts. It then trusts the child's session programs that
-live elsewhere but that they can't change, and runs a **self-test** with
-fapolicyd in permissive mode (nothing blocked yet). The self-test tries every
-program the desktop and the child's session start, plus a harmless test
-program placed in the child's own files. It only switches to enforcing if that
-test program **was** caught and nothing the desktop needs was. After
+anywhere the lock trusts. It then trusts (by checksum) the child's session
+programs that live elsewhere. It only does that for programs no child owns or
+can change, and never for anything in a home folder, a temp folder or on
+removable media. Then it runs a **self-test** with fapolicyd in permissive
+mode (nothing blocked yet). The self-test tries every program the desktop and
+the child's session start, plus two harmless test files placed in the child's
+own files: a program, and a copy of a system library. It only switches to
+enforcing if both test files **were** caught and nothing the desktop needs
+was. After
 switching, it checks again for real and undoes itself at once if anything
 needed is refused. If a program the child runs today lives in their own files
 (a game in `~/.local/bin`, say), `arm` lists it and stops; run it again with
 `--accept-blocked` if blocking it is what you want.
 
 To try it with a safety net, `sudo charter-applock arm --trial 15` disarms
-itself after 15 minutes unless you run `sudo charter-applock keep`.
+itself after 15 minutes unless you run `sudo charter-applock keep`. The
+deadline holds across a restart: a box rebooted after it passes disarms
+itself within a minute of starting.
+
+Adding another child with `charter-setup` while the lock is armed extends it
+to them (`charter-applock refresh`). Until that has happened, the guardian's
+app shows the lock as **not armed**. While it is armed, USB sticks and other
+removable drives mount **noexec** for every account on the computer, yours
+included.
 
 **To undo, one command** (from your desktop, a terminal, a text console, or a
 recovery shell):
@@ -201,11 +213,31 @@ mode** entry in the boot menu, choose **root**, and run
 `charter-applock disarm`, or just `systemctl disable fapolicyd`. fapolicyd
 not running means nothing is enforced.
 
-**What it does not cover.** A system program given the child's own file is
-not the child's file being run: `python3 ~/game.py`, `bash ~/script.sh`,
-`java -jar ~/game.jar` and web games still work. Files on FUSE mounts, such as
-browsing inside a zip in the file manager, are not watched either (watching
-them can hang the machine).
+**What it does not cover, and what it costs.**
+
+- **Interpreters.** A system program given the child's own file is not the
+  child's file being run: `python3 ~/game.py`, `bash ~/script.sh`,
+  `java -jar ~/game.jar` and web games still work. So does anything such a
+  script can do, including running code from memory: `memfd_create` plus
+  `execve` of the result is not an execution of a file on a watched disk.
+  The kernel switch `vm.memfd_noexec=2` would close that last part. It is not
+  turned on, because it can break programs that legitimately do this
+  (some browsers' and JIT runtimes' helpers); it is on the VM test list.
+- **FUSE.** Files on FUSE mounts are not watched (watching them can hang the
+  machine). The child cannot create such a mount themselves: running
+  `fusermount` is denied to them. That also means AppImages, `sshfs`,
+  opening files through gvfs's FUSE path (`/run/user/<uid>/gvfs`), and the
+  flatpak document portal's FUSE mount do not work in the child's account.
+  What is left is a FUSE mount made by the system, not the child. A USB
+  stick formatted NTFS or exFAT that is mounted through a FUSE driver is the
+  case in point, and it is mounted noexec (above).
+- **Libraries in the child's own files do not load.** That is the point
+  (`LD_PRELOAD=~/x.so` is refused), but it also refuses libraries programs
+  download into a home folder by themselves. The one a child will notice is
+  **DRM video (Netflix, Disney+ and similar) in Firefox or Chrome**. Both
+  download their Widevine module into the profile folder. So do Python
+  packages the child installs with `pip --user`, and games in Steam's
+  home-folder library. Approve what matters; the rest stays blocked.
 
 ## 8. If you get stuck — Recovery
 

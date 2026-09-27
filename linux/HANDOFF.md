@@ -397,3 +397,14 @@ no network.
   Mint VM round is `internal/reviews/2026-09-27-fapolicyd-vm-test.md`.
 - Known gaps (documented in INSTALL.md): root-owned interpreters on ward files,
   and FUSE mounts, which are deliberately not in `watch_fs`.
+
+### Review fixes (same day)
+
+- **Libraries:** a ward can open ELF shared objects only from the trees or trusted files, so `LD_PRELOAD=~/x.so` is refused. The self-test adds a library canary.
+- **Seeding:** nothing is trusted if any ward owns or can write it or a directory above it, or if it lives under a home, a temp dir or removable media. `integrity = sha256` while armed.
+- **FUSE:** wards cannot exec `fusermount{,3}`. udisks2 mounts removable media noexec while armed (`/etc/udisks2/mount_options.conf`, only when no admin file exists).
+- **Trial:** a deadline file plus a real persistent timer unit, so the trial survives a reboot. `refresh` extends an armed lock to wards added later, and charter-setup calls it.
+- **STATUS:** `appLockArmed` also needs every current ward covered and a two-level tree-writability check to pass. charterd logs the reason whenever it changes.
+- **Upgrades and exits:** an apt `DPkg::Post-Invoke` hook restarts an armed fapolicyd whose binary was replaced. Disarm restores fapolicyd's prior enabled/active state, and an EXIT trap reverts any partial arm.
+- **Denial watch:** RealDenialWatch now reads the journal.
+- **Known gaps (documented):** memfd exec from an interpreter (`vm.memfd_noexec=2` is not enabled), and DRM modules and pip libraries in the ward's home no longer load.

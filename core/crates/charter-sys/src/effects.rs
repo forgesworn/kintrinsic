@@ -1246,9 +1246,21 @@ mod real {
         }
     }
 
-    /// fapolicyd denial watch: surfaces the next blocked-exec path from the
-    /// denial log so charterd can prompt instead of failing silently. The line
-    /// parse is verified headlessly; the live log cursor is VM-verified.
+    /// The most recent denial's path in a block of fapolicyd log lines.
+    fn last_denial(lines: &str) -> Option<String> {
+        lines
+            .lines()
+            .rev()
+            .find(|l| l.contains("dec=deny"))
+            .and_then(parse_denial_path)
+    }
+
+    /// fapolicyd denial watch: surfaces the most recent blocked-exec path so
+    /// charterd can prompt instead of failing silently. fapolicyd writes its
+    /// `deny_log` decisions to syslog, i.e. the journal (`_COMM=fapolicyd`);
+    /// it never writes the log file below, which is kept only as a fallback
+    /// for hosts without journald. The line parse is verified headlessly; the
+    /// journal read is VM-verified.
     const FAPOLICYD_DENY_LOG: &str = "/var/log/fapolicyd-access.log";
     pub struct RealDenialWatch {
         log: PathBuf,
@@ -1263,18 +1275,30 @@ mod real {
     #[async_trait]
     impl DenialWatch for RealDenialWatch {
         async fn next_denial(&self) -> SysResult<Option<String>> {
-            // Best-effort: scan the current log tail for the most recent denial.
-            // A durable cursor (inotify / journal seek) is VM-wired.
+            // Best-effort: the tail of fapolicyd's journal, else the log file.
+            // A durable cursor (journal seek) is VM-wired.
+            if let Ok(out) = Command::new("journalctl")
+                .args([
+                    "_COMM=fapolicyd",
+                    "-o",
+                    "cat",
+                    "-n",
+                    "200",
+                    "--no-pager",
+                    "-q",
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    return Ok(last_denial(&String::from_utf8_lossy(&out.stdout)));
+                }
+            }
             let content = match fs::read_to_string(&self.log) {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(e) => return Err(io_err("read deny log", e)),
             };
-            Ok(content
-                .lines()
-                .rev()
-                .find(|l| l.contains("dec=deny"))
-                .and_then(parse_denial_path))
+            Ok(last_denial(&content))
         }
     }
 
@@ -2376,6 +2400,16 @@ charter-managed:x:990:kid";
                 Some("/home/kid/evil.AppImage")
             );
             assert_eq!(parse_denial_path("nothing here"), None);
+        }
+
+        #[test]
+        fn last_denial_takes_the_newest_deny_from_journal_lines() {
+            let journal = "Loaded 27 rules\n\
+                rule=12 dec=deny_log perm=execute auid=1001 pid=7 exe=/usr/bin/bash : path=/srv/kid/a ftype=application/x-executable trust=0\n\
+                rule=3 dec=allow perm=execute auid=1001 pid=8 exe=/usr/bin/bash : path=/usr/bin/ls ftype=application/x-executable trust=0\n\
+                rule=12 dec=deny_log perm=execute auid=1001 pid=9 exe=/usr/bin/bash : path=/srv/kid/b ftype=application/x-executable trust=0\n";
+            assert_eq!(last_denial(journal).as_deref(), Some("/srv/kid/b"));
+            assert_eq!(last_denial("Loaded 27 rules\n"), None);
         }
 
         #[test]

@@ -34,7 +34,7 @@ it to the laptop if you built elsewhere.
 
 ## 2. Install
 ```bash
-sudo apt install ./kintrinsic_*.deb    # or: sudo dpkg -i kintrinsic_*.deb
+sudo apt install ./kintrinsic_*.deb    # apt, not dpkg -i: apt pulls in the Depends (fapolicyd included)
 ```
 Installing only registers + starts the daemon. No lockdown is applied yet.
 

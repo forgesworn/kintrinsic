@@ -415,6 +415,14 @@ if [ "$ARM_APP_LOCK" = 1 ]; then
         APPLOCK_FAILED=1
         echo "charter-setup: WARN the app lock was NOT armed (see above). Everything else is set up; fix the reason and run 'charter-applock arm'."
     fi
+elif [ -f /etc/fapolicyd/rules.d/72-kintrinsic-applock.rules ] && [ -x /usr/sbin/charter-applock ]; then
+    # Already armed for other wards: a new ward must not be the one account
+    # the lock misses. `refresh` is a no-op for an account already covered.
+    echo "==> app lock is armed: extending it to \"$MANAGED_USER\""
+    if ! /usr/sbin/charter-applock refresh; then
+        APPLOCK_FAILED=1
+        echo "charter-setup: WARN the app lock does NOT cover \"$MANAGED_USER\" (see above); the guardian's app will show it as not armed. Fix the reason and run 'charter-applock refresh'."
+    fi
 fi
 
 NOEXEC_NOTE=""

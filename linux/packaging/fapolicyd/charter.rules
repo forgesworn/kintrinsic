@@ -34,14 +34,36 @@
 #
 # Known gaps, by design (see linux/docs/INSTALL.md, "App lock"): a root-owned
 # interpreter given the ward's own file (`python3 ~/game.py`, `bash ~/x.sh`,
-# `java -jar ~/x.jar`) is not an execution of that file; and filesystems not
-# in fapolicyd's `watch_fs` (FUSE mounts such as gvfs archive browsing) are not
-# watched at all.
+# `java -jar ~/x.jar`) is not an execution of that file, and neither is
+# memfd_create + execve from such a script; filesystems not in fapolicyd's
+# `watch_fs` (FUSE) are not watched at all — the ward is denied fusermount
+# below, and removable media mount noexec while armed, which leaves only
+# FUSE mounts the system itself makes.
 
 # The dynamic loader run by hand (`/lib64/ld-linux-x86-64.so.2 ~/game`) maps
 # the payload without an execute event of its own; fapolicyd's ld_so pattern
 # catches the process that was started that way.
 deny_log perm=any @WARD@ pattern=ld_so : all
+
+# FUSE mounts are not watched (see watch_fs in charter-applock), so a ward
+# must not be able to create one: fusermount is the setuid helper every
+# unprivileged FUSE mount goes through (AppImages, sshfs, gvfs-fuse, the
+# flatpak document portal). Denied BEFORE the /usr allow below.
+deny_log perm=execute @WARD@ : path=/usr/bin/fusermount3
+deny_log perm=execute @WARD@ : path=/usr/bin/fusermount
+
+# Shared libraries. Code can be run without any execute event by loading it
+# as a library into a trusted program (`LD_PRELOAD=~/x.so firefox`, dlopen,
+# `ld.so --preload`); the loader OPENS the .so, so a ward's opens of ELF
+# shared objects are held to the same trees as execution.
+allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/usr/
+allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/etc/
+allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/opt/
+allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/snap/
+allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/var/lib/flatpak/
+allow perm=open @WARD@ : ftype=application/x-sharedlib dir=/var/lib/charter/approved/
+allow perm=open @WARD@ : ftype=application/x-sharedlib trust=1
+deny_log perm=open @WARD@ : ftype=application/x-sharedlib
 
 # Root-only trees. Subject left of the colon, object right.
 allow perm=execute @WARD@ : dir=/usr/
