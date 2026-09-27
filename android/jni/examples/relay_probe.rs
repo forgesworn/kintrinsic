@@ -12,7 +12,7 @@ async fn main() {
             let pk = charter_primitives::PubKey::from_hex(args.get(1).expect("pk")).expect("hex");
             let wraps = relay
                 .query(
-                    &["wss://relay.trotters.cc".to_string()],
+                    &["wss://relay.damus.io".to_string()],
                     Filter {
                         kinds: vec![kinds::GIFT_WRAP],
                         p_tags: vec![pk],

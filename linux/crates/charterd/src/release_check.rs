@@ -24,13 +24,13 @@ use charter_verify::software_release::{verify_software_release, SoftwareRelease}
 pub const RELEASE_PUBKEY_HEX: &str =
     "11ecfbc95f61796b0b0c5156a24edb324b0ea5e69ff659990b99ebe2f44043a0";
 
-/// Release announcements ride trotters PLUS public relays — trotters must
-/// never be load-bearing (the end state runs no services of ours). Keep in
-/// sync with apps/charter-app/src/release/releaseTrust.ts.
+/// Release announcements ride public relays — no relay run by the project is
+/// ever a default (Kintrinsic is decentralised by design). Keep in sync with
+/// apps/charter-app/src/release/releaseTrust.ts.
 pub const RELEASE_RELAYS: &[&str] = &[
-    "wss://relay.trotters.cc",
     "wss://relay.damus.io",
     "wss://nos.lol",
+    "wss://relay.primal.net",
 ];
 
 /// This platform's channel (the event's `d` tag).

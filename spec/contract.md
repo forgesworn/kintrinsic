@@ -1160,9 +1160,10 @@ ordered list.
 
 There is no freshness window: downgrade safety is the strictly-greater
 `version_code` comparison, so a replayed old event is a no-op. Announcements
-are published to `wss://relay.trotters.cc` first and to public relays beside
-it; trotters is never load-bearing, and a publish that fewer than two relays
-accepted is flagged. Golden vector:
+are published to public relays only — no relay run by the project is a
+default (Kintrinsic is decentralised by design; `CHARTER_EXTRA_RELAYS` adds
+one back for a publish without making it load-bearing) — and a publish that
+fewer than two relays accepted is flagged. Golden vector:
 `core/crates/charter-testkit/vectors/nostr/software_release.json`.
 
 ### Enforcement parity — which warden reads which clause
@@ -1873,6 +1874,17 @@ that machine key:
   "ts": 1730000000                 // seconds; the device bounds staleness on it
 }
 ```
+
+**Relays are per pairing, not a global default.** Whatever relay list a
+pairing actually used — this offer's `relays`, or the guardian's compiled-in
+defaults if it named none — is stored on that pairing (`pairing.json`'s
+`relays` on `charterd`; the Android ward's own pairing record) and read from
+there for the life of that pairing. A change to the guardian's or ward's
+default relays only ever applies to a **NEW** pairing; an existing one is
+never re-read against it. A pairing made before this existed is back-filled
+**once**, at load, with the ONE relay every pairing used before per-pairing
+relays existed — a record of what that pairing already was, not a new
+default (`LEGACY_PAIRING_RELAYS`).
 
 **Why this is safe, and the one rule that makes it so.** The payload names **no
 guardian pubkey**. The device pins the **authenticated seal author** — the key

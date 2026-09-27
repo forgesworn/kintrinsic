@@ -371,6 +371,16 @@ export interface Device {
   pairedAt?: number; // epoch ms
   devicePubkey?: string | null; // the DEVICE's own key — mock hex for now
   lastSeenAt?: number; // epoch ms
+  /**
+   * The relays THIS pairing actually uses — set from the pair offer/accept at
+   * pairing time (the defaults, absent any relay the offer itself named).
+   * Never re-read from DEFAULT_RELAYS afterwards: a device already paired
+   * keeps whatever relays it was paired with, even after the app's own
+   * defaults change (see `signer/pairingRelays.ts`). Absent on a pairing made
+   * before this field existed — `loadState`'s migration back-fills those
+   * from `LEGACY_PAIRING_RELAYS`, once, at load.
+   */
+  relays?: string[];
 }
 
 export interface Child {

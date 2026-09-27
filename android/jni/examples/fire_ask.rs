@@ -13,7 +13,7 @@ use charter_sys::relay::{RealRelayTransport, RelayTransport};
 use charter_transport::nip59::{self, Rumor, WrapRandomness};
 use charter_verify::test_support::sign_event;
 
-const RELAY: &str = "wss://relay.trotters.cc";
+const RELAY: &str = "wss://relay.damus.io";
 
 fn now() -> u64 {
     SystemTime::now()

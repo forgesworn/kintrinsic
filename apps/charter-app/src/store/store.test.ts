@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { pendingCount, reducer, type CharterState } from "./store";
-import type { ChildRequest, SignerState } from "../domain/types";
+import type { Child, ChildRequest, Device, SignerState } from "../domain/types";
 
 const SIGNER: SignerState = { connected: false, kind: "none", autoSign: false };
 
@@ -166,5 +166,66 @@ describe("reducer — dismissRequest / SET_REQUEST_STATUS \"dismissed\" (Task C)
     const s0: CharterState = { ...emptyState(), requests: [BUCKET_ASK, other] };
     const s1 = reducer(s0, { type: "SET_REQUEST_STATUS", id: "req1", status: "dismissed" });
     expect(pendingCount(s1)).toBe(1);
+  });
+});
+
+const DEVICE: Device = {
+  id: "dev1",
+  label: "laptop",
+  platform: "linux",
+  pairing: "unpaired",
+  devicePubkey: null,
+};
+
+const CHILD: Child = {
+  id: "child1",
+  name: "Sam",
+  color: "#abc",
+  dependantPubkey: null,
+  devices: [DEVICE],
+  policies: [],
+};
+
+// Founder's decision (trotters.cc removal, follow-up): the guardian reads
+// DEFAULT_RELAYS live, so a new pairing must STAMP the relays it used onto
+// the pairing itself, and reconnecting/relaying an already-set pairing must
+// never clobber it back to the current defaults.
+describe("reducer — SET_DEVICE_PAIRING relays (per-pairing, not a re-read default)", () => {
+  it("a new pairing records the relays it actually used", () => {
+    const s0: CharterState = { ...emptyState(), children: [CHILD] };
+    const s1 = reducer(s0, {
+      type: "SET_DEVICE_PAIRING",
+      childId: "child1",
+      deviceId: "dev1",
+      pairing: "paired",
+      pairedAt: 1,
+      devicePubkey: "f".repeat(64),
+      relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"],
+    });
+    expect(s1.children[0].devices[0].relays).toEqual([
+      "wss://relay.damus.io",
+      "wss://nos.lol",
+      "wss://relay.primal.net",
+    ]);
+  });
+
+  it("an action that omits relays never clobbers an existing pairing's own relays", () => {
+    const paired: Device = {
+      ...DEVICE,
+      pairing: "paired",
+      devicePubkey: "f".repeat(64),
+      relays: ["wss://relay.trotters.cc"],
+    };
+    const s0: CharterState = { ...emptyState(), children: [{ ...CHILD, devices: [paired] }] };
+    // Reconnect-style dispatch: same shape reconnectDevice sends (no `relays`).
+    const s1 = reducer(s0, {
+      type: "SET_DEVICE_PAIRING",
+      childId: "child1",
+      deviceId: "dev1",
+      pairing: "paired",
+      pairedAt: 2,
+      devicePubkey: "f".repeat(64),
+    });
+    expect(s1.children[0].devices[0].relays).toEqual(["wss://relay.trotters.cc"]);
   });
 });

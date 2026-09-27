@@ -914,7 +914,7 @@ final gate is always on-metal GrapheneOS with decented, staged via enforce-mode.
 - Headless: instrumented test with a `TestGuardian` (charter-verify `test_support`) over
   `MockTransport` — full submit → grant → verify → enact → unlock loop on-device without
   a relay.
-- Live: one scripted round against `wss://relay.trotters.cc` with the deployed PWA
+- Live: one scripted round against a default public relay (`wss://relay.damus.io`) with the deployed PWA
   (after §5.1 lands): pair, sign a schedule, watch the lock land, ask-for-more from the
   lock screen, approve on the phone, watch the unlock — decented's hardware gate, turnkey
   steps prepared in advance.

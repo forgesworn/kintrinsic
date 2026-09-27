@@ -8,6 +8,7 @@ import {
   isCanonicalBlossomUrl,
   isGithubReleaseUrl,
   orderReleaseUrls,
+  releaseRelaysWithExtra,
   RELEASE_RELAYS,
 } from "./release-helpers.mjs";
 
@@ -171,7 +172,19 @@ test("buildReleaseEvent carries the GitHub download first, then Blossom", () => 
   );
 });
 
-test("release relays lead with trotters and keep public relays", () => {
-  assert.equal(RELEASE_RELAYS[0], "wss://relay.trotters.cc");
+test("release relays are all public — no relay run by the project is a default", () => {
   assert.ok(RELEASE_RELAYS.length >= 3);
+  assert.ok(!RELEASE_RELAYS.includes("wss://relay.trotters.cc"));
+});
+
+test("releaseRelaysWithExtra appends CHARTER_EXTRA_RELAYS without duplicating", () => {
+  assert.deepEqual(releaseRelaysWithExtra({}), RELEASE_RELAYS);
+  assert.deepEqual(
+    releaseRelaysWithExtra({ CHARTER_EXTRA_RELAYS: "wss://relay.trotters.cc, not-a-relay" }),
+    [...RELEASE_RELAYS, "wss://relay.trotters.cc"],
+  );
+  assert.deepEqual(
+    releaseRelaysWithExtra({ CHARTER_EXTRA_RELAYS: RELEASE_RELAYS[0] }),
+    RELEASE_RELAYS,
+  );
 });

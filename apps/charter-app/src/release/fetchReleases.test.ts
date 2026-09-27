@@ -56,7 +56,7 @@ describe("fetchAllReleaseManifests", () => {
       seen = { relays, filter: filter as Record<string, unknown> };
       return [];
     }, PK);
-    expect(seen.relays).toContain("wss://relay.trotters.cc");
+    expect(seen.relays).not.toContain("wss://relay.trotters.cc");
     expect(seen.relays!.length).toBeGreaterThan(1);
     expect(seen.filter!.kinds).toEqual([30063]);
     expect(seen.filter!.authors).toEqual([PK]);

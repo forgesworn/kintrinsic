@@ -26,6 +26,10 @@
 //   CHARTER_BLOSSOM_SERVERS  comma-separated (default below)
 //   CHARTER_RELEASE_KEY_FILE key path (default ~/.charter-release/release-key.hex)
 //   CHARTER_GITHUB_REPO      owner/name (default forgesworn/kintrinsic)
+//   CHARTER_EXTRA_RELAYS     comma-separated wss:// relays added to RELEASE_RELAYS
+//                            (Kintrinsic ships with no relay of its own as a
+//                            default; this is how the founder's own relay, if
+//                            any, is added back for a publish)
 //
 // Exit: non-zero, with nothing announced and no URL files written, when the
 // GitHub Release upload or its end-to-end download check fails, or when NO
@@ -49,8 +53,8 @@ import {
   isCanonicalBlossomUrl,
   isGithubReleaseUrl,
   orderReleaseUrls,
+  releaseRelaysWithExtra,
   RELEASE_GITHUB_REPO,
-  RELEASE_RELAYS,
 } from "./release-helpers.mjs";
 
 // Both live-verified 2026-08-12 with the 10 MB deb (upload + direct-200 GET).
@@ -432,15 +436,17 @@ async function main() {
     if (args.emitUrlsFile) writeFileSync(args.emitUrlsFile, urls.join("\n") + "\n");
   };
 
+  const relays = releaseRelaysWithExtra();
+
   if (args.dryRun) {
-    console.log(`--dry-run: would publish to ${RELEASE_RELAYS.join(", ")}`);
+    console.log(`--dry-run: would publish to ${relays.join(", ")}`);
     console.log("--dry-run: signed event follows; nothing uploaded or published");
     console.log(JSON.stringify(event, null, 2));
     emit();
     return;
   }
 
-  const results = await Promise.all(RELEASE_RELAYS.map((r) => publishToRelay(r, event)));
+  const results = await Promise.all(relays.map((r) => publishToRelay(r, event)));
   for (const r of results) {
     console.log(`${r.ok ? "relay ok " : "relay FAIL"}: ${r.url} ${r.reason ?? ""}`);
   }

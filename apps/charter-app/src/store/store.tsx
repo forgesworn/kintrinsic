@@ -73,6 +73,8 @@ import { unclaimedDevices, type UnclaimedDevice } from "./unclaimedDevices";
 import { forgetPairToken, livePairTokens, rememberPairToken } from "./pairTokens";
 import { readyResends, type PendingResend } from "./resendOnClaim";
 import { DEFAULT_RELAYS } from "../signer/config";
+import { allPairingRelays, deviceRelays } from "../signer/pairingRelays";
+import { backfillLegacyRelays } from "./pairingMigration";
 import { standingFor, standingNote } from "../domain/standing";
 import { selectSigner } from "../signer/selectSigner";
 import { mintPairToken } from "../signer/guardianPairing";
@@ -156,7 +158,17 @@ export const BROKEN_STATE_KEY = `${STORAGE_KEY}.broken`;
 function loadState(): CharterState {
   try {
     const revived = reviveState(localStorage.getItem(STORAGE_KEY), makeEmpty() as CharterState);
-    if (revived.kind === "ok") return revived.state;
+    if (revived.kind === "ok") {
+      // Back-fill any pairing made before Device.relays existed, ONCE, right
+      // here at load — never on a fresh DEFAULT_RELAYS read later. Persisted
+      // immediately so it survives even if nothing else in this session
+      // changes state.
+      const { children, changed } = backfillLegacyRelays(revived.state.children);
+      if (!changed) return revived.state;
+      const migrated = { ...revived.state, children };
+      persist(migrated);
+      return migrated;
+    }
     if (revived.kind === "broken") {
       // Set it aside BEFORE the persist-on-change effect writes an empty
       // household over it (see ./reviveState).
@@ -234,6 +246,10 @@ type Action =
       pairing: PairingState;
       pairedAt?: number;
       devicePubkey?: string | null;
+      /** Set on a NEW pairing (the relays that pairing actually used).
+       *  Omitted preserves whatever the device already had — never reset to
+       *  the current defaults just because the pairing state changed. */
+      relays?: string[];
     }
   | { type: "REMOVE_DEVICE"; childId: string; deviceId: string }
   | { type: "SET_DEVICE_LAST_SEEN"; machine: string; lastSeenAt: number }
@@ -309,6 +325,7 @@ export function reducer(state: CharterState, action: Action): CharterState {
                   action.devicePubkey !== undefined
                     ? action.devicePubkey
                     : d.devicePubkey,
+                relays: action.relays !== undefined ? action.relays : d.relays,
               }))
             : c,
         ),
@@ -798,6 +815,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         pairing: "paired",
         pairedAt,
         devicePubkey: machine,
+        // A NEW pairing: record the relays it actually used — the current
+        // defaults, since this handshake names none of its own.
+        relays: DEFAULT_RELAYS,
       });
       addActivity(childId, "enacted", `You set up ${device.label}`);
       // Spend the token: it has done the one job it existed for, and a spent
@@ -807,7 +827,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // standing charter, released once the claim is committed (the device
       // is not in state until the next render; see ./resendOnClaim).
       pendingResends.current.push({ childId, machine });
-      return { ...device, pairing: "paired", pairedAt, devicePubkey: machine };
+      return { ...device, pairing: "paired", pairedAt, devicePubkey: machine, relays: DEFAULT_RELAYS };
     },
     [addDevice, addActivity],
   );
@@ -829,6 +849,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         pairing: "paired",
         pairedAt,
         devicePubkey,
+        // A NEW pairing: record the relays it actually used.
+        relays: DEFAULT_RELAYS,
       });
       // Build the result from the device we were handed — it was created this
       // same tick by addDevice, so it is NOT yet in committed state (stateRef
@@ -836,7 +858,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // and make a real pairing look like a failure (and invite a duplicate on
       // retry). Success is determined solely by the code parsing above.
       addActivity(childId, "enacted", `You connected ${device.label}`);
-      return { ...device, pairing: "paired", pairedAt, devicePubkey };
+      return { ...device, pairing: "paired", pairedAt, devicePubkey, relays: DEFAULT_RELAYS };
     },
     [addActivity],
   );
@@ -880,8 +902,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         pairing: "paired",
         pairedAt,
         devicePubkey,
+        relays: DEFAULT_RELAYS,
       });
-      return { ...device, pairing: "paired", pairedAt, devicePubkey };
+      return { ...device, pairing: "paired", pairedAt, devicePubkey, relays: DEFAULT_RELAYS };
     },
     [addDevice],
   );
@@ -897,8 +920,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // Fire-and-forget: the UI updates immediately; the relay carries the
       // release, and the phone honors it on its next poll.
       // Pass the device's own name so the confirm sheet can say what is being
-      // disconnected rather than showing a key prefix (S9).
-      void signer.current?.releaseDevice(pk, DEFAULT_RELAYS, device?.label).catch(() => {});
+      // disconnected rather than showing a key prefix (S9). Target THIS
+      // device's own relays (plus the defaults) — not just the current
+      // defaults, so a device paired under an older default still hears it.
+      const relays = [...new Set([...deviceRelays(device!, DEFAULT_RELAYS), ...DEFAULT_RELAYS])];
+      void signer.current?.releaseDevice(pk, relays, device?.label).catch(() => {});
     }
   }, []);
 
@@ -1479,8 +1505,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // Set by anything this round could not finish with. It pins the cursor, so
     // the wide window keeps coming back until the wrap lands or ages out.
     let unfinished = false;
+    // The union of every PAIRED device's own relays, plus the current
+    // defaults — read fresh each tick so a device paired a moment ago (or one
+    // still on an older default) is never left off the poll. Read fresh each
+    // tick rather than closed over, so a pairing made mid-session is covered
+    // on its very next poll rather than needing a reload.
+    const relays = allPairingRelays(stateRef.current.children, DEFAULT_RELAYS);
     try {
-      const wraps = await pool.querySync(DEFAULT_RELAYS, {
+      const wraps = await pool.querySync(relays, {
         kinds: [1059],
         "#p": [guardianPk],
         since,
@@ -1530,7 +1562,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // Offline / relay down — routine; the next tick retries. The cursor is
       // deliberately left where it was: a failed read has covered nothing.
     } finally {
-      pool.close(DEFAULT_RELAYS);
+      pool.close(relays);
     }
   }, [ingestDeviceStatus, ingestDeviceRequest]);
 

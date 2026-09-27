@@ -19,9 +19,14 @@ pub const POLL_INTERVAL_SECS: u64 = 3;
 
 /// Relays an unpaired ward listens on. It has no pinned pairing yet, so it
 /// cannot learn these from one — they are the same default Kintrinsic publishes
-/// to (`apps/charter-app/src/signer/config.ts`). `CHARTER_PAIR_RELAYS`
-/// (comma-separated) overrides for a self-hosted relay.
-pub const DEFAULT_PAIR_RELAYS: &[&str] = &["wss://relay.trotters.cc"];
+/// to (`apps/charter-app/src/signer/config.ts`): public relays, never one run
+/// by the project. `CHARTER_PAIR_RELAYS` (comma-separated) overrides for a
+/// self-hosted relay.
+pub const DEFAULT_PAIR_RELAYS: &[&str] = &[
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+];
 
 /// The relay set to listen on, honouring the override.
 pub fn pair_relays() -> Vec<RelayUrl> {
@@ -179,7 +184,14 @@ mod tests {
     #[test]
     fn the_default_relay_matches_mycharter() {
         std::env::remove_var("CHARTER_PAIR_RELAYS");
-        assert_eq!(pair_relays(), vec!["wss://relay.trotters.cc".to_string()]);
+        assert_eq!(
+            pair_relays(),
+            vec![
+                "wss://relay.damus.io".to_string(),
+                "wss://nos.lol".to_string(),
+                "wss://relay.primal.net".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -187,7 +199,14 @@ mod tests {
         // An insecure ws:// override must never silently downgrade the pairing
         // channel — fall back rather than listen in the clear.
         std::env::set_var("CHARTER_PAIR_RELAYS", "ws://nope,http://also-nope");
-        assert_eq!(pair_relays(), vec!["wss://relay.trotters.cc".to_string()]);
+        assert_eq!(
+            pair_relays(),
+            vec![
+                "wss://relay.damus.io".to_string(),
+                "wss://nos.lol".to_string(),
+                "wss://relay.primal.net".to_string(),
+            ]
+        );
         std::env::remove_var("CHARTER_PAIR_RELAYS");
     }
 }

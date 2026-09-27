@@ -4,14 +4,30 @@
 // apps/charter-app/src/release/releaseEvent.ts (golden vector:
 // core/crates/charter-testkit/vectors/nostr/software_release.json).
 
-/** Keep in sync with releaseTrust.ts / release_check.rs. */
+/** Keep in sync with releaseTrust.ts / release_check.rs. No relay run by the
+ * project is a default (Kintrinsic is decentralised by design) — these are
+ * public relays, the same ones clients poll by default. */
 export const SOFTWARE_RELEASE_KIND = 30063;
 export const RELEASE_RELAYS = [
-  "wss://relay.trotters.cc",
   "wss://relay.damus.io",
   "wss://nos.lol",
+  "wss://relay.primal.net",
 ];
 export const RELEASE_CHANNELS = ["charter-apk", "mycharter-apk", "charter-deb"];
+
+/**
+ * RELEASE_RELAYS plus any operator-added relays from `CHARTER_EXTRA_RELAYS`
+ * (comma-separated `wss://` URLs, e.g. a relay the founder runs themselves).
+ * Kintrinsic ships with none of its own as a default; this is how one is
+ * added back for a publish, without making it load-bearing for every client.
+ */
+export function releaseRelaysWithExtra(env = process.env) {
+  const extra = (env.CHARTER_EXTRA_RELAYS ?? "")
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r.startsWith("wss://"));
+  return [...new Set([...RELEASE_RELAYS, ...extra])];
+}
 
 /**
  * The public repository whose GitHub Releases are the PRIMARY artifact host.

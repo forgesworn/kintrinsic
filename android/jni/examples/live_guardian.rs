@@ -12,7 +12,8 @@
 //!   cargo run --example live_guardian --features mock -- release <machine_pk_hex>  # parent-gated unpair
 //!
 //! The key persists in ./target/live-guardian.key (a THROWAWAY — never a real
-//! guardian). Relay: wss://relay.trotters.cc (the deployed default).
+//! guardian). Relay: wss://relay.damus.io (one of the deployed defaults —
+//! Kintrinsic runs no relay of its own).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,7 +22,7 @@ use charter_sys::relay::{Filter, RealRelayTransport, RelayTransport};
 use charter_transport::nip59::{self, Rumor, WrapRandomness};
 use charter_verify::test_support::{ClauseBuilder, TestGuardian};
 
-const RELAY: &str = "wss://relay.trotters.cc";
+const RELAY: &str = "wss://relay.damus.io";
 const KEY_PATH: &str = "target/live-guardian.key";
 
 fn now() -> u64 {

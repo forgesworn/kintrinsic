@@ -17,7 +17,7 @@ import org.forgesworn.charter.service.CharterService
  * only save fragile `input tap` UI automation during bring-up.
  *
  *   adb shell am broadcast -a org.forgesworn.charter.debug.PAIR \
- *     --es uri 'bunker://<guardian_pk>?relay=wss://relay.trotters.cc&kind=charter' \
+ *     --es uri 'bunker://<guardian_pk>?relay=wss://relay.damus.io&kind=charter' \
  *     org.forgesworn.charter
  *   adb shell am broadcast -a org.forgesworn.charter.debug.INSTALL_REQUEST \
  *     --es pkg app.meatchat.mobile org.forgesworn.charter

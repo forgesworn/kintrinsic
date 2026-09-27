@@ -78,4 +78,25 @@ describe("resolveChildTarget", () => {
     const t = resolveChildTarget([child({ dependantPubkey: null, devices: [dev({})] })], "child_sam", RELAYS);
     expect(t?.subject).toBeNull();
   });
+
+  // Follow-up to the trotters.cc removal: the guardian must never stop
+  // reaching a device just because DEFAULT_RELAYS changed after it paired.
+  it("unions a child's two devices' own (different) relays with the defaults", () => {
+    const c = child({
+      devices: [
+        dev({ id: "legacy", devicePubkey: "1".repeat(64), relays: ["wss://relay.trotters.cc"] }),
+        dev({ id: "custom", devicePubkey: "2".repeat(64), relays: ["wss://relay.example"] }),
+      ],
+    });
+    const t = resolveChildTarget([c], "child_sam", RELAYS);
+    expect(t?.relays).toContain("wss://relay.trotters.cc");
+    expect(t?.relays).toContain("wss://relay.example");
+    expect(t?.relays).toContain(RELAYS[0]);
+  });
+
+  it("a device with no relays of its own (a brand-new pairing) relies purely on the defaults", () => {
+    const c = child({ devices: [dev({ devicePubkey: "1".repeat(64) })] });
+    const t = resolveChildTarget([c], "child_sam", RELAYS);
+    expect(t?.relays).toEqual(RELAYS);
+  });
 });
