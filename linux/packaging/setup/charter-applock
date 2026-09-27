@@ -95,7 +95,7 @@ ALLOWED_TREES=(/usr /etc /opt /snap /var/lib/flatpak /var/lib/charter/approved)
 # removable media are where a ward's own content lives.
 SEED_FORBIDDEN=(/home /root /media /mnt /run/media /run/user /tmp /var/tmp /dev/shm)
 # Denied to wards on purpose by the template (not a self-test failure).
-INTENDED_DENY=(/usr/bin/fusermount3 /usr/bin/fusermount)
+INTENDED_DENY=(/usr/bin/fusermount3 /usr/bin/fusermount /usr/bin/aa-exec)
 # Filesystems added to watch_fs: the kernel exFAT/NTFS drivers USB sticks use.
 # FUSE is deliberately NOT added — fapolicyd reading a file through a FUSE
 # daemon that is itself waiting on a permission decision can hang the box.
@@ -105,11 +105,16 @@ PROBE_AS_BYTES=65536
 # mount a fresh filesystem (a tmpfs) that fapolicyd never marked. AppArmor's
 # switch keeps them to programs whose profile allows it. Armed sets it to 1
 # live and in a sysctl.d drop-in sorting after Mint's 20-apparmor-mint.conf;
-# disarm removes the drop-in and puts the recorded live value back.
+# disarm removes the drop-in and puts the recorded live values back.
 USERNS_SYSCTL=kernel.apparmor_restrict_unprivileged_userns
 USERNS_PROC=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+# Its companion: an unconfined process may not switch itself into a profile
+# that allows user namespaces (aa-exec, or writing /proc/self/attr/exec).
+UNCONFINED_SYSCTL=kernel.apparmor_restrict_unprivileged_unconfined
+UNCONFINED_PROC=/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined
 SYSCTL_DROPIN=/etc/sysctl.d/99-kintrinsic-applock.conf
-USERNS_PRIOR="$STATE_DIR/userns-restrict.orig"
+# Where each switch's live value before the first arm is kept.
+sysctl_prior() { printf '%s/sysctl-%s.orig\n' "$STATE_DIR" "$1"; }
 # Ubuntu's AppArmor profiles that let a desktop program (a browser sandbox,
 # flatpak's bwrap, an Electron app) keep making user namespaces while the
 # switch is on. Arm lists which are present; a program whose profile is
@@ -392,31 +397,74 @@ userns_open() {
         unshare -rm -- "$3" </dev/null >/dev/null 2>&1
 }
 
-# restrict_userns — the AppArmor userns switch on, live and across reboots.
-# The live value before the first arm is recorded once, for disarm.
+# restrict_userns — both AppArmor userns switches on, live and across
+# reboots; a switch this kernel lacks is skipped. The live value before the
+# first arm is recorded once, for disarm.
 restrict_userns() {
-    if ! [ -e "$USERNS_PROC" ]; then
-        log "note: this kernel has no $USERNS_SYSCTL; the self-test alone decides whether a ward can make a user namespace"
-        return 0
-    fi
-    [ -f "$USERNS_PRIOR" ] || cat "$USERNS_PROC" > "$USERNS_PRIOR" || return 1
+    local key proc prior present=()
+    for key in "$USERNS_SYSCTL" "$UNCONFINED_SYSCTL"; do
+        proc="/proc/sys/${key//.//}"
+        if ! [ -e "$proc" ]; then
+            log "note: this kernel has no $key; the self-test alone decides what it would have stopped"
+            continue
+        fi
+        prior="$(sysctl_prior "$key")"
+        [ -f "$prior" ] || cat "$proc" > "$prior" || return 1
+        present+=("$key")
+    done
+    [ "${#present[@]}" -gt 0 ] || return 0
     install -d -m 0755 "$(dirname "$SYSCTL_DROPIN")"
-    printf '%s unprivileged user namespaces stay restricted while the app lock is armed; removed by '"'"'charter-applock disarm'"'"'.\n%s = 1\n' \
-        "$OURS_TAG" "$USERNS_SYSCTL" > "$SYSCTL_DROPIN" || return 1
+    {
+        printf '%s unprivileged user namespaces stay restricted while the app lock is armed; removed by '"'"'charter-applock disarm'"'"'.\n' "$OURS_TAG"
+        for key in "${present[@]}"; do printf '%s = 1\n' "$key"; done
+    } > "$SYSCTL_DROPIN" || return 1
     chmod 0644 "$SYSCTL_DROPIN"
-    printf '1\n' > "$USERNS_PROC" 2>/dev/null || return 1
-    [ "$(cat "$USERNS_PROC" 2>/dev/null)" = 1 ]
+    for key in "${present[@]}"; do
+        proc="/proc/sys/${key//.//}"
+        printf '1\n' > "$proc" 2>/dev/null || return 1
+        [ "$(cat "$proc" 2>/dev/null)" = 1 ] || return 1
+    done
 }
 
-# restore_userns — the drop-in gone and the recorded live value back.
+# restore_userns — the drop-in gone and each recorded live value back.
 restore_userns() {
     [ -f "$SYSCTL_DROPIN" ] && file_is_ours "$SYSCTL_DROPIN" && rm -f "$SYSCTL_DROPIN"
-    if [ -f "$USERNS_PRIOR" ]; then
-        local prior
-        prior="$(cat "$USERNS_PRIOR" 2>/dev/null)"
-        [[ "$prior" =~ ^[0-9]+$ ]] && [ -e "$USERNS_PROC" ] && printf '%s\n' "$prior" > "$USERNS_PROC" 2>/dev/null
-        rm -f "$USERNS_PRIOR"
-    fi
+    local key proc prior value
+    for key in "$USERNS_SYSCTL" "$UNCONFINED_SYSCTL"; do
+        proc="/proc/sys/${key//.//}"
+        prior="$(sysctl_prior "$key")"
+        [ -f "$prior" ] || continue
+        value="$(cat "$prior" 2>/dev/null)"
+        [[ "$value" =~ ^[0-9]+$ ]] && [ -e "$proc" ] && printf '%s\n' "$value" > "$proc" 2>/dev/null
+        rm -f "$prior"
+    done
+}
+
+# userns_probe_profile — the name of a LOADED AppArmor profile that grants
+# user namespaces (trinity first, else the first such file in
+# /etc/apparmor.d), for the aa-exec check. Fails if there is none.
+userns_probe_profile() {
+    local loaded=/sys/kernel/security/apparmor/profiles f name
+    [ -r "$loaded" ] || return 1
+    for f in /etc/apparmor.d/trinity /etc/apparmor.d/*; do
+        [ -f "$f" ] || continue
+        grep -qE '^[[:space:]]*userns,' "$f" || continue
+        name="$(awk '$1 == "profile" { print $2; exit }' "$f")"
+        [ -n "$name" ] || continue
+        if cut -d' ' -f1 "$loaded" | grep -qxF "$name"; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# userns_open_via_profile <uid> <gid> <profile> <canary> — 0 if the ward
+# could switch into <profile> with aa-exec and run <canary> inside a new
+# user + mount namespace from there.
+userns_open_via_profile() {
+    LC_ALL=C timeout -s KILL 10 setpriv --reuid="$1" --regid="$2" --init-groups --reset-env -- \
+        /usr/bin/aa-exec -p "$3" -- unshare -rm -- "$4" </dev/null >/dev/null 2>&1
 }
 
 # userns_profiles_report — which of USERNS_PROFILES are present.
@@ -784,6 +832,11 @@ verify_ward_enforced() {
         || { echo "enforcing fapolicyd still let '$user' LD_PRELOAD the x-executable library canary"; return 1; }
     ! userns_open "$uid" "$gid" "$dir/canary" \
         || { echo "'$user' ran the canary inside a new user namespace"; return 1; }
+    local profile
+    if [ -x /usr/bin/aa-exec ] && profile="$(userns_probe_profile)"; then
+        ! userns_open_via_profile "$uid" "$gid" "$profile" "$dir/canary" \
+            || { echo "'$user' ran the canary in a new user namespace through aa-exec -p $profile"; return 1; }
+    fi
     st="$(run_as_ward_real "$uid" "$gid" /usr/bin/true)"
     [ "$st" = 0 ] || { echo "enforcing fapolicyd refused /usr/bin/true for '$user'"; return 1; }
     return 0
@@ -966,7 +1019,7 @@ $hits"
     # Mark whole filesystems, not mounts: a bind mount, or a watched
     # filesystem seen from another mount namespace, is then watched too.
     conf_set "$FAPO_CONF" allow_filesystem_mark 1
-    restrict_userns || abort_arm "could not set $USERNS_SYSCTL=1 (live and in $SYSCTL_DROPIN)"
+    restrict_userns || abort_arm "could not set $USERNS_SYSCTL=1 and $UNCONFINED_SYSCTL=1 (live and in $SYSCTL_DROPIN)"
     userns_profiles_report
     rm -f "$STALE_RULES"
     install -d -m 0755 "$FAPO_DIR/rules.d"
@@ -996,10 +1049,17 @@ $hits"
     # fapolicyd is stopped here, so these measure the namespace restriction
     # and the canaries themselves, not the rules.
     echo "==> checking that no ward can make a user namespace"
-    local c
+    local c profile=""
+    if [ -x /usr/bin/aa-exec ]; then
+        profile="$(userns_probe_profile)" \
+            || log "note: no loaded AppArmor profile grants user namespaces; the aa-exec check is skipped"
+    fi
     for i in "${!W_USER[@]}"; do
         if userns_open "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/canary"; then
             abort_arm "'${W_USER[$i]}' ran a program inside a new user + mount namespace (unshare -rm), so they could mount a filesystem fapolicyd does not watch. $USERNS_SYSCTL is $(cat "$USERNS_PROC" 2>/dev/null || echo 'not available on this kernel')."
+        fi
+        if [ -n "$profile" ] && userns_open_via_profile "${W_UID[$i]}" "${W_GID[$i]}" "$profile" "${CANARY[$i]}/canary"; then
+            abort_arm "'${W_USER[$i]}' switched into the AppArmor profile '$profile' (aa-exec) and ran a program inside a new user namespace from there. $UNCONFINED_SYSCTL is $(cat "$UNCONFINED_PROC" 2>/dev/null || echo 'not available on this kernel')."
         fi
         for c in libcanary.so libexeccanary.so; do
             ! preload_refused "${W_UID[$i]}" "${W_GID[$i]}" "${CANARY[$i]}/$c" \

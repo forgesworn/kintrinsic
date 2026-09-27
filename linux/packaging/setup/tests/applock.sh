@@ -171,7 +171,11 @@ else
     bad "the userns drop-in sorts after Mint's ($SYSCTL_DROPIN)"
 fi
 expect_eq "$USERNS_PROC" "/proc/sys/${USERNS_SYSCTL//.//}" "USERNS_PROC is the sysctl's /proc path"
-case "$USERNS_PRIOR" in "$STATE_DIR"/*) ok "the prior userns value is kept in the state dir" ;; *) bad "USERNS_PRIOR under STATE_DIR" ;; esac
+expect_eq "$UNCONFINED_PROC" "/proc/sys/${UNCONFINED_SYSCTL//.//}" "UNCONFINED_PROC is the sysctl's /proc path"
+for key in "$USERNS_SYSCTL" "$UNCONFINED_SYSCTL"; do
+    case "$(sysctl_prior "$key")" in "$STATE_DIR"/*"$key"*) ok "the prior $key is kept in the state dir" ;; *) bad "the prior $key is kept in the state dir" ;; esac
+done
+if [ "$(sysctl_prior "$USERNS_SYSCTL")" != "$(sysctl_prior "$UNCONFINED_SYSCTL")" ]; then ok "each switch has its own prior file"; else bad "each switch has its own prior file"; fi
 printf '%s userns\n%s = 1\n' "$OURS_TAG" "$USERNS_SYSCTL" > "$TMP/sysctl.conf"
 if file_is_ours "$TMP/sysctl.conf"; then ok "file_is_ours: our sysctl drop-in"; else bad "file_is_ours: our sysctl drop-in"; fi
 # The script's own body (below the source guard) — checked by text.
@@ -187,6 +191,7 @@ fi
 if grep -q 'conf_set "$FAPO_CONF" allow_filesystem_mark 1' <<< "$body"; then ok "arm sets allow_filesystem_mark = 1"; else bad "arm sets allow_filesystem_mark = 1"; fi
 if grep -q 'unshare -rm' <<< "$body"; then ok "the self-test runs the canary under unshare -rm"; else bad "the self-test runs the canary under unshare -rm"; fi
 if grep -q 'libexeccanary.so' <<< "$body"; then ok "an x-executable library canary is tested"; else bad "an x-executable library canary is tested"; fi
+if grep -q 'userns_open_via_profile' <<< "$body"; then ok "the self-test tries aa-exec into a userns profile"; else bad "the self-test tries aa-exec into a userns profile"; fi
 if grep -q '^    restore_userns$' <<< "$body"; then ok "disarm restores the userns switch"; else bad "disarm restores the userns switch"; fi
 
 echo "$checks checks, $fails failed"

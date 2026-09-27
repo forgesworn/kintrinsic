@@ -16,8 +16,9 @@
 //! 4. `fapolicyd.conf` is not permissive, and marks whole filesystems
 //!    (`allow_filesystem_mark = 1`),
 //! 5. unprivileged user namespaces are restricted
-//!    (`kernel.apparmor_restrict_unprivileged_userns` is 1, where the kernel
-//!    has it),
+//!    (`kernel.apparmor_restrict_unprivileged_userns` and
+//!    `kernel.apparmor_restrict_unprivileged_unconfined` are 1, each where the
+//!    kernel has it),
 //! 6. a `fapolicyd` process is alive (`/run/fapolicyd.pid` → `/proc/<pid>/comm`),
 //! 7. no ward can write near the top of a tree the rules trust by path (a
 //!    cheap, two-level re-run of the arm-time audit; the full one is `arm`'s).
@@ -60,6 +61,10 @@ pub struct AppLockPaths {
     /// The AppArmor userns switch; a missing file (a kernel without it) is
     /// not held against the lock, `arm`'s self-test having judged that box.
     pub userns_sysctl: PathBuf,
+    /// The companion switch stopping an unconfined process from changing
+    /// into a profile that grants user namespaces; missing is not held
+    /// against the lock either.
+    pub userns_unconfined_sysctl: PathBuf,
     pub trees: Vec<PathBuf>,
 }
 
@@ -74,6 +79,8 @@ impl Default for AppLockPaths {
             group: "/etc/group".into(),
             passwd: "/etc/passwd".into(),
             userns_sysctl: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns".into(),
+            userns_unconfined_sysctl: "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined"
+                .into(),
             trees: ALLOWED_TREES.iter().map(PathBuf::from).collect(),
         }
     }
@@ -287,6 +294,11 @@ pub fn probe(paths: &AppLockPaths) -> AppLockReport {
             "unprivileged user namespaces are not restricted (apparmor_restrict_unprivileged_userns is not 1)",
         );
     }
+    if read(&paths.userns_unconfined_sysctl).is_some_and(|v| v.trim() != "1") {
+        return AppLockReport::broken(
+            "unconfined programs may switch into a user-namespace profile (apparmor_restrict_unprivileged_unconfined is not 1)",
+        );
+    }
     let alive = read(&paths.pid_file)
         .and_then(|pid| pid.trim().parse::<u32>().ok())
         .and_then(|pid| fs::read_to_string(paths.proc_root.join(pid.to_string()).join("comm")).ok())
@@ -341,6 +353,7 @@ mod tests {
                 group: dir.join("group"),
                 passwd: dir.join("passwd"),
                 userns_sysctl: dir.join("userns"),
+                userns_unconfined_sysctl: dir.join("userns-unconfined"),
                 trees: vec![dir.join("tree")],
             };
             fs::write(&paths.rules, RULES).unwrap();
@@ -351,6 +364,7 @@ mod tests {
             fs::write(&paths.group, GROUP).unwrap();
             fs::write(&paths.passwd, PASSWD).unwrap();
             fs::write(&paths.userns_sysctl, "1\n").unwrap();
+            fs::write(&paths.userns_unconfined_sysctl, "1\n").unwrap();
             Self { dir, paths }
         }
     }
@@ -426,6 +440,10 @@ mod tests {
                 Box::new(|p| fs::write(&p.userns_sysctl, "0\n").unwrap()),
             ),
             (
+                "may switch into a user-namespace profile",
+                Box::new(|p| fs::write(&p.userns_unconfined_sysctl, "0\n").unwrap()),
+            ),
+            (
                 "not running",
                 Box::new(|p| fs::write(p.proc_root.join("4242/comm"), "bash\n").unwrap()),
             ),
@@ -451,6 +469,7 @@ mod tests {
     fn a_kernel_without_the_userns_switch_is_not_held_against_the_lock() {
         let f = Fixture::new("no-userns");
         fs::remove_file(&f.paths.userns_sysctl).unwrap();
+        fs::remove_file(&f.paths.userns_unconfined_sysctl).unwrap();
         assert!(probe(&f.paths).armed);
     }
 
@@ -526,5 +545,9 @@ mod tests {
             d.rules.file_name().unwrap().to_str().unwrap()
         )));
         assert!(script.contains(&format!("USERNS_PROC={}", d.userns_sysctl.display())));
+        assert!(script.contains(&format!(
+            "UNCONFINED_PROC={}",
+            d.userns_unconfined_sysctl.display()
+        )));
     }
 }

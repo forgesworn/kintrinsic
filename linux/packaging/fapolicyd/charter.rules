@@ -57,6 +57,13 @@ deny_log perm=any @WARD@ pattern=ld_so : all
 deny_log perm=execute @WARD@ : path=/usr/bin/fusermount3
 deny_log perm=execute @WARD@ : path=/usr/bin/fusermount
 
+# aa-exec switches a process into another AppArmor profile, and some of
+# Ubuntu's profiles grant user namespaces (see the userns switches in
+# charter-applock). Denied BEFORE the /usr allow; the kernel switch
+# apparmor_restrict_unprivileged_unconfined covers the same move made
+# without aa-exec (writing /proc/self/attr/exec).
+deny_log perm=execute @WARD@ : path=/usr/bin/aa-exec
+
 # Libraries, and every other ELF object. Code can be run without any
 # execute event by loading it as a library into a trusted program
 # (`LD_PRELOAD=~/x.so firefox`, dlopen, `ld.so --preload`); the loader OPENS

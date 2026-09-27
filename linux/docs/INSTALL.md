@@ -185,10 +185,15 @@ lock is armed (disarm puts both back as they were):
   that allows them (`kernel.apparmor_restrict_unprivileged_userns = 1`, set
   now and in `/etc/sysctl.d/99-kintrinsic-applock.conf`). Ubuntu ships this
   on; Linux Mint turns it off. Without it, the child could make a private
-  mount of their own, which fapolicyd never sees.
+  mount of their own, which fapolicyd never sees. Its companion,
+  `kernel.apparmor_restrict_unprivileged_unconfined = 1`, stops the child
+  switching themselves into a profile that does allow them, and running
+  `aa-exec` is denied to the child as well.
 
 `arm` then checks, as the child, that they can no longer run a program inside
-a new user namespace (`unshare -rm`), and stops if they can. It prints which
+a new user namespace (`unshare -rm`), nor through `aa-exec` into a profile
+that grants them (`trinity`, or another such profile that is loaded), and
+stops if they can. It prints which
 of Ubuntu's AppArmor profiles for sandboxed programs (Chrome and other
 Chromium browsers, Firefox, flatpak, Steam, Electron apps such as VS Code or
 Signal) are present. A sandboxed program with no profile cannot start its
@@ -263,6 +268,12 @@ not running means nothing is enforced.
   Restricting flatpak for children would close that, and would also stop
   every flatpak app working for them; it is left as it is for now, pending
   a decision on which matters more.
+- **Terminals inside a program that is allowed user namespaces.** A program
+  keeps its AppArmor profile's permissions for everything it starts. A
+  terminal the child opens inside such a program (VS Code's integrated
+  terminal, say) can therefore make user namespaces, and with them a
+  filesystem fapolicyd does not watch. Remove those programs from a child's
+  account if that matters.
 - **Programs whose sandbox has no AppArmor profile.** With user namespaces
   restricted, a sandboxed program (a browser, an Electron app) that Ubuntu
   ships no profile for cannot start its sandbox in the child's account.

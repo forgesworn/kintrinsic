@@ -26,13 +26,20 @@
 #     `docker cp`, and docker's /etc/hosts, /etc/hostname and
 #     /etc/resolv.conf are unmounted before arming), and the test refuses to
 #     arm if any disk filesystem is still visible. $HOME is a tmpfs.
-#   - kernel.apparmor_restrict_unprivileged_userns is not namespaced: in a
-#     privileged container a write would change the HOST. A stand-in file is
-#     bind-mounted over it inside the container, and the host's value is
-#     checked unchanged at the end.
+#   - kernel.apparmor_restrict_unprivileged_userns and ..._unconfined are not
+#     namespaced: in a privileged container a write would change the HOST. A
+#     stand-in file is bind-mounted over each inside the container, and the
+#     host's values are checked unchanged after boot and at the end.
+#     apparmor.service and systemd-sysctl.service are masked in the image:
+#     booting would otherwise load profiles into the host's kernel and apply
+#     apparmor's 10-apparmor.conf (userns switch = 1) to the HOST.
 #
 # What a container cannot show (the VM test covers these): AppArmor's actual
-# userns restriction and its profiles (flatpak/bwrap, browsers); the sysctl.d
+# userns restriction, the unconfined profile-switch restriction and the
+# aa-exec self-test (no loaded profiles are visible here, so arm skips it),
+# the path denials of /usr/bin/aa-exec and fusermount (the image's /usr is
+# overlayfs, which fapolicyd does not watch),
+# and the profiles themselves (flatpak/bwrap, browsers); the sysctl.d
 # drop-in applied at boot; fanotify on a real ext4 disk; a desktop session;
 # udisks noexec mounts; reboot and the trial timer across one.
 set -uo pipefail
@@ -43,6 +50,7 @@ RULES="$HERE/../../fapolicyd/charter.rules"
 IMAGE=kintrinsic-applock-test:noble
 BASE=ubuntu:24.04
 USERNS_PROC=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+UNCONFINED_PROC=/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined
 
 # ---------------------------------------------------------------------------
 # Inside the container.
@@ -63,9 +71,11 @@ inside() {
         echo "FAIL - [$mode] a host filesystem is visible in the container; refusing to arm: $disks"
         return 1
     fi
-    # The userns switch, as a stand-in file (see the header).
+    # The userns switches, as stand-in files (see the header).
     printf '0\n' > /run/userns-standin
     mount --bind /run/userns-standin "$USERNS_PROC" || { echo "FAIL - cannot bind the userns stand-in"; return 1; }
+    printf '0\n' > /run/unconfined-standin
+    mount --bind /run/unconfined-standin "$UNCONFINED_PROC" || { echo "FAIL - cannot bind the unconfined stand-in"; return 1; }
 
     groupadd -r charter-managed
     useradd -m -u 4242 -G charter-managed -s /bin/bash kid
@@ -94,6 +104,7 @@ inside() {
         fi
         check "the refused arm restored fapolicyd.conf byte for byte" cmp -s /etc/fapolicyd/fapolicyd.conf /root/fapolicyd.conf.before
         check "the refused arm put the userns switch back to 0" test "$(cat "$USERNS_PROC")" = 0
+        check "the refused arm put the unconfined switch back to 0" test "$(cat "$UNCONFINED_PROC")" = 0
         check "the refused arm left no sysctl drop-in" test ! -e /etc/sysctl.d/99-kintrinsic-applock.conf
         check "the refused arm left fapolicyd stopped" sh -c '! systemctl is-active --quiet fapolicyd'
         charter-applock status >/dev/null 2>&1; rc=$?
@@ -118,6 +129,8 @@ inside() {
     check "fapolicyd.conf: allow_filesystem_mark = 1" grep -qx 'allow_filesystem_mark = 1' /etc/fapolicyd/fapolicyd.conf
     check "the userns switch is 1 while armed" test "$(cat "$USERNS_PROC")" = 1
     check "the sysctl drop-in sets it across reboots" grep -qx 'kernel.apparmor_restrict_unprivileged_userns = 1' /etc/sysctl.d/99-kintrinsic-applock.conf
+    check "the unconfined switch is 1 while armed" test "$(cat "$UNCONFINED_PROC")" = 1
+    check "the sysctl drop-in sets the unconfined switch too" grep -qx 'kernel.apparmor_restrict_unprivileged_unconfined = 1' /etc/sysctl.d/99-kintrinsic-applock.conf
 
     # The ward.
     case "$(err_of as 4242 $KH/bin/game)" in
@@ -139,6 +152,17 @@ inside() {
     esac
     check "ward: /usr/bin/true runs" as 4242 /usr/bin/true
     check "ward: /usr/bin/bash runs" as 4242 /usr/bin/bash -c true
+    # Path denials inside /usr (aa-exec, fusermount) only bite where /usr is
+    # on a watched filesystem; the image's /usr is overlayfs, which is not.
+    local usr_fs
+    usr_fs="$(findmnt -no FSTYPE -T /usr/bin/aa-exec)"
+    if grep -qE "(^|,)$usr_fs(,|$)" <<< "$(sed -n 's/^watch_fs = //p' /etc/fapolicyd/fapolicyd.conf)"; then
+        case "$(err_of as 4242 /usr/bin/aa-exec -p trinity -- /usr/bin/true)" in
+            *'Operation not permitted'*) ok "ward: aa-exec is refused" ;; *) bad "ward: aa-exec is refused" ;;
+        esac
+    else
+        echo "skip - [$mode] ward: aa-exec is refused (/usr is $usr_fs here, which fapolicyd does not watch; the VM test covers it)"
+    fi
     check "ward: cannot unshare -rm" sh -c '! setpriv --reuid=4242 --regid=4242 --init-groups --reset-env -- unshare -rm /usr/bin/true 2>/dev/null'
     # A bind mount of the ward's files made in ANOTHER mount namespace:
     # fapolicyd only sees it through the filesystem mark.
@@ -179,6 +203,7 @@ inside() {
     check "disarm succeeds" test "$rc" = 0
     check "disarm restores fapolicyd.conf byte for byte" cmp -s /etc/fapolicyd/fapolicyd.conf /root/fapolicyd.conf.before
     check "disarm puts the userns switch back to 0" test "$(cat "$USERNS_PROC")" = 0
+    check "disarm puts the unconfined switch back to 0" test "$(cat "$UNCONFINED_PROC")" = 0
     check "disarm removes the sysctl drop-in" test ! -e /etc/sysctl.d/99-kintrinsic-applock.conf
     check "disarm removes the rules" test ! -e /etc/fapolicyd/rules.d/72-kintrinsic-applock.rules
     check "disarm removes the apt hook" test ! -e /etc/apt/apt.conf.d/80kintrinsic-applock
@@ -202,6 +227,8 @@ keep_image=0
 [ "${1:-}" = --keep-image ] && keep_image=1
 command -v docker >/dev/null || { echo "docker is needed" >&2; exit 2; }
 
+host_switches() { printf '%s/%s\n' "$(cat "$USERNS_PROC" 2>/dev/null || echo absent)" "$(cat "$UNCONFINED_PROC" 2>/dev/null || echo absent)"; }
+host_userns_before="$(host_switches)"
 WORK="$(mktemp -d)"
 CONTAINERS=()
 had_base=0
@@ -209,6 +236,13 @@ docker image inspect "$BASE" >/dev/null 2>&1 && had_base=1
 cleanup() {
     local c
     for c in "${CONTAINERS[@]}"; do docker rm -f "$c" >/dev/null 2>&1; done
+    # Safety net: if anything reached the host's switches, put them back.
+    if [ -n "${host_userns_before:-}" ] && [ "$(host_switches)" != "$host_userns_before" ]; then
+        local u="${host_userns_before%%/*}" n="${host_userns_before##*/}"
+        docker run --rm --privileged --entrypoint /bin/sh "$IMAGE" -c \
+            "case '$u' in [0-9]*) echo '$u' > $USERNS_PROC ;; esac; case '$n' in [0-9]*) echo '$n' > $UNCONFINED_PROC ;; esac" >/dev/null 2>&1
+        echo "restored the host's userns switches: now $(host_switches) (were $host_userns_before)" >&2
+    fi
     if [ "$keep_image" = 0 ]; then
         docker rmi -f "$IMAGE" >/dev/null 2>&1
         [ "$had_base" = 1 ] || docker rmi "$BASE" >/dev/null 2>&1
@@ -217,14 +251,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-host_userns_before="$(cat "$USERNS_PROC" 2>/dev/null || echo absent)"
 
 cat > "$WORK/Dockerfile" <<'EOF'
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive container=docker
 RUN apt-get update \
- && apt-get install -y --no-install-recommends systemd systemd-sysv fapolicyd util-linux libc-bin procps \
- && apt-get clean && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends systemd systemd-sysv fapolicyd util-linux libc-bin procps apparmor \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /dev/null /etc/systemd/system/apparmor.service \
+ && ln -sf /dev/null /etc/systemd/system/systemd-sysctl.service \
+ && ln -sf /dev/null /etc/systemd/system/procps.service
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
 EOF
@@ -257,6 +293,10 @@ run_pass() {
         case "$state" in running|degraded) break ;; esac
         sleep 1
     done
+    if [ "$(host_switches)" != "$host_userns_before" ]; then
+        echo "FAIL - [$mode] booting the container changed the host's userns switches ($host_userns_before -> $(host_switches)); stopping"
+        return 1
+    fi
     docker cp "$SETUP/charter-applock" "$name:/usr/sbin/charter-applock" >/dev/null
     docker exec "$name" install -d /usr/share/charter/fapolicyd
     docker cp "$RULES" "$name:/usr/share/charter/fapolicyd/72-charter.rules" >/dev/null
@@ -267,18 +307,18 @@ run_pass() {
 }
 
 fails=0
-if [ "$host_userns_before" = 0 ]; then
+if [ "${host_userns_before%%/*}" = 0 ]; then
     run_pass userns-open || fails=$((fails + 1))
 else
     echo "skip - [userns-open] this host's kernel already restricts user namespaces ($host_userns_before), so the refusal cannot be shown here"
 fi
 run_pass enforce --security-opt seccomp="$WORK/no-userns.json" || fails=$((fails + 1))
 
-host_userns_after="$(cat "$USERNS_PROC" 2>/dev/null || echo absent)"
+host_userns_after="$(host_switches)"
 if [ "$host_userns_after" = "$host_userns_before" ]; then
-    echo "ok   - the host's userns switch is untouched ($host_userns_after)"
+    echo "ok   - the host's userns switches are untouched (userns/unconfined: $host_userns_after)"
 else
-    echo "FAIL - the host's userns switch changed: $host_userns_before -> $host_userns_after"
+    echo "FAIL - the host's userns switches changed: $host_userns_before -> $host_userns_after"
     fails=$((fails + 1))
 fi
 [ "$fails" = 0 ] && echo "applock-container: all passes succeeded" || echo "applock-container: $fails pass(es) failed"
