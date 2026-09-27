@@ -11,7 +11,7 @@
       ]
     ],
     "content": "charter nip01 event-id kat",
-    "sig": "67bbede8f035266264145fed293b5d673b471269a9fe58ae486bdd0c78b0087ae8e6a21a9ff7431ec27c76ee77396667167d2d59869273f010e8b32d4dc991f4"
+    "sig": "3fc98e6b5a1c4b18bc1a60e4e64f0c7b0c3540914a58035a467fadf1361bb392b7819ab88c536cbcaa0cc6638cc518a588f71e095b29b8c633ef2062745338d7"
   },
   "canonical": "[0,\"1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11\",1700000000,1,[[\"t\",\"charter-device\"]],\"charter nip01 event-id kat\"]"
 }

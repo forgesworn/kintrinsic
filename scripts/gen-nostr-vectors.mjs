@@ -7,16 +7,37 @@
 //
 // Output: core/crates/charter-testkit/vectors/nostr/*.json
 //
-// NOTE: BIP-340 signing uses random aux data, so signatures differ each run.
-// The Rust suite *verifies* the committed signature (and *reproduces* the
-// deterministic event id) — it never reproduces the signature byte-for-byte.
-
-import { finalizeEvent, getPublicKey, serializeEvent } from "nostr-tools/pure";
+// Byte-for-byte determinism: BIP-340 signing takes optional aux-rand, and
+// nostr-tools' own `finalizeEvent`/`wrapEvent` helpers draw it (plus, for
+// NIP-59, the seal/wrap timestamps and the wrap's ephemeral key) from the
+// system CSPRNG. Every such input here is instead derived from a fixed,
+// labelled seed via SHA-256 (see `seedBytes`/`seedSecretKey`), so re-running
+// this script reproduces every byte of every vector, including `sig`.
+import { getPublicKey, serializeEvent, getEventHash } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
-import { wrapEvent, unwrapEvent } from "nostr-tools/nip59";
+import { schnorr } from "@noble/curves/secp256k1.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, hexToBytes, concatBytes } from "@noble/hashes/utils.js";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const te = new TextEncoder();
+
+// Deterministic 32-byte material for a labelled purpose (aux-rand, nonces).
+// Never reused for two different purposes — each call site passes a unique,
+// descriptive label.
+function seedBytes(label) {
+  return sha256(te.encode(`kintrinsic-testkit-vectors:${label}`));
+}
+
+// Deterministic secret key for a labelled purpose (e.g. the NIP-59 wrap's
+// ephemeral key), mapped into the valid scalar range the same way
+// `schnorr.utils.randomSecretKey` maps its (normally random) 48-byte seed.
+function seedSecretKey(label) {
+  const seed48 = concatBytes(seedBytes(`${label}:0`), seedBytes(`${label}:1`)).slice(0, 48);
+  return schnorr.utils.randomSecretKey(seed48);
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(
@@ -48,8 +69,14 @@ const EXP = 1_700_003_600;
 
 const MARKER = ["t", "charter-device"];
 
-function signWith(sk, template) {
-  const ev = finalizeEvent(template, sk);
+// Equivalent to nostr-tools' `finalizeEvent`, but with an explicit,
+// deterministic BIP-340 aux-rand (nostr-tools' own version always draws 32
+// fresh random bytes internally and gives no way to override that).
+function signWith(sk, template, auxLabel) {
+  const ev = { ...template, pubkey: getPublicKey(sk) };
+  ev.id = getEventHash(ev);
+  const sig = schnorr.sign(hexToBytes(ev.id), sk, seedBytes(auxLabel));
+  ev.sig = bytesToHex(sig);
   return {
     id: ev.id,
     pubkey: ev.pubkey,
@@ -69,12 +96,16 @@ function write(name, obj) {
 
 // --- 1. Generic NIP-01 event (event-id KAT) -------------------------------
 {
-  const event = signWith(MACHINE_SK, {
-    kind: 1,
-    created_at: TS,
-    tags: [["t", "charter-device"]],
-    content: "charter nip01 event-id kat",
-  });
+  const event = signWith(
+    MACHINE_SK,
+    {
+      kind: 1,
+      created_at: TS,
+      tags: [["t", "charter-device"]],
+      content: "charter nip01 event-id kat",
+    },
+    "nip01_event.sig",
+  );
   write("nip01_event.json", { event, canonical: serializeEvent(event) });
 }
 
@@ -82,12 +113,16 @@ function write(name, obj) {
 function grant(name, op, decision, params) {
   const payload = { v: 1, op, reqId: REQ_ID, nonce: NONCE, decision, ts: TS, exp: EXP, params };
   const content = JSON.stringify(payload);
-  const event = signWith(GUARDIAN_SK, {
-    kind: 31112,
-    created_at: TS,
-    tags: [MARKER, ["d", REQ_ID]],
-    content,
-  });
+  const event = signWith(
+    GUARDIAN_SK,
+    {
+      kind: 31112,
+      created_at: TS,
+      tags: [MARKER, ["d", REQ_ID]],
+      content,
+    },
+    `${name}.sig`,
+  );
   write(name, { event, guardian_pubkey: GUARDIAN_PK, payload, canonical: serializeEvent(event) });
 }
 
@@ -124,12 +159,16 @@ grant("grant_time_extend_allow.json", "time.extend", "allow", {
     },
   };
   const content = JSON.stringify(payload);
-  const event = signWith(GUARDIAN_SK, {
-    kind: 31113,
-    created_at: TS,
-    tags: [MARKER, ["d", "schedule"]],
-    content,
-  });
+  const event = signWith(
+    GUARDIAN_SK,
+    {
+      kind: 31113,
+      created_at: TS,
+      tags: [MARKER, ["d", "schedule"]],
+      content,
+    },
+    "clause_schedule.sig",
+  );
   write("clause_schedule.json", {
     event,
     guardian_pubkey: GUARDIAN_PK,
@@ -148,20 +187,24 @@ grant("grant_time_extend_allow.json", "time.extend", "allow", {
     `https://blossom.example/${sha}`,
     `https://mirror.example/${sha}`,
   ];
-  const event = signWith(RELEASE_SK, {
-    kind: 30063,
-    created_at: TS,
-    tags: [
-      ["d", "charter-apk"],
-      ["version", "0.6.9"],
-      ["version_code", "40"],
-      ["x", sha],
-      ["size", "27693181"],
-      ["cert", cert],
-      ...urls.map((u) => ["url", u]),
-    ],
-    content: "test release notes",
-  });
+  const event = signWith(
+    RELEASE_SK,
+    {
+      kind: 30063,
+      created_at: TS,
+      tags: [
+        ["d", "charter-apk"],
+        ["version", "0.6.9"],
+        ["version_code", "40"],
+        ["x", sha],
+        ["size", "27693181"],
+        ["cert", cert],
+        ...urls.map((u) => ["url", u]),
+      ],
+      content: "test release notes",
+    },
+    "software_release.sig",
+  );
   write("software_release.json", {
     event,
     release_pubkey: RELEASE_PK,
@@ -227,8 +270,18 @@ write("keys.json", {
 }
 
 // --- 6. NIP-59 gift-wrap fixture (machine -> guardian) --------------------
+// Reimplemented from nostr-tools' `wrapEvent`/`unwrapEvent` (rather than
+// calling them directly) because that pair draws three separate things from
+// the system CSPRNG with no override: the seal's and wrap's `created_at`
+// jitter (`randomNow()`), the wrap's ephemeral key (`generateSecretKey()`),
+// and the NIP-44 nonce used to encrypt the rumor and the seal. Every one of
+// those is pinned below to a labelled seed instead.
 {
-  const rumorTemplate = {
+  const SEAL_TS = TS; // fixed in place of NIP-59's randomised `randomNow()`
+  const WRAP_TS = TS;
+  const WRAP_EPHEMERAL_SK = seedSecretKey("nip59_giftwrap.wrap_ephemeral_key");
+
+  const rumor = {
     kind: 31111,
     created_at: TS,
     tags: [MARKER, ["d", REQ_ID]],
@@ -242,19 +295,45 @@ write("keys.json", {
       ts: TS,
       params: { ref: "org.videolan.VLC", remote: "flathub" },
     }),
+    pubkey: MACHINE_PK,
   };
-  // wrapEvent: machine seals+wraps the rumor for the guardian.
-  const wrap = wrapEvent(rumorTemplate, MACHINE_SK, GUARDIAN_PK);
-  const rumor = unwrapEvent(wrap, GUARDIAN_SK);
+  rumor.id = getEventHash(rumor);
+
+  const sealConvKey = nip44.v2.utils.getConversationKey(MACHINE_SK, GUARDIAN_PK);
+  const sealNonce = seedBytes("nip59_giftwrap.seal_nonce");
+  const sealContent = nip44.v2.encrypt(JSON.stringify(rumor), sealConvKey, sealNonce);
+  const seal = signWith(
+    MACHINE_SK,
+    { kind: 13, content: sealContent, created_at: SEAL_TS, tags: [] },
+    "nip59_giftwrap.seal_sig",
+  );
+
+  const wrapConvKey = nip44.v2.utils.getConversationKey(WRAP_EPHEMERAL_SK, GUARDIAN_PK);
+  const wrapNonce = seedBytes("nip59_giftwrap.wrap_nonce");
+  const wrapContent = nip44.v2.encrypt(JSON.stringify(seal), wrapConvKey, wrapNonce);
+  const wrap = signWith(
+    WRAP_EPHEMERAL_SK,
+    { kind: 1059, content: wrapContent, created_at: WRAP_TS, tags: [["p", GUARDIAN_PK]] },
+    "nip59_giftwrap.wrap_sig",
+  );
+
+  // Round-trip through the recipient's own unwrap, exactly as NIP-59
+  // prescribes, to prove the fixture actually opens (and to derive
+  // `expected_rumor`).
+  const unwrapConvKey = nip44.v2.utils.getConversationKey(GUARDIAN_SK, wrap.pubkey);
+  const unwrappedSeal = JSON.parse(nip44.v2.decrypt(wrap.content, unwrapConvKey));
+  const sealConvKey2 = nip44.v2.utils.getConversationKey(GUARDIAN_SK, unwrappedSeal.pubkey);
+  const unwrappedRumor = JSON.parse(nip44.v2.decrypt(unwrappedSeal.content, sealConvKey2));
+
   write("nip59_giftwrap.json", {
     recipient_secret: Buffer.from(GUARDIAN_SK).toString("hex"),
     recipient_pubkey: GUARDIAN_PK,
     sender_pubkey: MACHINE_PK,
     wrap,
     expected_rumor: {
-      pubkey: rumor.pubkey,
-      kind: rumor.kind,
-      content: rumor.content,
+      pubkey: unwrappedRumor.pubkey,
+      kind: unwrappedRumor.kind,
+      content: unwrappedRumor.content,
     },
   });
 }

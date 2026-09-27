@@ -15,7 +15,7 @@
       ]
     ],
     "content": "{\"v\":1,\"op\":\"install.flatpak\",\"reqId\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"nonce\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"decision\":\"deny\",\"ts\":1700000000,\"exp\":1700003600,\"params\":{\"ref\":\"org.videolan.VLC\",\"remote\":\"flathub\"}}",
-    "sig": "d18349360532530650f258ad91dc19572785fce2e7813f49d7592d0cc3c0be7ee4866c8aa49e8ab1fbbd5ea2c2a4d7aa08041583471a7f9513b7e1ab52e98bf2"
+    "sig": "68d8b7a396d5ba52a054296a35cb619d35ad8731aafdc0d9766311dd8700aee0be7c9c44b400d898e90b96cdebdea9ad9f6d5a9d66a1e57dfb939b357f5daa93"
   },
   "guardian_pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
   "payload": {

@@ -15,7 +15,7 @@
       ]
     ],
     "content": "{\"v\":1,\"op\":\"exec.allow\",\"reqId\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"nonce\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"decision\":\"allow\",\"ts\":1700000000,\"exp\":1700003600,\"params\":{\"name\":\"SuperTuxKart\",\"sha256\":\"abababababababababababababababababababababababababababababababab\",\"size\":123456,\"origin\":\"https://example.org/stk.AppImage\"}}",
-    "sig": "bccaa2b7ae882010215ae8bfea482bc7570c30649366c5546906f87b24b9897b03b76db659980ad9346edb7e06fef8da4865b6554b5ec278b025021665f4738d"
+    "sig": "61ab5986a0374d454d1cf31c5f8d698e1db19033033a760dd8fb76c8e84311b4639520f63464f861779af077abeb07f64f5650743eaac1a8443de37b1c8be0a4"
   },
   "guardian_pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
   "payload": {
