@@ -1,9 +1,9 @@
 {
-  "versionName": "0.6.11",
-  "versionCode": 42,
-  "url": "https://nostr.download/1dac95cb642e147b1ecceee75e93798d7a385366bbf51275ba6f72c8711e059b.apk",
-  "apkSha256": "1dac95cb642e147b1ecceee75e93798d7a385366bbf51275ba6f72c8711e059b",
+  "versionName": "0.6.12",
+  "versionCode": 43,
+  "url": "https://nostr.download/a3fd19e3c1f416b588efb8d2ee2f8b29fd4f1c991558ec5c0902841c568ffee3.apk",
+  "apkSha256": "a3fd19e3c1f416b588efb8d2ee2f8b29fd4f1c991558ec5c0902841c568ffee3",
   "certSha256": "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42",
-  "sizeBytes": 28083733,
-  "builtAt": "2026-09-08T06:52:03Z"
+  "sizeBytes": 28924597,
+  "builtAt": "2026-09-27T11:41:57Z"
 }

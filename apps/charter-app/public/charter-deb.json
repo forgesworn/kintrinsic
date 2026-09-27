@@ -1,8 +1,8 @@
 {
-  "versionName": "0.7.8",
-  "versionCode": 708,
-  "url": "https://nostr.download/f11271e42e4348df4f3f96f373f634bff85480b21fc2dee4ac5c7b915d6e59db.deb",
-  "sha256": "f11271e42e4348df4f3f96f373f634bff85480b21fc2dee4ac5c7b915d6e59db",
-  "sizeBytes": 10863940,
-  "builtAt": "2026-08-13T12:27:46Z"
+  "versionName": "0.7.9",
+  "versionCode": 709,
+  "url": "https://nostr.download/bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb.deb",
+  "sha256": "bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb",
+  "sizeBytes": 11162984,
+  "builtAt": "2026-09-27T11:44:46Z"
 }

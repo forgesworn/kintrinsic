@@ -1,12 +1,12 @@
 {
   "android": {
-    "version": "0.1.13",
-    "url": "https://nostr.download/34b4e2242d23060c2dfcf21919471f6b0e64634cee40aff6b5a7b50fffaa84a5.apk",
-    "sha256": "34b4e2242d23060c2dfcf21919471f6b0e64634cee40aff6b5a7b50fffaa84a5"
+    "version": "0.1.14",
+    "url": "https://nostr.download/f42e77bf80e3920d565a8c6be9f9102304841781c3c5a52268da8e19d07568a3.apk",
+    "sha256": "f42e77bf80e3920d565a8c6be9f9102304841781c3c5a52268da8e19d07568a3"
   },
   "linux": {
-    "version": "0.7.8",
-    "url": "https://nostr.download/f11271e42e4348df4f3f96f373f634bff85480b21fc2dee4ac5c7b915d6e59db.deb",
-    "sha256": "f11271e42e4348df4f3f96f373f634bff85480b21fc2dee4ac5c7b915d6e59db"
+    "version": "0.7.9",
+    "url": "https://nostr.download/bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb.deb",
+    "sha256": "bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb"
   }
 }
