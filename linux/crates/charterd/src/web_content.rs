@@ -23,7 +23,7 @@ pub enum WebReconcile {
     /// is unmanaged (no-op).
     Absent,
     /// The clause is gone and the restrictions we had written were RETRACTED:
-    /// the unrestricted policy has just been materialised over them.
+    /// the files we wrote (and only those) have just been removed.
     Retracted,
     /// The clause store could not be read. NOT the same event as `Absent`:
     /// the last-known policy stays exactly where it is (see [`WebContentEnforcer::reconcile`]).
@@ -202,10 +202,10 @@ fn dns_plan_is_ours(content: &str) -> bool {
     .all(|k| obj.contains_key(*k))
 }
 
-/// Which of the two documents a materialize is allowed to write.
+/// Which of the two documents a materialize writes, or a retraction removes.
 ///
-/// Enacting writes both. A RETRACTION on a box with no durable marker writes
-/// only the ones whose own fingerprint says we wrote them — see
+/// Enacting writes both. A RETRACTION removes only the ones whose own current
+/// fingerprint says we wrote them, marker or no marker — see
 /// [`WebContentEnforcer::on_disk_fingerprints`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WriteTargets {
@@ -229,6 +229,9 @@ impl WriteTargets {
 #[derive(Default)]
 pub struct WebContentEnforcer {
     last_applied: Option<EffectiveWebPolicy>,
+    /// This run already retracted: a steady absent clause is a no-op, not a
+    /// per-tick re-read of the disk. Cleared by the next materialise.
+    retracted: bool,
     /// Overridden only by tests, so the marker is per-fixture rather than a
     /// process-global env var several tests would race over.
     marker_path: Option<String>,
@@ -252,6 +255,7 @@ impl WebContentEnforcer {
     fn with_marker_path(path: &str) -> Self {
         Self {
             last_applied: None,
+            retracted: false,
             marker_path: Some(path.to_string()),
             firefox_policies_path: None,
             dns_plan_path: None,
@@ -266,6 +270,7 @@ impl WebContentEnforcer {
     fn with_paths(marker: &str, firefox_policies: &str, dns_plan: &str) -> Self {
         Self {
             last_applied: None,
+            retracted: false,
             marker_path: Some(marker.to_string()),
             firefox_policies_path: Some(firefox_policies.to_string()),
             dns_plan_path: Some(dns_plan.to_string()),
@@ -303,10 +308,10 @@ impl WebContentEnforcer {
     /// 03-B7 closes is a stranded restriction on a pre-marker upgrade, and
     /// requiring both to match would let one going missing strand whatever the
     /// other still enforces. But "we wrote one of these" is not "we wrote both
-    /// of these", and the retraction that follows OVERWRITES what it touches.
+    /// of these", and the retraction that follows REMOVES what it touches.
     /// A box where a hardening baseline someone else owns sits at
     /// `policies.json` and only our DNS plan is ours would otherwise have that
-    /// baseline silently replaced with an unrestricted document, by a daemon
+    /// baseline silently deleted, by a daemon
     /// whose whole rule at this point is "hands off what isn't ours".
     fn on_disk_fingerprints(&self) -> WriteTargets {
         let policies = std::fs::read_to_string(self.firefox_policies_path()).unwrap_or_default();
@@ -385,6 +390,7 @@ impl WebContentEnforcer {
 
         let locked = policy.locked;
         self.last_applied = Some(policy);
+        self.retracted = false;
         // Durable "there is a Kintrinsic policy on this box" record, so a later
         // daemon run can still RETRACT what this one wrote.
         let _ = crate::atomic_file::atomic_write(&self.marker(), b"1\n", 0o600);
@@ -396,20 +402,31 @@ impl WebContentEnforcer {
     /// browser permanently restricted with no clause anywhere explaining why,
     /// and no surface saying so.
     ///
+    /// Retraction REMOVES the files we wrote (L1). It used to write the
+    /// "unrestricted" render over them, but that render still carries the
+    /// static hardening block (private browsing, dev tools and about:config
+    /// off, DoH locked off) and our `_kintrinsic` marker — so the browser was
+    /// never actually handed back, and every later start fingerprinted the
+    /// document as ours and "retracted" it again, audit and all. Nothing keeps
+    /// a pre-install original to restore: the machine had no policy of ours
+    /// before, so no file is the state it had.
+    ///
     /// "Once" matters both ways: on a host Kintrinsic has never configured
     /// there is nothing to retract and we must not touch the browser at all
-    /// (that would stomp the machine owner's own `policies.json`), and once
-    /// retracted we must not rewrite the same unrestricted document every
-    /// reconcile.
+    /// (that would delete the machine owner's own `policies.json`), and once
+    /// retracted there is nothing of ours left for a later run to find.
     async fn retract<S: SystemLayer>(&mut self, sys: &S) -> WebReconcile {
-        let unrestricted = EffectiveWebPolicy::unrestricted();
-        if self.last_applied.as_ref() == Some(&unrestricted) {
+        if self.retracted {
             return WebReconcile::Absent; // already retracted this run
         }
-        // Which documents this retraction is allowed to overwrite. With a
-        // marker on disk it is both: that marker is this daemon's own record
-        // that it wrote both of them.
-        let mut targets = WriteTargets::both();
+        // Which documents this retraction is allowed to remove: only those
+        // whose CURRENT content carries our fingerprint, asked of each file
+        // at the moment of removal (N8). The marker (or this run's own
+        // `last_applied`) says we wrote them once, not that what sits there
+        // now is still ours: an administrator may have replaced
+        // `policies.json` since, and deleting theirs is not a retraction. A
+        // file that is missing needs no clearing.
+        let found = self.on_disk_fingerprints();
         if !self.has_live_policy() {
             // 03-B7: an install upgraded from *before* the durable marker
             // existed has no marker file even though an earlier run really
@@ -418,41 +435,41 @@ impl WebContentEnforcer {
             // daemon is down. Recognise our own handwriting still on disk
             // and backfill the marker once, so the retraction below runs
             // exactly as it would have if the marker had always been there.
-            //
-            // But only over the files whose OWN fingerprint says they are ours.
-            // Without the marker there is nothing else vouching for them, and
-            // an unrestricted document written over a file we did not write is
-            // not a retraction, it is a deletion of somebody else's policy.
-            let found = self.on_disk_fingerprints();
             if !found.any() {
                 return WebReconcile::Absent; // genuinely never configured — hands off
             }
             let _ = crate::atomic_file::atomic_write(&self.marker(), b"1\n", 0o600);
-            if !found.policies {
-                eprintln!(
-                    "charterd: retracting the web-content restrictions, but the browser policy \
-                     file on this machine carries no Kintrinsic marker — leaving it untouched"
-                );
-            }
-            if !found.dns {
-                eprintln!(
-                    "charterd: retracting the web-content restrictions, but the DNS plan file on \
-                     this machine carries no Kintrinsic marker — leaving it untouched"
-                );
-            }
-            targets = found;
         }
-        match self.materialize_to(sys, unrestricted, targets).await {
-            WebReconcile::Enacted { .. } => {
-                let _ = std::fs::remove_file(self.marker());
-                eprintln!(
-                    "charterd: the web-content clause is gone — the browser and DNS \
-                     restrictions it had written have been retracted"
-                );
-                WebReconcile::Retracted
-            }
-            other => other,
+        if !found.policies && std::path::Path::new(&self.firefox_policies_path()).exists() {
+            eprintln!(
+                "charterd: retracting the web-content restrictions, but the browser policy \
+                 file on this machine carries no Kintrinsic marker — leaving it untouched"
+            );
         }
+        if !found.dns && std::path::Path::new(&self.dns_plan_path()).exists() {
+            eprintln!(
+                "charterd: retracting the web-content restrictions, but the DNS plan file on \
+                 this machine carries no Kintrinsic marker — leaving it untouched"
+            );
+        }
+        let targets = found;
+        // A removal that fails leaves the marker in place and reports `Failed`
+        // (the daemon then forces the lock-down policy): fail closed, and the
+        // next reconcile tries again.
+        if targets.policies && sys.web_policy().clear_policies().await.is_err() {
+            return WebReconcile::Failed;
+        }
+        if targets.dns && sys.dns_filter().clear().await.is_err() {
+            return WebReconcile::Failed;
+        }
+        let _ = std::fs::remove_file(self.marker());
+        self.last_applied = None;
+        self.retracted = true;
+        eprintln!(
+            "charterd: the web-content clause is gone — the browser and DNS \
+             restrictions it had written have been removed"
+        );
+        WebReconcile::Retracted
     }
 
     /// Load → evaluate → render → materialize, only when the effective policy
@@ -649,8 +666,8 @@ mod tests {
     #[tokio::test]
     async fn removing_the_clause_retracts_the_policy_once() {
         let sys = MockSystem::new(1000);
-        let m = marker("retract");
-        let mut e = WebContentEnforcer::with_marker_path(&m);
+        let (m, policies_path, plan_path) = fingerprint_fixture("retract");
+        let mut e = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
         put_content(
             &sys,
             r#"{"v":1,"posture":"allowlist","ageTier":"young","parentAllow":["kids.example"],"issuedAt":1}"#,
@@ -664,18 +681,24 @@ mod tests {
             .last_policies()
             .unwrap()
             .contains("kids.example"));
+        land_on_disk(&sys, &policies_path, &plan_path);
 
         // The guardian deletes the clause. (`ClauseStore` has no delete, so an
         // empty store over a fresh disk is how "the clause is gone" is staged —
         // what reaches `reconcile` is the `Ok(None)` either way.)
         let gone = MockSystem::new(1000);
         assert_eq!(e.reconcile(&gone).await, WebReconcile::Retracted);
-        let pol = gone.web_policy().last_policies().unwrap();
+        // L1: both files are REMOVED, not overwritten with a still-hardened,
+        // still-marked "unrestricted" document.
         assert!(
-            !pol.contains("kids.example"),
-            "the restriction must be gone, not merely unexplained: {pol}"
+            gone.web_policy().was_cleared(),
+            "the browser policy is removed"
         );
-        assert!(!pol.contains("<all_urls>"), "retracted, not locked: {pol}");
+        assert!(gone.dns_filter().was_cleared(), "the DNS plan is removed");
+        assert!(
+            gone.web_policy().last_policies().is_none() && gone.dns_filter().last_plan().is_none(),
+            "nothing is written on retraction"
+        );
         assert!(
             !std::path::Path::new(&m).exists(),
             "the durable marker goes with the policy it recorded"
@@ -690,9 +713,9 @@ mod tests {
     #[tokio::test]
     async fn a_restarted_daemon_still_retracts_an_earlier_runs_policy() {
         let sys = MockSystem::new(1000);
-        let m = marker("restart");
+        let (m, policies_path, plan_path) = fingerprint_fixture("restart");
         {
-            let mut first = WebContentEnforcer::with_marker_path(&m);
+            let mut first = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
             put_content(
                 &sys,
                 r#"{"v":1,"posture":"blocklist","ageTier":"older","issuedAt":1}"#,
@@ -703,13 +726,101 @@ mod tests {
             ));
         }
         assert!(std::path::Path::new(&m).exists());
+        land_on_disk(&sys, &policies_path, &plan_path);
 
         // New daemon, no in-memory memory at all, clause gone.
         let gone = MockSystem::new(1000);
-        let mut restarted = WebContentEnforcer::with_marker_path(&m);
+        let mut restarted = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
         assert_eq!(restarted.reconcile(&gone).await, WebReconcile::Retracted);
         assert!(!std::path::Path::new(&m).exists());
-        assert!(gone.web_policy().last_policies().is_some());
+        assert!(gone.web_policy().was_cleared());
+        assert!(gone.web_policy().last_policies().is_none());
+    }
+
+    /// N8: the marker says we wrote the files once, not that what sits there
+    /// now is ours. An administrator who replaced `policies.json` after we
+    /// applied ours keeps theirs through the retraction; our own DNS plan
+    /// still goes.
+    #[tokio::test]
+    async fn an_admin_authored_policy_survives_a_marked_retraction() {
+        let sys = MockSystem::new(1000);
+        let (m, policies_path, plan_path) = fingerprint_fixture("admin-replaced");
+        let mut e = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
+        put_content(
+            &sys,
+            r#"{"v":1,"posture":"blocklist","ageTier":"older","issuedAt":1}"#,
+        );
+        assert!(matches!(
+            e.reconcile(&sys).await,
+            WebReconcile::Enacted { .. }
+        ));
+        land_on_disk(&sys, &policies_path, &plan_path);
+        assert!(std::path::Path::new(&m).exists(), "the marker is present");
+        // The administrator's own baseline, with no marker of ours.
+        let theirs = r#"{"policies":{"DisableTelemetry":true}}"#;
+        std::fs::write(&policies_path, theirs).unwrap();
+
+        let gone = MockSystem::new(1000);
+        assert_eq!(e.reconcile(&gone).await, WebReconcile::Retracted);
+        assert!(
+            !gone.web_policy().was_cleared(),
+            "a file without our marker is never removed"
+        );
+        assert!(gone.dns_filter().was_cleared(), "our own plan still goes");
+        assert_eq!(std::fs::read_to_string(&policies_path).unwrap(), theirs);
+    }
+
+    /// The mock ports record what they were handed but touch no files, so a
+    /// test that retracts puts the rendered documents where the fingerprint
+    /// reads them, as `RealWebPolicyOps`/`RealDnsFilterOps` would have.
+    fn land_on_disk(sys: &MockSystem, policies_path: &str, plan_path: &str) {
+        std::fs::write(policies_path, sys.web_policy().last_policies().unwrap()).unwrap();
+        std::fs::write(plan_path, sys.dns_filter().last_plan().unwrap()).unwrap();
+    }
+
+    /// L1: a retraction leaves nothing of ours behind, so the NEXT start finds
+    /// nothing to retract — no rewrite, no `retracted` audit, every restart
+    /// for ever. (The mock ports do not touch the fixture files, so the test
+    /// removes them as `RealWebPolicyOps`/`RealDnsFilterOps::clear` do.)
+    #[tokio::test]
+    async fn a_second_start_after_a_retraction_is_a_no_op() {
+        let (m, policies_path, plan_path) = fingerprint_fixture("second-start");
+        // An earlier run's marked documents, exactly as `materialize_to`
+        // stamps them.
+        std::fs::write(
+            &policies_path,
+            r#"{"policies":{"_kintrinsic":{"managed":true},"WebsiteFilter":{"Block":["<all_urls>"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &plan_path,
+            r#"{"_kintrinsic":{"managed":true},"mode":"allowlist"}"#,
+        )
+        .unwrap();
+        std::fs::write(&m, "1\n").unwrap();
+
+        let sys = MockSystem::new(1000);
+        let mut first = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
+        assert_eq!(first.reconcile(&sys).await, WebReconcile::Retracted);
+        assert!(sys.web_policy().was_cleared() && sys.dns_filter().was_cleared());
+        assert!(sys.web_policy().last_policies().is_none());
+        std::fs::remove_file(&policies_path).unwrap();
+        std::fs::remove_file(&plan_path).unwrap();
+        // Steady absence in the same run: nothing more.
+        assert_eq!(first.reconcile(&sys).await, WebReconcile::Absent);
+
+        let again = MockSystem::new(1000);
+        let mut second = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
+        let outcome = second.reconcile(&again).await;
+        assert_eq!(
+            outcome,
+            WebReconcile::Absent,
+            "nothing of ours is left to retract"
+        );
+        assert_eq!(outcome.audit_tags(), None, "and nothing is audited");
+        assert!(!again.web_policy().was_cleared() && !again.dns_filter().was_cleared());
+        assert!(again.web_policy().last_policies().is_none());
+        assert!(!std::path::Path::new(&m).exists());
     }
 
     /// A store read error is NOT "the guardian set nothing": the last-known
@@ -939,10 +1050,9 @@ mod tests {
             WebReconcile::Retracted,
             "the on-disk fingerprint must be recognized as ours and retracted, not stranded"
         );
-        let pol = sys.web_policy().last_policies().unwrap();
         assert!(
-            !pol.contains("kids.example") && !pol.contains("<all_urls>"),
-            "the unrestricted policy must actually have been materialized: {pol}"
+            sys.web_policy().was_cleared() && sys.dns_filter().was_cleared(),
+            "both of our files must actually have been removed"
         );
         assert!(
             !std::path::Path::new(&m).exists(),
@@ -1013,16 +1123,12 @@ mod tests {
             "our DNS plan is ours, so the retraction must still run"
         );
         assert!(
-            sys.web_policy().last_policies().is_none(),
-            "the foreign browser policy must not be overwritten by the retraction"
+            !sys.web_policy().was_cleared() && sys.web_policy().last_policies().is_none(),
+            "the foreign browser policy must not be touched by the retraction"
         );
-        let plan = sys
-            .dns_filter()
-            .last_plan()
-            .expect("our own DNS plan is retracted");
         assert!(
-            !plan.contains("kids.example"),
-            "the DNS plan must have been retracted to unrestricted: {plan}"
+            sys.dns_filter().was_cleared(),
+            "our own DNS plan is removed"
         );
     }
 
@@ -1052,12 +1158,12 @@ mod tests {
         let mut e = WebContentEnforcer::with_paths(&m, &policies_path, &plan_path);
         assert_eq!(e.reconcile(&sys).await, WebReconcile::Retracted);
         assert!(
-            sys.dns_filter().last_plan().is_none(),
-            "the foreign DNS plan must not be overwritten by the retraction"
+            !sys.dns_filter().was_cleared() && sys.dns_filter().last_plan().is_none(),
+            "the foreign DNS plan must not be touched by the retraction"
         );
         assert!(
-            sys.web_policy().last_policies().is_some(),
-            "our own browser policy is still retracted"
+            sys.web_policy().was_cleared(),
+            "our own browser policy is still removed"
         );
     }
 }

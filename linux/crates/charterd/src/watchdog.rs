@@ -22,7 +22,8 @@
 //! GRUB `init=/bin/bash`, or a daemon that crash-looped for an afternoon left
 //! the guardian looking at a quiet gap in the meter that reads exactly like a
 //! quiet evening. The device cannot witness its own absence, but it can write
-//! down when it was last awake: [`record`] each tick, [`gap_secs`] on startup.
+//! down when it was last awake: [`record`] (throttled by [`Stamp`] to once a
+//! minute), [`gap_secs`] on startup.
 //! Cheap, and it turns an undetectable bypass into a visible one.
 
 /// Seconds between "the daemon was simply restarted" and "enforcement was off
@@ -51,6 +52,46 @@ pub fn stamp_path() -> String {
 /// enforcing.
 pub fn record(now: i64) {
     let _ = crate::atomic_file::atomic_write(&stamp_path(), now.to_string().as_bytes(), 0o600);
+}
+
+/// How often the stamp is rewritten. A gap is measured to this resolution, far
+/// inside [`GAP_THRESHOLD_SECS`], so an ordinary restart still never reads as a
+/// gap. The tick runs every couple of seconds; writing each time cost two
+/// fsyncs and a directory scan per tick on the async worker (L5).
+pub const STAMP_INTERVAL_SECS: i64 = 60;
+
+/// The loop's throttle over [`record`]: at most one write per
+/// [`STAMP_INTERVAL_SECS`], done on the blocking pool so a slow disk never
+/// stretches the enforcement tick.
+#[derive(Debug, Default)]
+pub struct Stamp {
+    last_written: Option<i64>,
+}
+
+impl Stamp {
+    /// Whether a tick at `now` should rewrite the stamp, noting it if so. A
+    /// clock that went BACKWARDS writes at once: the stamp must never be left
+    /// in the future, where [`gap_secs`] would read every later start as a
+    /// clock move and report nothing.
+    pub fn due(&mut self, now: i64) -> bool {
+        let due = match self.last_written {
+            None => true,
+            Some(last) => now < last || now - last >= STAMP_INTERVAL_SECS,
+        };
+        if due {
+            self.last_written = Some(now);
+        }
+        due
+    }
+
+    /// Record that the enforcement tick ran at `now`, if due.
+    #[cfg(feature = "real")]
+    pub fn record(&mut self, now: i64) {
+        if self.due(now) {
+            // Fire and forget: best-effort exactly like `record` itself.
+            drop(tokio::task::spawn_blocking(move || record(now)));
+        }
+    }
 }
 
 /// The last recorded enforcement time, or `None` if there is no readable
@@ -136,6 +177,36 @@ pub fn ping() {
     let _ = notify("WATCHDOG=1");
 }
 
+#[cfg(feature = "real")]
+tokio::task_local! {
+    /// Set for the enforcement loop's own task only (see [`enforcement_task`]).
+    static ENFORCEMENT_TASK: ();
+}
+
+/// Run `f` as THE enforcement task: relay operations it awaits may feed the
+/// watchdog through [`ping_from_enforcement_task`]. Task-locals do not cross
+/// `tokio::spawn`, so the D-Bus handlers and the pair listener — which share
+/// the transport but not the loop — are outside it.
+#[cfg(feature = "real")]
+pub async fn enforcement_task<F: std::future::Future>(f: F) -> F::Output {
+    ENFORCEMENT_TASK.scope((), f).await
+}
+
+/// The keep-alive for a point INSIDE a relay operation sequence (04-G5): sent
+/// only when called from the enforcement task, so a ward spamming D-Bus asks
+/// cannot keep a wedged enforcement loop looking alive.
+#[cfg(feature = "real")]
+pub fn ping_from_enforcement_task() {
+    if in_enforcement_task() {
+        ping();
+    }
+}
+
+#[cfg(feature = "real")]
+fn in_enforcement_task() -> bool {
+    ENFORCEMENT_TASK.try_with(|_| ()).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +284,37 @@ mod tests {
         assert_eq!(gap_secs(1_500_000 + 900), Some(900));
         std::env::remove_var("CHARTER_ENFORCED_STAMP");
         let _ = std::fs::remove_dir_all(std::path::Path::new(&p).parent().unwrap());
+    }
+
+    /// Only the enforcement task's own awaits count as the loop being alive;
+    /// a spawned task (a D-Bus handler, the pair listener) does not.
+    #[cfg(feature = "real")]
+    #[tokio::test]
+    async fn only_the_enforcement_task_vouches_for_the_loop() {
+        assert!(!in_enforcement_task());
+        let inside = enforcement_task(async {
+            let here = in_enforcement_task();
+            let spawned = tokio::spawn(async { in_enforcement_task() }).await.unwrap();
+            (here, spawned)
+        })
+        .await;
+        assert_eq!(inside, (true, false));
+    }
+
+    /// L5: one write a minute, not one a tick — and never a stamp left in the
+    /// future after the clock steps back.
+    #[test]
+    fn the_stamp_is_written_at_most_once_a_minute() {
+        let mut s = Stamp::default();
+        assert!(s.due(1_000), "the first tick always writes");
+        assert!(!s.due(1_002));
+        assert!(!s.due(1_000 + STAMP_INTERVAL_SECS - 1));
+        assert!(s.due(1_000 + STAMP_INTERVAL_SECS));
+        assert!(!s.due(1_000 + STAMP_INTERVAL_SECS + 2));
+        assert!(s.due(500), "a clock step backwards rewrites at once");
+        assert!(!s.due(502));
+        // The resolution stays well inside the gap threshold.
+        const { assert!(STAMP_INTERVAL_SECS * 2 < GAP_THRESHOLD_SECS) };
     }
 
     /// No `$NOTIFY_SOCKET` (charterd run by hand) is not an error.

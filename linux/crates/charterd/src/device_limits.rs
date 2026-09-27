@@ -357,7 +357,10 @@ fn tz_name_shape_ok(tz: &str) -> bool {
 /// but `/usr/share/zoneinfo/n/a` doesn't exist, so the existence check
 /// correctly rejects it rather than treating it as a zone.
 fn tz_is_valid(tz: &str) -> bool {
-    tz_name_shape_ok(tz) && std::path::Path::new("/usr/share/zoneinfo").join(tz).exists()
+    tz_name_shape_ok(tz)
+        && std::path::Path::new("/usr/share/zoneinfo")
+            .join(tz)
+            .exists()
 }
 
 #[cfg(test)]
@@ -706,10 +709,10 @@ mod tests {
         // timedatectl's own "unknown" sentinel — must never be treated as a
         // zone name even though it happens to pass a naive alnum check.
         assert!(tz_name_shape_ok("n/a")); // shape alone can't catch this...
-                                           // ...which is exactly why `tz_is_valid` also requires the
-                                           // zoneinfo file to exist (covered by the doc comment above
-                                           // `tz_is_valid`; not re-asserted here since it needs a real
-                                           // /usr/share/zoneinfo on the test machine).
+                                          // ...which is exactly why `tz_is_valid` also requires the
+                                          // zoneinfo file to exist (covered by the doc comment above
+                                          // `tz_is_valid`; not re-asserted here since it needs a real
+                                          // /usr/share/zoneinfo on the test machine).
         assert!(!tz_name_shape_ok("/leading/slash/empty/segment"));
         assert!(!tz_name_shape_ok("trailing/slash/"));
         assert!(!tz_name_shape_ok("has space"));

@@ -65,7 +65,7 @@ pub struct PublishedState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement_gap_secs: Option<i64>,
     /// This machine could not construct its relay transport this run (an
-    /// unusable machine secret — B4, `internal/reviews/2026-09-21/01-core-crypto-proto.md`).
+    /// unusable machine secret — B4, the 2026-09-21 review).
     /// Cached clauses are still being enforced; the daemon just cannot poll
     /// or publish. `false` is the ordinary state.
     #[serde(default)]
@@ -122,7 +122,11 @@ fn set_world_readable(_path: &str) {}
 /// Only ever re-stamps a file that already exists — there are no live numbers
 /// to invent for a child who has none, and a pause is not the moment to start
 /// guessing.
-pub fn mark_paused(user: &str, at: i64) {
+///
+/// `enforcement_gap_secs` is the loop's CURRENT figure, not whatever the frozen
+/// snapshot carried: once a gap has been delivered to the guardian it is
+/// retired (L2), and a pause must not resurrect it.
+pub fn mark_paused(user: &str, at: i64, enforcement_gap_secs: Option<i64>) {
     let path = format!("{}/{user}.json", state_dir());
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
@@ -130,11 +134,13 @@ pub fn mark_paused(user: &str, at: i64) {
     let Ok(mut state) = serde_json::from_str::<PublishedState>(&text) else {
         return;
     };
-    if state.paused_by_admin && state.at == at {
+    if state.paused_by_admin && state.at == at && state.enforcement_gap_secs == enforcement_gap_secs
+    {
         return;
     }
     state.at = at;
     state.paused_by_admin = true;
+    state.enforcement_gap_secs = enforcement_gap_secs;
     publish(&state);
 }
 
@@ -249,12 +255,18 @@ mod tests {
         // 03-G5: a pause keeps the file MOVING, and says why the numbers are
         // frozen — a state file that simply stops updating is indistinguishable
         // from a daemon that has died, and the two want opposite reactions.
-        publish(&state("robin"));
-        mark_paused("robin", 1_782_738_000);
+        let mut gapped = state("robin");
+        gapped.enforcement_gap_secs = Some(4 * 3600);
+        publish(&gapped);
+        mark_paused("robin", 1_782_738_000, None);
         let paused: PublishedState =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(paused.paused_by_admin, "the pause is stated, not implied");
         assert_eq!(paused.at, 1_782_738_000, "and the snapshot is fresh");
+        assert_eq!(
+            paused.enforcement_gap_secs, None,
+            "a gap already retired by the loop is not carried on the frozen copy (L2)"
+        );
         assert_eq!(
             paused.time_left.used_today_seconds,
             Some(5400),
@@ -263,7 +275,7 @@ mod tests {
         assert_eq!(published_users(), vec!["robin".to_string()]);
 
         // A child with no published state is not invented during a pause.
-        mark_paused("nobody", 1_782_738_000);
+        mark_paused("nobody", 1_782_738_000, None);
         assert!(!dir.join("nobody.json").exists());
 
         retract("robin");

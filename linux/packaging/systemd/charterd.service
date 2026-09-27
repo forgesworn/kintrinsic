@@ -36,26 +36,33 @@ RestartSec=2
 # actually does the work, not merely a process that still exists.
 #
 # 04-G5 — THE BUDGET, and why this is 180 and not 60. The slow tick's network
-# section is the long pole: every relay operation carries its own ~8 s timeout,
-# and the tick runs one per operation per configured relay. A subscribe + a
-# publish across four unreachable relays is already ~64 s of perfectly correct,
-# perfectly expected waiting, and a 60 s watchdog killed the daemon for it. That
-# kill is not a harmless restart: `ExecStopPost=charter-recovery --thaw-all`
-# runs on the way out and unfreezes every managed child, so a bad Wi-Fi night
-# became a new fail-open — the exact failure the watchdog exists to prevent,
-# caused by the watchdog. 180 s covers the worst realistic network section with
-# room to spare while still being far short of an afternoon.
+# section is the long pole. Every relay operation (one query or one publish)
+# walks the configured relays in turn, and each relay can take up to 16 s: an
+# 8 s connect plus an 8 s wait for EOSE/OK — a relay that accepts the socket and
+# then stalls reaches the full 16 s. A 60 s watchdog killed the daemon for that
+# perfectly correct waiting, and the kill is not a harmless restart:
+# `ExecStopPost=charter-recovery --thaw-all` runs on the way out and unfreezes
+# every managed child, so a bad Wi-Fi night became a new fail-open — the exact
+# failure the watchdog exists to prevent, caused by the watchdog.
 #
-# The ceiling is only half of it: `watchdog::ping()` is also sent BEFORE and
-# AFTER the network section and between each relay operation inside it
-# (`runtime.rs`), so a tick that is merely waiting on relays keeps vouching for
-# itself and only a tick that is genuinely STUCK runs the clock out. Raise the
-# per-operation timeout or add relays and this number has to be re-derived:
-# worst case ≈ (relay timeout) × (relays) × (operations per tick).
+# `watchdog::ping()` is sent before and after the network section, after every
+# STATUS, and after EVERY relay operation inside the broker poll (the transport
+# facade in `runtime.rs` pings as each query/publish returns, but only from the
+# enforcement loop's own task — a D-Bus ask cannot vouch for a stuck loop). So
+# the window only has to cover the LONGEST SINGLE OPERATION, not the whole poll:
+# worst gap between pings ≈ 16 s × (relays) plus the enforcement pass itself.
+# 180 s covers ten relays with room to spare while still being far short of an
+# afternoon. Raise the per-operation timeouts or allow more relays and this
+# number has to be re-derived.
 WatchdogSec=180
 # The keep-alive comes from the main process. (Type=simple does not imply this
 # the way Type=notify would, and the unit's Type= is deliberately unchanged.)
 NotifyAccess=main
+# L6: no core dumps. charterd holds the machine key and the guardian
+# conversation key in memory (held in `Zeroizing` so freed heap is wiped), and a
+# watchdog kill (SIGABRT, left at its default so the journal names the timeout)
+# would otherwise write both to disk.
+LimitCORE=0
 # Lock-out safety: every stop (incl. crash, `systemctl stop`, prerm, the Recovery
 # "turn off" action) thaws every managed child's app.slice and re-enables VT
 # switching, so a stopped/removed Charter never leaves the box frozen.
@@ -69,13 +76,29 @@ EnvironmentFile=-/etc/charter/charterd.env
 User=root
 NoNewPrivileges=false
 ProtectSystem=full
-# ProtectSystem=full makes /etc read-only. That was harmless while only the
-# pkexec'd helpers wrote there, but scan-to-pair has the DAEMON bind the
-# guardian's subject into /etc/charter/limits.d — which failed with
-# "Read-only file system (os error 30)" on every offer, refusing a pairing
-# that was otherwise completely valid. Carve out our own directory ONLY; the
-# rest of /etc stays read-only.
-ReadWritePaths=/etc/charter
+# ProtectSystem=full makes /usr, /boot, /efi and /etc read-only in charterd's
+# mount namespace — and in everything it spawns (fapolicyd-cli, chattr,
+# update-desktop-database), which shares it. Every path charterd writes there
+# needs its own carve-out, or the write fails with "Read-only file system (os
+# error 30)" on a real install while every test passes. Carve out exactly the
+# directories written, nothing wider (R2-4 audit; /var/lib/charter, /run and
+# /var/lib/flatpak are writable already):
+#   /etc/charter                 scan-to-pair binds the guardian's subject into
+#                                limits.d (device_limits)
+#   /etc/firefox/policies        the web-content clause's Firefox enterprise
+#                                policy, written, `chattr +i`'d and retracted
+#                                (web_content → WebPolicyOps)
+#   /usr/share/applications      learning-app launchers and the menu cache
+#                                (learning_apps::RealLearnFs)
+#   /etc/fapolicyd/trust.d       an approved binary's trust entry
+#                                (`fapolicyd-cli --file add --trust-file
+#                                charter`, RealTrustDb)
+# A path listed here that does not exist when the unit starts can never be
+# created afterwards (the parent is still read-only), so postinst creates
+# /etc/firefox/policies (and trust.d, when fapolicyd is installed) BEFORE it
+# restarts the unit. The `-` prefix lets the unit start without one — a box
+# with no fapolicyd — rather than fail to start at all.
+ReadWritePaths=/etc/charter -/etc/firefox/policies -/usr/share/applications -/etc/fapolicyd/trust.d
 ProtectHome=false
 ProtectKernelTunables=true
 ProtectControlGroups=false

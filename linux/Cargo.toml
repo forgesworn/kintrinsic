@@ -24,7 +24,7 @@ exclude = ["apps/charter-gui/src-tauri", "apps/charter-gui/ui"]
 
 [workspace.package]
 edition = "2021"
-version = "0.7.8"
+version = "0.7.9"
 license = "MIT"
 rust-version = "1.94"
 publish = false

@@ -6,6 +6,15 @@ set -e
 
 case "$1" in
     configure)
+        # charterd's unit carves these out of ProtectSystem=full with
+        # ReadWritePaths, but a carve-out cannot create a directory that is
+        # missing when the unit starts (its parent stays read-only). Create
+        # them BEFORE the restart below. Only when missing, so an existing
+        # directory's owner and mode are left alone.
+        [ -d /etc/firefox/policies ] || install -d -m 0755 /etc/firefox/policies
+        if [ -d /etc/fapolicyd ] && [ ! -d /etc/fapolicyd/trust.d ]; then
+            install -d -m 0755 /etc/fapolicyd/trust.d
+        fi
         systemctl daemon-reload || true
         # Reload D-Bus so the system.d policy for org.forgesworn.charterd applies.
         systemctl reload dbus 2>/dev/null || systemctl reload dbus-broker 2>/dev/null || true

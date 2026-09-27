@@ -438,6 +438,51 @@ mod tests {
         assert!(c.ends_with('\n'));
     }
 
+    /// R2-4: ProtectSystem=full leaves /usr, /boot, /efi and /etc read-only
+    /// in charterd's namespace, so every directory charterd (or anything it
+    /// spawns) writes there must be carved out, and every carve-out under a
+    /// read-only parent that a stock box may lack must be created by postinst
+    /// before the unit is restarted. Add to both lists with the writer.
+    #[test]
+    fn the_unit_carves_out_every_read_only_path_charterd_writes() {
+        let root = workspace_root().join("packaging");
+        let unit = std::fs::read_to_string(root.join("systemd/charterd.service")).unwrap();
+        assert!(
+            unit.contains("\nProtectSystem=full\n"),
+            "the audit assumes =full"
+        );
+        let rw: Vec<&str> = unit
+            .lines()
+            .filter_map(|l| l.strip_prefix("ReadWritePaths="))
+            .flat_map(|l| l.split_whitespace())
+            .map(|p| p.trim_start_matches('-'))
+            .collect();
+        for written in [
+            "/etc/charter",            // device_limits (limits.d)
+            "/etc/firefox/policies",   // web_content / WebPolicyOps
+            "/usr/share/applications", // learning_apps::RealLearnFs
+            "/etc/fapolicyd/trust.d",  // RealTrustDb (fapolicyd-cli)
+        ] {
+            assert!(
+                rw.contains(&written),
+                "ReadWritePaths is missing {written}: {rw:?}"
+            );
+        }
+        let postinst = std::fs::read_to_string(root.join("debian/postinst")).unwrap();
+        let restart = postinst
+            .find("systemctl restart charterd.service")
+            .expect("postinst restarts the unit");
+        for created in ["/etc/firefox/policies", "/etc/fapolicyd/trust.d"] {
+            let at = postinst
+                .find(&format!("install -d -m 0755 {created}"))
+                .unwrap_or_else(|| panic!("postinst does not create {created}"));
+            assert!(
+                at < restart,
+                "{created} must exist before the unit restarts"
+            );
+        }
+    }
+
     #[test]
     fn workspace_root_holds_packaging() {
         assert!(workspace_root().join("packaging").is_dir());

@@ -1026,7 +1026,23 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                     // dimensions transposed from what the root window (and
                     // hence the lock, which is sized to match it) actually
                     // has. `get_geometry` reflects the rotation.
-                    let geom = conn.get_geometry(root)?.reply()?;
+                    // An X ERROR here (a root that briefly refuses the query
+                    // mid-reconfigure) is logged and the lock carries on at its
+                    // current size — propagating it exited the lock and left
+                    // the desktop bare until charterd's next respawn. Only a
+                    // dead connection still ends the loop.
+                    let geom = match conn.get_geometry(root)?.reply() {
+                        Ok(g) => g,
+                        Err(x11rb::errors::ReplyError::X11Error(e)) => {
+                            eprintln!(
+                                "charter-lock: X error {:?} reading the screen geometry after a \
+                                 RandR change; keeping the current size",
+                                e.error_kind
+                            );
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
                     let (new_w, new_h) = (geom.width, geom.height);
                     if (new_w, new_h) != dims.get() && new_w > 0 && new_h > 0 {
                         dims.set((new_w, new_h));

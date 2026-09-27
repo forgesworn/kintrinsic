@@ -314,7 +314,7 @@ Key files: `runtime.rs` (the loop + precedence), `multi_child.rs`,
 ## Signet-first per-child enforcement — DONE (2026-06-30)
 
 Both approved tasks built test-first, each committed on a green gate. Design spec:
-`docs/superpowers/specs/2026-06-30-charter-signet-first-per-child-design.md`.
+internal design spec 2026-06-30-charter-signet-first-per-child-design.
 Gate green: fmt, clippy `--all-features`, **331 mock + 37 charter-sys real**
 tests, workspace `--features real` build.
 

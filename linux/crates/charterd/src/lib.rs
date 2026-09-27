@@ -40,6 +40,8 @@ pub mod release_check;
 pub mod runtime;
 pub mod site_app;
 pub mod state_file;
+pub mod status_seq;
+pub mod usage_save_guard;
 pub mod version;
 pub mod watchdog;
 pub mod web_content;

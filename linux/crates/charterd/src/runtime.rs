@@ -277,7 +277,14 @@ impl RealTransportFacade {
     /// Record a poll's per-relay `Result`, folding `Unreachable` into the
     /// health accumulator instead of throwing it away — the shape every
     /// `poll_*` wrapper below shares.
+    ///
+    /// 04-G5 (M1): every relay operation ends here or in [`Self::record_publish`]'s
+    /// callers, so this is also where the watchdog is fed BETWEEN operations —
+    /// `Broker::poll_once` runs five queries plus a publish per audit, each up
+    /// to 16 s per relay, and pinging only around the whole poll let a slow
+    /// relay set run the 180 s window out.
     fn record_poll<T>(&self, r: Result<Vec<T>, RelayIoError>) -> Vec<T> {
+        crate::watchdog::ping_from_enforcement_task();
         match r {
             Ok(v) => v,
             Err(RelayIoError::Unreachable(_)) => {
@@ -303,9 +310,16 @@ impl RealTransportFacade {
 
     /// Publish a gift-wrapped STATUS (kind 31114) to the pinned guardian.
     /// Best-effort — a failed publish is a dropped update, never a crash.
-    pub async fn emit_status(&self, status_json: &str, now: u64) {
+    /// Returns whether at least one relay accepted it (L2: the one-shot
+    /// enforcement-gap figure is retired only once it has actually left).
+    pub async fn emit_status(&self, status_json: &str, now: u64) -> bool {
         let outcomes = self.inner.emit_status(status_json, now).await;
+        crate::watchdog::ping_from_enforcement_task();
+        let delivered = outcomes
+            .iter()
+            .any(|(_, o)| matches!(o, PublishOutcome::Ok));
         self.record_publish(outcomes);
+        delivered
     }
 
     /// Poll PAIR_OFFERs addressed to this machine (the unpaired scan-to-pair
@@ -324,6 +338,7 @@ impl RealTransportFacade {
 impl TransportFacade for RealTransportFacade {
     async fn publish_request(&self, request_json: &str, now: u64) {
         let outcomes = self.inner.submit_request(request_json, now).await;
+        crate::watchdog::ping_from_enforcement_task();
         self.record_publish(outcomes);
     }
     async fn poll_grants(&self, since: u64, now: u64) -> Vec<ReceivedGrant> {
@@ -346,6 +361,7 @@ impl TransportFacade for RealTransportFacade {
     }
     async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) {
         let outcomes = self.inner.emit_audit(tags, now).await;
+        crate::watchdog::ping_from_enforcement_task();
         self.record_publish(outcomes);
     }
     fn pinned_guardian(&self) -> PubKey {
@@ -455,7 +471,17 @@ fn active_session_x() -> Option<(String, Option<String>)> {
     let found = kernel_vt
         .and_then(|tty| xorg_for_vt(&tty))
         .or_else(|| session_vt().and_then(|tty| xorg_for_vt(&tty)));
-    if found.is_none() {
+    // L3: this runs every tick for every governed child, so a box sitting on a
+    // text VT or a Wayland session would log a line (and pay the loginctl
+    // calls below) every couple of seconds. Log the TRANSITION, not the state
+    // — the same discipline as the Named model's `display_unreadable` line.
+    static DISPLAY_MISSING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let was_missing = DISPLAY_MISSING.swap(found.is_none(), std::sync::atomic::Ordering::Relaxed);
+    if found.is_some() && was_missing {
+        eprintln!("charterd: the active display resolves again");
+    }
+    if found.is_none() && !was_missing {
         // Say WHICH kind of failure this is. A Wayland session has no Xorg to
         // find, so the search above can only ever fail — and the cgroup freeze
         // still lands, leaving the ward staring at a dead desktop with no panel,
@@ -471,7 +497,7 @@ fn active_session_x() -> Option<(String, Option<String>)> {
             });
         match display_protocol_note(session_type.as_deref()) {
             Some(note) => eprintln!("charterd: {note}"),
-            None => eprintln!("charterd: active display resolution failed (no Xorg on the active VT) — falling back to CHARTER_DISPLAY"),
+            None => eprintln!("charterd: active display resolution failed (no trusted Xorg on the active VT) — falling back to CHARTER_DISPLAY; logged once until it resolves"),
         }
     }
     found
@@ -537,15 +563,37 @@ fn display_from_xorg_args(args: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// Argv of every running Xorg process.
+/// Argv of every running Xorg process that charterd TRUSTS to be the display
+/// manager's X server (see [`is_trusted_xorg`]).
+///
+/// H1: argv is ward-controlled (`exec -a Xorg ...`), and since the DPMS idle
+/// rule this snapshot decides whether a tick is charged at all — a ward-run
+/// fake server answering "powered down, no input" would never be charged. So
+/// argv only NAMES the display and cookie of a process whose identity has
+/// already been established from what the ward cannot forge: its real uid and
+/// the owner and name of the executable the kernel actually mapped. A session
+/// with no trusted Xorg gets no snapshot, and no snapshot is charged (the
+/// Session baseline) — never treated as idle.
 fn xorg_processes() -> Vec<Vec<String>> {
+    use std::os::unix::fs::MetadataExt as _;
     let mut found = Vec::new();
     let entries = match std::fs::read_dir("/proc") {
         Ok(e) => e,
         Err(_) => return found,
     };
     for entry in entries.flatten() {
-        let cmdline = match std::fs::read(entry.path().join("cmdline")) {
+        let dir = entry.path();
+        let real_uid = std::fs::read_to_string(dir.join("status"))
+            .ok()
+            .and_then(|s| real_uid_from_status(&s));
+        let exe_path = std::fs::read_link(dir.join("exe")).ok();
+        // `metadata` follows the magic link to the mapped inode itself, not a
+        // path lookup the ward could race (see `ancestry::exe_owner_uid`).
+        let exe_owner = std::fs::metadata(dir.join("exe")).ok().map(|m| m.uid());
+        if !is_trusted_xorg(real_uid, exe_path.as_deref(), exe_owner) {
+            continue;
+        }
+        let cmdline = match std::fs::read(dir.join("cmdline")) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -563,6 +611,46 @@ fn xorg_processes() -> Vec<Vec<String>> {
         }
     }
     found
+}
+
+/// The real uid (the first field of the `Uid:` line) from the text of a
+/// `/proc/<pid>/status` file.
+fn real_uid_from_status(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+}
+
+/// Whether a process is an X server charterd may take its display from: its
+/// REAL uid is root (the display manager starts Xorg as root; a ward cannot
+/// give their own process real uid 0), AND the executable the kernel mapped is
+/// a root-owned file named exactly `Xorg` (`/usr/lib/xorg/Xorg`,
+/// `/usr/bin/Xorg`). A root-owned `Xvfb`/`Xvnc` is not enough — the ward can
+/// start either themselves — and an unknown on any input is untrusted.
+///
+/// A running server whose package was upgraded underneath it reads back as
+/// `.../Xorg (deleted)`; the inode is still the root-owned one that was
+/// mapped, so it stays trusted until the next restart.
+///
+/// Pure so it is unit-tested; the `/proc` reads that feed it are not.
+fn is_trusted_xorg(
+    real_uid: Option<u32>,
+    exe_path: Option<&std::path::Path>,
+    exe_owner: Option<u32>,
+) -> bool {
+    if real_uid != Some(0) || exe_owner != Some(0) {
+        return false;
+    }
+    let Some(name) = exe_path
+        .and_then(|p| p.to_str())
+        .map(|p| p.strip_suffix(" (deleted)").unwrap_or(p))
+        .and_then(|p| std::path::Path::new(p).file_name())
+    else {
+        return false;
+    };
+    name == "Xorg"
 }
 
 /// The X authority file a display's X server was started with, read from the
@@ -672,12 +760,45 @@ fn load_child_ledgers(uid: u32) -> (Option<String>, Option<String>) {
 /// `restore_usage` swallows a snapshot that will not parse, so the child came
 /// back with the whole day's accrued time gone. Repeatable at will, in the
 /// fail-open direction. Now temp + fsync + rename, via [`atomic_write`].
-fn save_child_usage(uid: u32, usage: &str) {
-    if let Err(e) = atomic_write(&child_usage_path(uid), usage.as_bytes(), 0o600) {
-        eprintln!(
+///
+/// A failure is no longer just logged: the result goes to the
+/// [`UsageSaveGuard`](crate::usage_save_guard::UsageSaveGuard), which holds
+/// the child's budget paused once saves have failed for five minutes
+/// (R3-H1) — at once if they fail for want of space, inodes or quota
+/// (R4-1) — and names each transition for the log.
+fn save_child_usage(
+    guard: &mut crate::usage_save_guard::UsageSaveGuard,
+    uid: u32,
+    usage: &str,
+    mono_secs: u64,
+) {
+    use crate::usage_save_guard::SaveTransition;
+    let result = atomic_write(&child_usage_path(uid), usage.as_bytes(), 0o600);
+    match guard.record(uid, &result, mono_secs) {
+        Some(SaveTransition::StartedFailing(e)) => eprintln!(
             "charterd: could not persist the usage ledger for uid {uid} ({e}) — \
-             the day's accrued time is still being enforced from memory"
-        );
+             the day's accrued time is still being enforced from memory; the \
+             budget is held paused if this lasts {} minutes",
+            crate::usage_save_guard::USAGE_UNSAVED_AFTER_SECS / 60
+        ),
+        Some(SaveTransition::Tripped) => eprintln!(
+            "charterd: the usage ledger for uid {uid} has not saved for {} minutes — \
+             holding their budget paused until a save lands (is the state \
+             filesystem out of space or inodes?)",
+            crate::usage_save_guard::USAGE_UNSAVED_AFTER_SECS / 60
+        ),
+        Some(SaveTransition::TrippedStorageFull(e)) => eprintln!(
+            "charterd: could not persist the usage ledger for uid {uid} ({e}) — \
+             the state filesystem is out of space, inodes or quota, which a ward \
+             can cause at will; holding their budget paused until a save lands"
+        ),
+        Some(SaveTransition::Recovered { was_tripped: true }) => {
+            eprintln!("charterd: the usage ledger for uid {uid} saves again — budget released")
+        }
+        Some(SaveTransition::Recovered { was_tripped: false }) => {
+            eprintln!("charterd: the usage ledger for uid {uid} saves again")
+        }
+        None => {}
     }
 }
 
@@ -1531,7 +1652,16 @@ fn machine_key_outcome(
 
 /// Provision identity, (optionally) stand up the guardian broker, and run the
 /// per-child enforce loop forever. Returns only on a fatal setup error.
+///
+/// Runs inside [`crate::watchdog::enforcement_task`], so relay operations
+/// awaited by THIS task (the broker poll, STATUS) keep the watchdog fed
+/// between operations, while the same operations reached from any other task
+/// (a D-Bus ask, the pair listener) do not vouch for a loop that may be stuck.
 pub async fn run(config: DaemonConfig) -> Result<(), String> {
+    crate::watchdog::enforcement_task(run_enforcement(config)).await
+}
+
+async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // 02b-G3: a machine key that will not load is NOT a reason to exit. `run()`
     // used to `?` this straight out of the process, and with `Restart=always`
     // in the unit that is a crash loop in which NOTHING is enforced — a
@@ -1650,6 +1780,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
 
     // Independent per-child screen-time enforcement (device-only, multi-child).
     let mut multi = MultiChildEnforcer::new();
+    // R3-H1: how long each child's usage-ledger saves have been failing,
+    // timed on the monotonic clock from here (the ward can move the wall
+    // clock). See `usage_save_guard`.
+    let mut usage_saves = crate::usage_save_guard::UsageSaveGuard::new();
+    let mono_origin = std::time::Instant::now();
+    // R4-1: whether step 4 has saved the ledgers yet this run — the first
+    // iteration to reach it saves regardless of cadence.
+    let mut ledgers_saved_this_run = false;
     let mut lock = LockState::default();
     let lock_bin =
         std::env::var("CHARTER_LOCK_BIN").unwrap_or_else(|_| "/usr/bin/charter-lock".into());
@@ -1707,6 +1845,23 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         };
     let mut status_last: std::collections::HashMap<u32, charter_proto::StatusPayload> =
         std::collections::HashMap::new();
+    // `clockSteppedBackFrom` stamps that reached no relay, per child, carried
+    // until one lands (see `status_emit::clock_stepped_back_from`). Memory
+    // only, like `status_last`: after a restart nothing is carried. The
+    // marker now only drives the guardian's "clock went backwards" notice;
+    // ordering is the durable `seq` below, which a restart does not lose.
+    let mut status_step_undelivered: std::collections::HashMap<u32, u64> =
+        std::collections::HashMap::new();
+    // The device's STATUS `seq` (R2-2/R2-3): strictly increasing across every
+    // child and every restart, stored under /var/lib before each publish, so
+    // the guardian can order this device's statuses without trusting its
+    // wall clock.
+    let mut status_seq = crate::status_seq::resume(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    );
 
     // Offline guardian unlock: derive the guardian↔machine NIP-44 conversation
     // key ONCE (paired only). The lock spawn uses it to compute the expected
@@ -1857,13 +2012,15 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // off/on loop — see `focus::ActivityHistory`, which holds the rule.
     let mut activity_history = crate::focus::ActivityHistory::default();
     // 04-G6: was this machine running WITHOUT a warden before now? The stamp
-    // below is written every tick; a hole in it bigger than a restart is the
+    // below is written once a minute; a hole in it bigger than a restart is the
     // cheap half of tamper-evidence — a live USB, a GRUB `init=/bin/bash`, an
     // afternoon of crash-looping and an afternoon switched off all leave the
     // same hole, and the honest reading is "nothing was enforced for N
     // seconds", not an accusation. Computed ONCE, at startup, and carried on
-    // every state file this run publishes.
-    let enforcement_gap_secs = crate::watchdog::gap_secs(sys.clock().now_utc() as i64);
+    // the state files and STATUS only until the first STATUS that a relay
+    // accepted (L2): an overnight power-off is a gap too, and a figure that
+    // rode on every STATUS for the rest of the run read as a daily alarm.
+    let mut enforcement_gap_secs = crate::watchdog::gap_secs(sys.clock().now_utc() as i64);
     if let Some(gap) = enforcement_gap_secs {
         eprintln!(
             "charterd: no warden was running on this machine for {gap}s before this start              — nothing was enforced during that time (reported to the guardian)"
@@ -1874,6 +2031,9 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
     // any tick that reaches a relay at all, so a climbing count means the
     // relay set itself has gone bad, not one bad poll.
     let mut consecutive_unreachable: u32 = 0;
+    // L5: the last-enforced stamp, written at most once a minute off the async
+    // worker (two fsyncs and a directory scan per write).
+    let mut stamp = crate::watchdog::Stamp::default();
     // Tell systemd we are up before the first tick, so `WatchdogSec` starts
     // counting from a daemon that is actually looping.
     crate::watchdog::ping();
@@ -1885,6 +2045,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         // Computed every iteration (incl. skips below) so a paused stretch never
         // accumulates into the next real tick's charge.
         let elapsed = charge.observe(now, sys.clock().suspended_secs() as i64);
+        // N1: the usage ledgers may drop a far-future day key back only while
+        // the kernel reports the clock NTP-synchronised. Read every tick: a
+        // read-only `adjtimex` is one cheap syscall.
+        multi.set_clock_trusted(sys.clock().wall_clock_synchronised());
 
         // Who may be frozen/locked this tick: charter-managed CHILDREN only —
         // never the parent/admin/root/system (the lock-out-recovery guarantee).
@@ -1921,7 +2085,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             // opposite reactions. Keep publishing, and say plainly that this is
             // a pause.
             for user in crate::state_file::published_users() {
-                crate::state_file::mark_paused(&user, now);
+                crate::state_file::mark_paused(&user, now, enforcement_gap_secs);
             }
             // …and the same on the GUARDIAN's wire, which is where 03-G5's
             // point actually lands: the phone is the only place a parent looks.
@@ -1939,14 +2103,40 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             // to report and inventing some would be worse than the state file's
             // own account, which is published above regardless.
             if let Some(stx) = &status_tx {
-                for last in status_last.values_mut() {
-                    let cur = paused_status(last, now as u64);
+                let mut gap_delivered = false;
+                for (uid, last) in status_last.iter_mut() {
+                    let mut cur = paused_status(last, now as u64);
+                    // A gap already delivered is not re-sent on the frozen copy.
+                    if enforcement_gap_secs.is_none() {
+                        cur.enforcement_gap_secs = None;
+                    }
+                    // Re-stamped, never copied from the frozen payload.
+                    cur.clock_stepped_back_from = crate::status_emit::clock_stepped_back_from(
+                        Some(last),
+                        cur.ts,
+                        status_step_undelivered.get(uid).copied(),
+                    );
                     if crate::status_emit::should_emit_status(
                         Some(last),
                         &cur,
                         STATUS_HEARTBEAT_SECS,
                     ) {
-                        stx.emit_status(&cur.to_json(), now as u64).await;
+                        // Re-stamped, never copied: the frozen payload's seq
+                        // is the one already published.
+                        cur.seq = Some(crate::status_seq::next_durable(&mut status_seq));
+                        let delivered = stx.emit_status(&cur.to_json(), now as u64).await;
+                        if delivered && cur.enforcement_gap_secs.is_some() {
+                            gap_delivered = true;
+                        }
+                        match (delivered, cur.clock_stepped_back_from) {
+                            (false, Some(from)) => {
+                                status_step_undelivered.insert(*uid, from);
+                            }
+                            (true, _) => {
+                                status_step_undelivered.remove(uid);
+                            }
+                            (false, None) => {}
+                        }
                         // One relay round trip PER CHILD, awaited, with the
                         // watchdog's clock running: a family of four on a relay
                         // that has gone quiet spends four timeouts inside one
@@ -1958,11 +2148,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                         *last = cur;
                     }
                 }
+                if gap_delivered {
+                    enforcement_gap_secs = None;
+                }
             }
             // The tick is alive and doing its job — a pause is not a hang, and
             // the watchdog must not kill a deliberately idle daemon.
             crate::watchdog::ping();
-            crate::watchdog::record(now);
+            stamp.record(now);
             if slow_tick {
                 if let Some(b) = &broker {
                     b.poll_once().await;
@@ -1983,10 +2176,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         //    fallback for a child the guardian hasn't set. Filtered to lockable
         //    children so a stray limits.d file can never enroll an admin/root.
         let mut configs = load_child_configs(&config.child_limits_dir);
-        // 02b-G8: a guardian subject claimed by two children is dropped from
-        // BOTH before anything reads it — not just before policy resolution,
-        // but before the bucket reads, the STATUS addressing and the extension
-        // routing below, every one of which keys off `cfg.subject`.
+        // 02b-G8: a guardian subject claimed by two children is REPORTED here
+        // (once per change of the claimant set, not per tick) and otherwise
+        // left bound, so the guardian's clauses stay enforced on every
+        // claimant — dropping it left a child with no device-only limits
+        // unconstrained (see `child_policy::drop_duplicate_subjects`).
         crate::child_policy::drop_duplicate_subjects(&mut configs);
         let configs = configs;
         let policies: Vec<_> = resolve_child_policies(&sys, &passwd, &configs)
@@ -2006,6 +2200,16 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
             })
             .collect();
         multi.sync(&policies, now, load_child_ledgers);
+        // Re-assert every tick: `sync` rebuilds a child who dropped out of
+        // `configs` for a tick, and a rebuilt child must not come back with
+        // its budget released while its saves are still failing.
+        {
+            let uids = multi.uids();
+            usage_saves.retain(&uids);
+            for uid in uids {
+                multi.set_usage_unsaved(uid, usage_saves.is_unsaved(uid));
+            }
+        }
 
         // 1a) Every managed child's app buckets ("Play is an hour a day"),
         //     read once from their `buckets` clause and shared by every
@@ -2764,21 +2968,34 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         // process is exactly the failure `WatchdogSec` exists to catch — and
         // what the stamp records for the next start to compare against.
         crate::watchdog::ping();
-        crate::watchdog::record(now);
-
-        if !slow_tick {
-            tokio::time::sleep(fast).await;
-            continue;
-        }
+        stamp.record(now);
 
         // 4) Persist each child's accrued time AND the guardian's given
         //    minutes (restart durability). The extension snapshot was
         //    produced here and thrown away, which is what made a reboot
         //    refill a schedule gift in full and lose an approved
         //    `time.extend` outright.
-        for (uid, usage, ext) in multi.snapshots() {
-            save_child_usage(uid, &usage);
-            save_child_extension(uid, &ext);
+        //
+        //    R4-1: the first iteration to get this far saves whatever its
+        //    cadence. Iteration 0 is a slow tick, so ordinarily this is the
+        //    very first tick; but a skipped iteration 0 (an unreadable
+        //    passwd, an admin pause) would otherwise defer the first save to
+        //    the next slow tick while fast ticks charge. The first save is
+        //    what trips the save guard at once on `ENOSPC`, so a reboot can
+        //    hand back at most the time charged before it.
+        if slow_tick || !ledgers_saved_this_run {
+            ledgers_saved_this_run = true;
+            let mono_secs = mono_origin.elapsed().as_secs();
+            for (uid, usage, ext) in multi.snapshots() {
+                save_child_usage(&mut usage_saves, uid, &usage, mono_secs);
+                multi.set_usage_unsaved(uid, usage_saves.is_unsaved(uid));
+                save_child_extension(uid, &ext);
+            }
+        }
+
+        if !slow_tick {
+            tokio::time::sleep(fast).await;
+            continue;
         }
 
         // 4b) Refresh the installed-app inventory when the launcher OR the
@@ -2879,6 +3096,9 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
         //     lock state. Numbers/enums only (no PII); throttled to displayable
         //     state-changes + a heartbeat so it isn't a per-tick relay flood.
         if let (Some(stx), Some(machine)) = (&status_tx, status_machine) {
+            // L2: every child's STATUS this tick carries the gap; it is
+            // retired after the tick in which one of them was accepted.
+            let mut gap_delivered = false;
             for (uid, pol) in &policies {
                 // Only a guardian-bound child (has a `subject`) gets STATUS —
                 // there is a guardian to address it to.
@@ -2947,6 +3167,9 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 status.relay_unreachable_polls =
                     (consecutive_unreachable > 0).then_some(consecutive_unreachable);
                 status.transport_unavailable = transport_unavailable.then_some(true);
+                // R3-H1: the budget is held paused because the ledger will
+                // not save — say why, or the guardian sees an unexplained lock.
+                status.usage_unsaved = multi.usage_unsaved(*uid).then_some(true);
                 // Per-bucket ("named time") progress, so the guardian's app
                 // can show "Play: 22 of 60 used" instead of a blank. RAW
                 // meters — not extra-adjusted — because this is the guardian's
@@ -2995,18 +3218,41 @@ pub async fn run(config: DaemonConfig) -> Result<(), String> {
                 // invisible to the guardian on that score.
                 status.app_version_code = Some(crate::version::version_code());
                 status.app_version_name = Some(crate::version::version_name().to_string());
+                // The clock went backwards since the last emit: say from where,
+                // once, so the guardian takes this lower-`ts` status as current.
+                status.clock_stepped_back_from = crate::status_emit::clock_stepped_back_from(
+                    status_last.get(uid),
+                    status.ts,
+                    status_step_undelivered.get(uid).copied(),
+                );
                 if crate::status_emit::should_emit_status(
                     status_last.get(uid),
                     &status,
                     STATUS_HEARTBEAT_SECS,
                 ) {
-                    stx.emit_status(&status.to_json(), now as u64).await;
+                    status.seq = Some(crate::status_seq::next_durable(&mut status_seq));
+                    let delivered = stx.emit_status(&status.to_json(), now as u64).await;
+                    if delivered && status.enforcement_gap_secs.is_some() {
+                        gap_delivered = true;
+                    }
+                    match (delivered, status.clock_stepped_back_from) {
+                        (false, Some(from)) => {
+                            status_step_undelivered.insert(*uid, from);
+                        }
+                        (true, _) => {
+                            status_step_undelivered.remove(uid);
+                        }
+                        (false, None) => {}
+                    }
                     // 04-G5: one relay round trip per child, each with its own
                     // timeout — a family of four on four dead relays is minutes
                     // of correct waiting, so vouch between them.
                     crate::watchdog::ping();
                     status_last.insert(*uid, status);
                 }
+            }
+            if gap_delivered {
+                enforcement_gap_secs = None;
             }
         }
 
@@ -3299,6 +3545,61 @@ mod tests {
         assert!(super::display_protocol_note(Some("x11")).is_none());
         assert!(super::display_protocol_note(Some("tty")).is_none());
         assert!(super::display_protocol_note(None).is_none());
+    }
+
+    /// H1: only the display manager's root Xorg names the display. A ward
+    /// process calling itself `Xorg` (argv is theirs to set) fails on real
+    /// uid; a root-owned `Xvfb` the ward launched fails on the name; a
+    /// ward-owned binary named `Xorg` fails on the owner.
+    #[test]
+    fn only_a_root_run_root_owned_xorg_is_trusted() {
+        use std::path::Path;
+        let xorg = Path::new("/usr/lib/xorg/Xorg");
+        assert!(super::is_trusted_xorg(Some(0), Some(xorg), Some(0)));
+        assert!(super::is_trusted_xorg(
+            Some(0),
+            Some(Path::new("/usr/bin/Xorg")),
+            Some(0)
+        ));
+        // Upgraded under a running server: the mapped inode is still root's.
+        assert!(super::is_trusted_xorg(
+            Some(0),
+            Some(Path::new("/usr/lib/xorg/Xorg (deleted)")),
+            Some(0)
+        ));
+        // The ward's own process, whatever it is called.
+        assert!(!super::is_trusted_xorg(Some(1000), Some(xorg), Some(0)));
+        // A ward-owned binary named Xorg, even if somehow run as root.
+        assert!(!super::is_trusted_xorg(
+            Some(0),
+            Some(Path::new("/managed/ward/bin/Xorg")),
+            Some(1000)
+        ));
+        // Root-owned, but not the display manager's server.
+        assert!(!super::is_trusted_xorg(
+            Some(0),
+            Some(Path::new("/usr/bin/Xvfb")),
+            Some(0)
+        ));
+        assert!(!super::is_trusted_xorg(
+            Some(0),
+            Some(Path::new("/usr/bin/Xorg.wrap")),
+            Some(0)
+        ));
+        // Any unknown is untrusted.
+        assert!(!super::is_trusted_xorg(None, Some(xorg), Some(0)));
+        assert!(!super::is_trusted_xorg(Some(0), None, Some(0)));
+        assert!(!super::is_trusted_xorg(Some(0), Some(xorg), None));
+    }
+
+    #[test]
+    fn real_uid_is_the_first_field_of_the_uid_line() {
+        let status = "Name:\tXorg\nState:\tS (sleeping)\nUid:\t1000\t0\t0\t0\nGid:\t0\t0\t0\t0\n";
+        // A setuid binary's EFFECTIVE uid is 0; the REAL uid is the caller's.
+        assert_eq!(super::real_uid_from_status(status), Some(1000));
+        assert_eq!(super::real_uid_from_status("Uid:\t0\t0\t0\t0\n"), Some(0));
+        assert_eq!(super::real_uid_from_status("Name:\tx\n"), None);
+        assert_eq!(super::real_uid_from_status("Uid:\tnope\n"), None);
     }
 
     #[test]
