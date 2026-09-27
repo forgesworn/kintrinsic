@@ -106,4 +106,4 @@ not policing**:
 
 *Related: `spec/contract.md` (the wire contract), the wardship lexicon
 (guardian / ward / charter / clause), and the per-device-rules design memo
-(`docs/superpowers/specs/2026-07-24-per-device-rules-design.md`).*
+(internal design spec 2026-07-24-per-device-rules-design).*

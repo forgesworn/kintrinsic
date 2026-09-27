@@ -110,5 +110,5 @@ You're integrating against **Charter Protocol v0.1** (pre-stable). See `spec/con
 ## Questions
 
 - Spec ambiguity → open a discussion on `forgesworn/charter`
-- Bunker bug → file on `forgesworn/signet-app-internal`
+- Bunker bug → file on `forgesworn/signet-app` issues
 - Strategic question (clause priorities, etc.) → ask in the ForgeSworn channels

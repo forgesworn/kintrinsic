@@ -11,6 +11,16 @@ autonomy back over time, not to build a cage. The design principle is that we
 **do not design around circumvention** — where enforcement is incomplete, the
 docs say so plainly.
 
+> **Status: pre-1.0, alpha.** Kintrinsic is dogfooded daily on the
+> maintainers' own family's devices, but it has not had independent security
+> review and is still growing enforcement coverage — read
+> [Known limitations](#known-limitations) before you rely on it. Android
+> release builds are currently signed with a debug-derived key as a
+> documented, temporary bridge (see
+> [`android/keystore/README.md`](android/keystore/README.md)). Kintrinsic is a
+> supervision aid, not a substitute for actually supervising your child, and
+> it cannot stop a ward who has root/admin on their own device (see below).
+
 > **A note on the name.** The product is **Kintrinsic**. The code, the daemon,
 > and some binaries and identifiers keep the earlier working name **`charter`**
 > (e.g. `charterd`, the Android application id) — a deliberate, permanent
@@ -27,7 +37,7 @@ protocol — not a spec or an SDK alone.
 | Component | What it is |
 |---|---|
 | **Ward APK** (`android/app`, `org.forgesworn.charter`) | An Android **Device Owner** enforcer for a child's phone (GrapheneOS and stock). Enforces schedules, budgets, per-app limits, install windows, web content and an always-available **Lifeline** emergency-calling path. Self-updates from a guardian-signed instruction. |
-| **Linux warden** (`linux/`, `charterd`) | A Rust daemon that enforces the same charter on a Linux machine: per-child time, an on-display lock, web filtering, and honest foreground-app attribution. Ships as a `.deb`. |
+| **Linux warden** (`linux/`, `charterd`) | A Rust daemon that enforces the same charter on a Linux machine: per-child time, an on-display lock, Firefox-only web filtering (see [Known limitations](#known-limitations)), and honest foreground-app attribution. Ships as a `.deb`. |
 | **Guardian app** (`apps/charter-app`, the carrier APK) | Where a guardian issues and amends clauses, approves "can I have longer?" asks, and pairs devices. Holds the family signing key locally; backs it up encrypted. |
 | **Wire contract** (`spec/contract.md`) | The Nostr-based protocol: gift-wrapped (NIP-59) clauses, grants, status and usage-sync between guardian and device. No server holds family data. |
 | **Consumer SDK** (`@forgesworn/charter` on npm) | Lets a Nostr-aware app honour a schedule clause directly (see below). |
@@ -88,6 +98,37 @@ protocol semantics.
 - `android/` — the ward enforcer (`app`) and guardian carrier (`carrier`) modules.
 - `apps/charter-app/` — the guardian PWA bundled into the carrier APK.
 - `src/` + `docs/` — the consumer SDK and its integration docs.
+
+## Known limitations
+
+Kintrinsic is alpha software. Some of these are architectural (true for any
+on-device parental-control system); some are gaps we intend to close.
+
+- **A ward with root/administrator access on their own device can defeat any
+  on-device enforcement.** Kintrinsic enforces at the OS layer (Android Device
+  Owner, or a privileged Linux daemon); it assumes the guardian, not the ward,
+  controls that layer. This is a property of on-device enforcement generally,
+  not a bug we can patch away.
+- **Linux web-content filtering is partial.** The clause covers block/allow
+  lists, SafeSearch and a YouTube restricted-mode setting, but on Linux this
+  is currently enforced only inside Firefox (via browser policy); Chromium,
+  Brave, Electron-based apps and other non-browser network clients are not
+  yet filtered. The Android ward enforces web content at the network (VPN)
+  layer instead and is not affected by this gap. Until the Linux applier is
+  finished, treat "web filtering" on a Linux ward as Firefox-only.
+- **Supported ward platforms are Android (Device Owner mode, GrapheneOS and
+  stock) and Linux.** There is no ward enforcer for iOS, ChromeOS, Windows or
+  macOS, and none is currently planned; a family with wards on those
+  platforms cannot use Kintrinsic to enforce clauses there.
+- **No independent third-party security audit has been done.** The project
+  has had internal review, but nothing external and adversarial. Given that
+  the guardian app holds a family signing key, treat key backup and device
+  loss recovery with care until an audit exists.
+- **Android release signing is on a temporary debug-derived key**, a
+  documented bridge for already-paired field devices until the signing
+  identity is rotated — see
+  [`android/keystore/README.md`](android/keystore/README.md) for the
+  mitigations in force meanwhile.
 
 ## Provenance
 

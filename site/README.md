@@ -51,12 +51,12 @@ The user-facing rebrand has shipped and those literals are intentionally kept.
 If any shipped copy changes, recapture the screenshots (recipe below) and
 regenerate `img/og.png` (`img/src/og-card.html`, rendered at exactly 1200×630).
 
-**Branding lives in `forgesworn/kindred-internal`** (private): all mark SVGs,
-the brand workbench, the brand book, the living spec and the full decision
-record moved there 2026-08-11. This repo keeps only the shipped assets
+**Branding assets are maintained privately:** all mark SVGs, the brand
+workbench, the brand book, the living spec and the full decision record are
+kept outside this (public) repo. This repo keeps only the shipped assets
 (`seal.svg`, `img/og.png`) and `img/src/og-card.html` (the og-image source,
-which uses the bud mark). The `docs/superpowers/` copies here are dated
-history; the living spec is kindred-internal's.
+which uses the bud mark). The dated `docs/superpowers/` copies that used to
+sit alongside them here have been removed.
 
 Screenshots in `img/` are captured from the apps' own fixture data, never a
 real family — `charter-console/ui/app.html` opened directly in a browser (its

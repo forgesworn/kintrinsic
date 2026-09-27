@@ -1,9 +1,9 @@
 # Security policy
 
-Charter is child-safety software: a Device Owner enforcer on the ward's phone,
-a Linux warden, and a guardian app that holds a family's signing key. A defect
-here can mean a supervised child bypasses a limit, or — worse — that an outside
-party interferes with a family's devices. We take reports seriously.
+Kintrinsic is child-safety software: a Device Owner enforcer on the ward's
+phone, a Linux warden, and a guardian app that holds a family's signing key. A
+defect here can mean a supervised child bypasses a limit, or — worse — that an
+outside party interferes with a family's devices. We take reports seriously.
 
 ## Reporting a vulnerability
 
@@ -33,10 +33,17 @@ Please include:
 
 ## Scope
 
-In scope: the enforcer/warden/guardian code in this repository and its update
-channel (signed release events + artifact integrity). Out of scope: the
-deployment infrastructure and its secrets (owned separately), and third-party
-relays or Blossom servers we do not operate.
+In scope: enforcement logic that can fail open (schedule, app, install and web
+content limits) on either warden; family signing-key generation, storage and
+backup in the guardian app; device pairing and the NIP-46/bunker transport;
+and the relay/Blossom transport and update channel (signed release events and
+artifact integrity). Out of scope: the deployment infrastructure and its
+secrets (owned separately), and third-party relays or Blossom servers we do
+not operate.
+
+**Supported versions:** only the latest tagged release is supported. Kintrinsic
+is pre-1.0 alpha software — there is no long-term-support branch, and older
+releases do not receive backported fixes.
 
 ## A note on candor
 

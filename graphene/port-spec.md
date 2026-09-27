@@ -504,7 +504,7 @@ runtime.rs:200-207):
 
 **LockActivity (replaces charter-lock; LockTask replaces override-redirect + grabs +
 overlay + VT lock).** Humane-lockout semantics preserved exactly
-(docs/superpowers/specs/2026-07-03-humane-lockout-design.md:28-41, 119-130):
+(internal design spec 2026-07-03-humane-lockout-design):
 - Content = `charterLockInfo` verbatim: reason-specific title ("Outside allowed hours" /
   "Time's up for today" / "Locked — Setup needs attention, ask your guardian"), the
   "You can come back at…" line in clause tz, grouped weekly hours ("Mon–Fri 07:00 – 20:00"),

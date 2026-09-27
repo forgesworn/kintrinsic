@@ -49,3 +49,7 @@ src-tauri/Cargo.lock
 # Internal / not-for-open-source (strategy, research, private docs).
 # Kept out of git so it can never leak if this repo is made public.
 internal/
+
+# Agent scaffolding: local only, never public
+CLAUDE.md
+CLAUDE.local.md
