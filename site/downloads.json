@@ -1,9 +1,9 @@
 {
   "android": {
-    "version": "0.1.15",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.15/kintrinsic-0.1.15.apk",
-    "sha256": "0f35567b97d17413ba0cce779cc724fd867e08d3cf7b48a79569857155484d00",
-    "mirror": "https://nostr.download/0f35567b97d17413ba0cce779cc724fd867e08d3cf7b48a79569857155484d00.apk"
+    "version": "0.1.16",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.16/kintrinsic-0.1.16.apk",
+    "sha256": "9fa570074eaaa4dccdd95cbacab4f17b99c64119981cc12d64e018cc522fc7fc",
+    "mirror": "https://nostr.download/9fa570074eaaa4dccdd95cbacab4f17b99c64119981cc12d64e018cc522fc7fc.apk"
   },
   "linux": {
     "version": "0.7.9",
