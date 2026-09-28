@@ -169,7 +169,9 @@ jobs:
         run: |
           set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses > /dev/null
+          # `yes` dies of SIGPIPE once sdkmanager stops reading; under pipefail
+          # that would fail the step, so only sdkmanager's own status counts.
+          { yes || true; } | "$SDKMANAGER" --licenses > /dev/null
           "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
@@ -301,7 +303,9 @@ jobs:
         run: |
           set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses > /dev/null
+          # `yes` dies of SIGPIPE once sdkmanager stops reading; under pipefail
+          # that would fail the step, so only sdkmanager's own status counts.
+          { yes || true; } | "$SDKMANAGER" --licenses > /dev/null
           "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
