@@ -42,19 +42,22 @@ export interface CatalogApp {
  * here would surface as a false "✓ Verified · <publisher>" in Approvals, so this
  * list carries no third-party entry we can't stand behind.
  *
- * The ONE exception to the no-debug-cert rule is Kintrinsic itself: during alpha
- * the dev keystore IS the product's genuine signing identity (every deployed
- * phone verifies its App Links and updates against it — continuity is anchored
- * by the devices, not by a store listing). The publisher string says so
- * plainly instead of implying a store-grade identity. Swaps to the release
- * cert when the sysadmin's keystore lands in CI (#44 item 3).
+ * Kintrinsic itself is signed with the sysadmin-owned release key: the
+ * android-signing-rotation plan (2026-09-27) moved it off the laptop's debug
+ * keystore via an APK Signature Scheme v3 lineage built from the old debug
+ * key plus the new release certificate (`scripts/release/MakeLineage.java`;
+ * see `docs/releasing.md`). Every fielded phone rotates in place — no
+ * factory reset, no re-pairing — because Android accepts the update once its
+ * signer is an ancestor in the incoming lineage. The digest below is that
+ * release certificate's SHA-256, read from the real release APK exactly like
+ * any other catalog entry.
  */
 export const APP_CATALOG: readonly CatalogApp[] = [
   {
     packageName: "org.forgesworn.charter",
     label: "Kintrinsic",
-    publisher: "ForgeSworn (alpha build, dev signing key)",
-    signerCertSha256: "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42",
+    publisher: "ForgeSworn",
+    signerCertSha256: "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc",
     source: "staged",
     homepage: "https://charter.signet.you",
   },

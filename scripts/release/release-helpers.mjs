@@ -243,10 +243,11 @@ export function buildBlossomAuth({ sha256, createdAt }) {
 export const DEBUG_CERT_SHA256 = "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42";
 
 // The pinned release-key certificate fingerprint (lowercase hex, 64 chars).
-// Empty until the sysadmin supplies it (see docs/releasing.md) — kept as
-// two copies for the same reason DEBUG_CERT_SHA256 is (this one is JS,
-// scripts/release/lib.sh's own RELEASE_CERT_SHA256 is bash).
-export const RELEASE_CERT_SHA256 = "";
+// Pinned to the sysadmin's release cert (android-signing-rotation plan,
+// 2026-09-27) — kept as two copies for the same reason DEBUG_CERT_SHA256 is
+// (this one is JS, scripts/release/lib.sh's own RELEASE_CERT_SHA256 is
+// bash). See docs/releasing.md.
+export const RELEASE_CERT_SHA256 = "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc";
 
 /**
  * The cert-pin guard `--from-draft` runs for every APK channel, on top of

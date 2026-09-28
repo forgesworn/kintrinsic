@@ -13,14 +13,12 @@
 DEBUG_CERT_SHA256=d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42
 
 # The pinned release-key certificate fingerprint (lowercase hex, 64 chars).
-# Empty until the sysadmin supplies it (see docs/releasing.md) — until then,
-# android_verify_signing below only checks internal consistency (v3 +
-# lineage-from-debug), not identity against a known-good value. Once set,
-# every real-signing build's current signer must equal it exactly, in both
-# this file and scripts/release/release-helpers.mjs's own RELEASE_CERT_SHA256
-# (kept as two copies for the same reason DEBUG_CERT_SHA256 is: one is bash,
-# one is JS).
-RELEASE_CERT_SHA256=
+# Pinned to the sysadmin's release cert (android-signing-rotation plan,
+# 2026-09-27): every real-signing build's current signer must equal it
+# exactly, in both this file and scripts/release/release-helpers.mjs's own
+# RELEASE_CERT_SHA256 (kept as two copies for the same reason
+# DEBUG_CERT_SHA256 is: one is bash, one is JS). See docs/releasing.md.
+RELEASE_CERT_SHA256=4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc
 #
 # release_publish <repo-root> <channel> <artifact> <version> <version-code> <sha256> [cert]
 #

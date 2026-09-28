@@ -23,13 +23,19 @@ plugins {
 //
 // ALPHA BRIDGE — `CHARTER_ALPHA_DEBUG_SIGNING=1`. The phones already deployed
 // are pinned to the debug cert, and Android only accepts same-signature
-// updates, so rotating the signing identity costs a one-time re-pin on every
-// deployed phone (founder + infra-owner, per the security goals). Until that
-// happens there has to be SOME way to cut an update for those phones. This is
-// it, and it is deliberately a typed, explicit act with a loud warning rather
-// than a default: the vulnerability was never "a debug-signed alpha build",
-// it was a debug-signed build that nobody had to ask for. Delete this bridge
-// at the re-pin.
+// updates unless the incoming build carries a proof-of-rotation lineage.
+// The android-signing-rotation plan (2026-09-27) supplies exactly that:
+// phones move to the sysadmin's release key IN PLACE — no re-install, no
+// re-pin — via a v3 lineage built from the old debug key plus the new
+// release cert (`scripts/release/MakeLineage.java`; see
+// `docs/releasing.md`). CHARTER_SIGNING_LINEAGE_B64/_FILE is what the CI
+// signing step (`android_sign_rotated`, `scripts/release/lib.sh`) uses to
+// re-sign with that lineage; no private key changes hands to build it. This
+// bridge exists only for the case where no rotated release material is
+// available at all: it is deliberately a typed, explicit act with a loud
+// warning rather than a default — the vulnerability was never "a
+// debug-signed alpha build", it was a debug-signed build that nobody had to
+// ask for. Delete this bridge once the whole fleet has rotated (plan step 9).
 val signingProps = Properties().apply {
     val f = rootProject.file("signing.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -54,8 +60,8 @@ android {
         applicationId = "org.forgesworn.charter"
         minSdk = 34
         targetSdk = 35
-        versionCode = 43
-        versionName = "0.6.12"
+        versionCode = 44
+        versionName = "0.6.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -118,13 +118,15 @@ only skips re-flipping the release to published.
 ### The release cert pin (`RELEASE_CERT_SHA256`)
 
 `scripts/release/lib.sh` and `scripts/release/release-helpers.mjs` each
-carry a `RELEASE_CERT_SHA256` constant, empty until the sysadmin supplies
-the fingerprint of the real release key (post-rotation). Until it is set:
+carry a `RELEASE_CERT_SHA256` constant. It is now pinned to the sysadmin's
+release-key fingerprint (android-signing-rotation plan, 2026-09-27). Before
+it was set:
 
-- `--from-draft` **refuses to publish any APK channel** ("release cert not
+- `--from-draft` **refused to publish any APK channel** ("release cert not
   pinned yet — see docs/releasing.md"). The `charter-deb` channel has no
   cert at all and is unaffected.
-- Once it is set, every APK's actual signing cert must equal it exactly, in
+
+Now that it is set, every APK's actual signing cert must equal it exactly, in
   both CI (`android_verify_signing`, lib.sh) and `--from-draft`
   (`assertPinnedCert`, release-helpers.mjs).
 - Independently of the pin, a signer equal to the well-known debug cert
@@ -179,6 +181,15 @@ are not in this repository):
 CI decodes the keystore and lineage to a runner-local temp path for the
 build, and deletes both again afterwards regardless of whether the build
 succeeded.
+
+The lineage itself is built once with `scripts/release/MakeLineage.java`
+from the OLD (debug) keystore plus the NEW release certificate — it is
+public data (it names two certificates, never a private key) and is what
+lets every fielded phone rotate to the release key in place, with no
+re-install and no re-pairing. `CHARTER_SIGNING_LINEAGE_B64` is set by the
+maintainer, alongside the other `release`-Environment secrets, once the
+sysadmin has sent back the lineage file (see the android-signing-rotation
+plan). It never needs to be rebuilt unless the signing key rotates again.
 
 ### Why the lineage is mandatory, not optional
 

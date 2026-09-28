@@ -65,19 +65,37 @@ finds every site.
 
 ## Rotating to a real key — what it costs
 
-Not just a CI variable. Because the signer digest is pinned on-device:
+Not a re-install. Every fielded phone moves to the new key **in place**, via
+an APK Signature Scheme v3 proof-of-rotation lineage (the
+android-signing-rotation plan, 2026-09-27): a lineage built from the OLD
+(debug) key plus the NEW release certificate, using
+`scripts/release/MakeLineage.java`. Android's `PackageManagerService`
+honours the lineage from API 28, so a v3-rotated update installs over the
+debug-signed app already on the device — the installed signer only needs to
+be an ancestor in the incoming lineage, which the debug key is. No factory
+reset, no re-provisioning, no re-pairing, and no private key ever changes
+hands: the lineage file is public data (it names two certificates, not a
+private key), built once by whoever holds both the old debug keystore and
+the new release keystore, and from then on carried alongside the release
+keystore itself.
 
-1. The sysadmin supplies keystore + the four `CHARTER_KEYSTORE_*` values to CI.
+Because the signer digest is also pinned on-device, rotating still needs:
+
+1. The sysadmin supplies keystore + the four `CHARTER_KEYSTORE_*` values, and
+   the lineage as `CHARTER_SIGNING_LINEAGE_B64`, to CI (see
+   `docs/releasing.md`). CI re-signs every release build with the lineage
+   before it is ever published (`android_sign_rotated`, `scripts/release/lib.sh`).
 2. `apps/charter-app/public/.well-known/assetlinks.json` must be updated with
-   the **new** cert fingerprint. `publish-apk.sh` now refuses to publish when
-   the APK's actual signing cert is not listed there, so this cannot be
-   forgotten — but it does mean the first post-rotation publish fails until
-   the file is updated. That failure is the feature.
-3. Every deployed ward phone needs a **one-time re-pin**: a same-signature
-   update is impossible across a key change, so each phone takes a manual
-   re-install. Founder hardware round, one per phone.
+   the **new** cert fingerprint as a SECOND entry, alongside the debug one.
+   `publish-apk.sh` refuses to publish when the APK's actual signing cert is
+   not listed there, so this cannot be forgotten — but it does mean the
+   first post-rotation publish fails until the file is updated. That failure
+   is the feature.
+3. Each phone then takes the rotated release the normal way — the guardian's
+   "Update" button, or the carrier's self-update — and Android accepts it
+   because of the lineage. No manual per-phone re-install step.
 4. Remove `CHARTER_ALPHA_DEBUG_SIGNING` from both `build.gradle.kts` files and
-   both publish scripts.
+   both publish scripts, once the whole fleet has rotated.
 
 No keystore, passphrase, or certificate fingerprint is generated, guessed, or
 recorded in this repo. If you ever see a `.jks`, `.keystore`, or

@@ -17,6 +17,13 @@
 #
 #     CHARTER_ALPHA_DEBUG_SIGNING=1 ./scripts/publish-carrier-apk.sh
 #
+# Rotating off the debug cert (android-signing-rotation plan, 2026-09-27) is
+# IN PLACE, not a re-install: android_sign_rotated (scripts/release/lib.sh)
+# re-signs the build with a v3 lineage from the old debug key plus the new
+# release cert (scripts/release/MakeLineage.java), so the phone already
+# carrying the debug-signed carrier accepts the rotated update directly, and
+# no private key changes hands to build that lineage.
+#
 # Requires: `source ~/Android/env.sh` (SDK + NDK on PATH).
 set -euo pipefail
 cd "$(dirname "$0")/.."   # android/

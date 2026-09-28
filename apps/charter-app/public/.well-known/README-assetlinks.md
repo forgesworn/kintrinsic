@@ -11,26 +11,27 @@ cable-pair flow (that fires `bunker://` directly).
 
 ## Current entries
 
-- **Debug key** (the only entry today): the fingerprint in `assetlinks.json` is
-  the debug keystore's cert. The alpha hardware builds are debug-signed, so
-  QR-scan pairing verifies for them as-is.
+`assetlinks.json` now lists **two** fingerprints (android-signing-rotation
+plan, 2026-09-27):
 
-## Adding the release cert (the sysadmin's key) — do this when the release build ships
-
-The release APK is signed with **the sysadmin's release keystore** (a deploy secret;
-see `android/keystore/README.md`). Its cert fingerprint is a **public** value,
-but we do **not** have it yet and must **never fabricate it**. When the sysadmin
-provides it, add it as a SECOND entry in the `sha256_cert_fingerprints` array in
-`assetlinks.json` (keep the debug entry so dev builds still verify):
+- **Debug key** (existing): the fielded debug keystore's cert. Kept so any
+  device still running a pre-rotation, debug-signed build continues to
+  verify App-Link pairing. Dropped only once the whole fleet has rotated
+  (rotation plan step 9).
+- **Release key** (new): the sysadmin's release keystore's cert. Rotated
+  devices — signed via the v3 lineage built from the old debug key plus this
+  new cert (`scripts/release/MakeLineage.java`; see `docs/releasing.md`) —
+  verify against this entry. No private key changes hands to add it: the
+  fingerprint is public data derived from the sysadmin's certificate.
 
 ```json
 "sha256_cert_fingerprints": [
-  "D9:C7:F3:DE:...:42",                 // debug (existing)
-  "<REAL RELEASE CERT SHA-256 FROM THE SYSADMIN>"   // release — colon-separated hex
+  "D9:C7:F3:DE:...:42",   // debug — kept until the fleet has fully rotated
+  "4A:78:3A:3E:...:DC"    // release — the sysadmin's key
 ]
 ```
 
-How the sysadmin gets the value from his release keystore:
+How the sysadmin got the value from his release keystore:
 
 ```bash
 keytool -list -v -keystore <release.jks> -alias <alias> | grep -A1 'SHA256:'
@@ -39,6 +40,9 @@ keytool -list -v -keystore <release.jks> -alias <alias> | grep -A1 'SHA256:'
 …or, if using Play App Signing: Play Console → App integrity → **App signing
 key certificate** → the SHA-256 fingerprint.
 
-Then push to `main` — the deploy pipeline serves the updated `assetlinks.json`
-from the PWA origin, and the release build's App Link verifies. Until then, a
-release build simply uses the `bunker://` fallback for pairing (no breakage).
+This file must be live on the PWA origin (`https://charter.mysignet.app/.well-known/assetlinks.json`,
+both fingerprints present) **before** any rotated ward or carrier build is
+installed anywhere — check with `curl -s
+https://charter.mysignet.app/.well-known/assetlinks.json`. Until a device
+rotates, it keeps verifying against the debug entry as before; a rotated
+device verifies against the release entry.

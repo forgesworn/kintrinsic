@@ -14,7 +14,12 @@ plugins {
 // Reads the same `CHARTER_KEYSTORE_*` env vars / `android/signing.properties`
 // as `app/build.gradle.kts`, fails without them, and honours the same
 // deliberate `CHARTER_ALPHA_DEBUG_SIGNING=1` bridge for the phones already
-// pinned to the debug cert. See android/keystore/README.md.
+// pinned to the debug cert. Rotating off that cert is in place, not a
+// re-install: an APK v3 lineage built from the old debug key plus the new
+// release cert (`scripts/release/MakeLineage.java`) lets a rotated build
+// install straight over the debug-signed carrier already on the guardian's
+// phone — no private key changes hands to build that lineage. See
+// android/keystore/README.md and docs/releasing.md.
 val signingProps = Properties().apply {
     val f = rootProject.file("signing.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -33,8 +38,8 @@ android {
         // reach back further than the ward app's minSdk 34.
         minSdk = 29
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.1.14"
+        versionCode = 16
+        versionName = "0.1.15"
     }
 
     signingConfigs {

@@ -361,8 +361,11 @@ test("verifyRotatedApkCert refuses more than one current signer", () => {
 
 // ---- RELEASE_CERT_SHA256 pinning (assertPinnedCert) ------------------------
 
-test("RELEASE_CERT_SHA256 is empty until the sysadmin supplies it", () => {
-  assert.equal(RELEASE_CERT_SHA256, "");
+test("RELEASE_CERT_SHA256 is pinned to the sysadmin's release cert", () => {
+  assert.equal(
+    RELEASE_CERT_SHA256,
+    "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc",
+  );
 });
 
 test("assertPinnedCert refuses an APK while the pin is empty", () => {

@@ -18,9 +18,15 @@
 #     CHARTER_ALPHA_DEBUG_SIGNING=1 ./scripts/publish-apk.sh
 #
 # The bridge exists because deployed phones are pinned to the debug cert and
-# Android only accepts same-signature updates — rotating means a one-time
-# re-pin on every phone in the field. It is not "on purpose", it is a debt,
-# and it is spelled out at every use so it can't be forgotten.
+# Android only accepts same-signature updates unless the release carries a
+# proof-of-rotation lineage. The android-signing-rotation plan (2026-09-27)
+# supplies that: android_sign_rotated (scripts/release/lib.sh) re-signs the
+# build with a v3 lineage from the old debug key plus the new release cert
+# (scripts/release/MakeLineage.java), and every fielded phone then rotates
+# IN PLACE — no re-install, no re-pin, no private key changing hands. The
+# bridge is not "on purpose", it is a debt for when no rotated release
+# material is available at all, and it is spelled out at every use so it
+# can't be forgotten.
 #
 # Requires: `source ~/Android/env.sh` (SDK + NDK on PATH).
 set -euo pipefail

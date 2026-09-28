@@ -5,7 +5,8 @@
       "namespace": "android_app",
       "package_name": "org.forgesworn.charter",
       "sha256_cert_fingerprints": [
-        "D9:C7:F3:DE:D3:86:E9:AD:36:BD:FF:31:D0:7B:31:C6:C6:BF:E2:37:9E:C3:3D:E7:A2:B6:F6:AC:68:0F:BB:42"
+        "D9:C7:F3:DE:D3:86:E9:AD:36:BD:FF:31:D0:7B:31:C6:C6:BF:E2:37:9E:C3:3D:E7:A2:B6:F6:AC:68:0F:BB:42",
+        "4A:78:3A:3E:2C:08:79:06:BF:29:D4:D5:00:2B:54:67:05:FA:50:F9:D8:34:4E:C5:DA:D0:88:E4:74:0C:FC:DC"
       ]
     }
   }
