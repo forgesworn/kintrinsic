@@ -50,6 +50,12 @@
 //                   is never the default because it must be a deliberate
 //                   choice, not something a stray re-run does by accident.
 //
+// Step 0, before anything else and before any `gh` call at all: the
+// forgot-to-bump guard (assertVersionCodeBump, release-helpers.mjs) reads
+// the channel's committed manifest under apps/charter-app/public/ and
+// refuses outright if --version-code is not strictly greater than what is
+// already published there. This runs the same in --dry-run.
+//
 // Verification (steps 1-6), then publish (skipped with --resume), then a
 // device-facing download check, then the mirror + announce — any
 // verification failure aborts before anything is announced or (without
@@ -74,9 +80,20 @@
 //   6. if --cert was given, it must match the actual signing cert too.
 // Only once all of that passes: publish the draft, verify the GitHub
 // download URL serves it (200, following redirects), THEN mirror to
-// Blossom and sign + announce the Nostr event.
+// Blossom and sign + announce the Nostr event, THEN — the only thing this
+// mode does that publish-apk.sh/publish-carrier-apk.sh/publish-deb.sh don't
+// need, since they write their own — write the channel's manifest under
+// apps/charter-app/public/ (buildManifest/formatManifest,
+// release-helpers.mjs: same fields, same field order, same formatting those
+// scripts' write_manifest calls use) and run
+// scripts/sync-front-door-downloads.sh so site/downloads.json and
+// site/download.html follow. Nothing is committed or pushed; the run prints
+// a "next: commit … and push" line instead.
 // --dry-run makes NO network calls at all in this mode (no `gh`, no
-// download): it only resolves the tag and prints the plan.
+// download): it only resolves the tag, runs the (local, no-network)
+// forgot-to-bump guard, and prints the plan plus a shape-only preview of the
+// manifest it would write (the real sha256/url/cert/builtAt are only known
+// once the download above verifies).
 //
 // Env:
 //   CHARTER_BLOSSOM_SERVERS  comma-separated (default below)
@@ -110,16 +127,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   assertPinnedCert,
+  assertVersionCodeBump,
   buildBlossomAuth,
+  buildManifest,
   buildReleaseEvent,
   channelAndVersionFromTag,
   extractAttestedCommit,
+  formatManifest,
   githubRelease,
   isCanonicalBlossomUrl,
   isGithubReleaseUrl,
+  MANIFEST_FILES,
   orderReleaseUrls,
   parseSha256Sums,
   releaseRelaysWithExtra,
@@ -131,6 +153,28 @@ import {
 // blossom.band was tried and REFUSES non-media uploads (HTTP 415);
 // blossom.sovbit.host was unreachable. Re-verify before adding servers.
 const DEFAULT_BLOSSOM = "https://blossom.primal.net,https://nostr.download";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// scripts/release/ -> repo root.
+const REPO_ROOT = join(__dirname, "..", "..");
+const PUBLIC_DIR = join(REPO_ROOT, "apps", "charter-app", "public");
+
+/**
+ * The existing manifest's versionCode, or null when the channel has never
+ * published one (no file) or the field is missing/malformed — the
+ * forgot-to-bump guard's baseline. Reads the committed manifest straight off
+ * disk, never `gh`, so it works the same in --dry-run as for real.
+ */
+function readManifestVersionCode(path) {
+  if (!existsSync(path)) return null;
+  let data;
+  try {
+    data = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`cannot parse existing manifest ${path}: ${err.message}`);
+  }
+  return typeof data.versionCode === "number" ? data.versionCode : null;
+}
 
 function parseArgs(argv) {
   const args = { notes: "" };
@@ -554,7 +598,7 @@ async function announceRelease(
     console.log("--dry-run: signed event follows; nothing uploaded or published");
     console.log(JSON.stringify(event, null, 2));
     emit();
-    return;
+    return { legacyUrl, urls };
   }
 
   const results = await Promise.all(relays.map((r) => publishToRelay(r, event)));
@@ -578,6 +622,7 @@ async function announceRelease(
   console.log(`urls: ${urls.join(" ")}`);
   emit();
   console.log(`announced ${channel} ${version} (code ${versionCode})`);
+  return { legacyUrl, urls };
 }
 
 /** Wrap a `gh` call so a failure carries its stderr, not just an exit code. */
@@ -602,6 +647,14 @@ async function runFromDraft(args, sk) {
   const gr = githubRelease(channel, version, repo);
   console.log(`--from-draft ${tag}: channel=${channel} version=${version} asset=${gr.asset}`);
 
+  const manifestFile = MANIFEST_FILES[channel];
+  const manifestPath = join(PUBLIC_DIR, manifestFile);
+  const oldVersionCode = readManifestVersionCode(manifestPath);
+
+  // The forgot-to-bump guard runs BEFORE anything else — even before the
+  // draft is looked at — so a stray re-run refuses with nothing published
+  // and no `gh` call made at all. It only needs the committed manifest and
+  // --version-code, so it behaves the same in --dry-run as for real.
   if (args.dryRun) {
     console.log("--dry-run: would `gh release download` the asset + SHA256SUMS, check the sha256,");
     console.log("--dry-run: `gh attestation verify --format json` it (signer-workflow + source-ref +");
@@ -609,9 +662,26 @@ async function runFromDraft(args, sk) {
     console.log("--dry-run: origin/main, and (for an APK channel) verify the signing cert with");
     console.log("--dry-run: apksigner against the RELEASE_CERT_SHA256 pin — then publish the draft,");
     console.log("--dry-run: verify the GitHub download, and run the normal Blossom + Nostr flow.");
+    console.log(`--dry-run: would then write apps/charter-app/public/${manifestFile} (exact values`);
+    console.log("--dry-run: known only once the download above verifies; shown here as a shape):");
+    const preview = {
+      versionName: version,
+      versionCode: args.versionCode,
+      url: "<verified direct-200 Blossom URL, known only after `gh release download`>",
+      urls: [gr.url, "<verified Blossom mirror>"],
+      ...(channel === "charter-deb"
+        ? { sha256: "<sha256 of the downloaded asset>" }
+        : { apkSha256: "<sha256 of the downloaded asset>", certSha256: "<verified signing cert>" }),
+      sizeBytes: "<downloaded asset size>",
+      builtAt: "<the GitHub release asset's createdAt>",
+    };
+    console.log(JSON.stringify(preview, null, 2));
     console.log("--dry-run: No network calls made.");
+    assertVersionCodeBump(oldVersionCode, args.versionCode, { manifestPath });
     return;
   }
+
+  assertVersionCodeBump(oldVersionCode, args.versionCode, { manifestPath });
 
   const view = JSON.parse(
     ghOrThrow(["release", "view", tag, "--repo", repo, "--json", "isDraft,assets"], `gh release view ${tag}`),
@@ -730,7 +800,7 @@ async function runFromDraft(args, sk) {
     await verifyGithubDownload(gr.url, sha256);
     console.log(`github ok: ${gr.url}`);
 
-    await announceRelease(sk, {
+    const { legacyUrl, urls } = await announceRelease(sk, {
       channel,
       version,
       versionCode: args.versionCode,
@@ -744,6 +814,34 @@ async function runFromDraft(args, sk) {
       emitUrlFile: args.emitUrlFile,
       emitUrlsFile: args.emitUrlsFile,
     });
+
+    // The site's download manifest — same fields/format publish-apk.sh,
+    // publish-carrier-apk.sh and publish-deb.sh write via lib.sh's
+    // write_manifest, so the maintainer no longer hand-writes it after a
+    // --from-draft publish.
+    const assetInfo = (view.assets ?? []).find((a) => a.name === gr.asset);
+    const builtAt = assetInfo?.createdAt;
+    if (!builtAt) throw new Error(`gh release view ${tag}: asset ${gr.asset} has no createdAt`);
+    const manifest = buildManifest({
+      channel,
+      versionName: version,
+      versionCode: args.versionCode,
+      url: legacyUrl,
+      urls,
+      sha256,
+      certSha256: cert,
+      sizeBytes,
+      builtAt,
+    });
+    writeFileSync(manifestPath, formatManifest(manifest));
+    console.log(`wrote apps/charter-app/public/${manifestFile}`);
+
+    execFileSync("bash", [join(REPO_ROOT, "scripts", "sync-front-door-downloads.sh")], {
+      cwd: REPO_ROOT,
+      stdio: "inherit",
+    });
+
+    console.log(`next: commit apps/charter-app/public/${manifestFile} and site/, then push`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -43,12 +43,39 @@ test("--from-draft --resume --dry-run prints the plan and makes no network calls
   try {
     const keyFile = join(dir, "release-key.hex");
     writeFileSync(keyFile, randomBytes(32).toString("hex"));
-    const r = run(["--from-draft", "ward-v9.9.9", "--version-code", "1", "--resume", "--dry-run"], {
+    // --version-code must clear the (local, no-network) forgot-to-bump guard
+    // against the real committed apps/charter-app/public/charter-apk.json —
+    // 999 is comfortably above any versionCode that file will ever hold.
+    const r = run(["--from-draft", "ward-v9.9.9", "--version-code", "999", "--resume", "--dry-run"], {
       CHARTER_RELEASE_KEY_FILE: keyFile,
     });
     assert.equal(r.status, 0);
     assert.match(r.stdout, /--from-draft ward-v9\.9\.9/);
     assert.match(r.stdout, /No network calls made/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--from-draft --dry-run prints the manifest shape it would write, then refuses on the forgot-to-bump guard, before any `gh` call", () => {
+  const dir = mkdtempSync(join(tmpdir(), "charter-release-key-"));
+  try {
+    const keyFile = join(dir, "release-key.hex");
+    writeFileSync(keyFile, randomBytes(32).toString("hex"));
+    // The real committed apps/charter-app/public/mycharter-apk.json is at
+    // versionCode 17 (guardian-v0.1.16) — passing the same code must refuse.
+    const r = run(
+      ["--from-draft", "guardian-v0.1.16", "--version-code", "17", "--dry-run", "--resume"],
+      { CHARTER_RELEASE_KEY_FILE: keyFile },
+    );
+    assert.notEqual(r.status, 0);
+    // The manifest-shape preview printed to stdout before the guard fired.
+    assert.match(r.stdout, /would then write apps\/charter-app\/public\/mycharter-apk\.json/);
+    assert.match(r.stdout, /"apkSha256": "<sha256 of the downloaded asset>"/);
+    assert.match(r.stdout, /"certSha256": "<verified signing cert>"/);
+    // The guard's refusal — nothing published, no `gh` call ever made.
+    assert.match(r.stderr, /versionCode 17 <= published 17/);
+    assert.match(r.stderr, /mycharter-apk\.json/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

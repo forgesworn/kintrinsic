@@ -3,15 +3,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   assertPinnedCert,
+  assertVersionCodeBump,
   buildBlossomAuth,
+  buildManifest,
   buildReleaseEvent,
   channelAndVersionFromTag,
   CI_RELEASE_TAG_RE,
   DEBUG_CERT_SHA256,
   extractAttestedCommit,
+  formatManifest,
   githubRelease,
   isCanonicalBlossomUrl,
   isGithubReleaseUrl,
+  MANIFEST_FILES,
   orderReleaseUrls,
   parseApksignerLineage,
   parseApksignerVerify,
@@ -472,4 +476,171 @@ test("extractAttestedCommit accepts a single object as well as an array", () => 
 test("extractAttestedCommit fails closed when no commit is found anywhere", () => {
   assert.throws(() => extractAttestedCommit([{ verificationResult: {} }]), /could not find an attested source commit/);
   assert.throws(() => extractAttestedCommit([]), /could not find an attested source commit/);
+});
+
+// ---- buildManifest / formatManifest ----------------------------------------
+
+const GITHUB_URL = `https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.16/kintrinsic-0.1.16.apk`;
+const BLOSSOM_URL = `https://nostr.download/${SHA}.apk`;
+
+test("MANIFEST_FILES names one file per channel", () => {
+  assert.deepEqual(MANIFEST_FILES, {
+    "charter-apk": "charter-apk.json",
+    "mycharter-apk": "mycharter-apk.json",
+    "charter-deb": "charter-deb.json",
+  });
+});
+
+test("buildManifest: APK shape and field order matches the hand-written example", () => {
+  const m = buildManifest({
+    channel: "mycharter-apk",
+    versionName: "0.1.16",
+    versionCode: 17,
+    url: BLOSSOM_URL,
+    urls: [GITHUB_URL, BLOSSOM_URL],
+    sha256: SHA,
+    certSha256: CERT,
+    sizeBytes: 10_363_951,
+    builtAt: "2026-09-28T15:30:55Z",
+  });
+  assert.deepEqual(Object.keys(m), [
+    "versionName",
+    "versionCode",
+    "url",
+    "urls",
+    "apkSha256",
+    "certSha256",
+    "sizeBytes",
+    "builtAt",
+  ]);
+  assert.equal(m.apkSha256, SHA);
+  assert.equal(m.certSha256, CERT);
+  assert.deepEqual(m.urls, [GITHUB_URL, BLOSSOM_URL]);
+});
+
+test("buildManifest: charter-deb shape has no certSha256 and uses `sha256`", () => {
+  const m = buildManifest({
+    channel: "charter-deb",
+    versionName: "0.7.9",
+    versionCode: 709,
+    url: `https://nostr.download/${SHA}.deb`,
+    urls: [`https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.7.9/kintrinsic_0.7.9_amd64.deb`, `https://nostr.download/${SHA}.deb`],
+    sha256: SHA,
+    sizeBytes: 11_162_984,
+    builtAt: "2026-09-27T11:44:46Z",
+  });
+  assert.deepEqual(Object.keys(m), ["versionName", "versionCode", "url", "urls", "sha256", "sizeBytes", "builtAt"]);
+  assert.equal(m.sha256, SHA);
+  assert.equal("certSha256" in m, false);
+});
+
+test("buildManifest refuses an APK channel with no certSha256", () => {
+  assert.throws(
+    () =>
+      buildManifest({
+        channel: "charter-apk",
+        versionName: "0.6.13",
+        versionCode: 44,
+        url: BLOSSOM_URL,
+        urls: [GITHUB_URL, BLOSSOM_URL],
+        sha256: SHA,
+        sizeBytes: 100,
+        builtAt: "2026-09-28T00:00:00Z",
+      }),
+    /certSha256/,
+  );
+});
+
+test("buildManifest refuses a bad channel, non-https url, empty urls, or malformed sha256", () => {
+  const good = {
+    channel: "charter-deb",
+    versionName: "0.7.9",
+    versionCode: 709,
+    url: `https://nostr.download/${SHA}.deb`,
+    urls: [`https://nostr.download/${SHA}.deb`],
+    sha256: SHA,
+    sizeBytes: 100,
+    builtAt: "2026-09-27T11:44:46Z",
+  };
+  assert.throws(() => buildManifest({ ...good, channel: "not-a-channel" }), /bad channel/);
+  assert.throws(() => buildManifest({ ...good, url: "http://insecure" }), /https/);
+  assert.throws(() => buildManifest({ ...good, urls: [] }), /urls/);
+  assert.throws(() => buildManifest({ ...good, sha256: "not-hex" }), /sha256/);
+  assert.throws(() => buildManifest({ ...good, versionCode: 0 }), /versionCode/);
+  assert.throws(() => buildManifest({ ...good, sizeBytes: 0 }), /sizeBytes/);
+});
+
+test("formatManifest renders the exact on-disk text of the hand-written mycharter-apk.json example", () => {
+  const m = buildManifest({
+    channel: "mycharter-apk",
+    versionName: "0.1.16",
+    versionCode: 17,
+    url: BLOSSOM_URL,
+    urls: [GITHUB_URL, BLOSSOM_URL],
+    sha256: SHA,
+    certSha256: CERT,
+    sizeBytes: 10_363_951,
+    builtAt: "2026-09-28T15:30:55Z",
+  });
+  const text = formatManifest(m);
+  assert.equal(
+    text,
+    `{
+  "versionName": "0.1.16",
+  "versionCode": 17,
+  "url": "${BLOSSOM_URL}",
+  "urls": ["${GITHUB_URL}", "${BLOSSOM_URL}"],
+  "apkSha256": "${SHA}",
+  "certSha256": "${CERT}",
+  "sizeBytes": 10363951,
+  "builtAt": "2026-09-28T15:30:55Z"
+}
+`,
+  );
+});
+
+test("formatManifest renders the charter-deb shape (no certSha256 line)", () => {
+  const m = buildManifest({
+    channel: "charter-deb",
+    versionName: "0.7.9",
+    versionCode: 709,
+    url: `https://nostr.download/${SHA}.deb`,
+    urls: [`https://nostr.download/${SHA}.deb`],
+    sha256: SHA,
+    sizeBytes: 11_162_984,
+    builtAt: "2026-09-27T11:44:46Z",
+  });
+  const text = formatManifest(m);
+  assert.doesNotMatch(text, /certSha256/);
+  assert.match(text, /^\{\n  "versionName": "0\.7\.9",\n/);
+  assert.match(text, /\n\}\n$/);
+});
+
+// ---- assertVersionCodeBump --------------------------------------------------
+
+test("assertVersionCodeBump passes when there is no existing manifest (null/undefined old)", () => {
+  assert.doesNotThrow(() => assertVersionCodeBump(null, 1));
+  assert.doesNotThrow(() => assertVersionCodeBump(undefined, 1));
+});
+
+test("assertVersionCodeBump passes when the new versionCode is strictly greater", () => {
+  assert.doesNotThrow(() => assertVersionCodeBump(17, 18));
+});
+
+test("assertVersionCodeBump refuses an equal versionCode", () => {
+  assert.throws(() => assertVersionCodeBump(17, 17), /versionCode 17 <= published 17/);
+});
+
+test("assertVersionCodeBump refuses a lower versionCode", () => {
+  assert.throws(() => assertVersionCodeBump(17, 5), /versionCode 5 <= published 17/);
+});
+
+test("assertVersionCodeBump includes the manifest path in its message when given one", () => {
+  assert.throws(() => assertVersionCodeBump(17, 17, { manifestPath: "apps/charter-app/public/mycharter-apk.json" }), /mycharter-apk\.json/);
+});
+
+test("assertVersionCodeBump refuses a non-positive-integer new versionCode even with no old one", () => {
+  assert.throws(() => assertVersionCodeBump(null, 0), /versionCode must be a positive integer/);
+  assert.throws(() => assertVersionCodeBump(null, -1), /versionCode must be a positive integer/);
+  assert.throws(() => assertVersionCodeBump(null, 1.5), /versionCode must be a positive integer/);
 });

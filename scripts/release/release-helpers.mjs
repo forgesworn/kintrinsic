@@ -413,3 +413,110 @@ export function extractAttestedCommit(json) {
     "could not find an attested source commit in `gh attestation verify --format json` output — refusing to publish",
   );
 }
+
+// ---- manifest writing (`--from-draft` only) --------------------------------
+//
+// publish-apk.sh / publish-carrier-apk.sh / publish-deb.sh write their own
+// site download manifest via scripts/release/lib.sh's `write_manifest`
+// (unchanged by any of this). `--from-draft` (publish-release.mjs) has no
+// such bash helper backing it, so it needs its own — same fields, same
+// field order, same compact-array formatting as the hand-written examples
+// (apps/charter-app/public/mycharter-apk.json, charter-apk.json,
+// charter-deb.json).
+
+/** Channel -> the manifest file it owns under apps/charter-app/public/. */
+export const MANIFEST_FILES = {
+  "charter-apk": "charter-apk.json",
+  "mycharter-apk": "mycharter-apk.json",
+  "charter-deb": "charter-deb.json",
+};
+
+/**
+ * The manifest object for one release, field order matching the
+ * hand-written examples exactly: versionName, versionCode, url, urls, the
+ * sha256 field (apkSha256 for an APK channel, sha256 for charter-deb),
+ * certSha256 (APK channels only — omitted entirely for charter-deb, not
+ * even as null), sizeBytes, builtAt. Throws on any malformed field — a
+ * manifest a device reads to decide whether to update must never be built
+ * from partial data.
+ */
+export function buildManifest({
+  channel,
+  versionName,
+  versionCode,
+  url,
+  urls,
+  sha256,
+  certSha256,
+  sizeBytes,
+  builtAt,
+}) {
+  if (!MANIFEST_FILES[channel]) throw new Error(`bad channel: ${channel}`);
+  if (typeof versionName !== "string" || versionName.length === 0)
+    throw new Error("versionName required");
+  if (!Number.isInteger(versionCode) || versionCode <= 0)
+    throw new Error("versionCode must be a positive integer");
+  if (typeof url !== "string" || !url.startsWith("https://"))
+    throw new Error("url must be an https URL");
+  if (
+    !Array.isArray(urls) ||
+    urls.length === 0 ||
+    urls.some((u) => typeof u !== "string" || !u.startsWith("https://"))
+  )
+    throw new Error("urls must be a non-empty array of https URLs");
+  if (!HEX64.test(sha256 ?? "")) throw new Error("sha256 must be 64 lowercase hex chars");
+  if (!Number.isInteger(sizeBytes) || sizeBytes <= 0)
+    throw new Error("sizeBytes must be a positive integer");
+  if (typeof builtAt !== "string" || builtAt.length === 0) throw new Error("builtAt required");
+
+  const isApk = channel !== "charter-deb";
+  if (isApk && !HEX64.test(certSha256 ?? ""))
+    throw new Error("APK channels require certSha256 (64 lowercase hex chars)");
+
+  const fields = { versionName, versionCode, url, urls };
+  fields[isApk ? "apkSha256" : "sha256"] = sha256;
+  if (isApk) fields.certSha256 = certSha256;
+  fields.sizeBytes = sizeBytes;
+  fields.builtAt = builtAt;
+  return fields;
+}
+
+/**
+ * Render a buildManifest() object to the exact on-disk text the hand-written
+ * manifests use: 2-space indent, one field per line, the `urls` array kept
+ * on a single line (as lib.sh's `write_manifest` heredocs write it, not
+ * JSON.stringify's multi-line default), no trailing comma, trailing
+ * newline.
+ */
+export function formatManifest(fields) {
+  const lines = Object.entries(fields).map(([key, value]) => {
+    const rendered = Array.isArray(value)
+      ? `[${value.map((u) => JSON.stringify(u)).join(", ")}]`
+      : JSON.stringify(value);
+    return `  ${JSON.stringify(key)}: ${rendered}`;
+  });
+  return `{\n${lines.join(",\n")}\n}\n`;
+}
+
+/**
+ * The "forgot to bump the version" guard every publish-*.sh already runs by
+ * hand (grep-ing the old manifest's versionCode): refuse a new versionCode
+ * that is not STRICTLY greater than the one already published.
+ * `oldVersionCode` is null/undefined when no manifest exists yet (first
+ * publish on this channel, or the field is missing/malformed) — nothing to
+ * compare against, so this passes. Throws rather than returning a boolean,
+ * so a caller can never accidentally ignore a failed check.
+ */
+export function assertVersionCodeBump(oldVersionCode, newVersionCode, { manifestPath } = {}) {
+  if (!Number.isInteger(newVersionCode) || newVersionCode <= 0)
+    throw new Error("versionCode must be a positive integer");
+  if (oldVersionCode === null || oldVersionCode === undefined) return;
+  if (!Number.isInteger(oldVersionCode)) return; // malformed existing field — nothing to compare
+  if (newVersionCode <= oldVersionCode) {
+    throw new Error(
+      `versionCode ${newVersionCode} <= published ${oldVersionCode}` +
+        (manifestPath ? ` (${manifestPath})` : "") +
+        " — bump the version first",
+    );
+  }
+}
