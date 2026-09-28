@@ -7,8 +7,16 @@
 // getCertificate(). The new private key is never touched, so we hand it null.
 //
 // Capabilities are fixed to the Kintrinsic rotation plan (S2): the old signer
-// keeps installed-data only; shared-uid, permission, rollback and auth are off.
+// keeps installed-data and permission; shared-uid, rollback and auth are off.
 // The new signer gets apksigner's defaults (all true), as `apksigner rotate` does.
+//
+// Why permission is true: our apps declare an AndroidX signature permission
+// (org.forgesworn.mycharter.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION). Without
+// the PERMISSION capability on the old signer, PackageManager's
+// checkCapability(..., PERMISSION) fails for that self-declared signature
+// permission during an update, and every update fails to install with
+// INSTALL_FAILED_DUPLICATE_PERMISSION (reproduced on an emulator with
+// throwaway keys 2026-09-28; fixed by flipping this bit).
 //
 // Build and run (Java 11+, single-file launch):
 //   AS_JAR=~/Android/Sdk/build-tools/36.0.0/lib/apksigner.jar
@@ -66,7 +74,7 @@ public class MakeLineage {
         SignerCapabilities oldCaps = new SignerCapabilities.Builder()
                 .setInstalledData(true)
                 .setSharedUid(false)
-                .setPermission(false)
+                .setPermission(true)
                 .setRollback(false)
                 .setAuth(false)
                 .build();
