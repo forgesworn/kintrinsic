@@ -460,12 +460,25 @@ jobs:
           name: ${{ (needs.resolve.outputs.channel == 'charter-apk' && 'ward-apk') || (needs.resolve.outputs.channel == 'mycharter-apk' && 'guardian-apk') || 'linux-deb' }}
           path: dist
 
-      - name: Compute SHA256SUMS
+      # The published asset name is the one publish-release.mjs expects for
+      # the channel (release-helpers.mjs CHANNELS), not the build output's.
+      - name: Name the artifact and compute SHA256SUMS
         id: sums
+        env:
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           cd dist
-          ARTIFACT=$(ls .)
+          BUILT=$(ls .)
+          [ "$(echo "$BUILT" | wc -l)" = "1" ] || { echo "::error::expected one built file, got: $BUILT"; exit 1; }
+          case "$CHANNEL" in
+            charter-apk)   ARTIFACT="kintrinsic-ward-$VERSION.apk" ;;
+            mycharter-apk) ARTIFACT="kintrinsic-$VERSION.apk" ;;
+            charter-deb)   ARTIFACT="kintrinsic_${VERSION}_amd64.deb" ;;
+            *) echo "::error::unknown channel $CHANNEL"; exit 1 ;;
+          esac
+          [ "$BUILT" = "$ARTIFACT" ] || mv "$BUILT" "$ARTIFACT"
           sha256sum "$ARTIFACT" > SHA256SUMS
           cat SHA256SUMS
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
