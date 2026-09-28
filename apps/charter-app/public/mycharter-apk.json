@@ -1,9 +1,10 @@
 {
-  "versionName": "0.1.14",
-  "versionCode": 15,
-  "url": "https://nostr.download/f42e77bf80e3920d565a8c6be9f9102304841781c3c5a52268da8e19d07568a3.apk",
-  "apkSha256": "f42e77bf80e3920d565a8c6be9f9102304841781c3c5a52268da8e19d07568a3",
-  "certSha256": "d9c7f3ded386e9ad36bdff31d07b31c6c6bfe2379ec33de7a2b6f6ac680fbb42",
-  "sizeBytes": 10857595,
-  "builtAt": "2026-09-27T11:42:40Z"
+  "versionName": "0.1.15",
+  "versionCode": 16,
+  "url": "https://nostr.download/0f35567b97d17413ba0cce779cc724fd867e08d3cf7b48a79569857155484d00.apk",
+  "urls": ["https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.15/kintrinsic-0.1.15.apk", "https://nostr.download/0f35567b97d17413ba0cce779cc724fd867e08d3cf7b48a79569857155484d00.apk"],
+  "apkSha256": "0f35567b97d17413ba0cce779cc724fd867e08d3cf7b48a79569857155484d00",
+  "certSha256": "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc",
+  "sizeBytes": 10363951,
+  "builtAt": "2026-09-28T14:47:26Z"
 }
