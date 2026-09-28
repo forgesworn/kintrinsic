@@ -159,6 +159,14 @@ class LockActivity : Activity() {
         runCatching { cameraManager?.registerTorchCallback(torchCallback, ui) }
     }
 
+    /** singleTask: the warden re-delivers the lock when its reason changes
+     *  (a stand-in lock becoming a schedule lock), so repaint from it. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        render()
+    }
+
     override fun onResume() {
         super.onResume()
         ui.removeCallbacks(clockTick)
@@ -494,9 +502,12 @@ class LockActivity : Activity() {
         // The lock copy + pairing flag come from the Rust core (JNI); read them
         // on the worker — never the main thread (port-spec §2.3/§3.2) — then
         // build the views back on the UI thread.
+        val standIn = intent?.getStringExtra("reason") ==
+            org.forgesworn.charter.service.DegradedAppGate.DEGRADED_REASON
         askWorker.post {
             val info = runCatching { CharterCore.lockInfo(null, System.currentTimeMillis() / 1000) }
                 .getOrNull()
+                .let { shadeInfo(it, standIn) }
             val paired = runCatching { CharterCore.pairingState().paired }.getOrDefault(false)
             val lifeline = runCatching { CharterCore.lifelineView() }
                 .getOrDefault(CharterCore.LifelineView())
@@ -1001,5 +1012,29 @@ class LockActivity : Activity() {
 
         setContentView(screen, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+}
+
+/**
+ * The copy the shade shows. The core's lock copy describes the CORE's lock, and
+ * the core is not what put up a lock standing in for a failing app gate
+ * ([org.forgesworn.charter.service.DegradedAppGate]): asked about that one it
+ * answers "Unlocked", which a locked shade then printed as its headline
+ * (emulator round, 2026-09-28). A shade is only ever up while the ward is
+ * locked, so it never says otherwise: the stand-in gets its own words, and any
+ * other core "not locked" (a lock the core has just lifted, which the shade is
+ * about to dismiss itself for) reads plainly as "Locked".
+ */
+internal fun shadeInfo(info: CharterCore.LockInfo?, standIn: Boolean): CharterCore.LockInfo? {
+    if (info == null || info.locked) return info
+    return if (standIn) {
+        info.copy(
+            locked = true,
+            title = "Locked for now",
+            comeBack = "This phone can't check its apps at the moment. It opens again as soon as it can.",
+            dormant = false,
+        )
+    } else {
+        info.copy(locked = true, title = "Locked", comeBack = "", dormant = false)
     }
 }

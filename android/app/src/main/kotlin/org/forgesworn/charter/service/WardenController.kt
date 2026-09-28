@@ -1023,12 +1023,17 @@ class WardenController(
 /** Launches / dismisses the real [LockActivity]. */
 class ActivityLockController(private val context: Context) : WardenController.LockController {
     @Volatile private var shown = false
+    @Volatile private var shownReason: String? = null
 
     override fun show(reason: String) {
         // Level-triggered against the activity's real life, not only the
         // latch (05-B9): a lock the system destroyed, or one whose launch was
-        // quietly refused, is launched again on the next tick.
-        if (shown && lockAlive) return
+        // quietly refused, is launched again on the next tick. A lock whose
+        // REASON changed under it is re-delivered too (singleTask, so the live
+        // shade gets onNewIntent and repaints): a shade raised for a failing
+        // app gate once stayed headlined "Unlocked" for eleven minutes after
+        // the allowed hours had closed, because it was never told.
+        if (!lockLaunchWanted(shown, lockAlive, shownReason, reason)) return
         val intent = Intent(context, LockActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra("reason", reason)
@@ -1040,6 +1045,7 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
         try {
             context.startActivity(intent)
             shown = true
+            shownReason = reason
         } catch (t: Throwable) {
             shown = false
         }
@@ -1047,6 +1053,7 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
 
     override fun hide() {
         shown = false
+        shownReason = null
         // The lock activity observes HideLock via a broadcast and finishes.
         context.sendBroadcast(Intent(ACTION_HIDE_LOCK).setPackage(context.packageName))
     }
@@ -1059,6 +1066,15 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
         @Volatile var lockAlive = false
     }
 }
+
+/**
+ * Whether [ActivityLockController.show] must (re)launch the shade: it was never
+ * launched, its activity has died (05-B9), or the lock's reason has changed
+ * since it was launched, so the shade's copy and its self-dismiss rule follow
+ * the lock actually in force.
+ */
+internal fun lockLaunchWanted(shown: Boolean, alive: Boolean, shownReason: String?, reason: String): Boolean =
+    !(shown && alive && shownReason == reason)
 
 /**
  * Whether the install lock must be up (F2). [pairing] is null when the pairing

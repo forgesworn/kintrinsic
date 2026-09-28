@@ -6,7 +6,10 @@ import android.content.Intent
 import android.util.Log
 import org.forgesworn.charter.admin.Provisioning
 import org.forgesworn.charter.native.CharterCore
+import org.forgesworn.charter.enforce.dns.DnsQuestion
+import org.forgesworn.charter.enforce.dns.DnsResolver
 import org.forgesworn.charter.service.CharterService
+import org.forgesworn.charter.service.CharterVpnService
 import org.forgesworn.charter.service.FaultInjection
 
 /**
@@ -35,6 +38,8 @@ import org.forgesworn.charter.service.FaultInjection
  *   adb shell am broadcast -a org.forgesworn.charter.debug.DROP_RESTRICTION \
  *     --es key no_safe_boot org.forgesworn.charter
  *   adb shell am broadcast -a org.forgesworn.charter.debug.STOP_DNS org.forgesworn.charter
+ *   adb shell am broadcast -a org.forgesworn.charter.debug.DNS_STATE \
+ *     --es name reddit.com org.forgesworn.charter
  */
 class DebugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -52,18 +57,56 @@ class DebugReceiver : BroadcastReceiver() {
                 if (key.isNullOrBlank()) {
                     Log.e(TAG, "DROP_RESTRICTION: missing --es key")
                 } else {
-                    val r = runCatching {
-                        Provisioning.dpm(context).clearUserRestriction(Provisioning.adminComponent(context), key)
+                    val dpm = Provisioning.dpm(context)
+                    val admin = Provisioning.adminComponent(context)
+                    // Say whether the key was set at all: the platform takes any
+                    // string, so a misspelt key (the 2026-09-28 round used
+                    // "no_config_private_dns"; the real key is
+                    // "disallow_config_private_dns") "clears" nothing and looks
+                    // like a restriction the posture pass never puts back.
+                    val wasSet = runCatching { dpm.getUserRestrictions(admin).getBoolean(key, false) }.getOrNull()
+                    val r = runCatching { dpm.clearUserRestriction(admin, key) }
+                    val what = when {
+                        r.isFailure -> r.exceptionOrNull().toString()
+                        wasSet == false -> "NOT SET — nothing cleared (unknown or misspelt key?)"
+                        else -> "cleared"
                     }
-                    Log.i(TAG, "DROP_RESTRICTION $key: ${if (r.isSuccess) "cleared" else r.exceptionOrNull()}")
+                    Log.i(TAG, "DROP_RESTRICTION $key: $what")
                 }
                 return
             }
             ACTION_STOP_DNS -> {
+                // Not stopService: the platform holds an established VPN
+                // service bound, so stopping it destroys nothing and the tunnel
+                // never goes down. Ask the service to drop its tunnel instead.
                 val r = runCatching {
-                    context.stopService(Intent(context, org.forgesworn.charter.service.CharterVpnService::class.java))
+                    context.startService(
+                        Intent(context, CharterVpnService::class.java)
+                            .setAction(CharterVpnService.ACTION_DEBUG_KILL_TUNNEL),
+                    )
                 }
-                Log.i(TAG, "STOP_DNS: ${r.getOrNull() ?: r.exceptionOrNull()}")
+                Log.i(TAG, "STOP_DNS: ${if (r.isSuccess) "tunnel teardown sent" else r.exceptionOrNull()}")
+                return
+            }
+            ACTION_DNS_STATE -> {
+                // Where a lookup went: the plan, whether the tunnel is up, what
+                // the filter would decide for `--es name`, and how many queries
+                // it has actually seen. A name that resolves while `seen` does
+                // not move never reached the filter.
+                val name = intent.getStringExtra("name").orEmpty()
+                val plan = runCatching { CharterCore.dnsPlan() }
+                val decision = plan.getOrNull()?.let { p ->
+                    if (name.isEmpty()) null
+                    else DnsResolver(p).decide(DnsQuestion(name, 1, 0, ByteArray(0))).javaClass.simpleName
+                }
+                Log.i(
+                    TAG,
+                    "DNS_STATE tunnelUp=${CharterVpnService.tunnelUp} " +
+                        "mode=${plan.getOrNull()?.mode ?: plan.exceptionOrNull() ?: "no plan"} " +
+                        "rev=${plan.getOrNull()?.revision} blockDomains=${plan.getOrNull()?.blockDomains?.size} " +
+                        "seen=${CharterVpnService.queriesSeen.get()} blocked=${CharterVpnService.queriesBlocked.get()}" +
+                        if (name.isEmpty()) "" else " decide($name)=$decision",
+                )
                 return
             }
         }
@@ -115,5 +158,6 @@ class DebugReceiver : BroadcastReceiver() {
         const val ACTION_FAULT = "org.forgesworn.charter.debug.FAULT"
         const val ACTION_DROP_RESTRICTION = "org.forgesworn.charter.debug.DROP_RESTRICTION"
         const val ACTION_STOP_DNS = "org.forgesworn.charter.debug.STOP_DNS"
+        const val ACTION_DNS_STATE = "org.forgesworn.charter.debug.DNS_STATE"
     }
 }

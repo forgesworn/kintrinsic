@@ -62,6 +62,18 @@ class CharterVpnService : VpnService() {
     private val writeLock = Any()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Debug builds only: tear the tunnel down while the service, and with it
+        // the always-on pin, stays up — the state a dead read loop leaves. The
+        // liveness round's STOP_DNS used to call stopService, which is a no-op
+        // on a VPN service the platform holds bound, so 05-B7 was never
+        // exercised. The service is not exported, so only this app can send it.
+        if (intent?.action == ACTION_DEBUG_KILL_TUNNEL &&
+            (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        ) {
+            Log.w(TAG, "debug: tunnel torn down, service and pin left in place")
+            stopTunnel()
+            return START_STICKY
+        }
         // Always re-read the plan on (re)start; apply calls just restart us.
         // A throw (a refused native core, F3/N4) is not "no policy": keep the
         // tunnel up and block everything rather than crash-loop or pass through.
@@ -148,7 +160,10 @@ class CharterVpnService : VpnService() {
         val buf = ByteArray(32767)
         while (!Thread.currentThread().isInterrupted) {
             val n = try { input.read(buf) } catch (t: Throwable) { break }
-            if (n <= 0) continue
+            // End of stream is a dead tunnel, not an empty read: spinning on
+            // it would keep [tunnelUp] true over a filter that sees nothing.
+            if (n < 0) break
+            if (n == 0) continue
             // No DNS query is bigger than this; a bigger packet is not one we
             // answer, so it is not copied or queued either.
             if (n > MAX_QUERY_PACKET) continue
@@ -181,8 +196,9 @@ class CharterVpnService : VpnService() {
         val ip = IpUdpDatagram.parse(packet) ?: return null
         if (ip.dstPort != 53) return null
         val q = parseQuestion(ip.payload) ?: return null
+        queriesSeen.incrementAndGet()
         val dns = when (val d = resolver!!.decide(q)) {
-            is DnsDecision.Block -> buildNxdomain(q)
+            is DnsDecision.Block -> { queriesBlocked.incrementAndGet(); buildNxdomain(q) }
             is DnsDecision.PassThrough -> relay(ip.payload) ?: buildNxdomain(q)
             is DnsDecision.Rewrite -> {
                 val ips = resolveProtected(d.target)
@@ -223,6 +239,14 @@ class CharterVpnService : VpnService() {
     companion object {
         private const val TAG = "CharterVpn"
         const val ACTION_APPLY = "org.forgesworn.charter.APPLY_DNS"
+        /** Debug builds only; see [onStartCommand]. */
+        const val ACTION_DEBUG_KILL_TUNNEL = "org.forgesworn.charter.DEBUG_KILL_TUNNEL"
+
+        /** Queries this process's filter has decided, and how many it refused:
+         *  lets a test round tell "the filter allowed it" from "the lookup
+         *  never reached the filter". */
+        val queriesSeen = AtomicLong()
+        val queriesBlocked = AtomicLong()
         const val EXTRA_REVISION = "revision"
         const val DNS_V4 = "10.111.0.53"
         const val DNS_V6 = "fd00:6368:6172:74::53"

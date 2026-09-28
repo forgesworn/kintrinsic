@@ -28,6 +28,7 @@
                 <action android:name="org.forgesworn.charter.debug.FAULT" />
                 <action android:name="org.forgesworn.charter.debug.DROP_RESTRICTION" />
                 <action android:name="org.forgesworn.charter.debug.STOP_DNS" />
+                <action android:name="org.forgesworn.charter.debug.DNS_STATE" />
             </intent-filter>
         </receiver>
     </application>
