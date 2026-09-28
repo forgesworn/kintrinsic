@@ -92,10 +92,15 @@ write_manifest() {
   fi
 }
 
-# Resolve the newest apksigner under $ANDROID_HOME/build-tools.
+# Resolve apksigner: the pinned build-tools (the release workflow installs
+# exactly this version, and the parsing below was verified against its
+# output) when present, else the newest installed. CI runner images ship
+# newer build-tools whose --print-certs output is not guaranteed to match.
+ANDROID_BUILD_TOOLS_PIN=36.0.0
 _android_apksigner() {
-  local apksigner
-  apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+  local apksigner="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_PIN/apksigner"
+  [ -x "$apksigner" ] \
+    || apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
   [ -n "$apksigner" ] || { echo "FATAL: apksigner not found under \$ANDROID_HOME/build-tools" >&2; return 1; }
   echo "$apksigner"
 }
@@ -299,7 +304,11 @@ android_verify_signing() {
   local cert
   cert=$(echo "$verify_out" | grep -oiE '^Signer #1 certificate SHA-256 digest: [0-9a-f]+' \
     | awk '{print tolower($NF)}')
-  [ -n "$cert" ] || { echo "FATAL: could not read the signing cert digest from $apk" >&2; return 1; }
+  [ -n "$cert" ] || {
+    echo "FATAL: could not read the signing cert digest from $apk ($apksigner said:)" >&2
+    echo "$verify_out" >&2
+    return 1
+  }
 
   if [ -n "${CHARTER_KEYSTORE_FILE:-}" ] && [ "$cert" = "$DEBUG_CERT_SHA256" ]; then
     echo "FATAL: $apk's current signer IS the debug cert even though real signing material was" >&2
