@@ -469,6 +469,11 @@ impl Warden {
         if let Some(subject) = self.subject {
             let _ = self.child_clauses.clear_for(&subject.to_hex());
         }
+        // The machine-wide store too: it holds the web (`content`) clause the
+        // broker stored and the ward clauses mirrored for the broker. Left in
+        // place, a released phone re-paired to anyone would keep enforcing the
+        // previous guardian's web rules.
+        let _ = std::fs::remove_dir_all(self.base.join("clauses"));
         let _ = self.pairing.clear();
         self.guardian = None;
         self.subject = None;
@@ -1263,10 +1268,7 @@ impl Warden {
             .filter_map(|j| serde_json::from_str::<charter_content::CuratorList>(j).ok())
             .collect();
         // The stored content clause; absent ⇒ unrestricted (no web constraint yet).
-        let clause_json = match self.child_clauses.get_child_clause(
-            &subject.to_hex(),
-            charter_proto::ClauseKind::Content.store_key(),
-        ) {
+        let clause_json = match self.stored_content_clause(&subject) {
             Ok(Some(body)) => body,
             // No content clause for this ward → no web constraint.
             Ok(None) => {
@@ -1289,6 +1291,41 @@ impl Warden {
         let eff = charter_content::evaluate_content_json(&clause_json, &lists);
         let plan = charter_webpolicy::render_dns_filter(&eff);
         wrap_plan(&plan)
+    }
+
+    /// The ward's content clause, from whichever of its two homes holds the
+    /// newer one.
+    ///
+    /// `content` is machine-wide in the contract, so a clause that arrives
+    /// without a `subject` — which is every web clause the guardian app sends
+    /// today, because it has no dependant pubkey to give — is stored by the
+    /// shared broker in the MACHINE-WIDE clause store, the one `charterd`
+    /// reads. Reading only the ward's per-child slot (where the legacy
+    /// direct-ingest path, and a clause that does name the ward, land) left
+    /// every guardian-set web rule on Android accepted, stored and never
+    /// enforced: the DNS plan stayed "unrestricted".
+    ///
+    /// Newest `issuedAt` wins, like every other clause. A record whose
+    /// `issuedAt` cannot be read wins outright, so a garbled clause reaches
+    /// `evaluate_content_json` and fails CLOSED rather than being passed over
+    /// for an older, looser one. A read error on EITHER store is an error.
+    fn stored_content_clause(&self, subject: &PubKey) -> Result<Option<String>, ()> {
+        let key = charter_proto::ClauseKind::Content.store_key();
+        let per_ward = self
+            .child_clauses
+            .get_child_clause(&subject.to_hex(), key)
+            .map_err(|_| ())?;
+        let machine_wide = self.machine_clauses.get_clause(key).map_err(|_| ())?;
+        let issued_at = |json: &str| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|v| v.get("issuedAt").and_then(|x| x.as_u64()))
+                .unwrap_or(u64::MAX)
+        };
+        Ok(match (per_ward, machine_wide) {
+            (Some(a), Some(b)) => Some(if issued_at(&b) > issued_at(&a) { b } else { a }),
+            (a, b) => a.or(b),
+        })
     }
 
     /// Kotlin reports the device's installed launchable apps (JSON
@@ -5092,6 +5129,161 @@ mod tests {
             r["host"] == "www.youtube.com" && r["answer"] == "restrictmoderate.youtube.com"
         }));
         assert!(v["revision"].as_str().unwrap().len() >= 8);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The web clause exactly as the guardian app sends it — `content`, NO
+    /// `subject` (the app has no dependant pubkey to give), the body
+    /// `contentToGrant` builds — delivered over the relay through the broker.
+    /// The broker stores a subject-less `content` clause machine-wide, as the
+    /// contract says it is; the DNS plan used to read only the ward's
+    /// per-child slot, so this clause was accepted and never enforced
+    /// (emulator liveness round, 2026-09-28: `mode=unrestricted` for minutes
+    /// after `clausesAccepted=1`, reddit.com resolving).
+    #[test]
+    fn web_clause_from_the_guardian_app_reaches_the_dns_plan_via_the_broker() {
+        use charter_sys::relay::MockRelayTransport;
+        use charter_transport::nip59::{self, Rumor, WrapRandomness};
+
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        // The broker reads the real clock: stamp everything on wall time.
+        let t0 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        w.pair(&uri, t0 - 600).unwrap();
+        let machine = PubKey::from_hex(&w.machine_pubkey_hex()).unwrap();
+        let mock = MockRelayTransport::new();
+        w.wire_test_relay(mock.clone()).unwrap();
+
+        let unrestricted = w.web_dns_plan();
+        let v: serde_json::Value = serde_json::from_str(&unrestricted).unwrap();
+        assert_eq!(v["plan"]["mode"], "unrestricted", "no web clause yet");
+
+        // The guardian app's own wire bytes for "block these sites": the
+        // cross-stack content vector its `contentToGrant` is pinned to, re-
+        // stamped to wall time. No `.subject(…)`: the app's clause carries
+        // none (apps/charter-app `policyToClauses(null, …)`, pinned there).
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../core/crates/charter-testkit/vectors/content/content_clause_vectors.json"
+        ))
+        .unwrap();
+        let mut body = vectors["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "blocklist_block_youtube_allow_wikipedia")
+            .expect("blocklist vector")["payload"]
+            .clone();
+        body["issuedAt"] = json!(t0 - 500);
+        let ev = ClauseBuilder::content(t0 - 500).body(body).build(&guardian);
+        let wrap = nip59::wrap(
+            &Rumor::from_signed_event(&ev),
+            &guardian_sk(),
+            machine.as_bytes(),
+            &WrapRandomness {
+                ephemeral_secret: [21u8; 32],
+                seal_nonce: [22u8; 32],
+                wrap_nonce: [23u8; 32],
+                seal_created_at: t0,
+                wrap_created_at: t0,
+            },
+        )
+        .expect("wrap");
+        mock.inject(wrap);
+
+        let lock = Mutex::new(Some(w));
+        let r = poll_once_locked(&lock, t0);
+        assert!(r.polled, "reason: {}", r.reason);
+        assert_eq!(r.clauses_accepted, 1, "reason: {}", r.reason);
+
+        let mut g = lock.lock().unwrap();
+        let w = g.as_mut().unwrap();
+        let out = w.web_dns_plan();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["plan"]["mode"], "blocklist", "plan: {out}");
+        assert!(v["plan"]["blockDomains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "youtube.com"));
+        assert_eq!(v["plan"]["safeSearch"], true);
+        assert_ne!(
+            v["revision"],
+            serde_json::from_str::<serde_json::Value>(&unrestricted).unwrap()["revision"]
+        );
+
+        // A release forgets the web clause too: re-paired, the phone starts
+        // unrestricted instead of enforcing the old pairing's web rules.
+        w.apply_release();
+        w.pair(&uri, t0 - 60).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&w.web_dns_plan()).unwrap();
+        assert_eq!(
+            v["plan"]["mode"], "unrestricted",
+            "released web clause lingered"
+        );
+
+        drop(g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Both homes of the content clause hold one: the newer `issuedAt` wins,
+    /// whichever store it is in, and a record whose `issuedAt` cannot be read
+    /// wins outright so it fails CLOSED instead of yielding to a looser one.
+    #[test]
+    fn web_dns_plan_takes_the_newer_content_clause_and_fails_closed_on_garble() {
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x45);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+        let mode = |w: &Warden| {
+            let v: serde_json::Value = serde_json::from_str(&w.web_dns_plan()).unwrap();
+            v["plan"]["mode"].as_str().unwrap().to_string()
+        };
+        let subj = ward.pubkey().to_hex();
+        let key = charter_proto::ClauseKind::Content.store_key();
+
+        // Older allowlist in the ward's slot, newer blocklist machine-wide.
+        w.child_clauses
+            .put_child_clause(
+                &subj,
+                key,
+                10,
+                r#"{"v":1,"posture":"allowlist","ageTier":"young","issuedAt":10}"#,
+            )
+            .unwrap();
+        w.machine_clauses
+            .put_clause(
+                key,
+                20,
+                r#"{"v":1,"posture":"blocklist","ageTier":"older","issuedAt":20}"#,
+            )
+            .unwrap();
+        assert_eq!(mode(&w), "blocklist");
+
+        // A newer per-ward clause supersedes the machine-wide one.
+        w.child_clauses
+            .put_child_clause(
+                &subj,
+                key,
+                30,
+                r#"{"v":1,"posture":"blocklist","ageTier":"older","revoked":true,"issuedAt":30}"#,
+            )
+            .unwrap();
+        assert_eq!(mode(&w), "unrestricted");
+
+        // A garbled machine-wide record must not be passed over: locked.
+        w.machine_clauses.put_clause(key, 40, "not json").unwrap();
+        assert_eq!(mode(&w), "locked");
 
         let _ = std::fs::remove_dir_all(&base);
     }

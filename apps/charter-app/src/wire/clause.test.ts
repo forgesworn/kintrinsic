@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { AppsPolicy, Policy, Schedule, Budget } from "../domain/types";
+import type { AppsPolicy, Policy, Schedule, Budget, WebPolicy } from "../domain/types";
 import type { GrantBudget, GrantSchedule } from "./types";
-import { appRulesToGrant, appsToGrant, budgetToGrant, policyToClauses, scheduleToGrant } from "./clause";
+import {
+  appRulesToGrant,
+  appsToGrant,
+  budgetToGrant,
+  contentToGrant,
+  policyToClauses,
+  scheduleToGrant,
+} from "./clause";
 
 const SUBJECT = "a".repeat(64);
 const AT = 1_700_000_000;
@@ -155,6 +162,42 @@ describe("policyToClauses", () => {
   it("omits subject when null (single-child default)", () => {
     const clauses = policyToClauses(null, devicePolicy(), AT);
     expect(clauses[0].subject).toBeUndefined();
+  });
+
+  // The ward side's regression test (android/jni warden.rs,
+  // `web_clause_from_the_guardian_app_reaches_the_dns_plan_via_the_broker`)
+  // models exactly this envelope: kind `content`, NO subject, the
+  // `contentToGrant` body. Every child today has a null dependant pubkey, so
+  // this is the only web clause the wards ever receive — and a subject-less
+  // `content` clause is machine-wide on the ward, which the Android DNS plan
+  // once never read.
+  it("sends a web policy as a subject-less machine-wide `content` clause", () => {
+    const web: WebPolicy = {
+      enabled: true,
+      posture: "blocklist",
+      ageTier: "older",
+      allow: [],
+      block: ["reddit.com"],
+      youtube: "off",
+      safeSearch: true,
+    };
+    const clauses = policyToClauses(
+      null,
+      devicePolicy({ schedule: undefined, budget: undefined, web }),
+      AT,
+    );
+    expect(clauses).toEqual([
+      { v: 1, kind: "content", issuedAt: AT, body: contentToGrant(web, AT) },
+    ]);
+    expect(clauses[0].body).toEqual({
+      v: 1,
+      posture: "blocklist",
+      ageTier: "older",
+      issuedAt: AT,
+      safeSearch: true,
+      youtubeRestrict: "off",
+      parentDeny: ["reddit.com"],
+    });
   });
 });
 
