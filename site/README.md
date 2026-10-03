@@ -1,19 +1,17 @@
 # site/ — kintrinsic.app, Kintrinsic's front door
 
-**This directory is the marketing site**, copied (working tree, not history)
-from the retired `forgesworn/charter-you` repo on 2026-08-11 so everything
-lives in one repo for the eventual public flip. The old repo keeps the messy
-site history (and keeps deploying until this repo's `deploy-site.yml` takes
-over at the rename-branch merge); it gets archived at cutover.
+**This directory is the marketing site**, deployed from this repo by
+`.github/workflows/deploy-site.yml`.
 
 The public site for **Kintrinsic** (wardship for a child's Linux computer or
-GrapheneOS phone — launched as **Charter**; this repo led the rename). Static
-HTML, no build step — open any page in a browser to preview, or serve the
-folder (`python3 -m http.server`).
+GrapheneOS phone — launched as **Charter**). Static HTML, no build step — open
+any page in a browser to preview, or serve the folder
+(`python3 -m http.server`).
 
 The site is the product's marketing, its downloads, and its install support.
-There is **no PWA**: the parent app ships as an APK (plus the Linux installer),
-and this site is where both live.
+The parent app ships as an Android APK (bundling the console) and is also
+served as a web app at `charter.mysignet.app` (see `apps/charter-app/DEPLOY.md`);
+this site is where the APK and the Linux installer are linked from.
 
 Multi-page, one shared stylesheet:
 
@@ -25,10 +23,12 @@ Multi-page, one shared stylesheet:
 | `setup-phone.html` | Setup guide for a child's GrapheneOS phone (the harder one) |
 | `roadmap.html` | Honest map: shipped / newly-landed / coming |
 | `faq.html` | The questions parents ask |
+| `download/index.html` | Redirect from `/download` to `/download.html` |
+| `downloads.json` | Current versions, URLs and SHA-256 per platform; read by `download.html` (hrefs in the markup are the no-JS fallback) |
 | `styles.css` | Shared design system (wax-seal skin), light + dark |
 | `seal.svg` | Favicon / logo |
-| `img/` | `og.png` (link previews, source in `img/src/`) and the product screenshots |
-| `robots.txt`, `sitemap.xml` | Crawl basics |
+| `img/` | `og.png` (link previews), the product screenshots, and `img/src/` (the og-card source) |
+| `robots.txt`, `sitemap.xml` | Crawl basics (bump `lastmod` when a page changes) |
 
 ## The rename, and what still says "Charter"
 
@@ -44,8 +44,9 @@ deliberate, permanent internal name (like Signal's package id):
 - **`org.forgesworn.charter` / `org.forgesworn.mycharter`** — the Android app ids.
 - **`@forgesworn/charter`** — the npm package name.
 
-Release artifacts (the `.deb` / `.apk`) live on Blossom (content-addressed),
-not in this repo; the download page links out to them via `downloads.json`.
+Release artifacts (the `.deb` / `.apk`) are not in this repo. GitHub Releases
+serve the Android APK, Blossom mirrors it, and the Linux `.deb` is currently
+linked from Blossom; the download page gets its links from `downloads.json`.
 
 The user-facing rebrand has shipped and those literals are intentionally kept.
 If any shipped copy changes, recapture the screenshots (recipe below) and
@@ -63,8 +64,9 @@ real family — `charter-console/ui/app.html` opened directly in a browser (its
 `SAMPLE` fallback fires when no host answers), `charter-lock` via
 `CHARTER_LOCK_RENDER_TO=` (renders offscreen, never locks anything), and the
 parent app under `npm run dev` (which seeds a fictional "Sam") — capture from
-the `rename/kintrinsic` branch so the wordmark reads Kintrinsic. None of those
-touch a running `charterd`.
+`main`. None of those touch a running `charterd`. The four screenshots currently
+in `img/` predate the new seal and still show the old "C"; the home page says so
+until they are recaptured.
 
 ## Deploy
 
@@ -80,20 +82,14 @@ touch a running `charterd`.
   fallback; bump those when you cut a release (`downloads.json` still drives the
   live value).
 
-## Cutting a release (D2 order)
+## Cutting a release
 
-1. Bump the version: `android/app/build.gradle.kts` (ward) /
-   `android/carrier/build.gradle.kts` (carrier) / `linux/Cargo.toml` (deb).
-2. Run the publish script(s) — `android/scripts/publish-apk.sh`,
-   `android/scripts/publish-carrier-apk.sh`, `./scripts/publish-deb.sh`. Each
-   now ALSO uploads the artifact to the Blossom mirrors and announces it as a
-   signed kind-30063 event on the release relays
-   (`scripts/release/publish-release.mjs`; key: `~/.charter-release/`, see
-   `android/keystore/README.md`). `CHARTER_RELEASE_EVENT_SKIP=1` skips that
-   step for offline builds.
-3. `./scripts/sync-front-door-downloads.sh`, bump the `data-ver` fallbacks in
-   `site/download.html`.
-4. Commit `apps/charter-app/public/` + `site/` and push main (both deploys
-   fire). The origin JSON feeds are the UNSIGNED FALLBACK only — clients
-   prefer the relay events; the feeds (and this step's urgency) retire at D3
-   once the fleet has been seen updating via relays + Blossom.
+The release itself (tag, CI draft, verify and publish) is described in
+`docs/releasing.md`; `publish-release.mjs --from-draft` also writes the
+channel's download manifest. For the site, after a release:
+
+1. Check `site/downloads.json` matches the new manifest
+   (`./scripts/sync-front-door-downloads.sh` copies it).
+2. Bump the `data-ver` fallbacks and the `data-sha` fallback in
+   `site/download.html`, and the file names in the verify commands there.
+3. Commit `site/` and push `main`.

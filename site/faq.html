@@ -57,7 +57,7 @@
   <header class="page-head">
     <div class="container">
       <p class="t-eyebrow">FAQ</p>
-      <h1 class="t-display">Straight answers.</h1>
+      <h1 class="t-display">Straight&nbsp;answers.</h1>
       <p class="t-sub lede">The things parents actually ask, answered plainly — including the awkward ones.</p>
     </div>
   </header>
@@ -84,7 +84,7 @@
               changed.</p>
             <p>Everything you install now carries the Kintrinsic name — the phone app, the computer
               installer and its menu entries. Only the command you'd type in a terminal
-              (<code>charterd</code>) keeps the name <em>charter</em>, as a permanent internal name.
+              (<code>charterd</code>) and a few other under-the-hood names keep the name <em>charter</em>, as permanent internal names.
               Installing over the top keeps your key, your family and your limits.</p>
             <p>One nice side effect: “charter” now clearly means the thing it always described — the
               agreement your family writes — rather than doubling as a brand.</p>
@@ -104,22 +104,23 @@
         <details id="free">
           <summary>Is it free? What's the catch?<a class="faq__anchor" href="#free" aria-label="Link to this question">#</a></summary>
           <div>
-            <p>It's free while in early access. There's no catch of the usual kind — no data to sell, no ads, no
-              subscription that quietly profiles your child. Kintrinsic is part of the <a href="https://signet.you">Signet</a>
-              project, built on the idea that families should own their own keys.</p>
+            <p>It's free, and it will always be free and open source (MIT licence). There's no catch of the usual kind — no
+              data to sell, no ads, no subscription that quietly profiles your child. Kintrinsic is part of the
+              <a href="https://kindred.software">Kindred</a> family of ForgeSworn apps, built on the idea that families should own
+              their own keys. It can also keep your key in <a href="https://signet.you">Signet</a> if you use it.</p>
           </div>
         </details>
 
         <details id="devices">
           <summary>Which devices does it work on?<a class="faq__anchor" href="#devices" aria-label="Link to this question">#</a></summary>
           <div>
-            <p><strong>Today:</strong> Linux computers — Linux Mint 22.x and other Ubuntu-based systems. This is the
-              proven, ready path.</p>
-            <p><strong>In preview:</strong> de-Googled Android phones (a private, Google-free Android such as
-              GrapheneOS on a Pixel).</p>
-            <p><strong>Not yet:</strong> Windows, macOS, or iPhone/iPad. Apple doesn't allow the kind of on-device
-              control Kintrinsic needs, so an iPhone can't be managed this way. See the
-              <a href="/roadmap.html">roadmap</a> for what's coming.</p>
+            <p><strong>Today:</strong> Linux computers — Linux Mint 22.x on an X11 session (Cinnamon's default). This is the
+              proven, ready path. Learning apps need Chromium installed.</p>
+            <p><strong>In preview:</strong> a child's de-Googled Android phone: a Pixel running GrapheneOS is the only
+              supported one. Other Android 14+ phones are being tested but aren't supported yet. Your own phone, for the
+              parent app, needs Android 10 or newer.</p>
+            <p><strong>Not supported:</strong> Windows, macOS, or iPhone/iPad, and not currently planned. Apple doesn't allow
+              the kind of on-device control Kintrinsic needs, so an iPhone can't be managed this way.</p>
           </div>
         </details>
 
@@ -141,6 +142,8 @@
               otherwise.</p>
             <p>The design leans on trust and gentle friction, with the family agreement doing the real work. If the
               relationship is adversarial, no app fixes that — but Kintrinsic won't make it worse by spying.</p>
+            <p>Kintrinsic is pre-1.0 and has not had an independent security audit; if you find a hole, the
+              <a href="https://github.com/forgesworn/kintrinsic/blob/main/SECURITY.md">security policy</a> on GitHub says how to tell us privately.</p>
           </div>
         </details>
 
@@ -159,7 +162,7 @@
           <div>
             <p>For the Linux computer: if you can install an app and use a settings menu, you can set up Kintrinsic — it's
               a double-click and a couple of choices, working within minutes.</p>
-            <p>If you'd like a hand, the Kintrinsic app has a <strong>“Copy this guide for your AI”</strong> button. It gives
+            <p>If you'd like a hand, the Kintrinsic phone app has a <strong>“Copy this guide for your AI”</strong> button. It gives
               you a plain-text runbook to paste into ChatGPT or Claude, which will then walk you through your own
               setup one step at a time and answer questions as they come up.</p>
             <p>The de-Googled phone is more involved (it's in preview), because a phone has to be handed control in a
@@ -171,7 +174,7 @@
           <summary>What can I actually set?<a class="faq__anchor" href="#what-can-i-set" aria-label="Link to this question">#</a></summary>
           <div>
             <p>Allowed hours, a daily time limit with gentle warnings, specific games and apps (block one, or give it
-              its own hours), website filtering, and “learning is free” so homework doesn't cost playtime. You can also
+              its own hours), website filtering (in Firefox on the Linux computer for now), and “learning is free” so homework doesn't cost playtime. You can also
               name what time is <em>for</em> in your own words — “Play” gets an hour a day, schoolwork costs nothing.
               Your child can ask for more time from the lock screen, and you approve with a tap. See
               <a href="/#does">everything a charter can hold →</a></p>
@@ -184,10 +187,18 @@
             <p><strong>Yes.</strong> Kintrinsic is published under the <strong>MIT licence</strong> —
               on GitHub, because that's where people will look first, and heading for a decentralised home
               that isn't owned by Microsoft.</p>
-            <p>Every download comes with <strong>checksums</strong>, so that “we can't read your data” stops
-              being our word for it and becomes something you can check yourself. That's the point of doing
-              it, and it's why we did it properly rather than quickly.</p>
+            <p>Every download has a published <strong>checksum</strong>, and Android releases carry a build attestation
+              too, so that “we can't read your data” stops being our word for it and becomes something you can check
+              yourself. <a href="/download.html#verifying">Here's how to check one.</a></p>
             <p>The <a href="/roadmap.html">roadmap</a> tracks where it's up to.</p>
+          </div>
+        </details>
+
+        <details id="updating">
+          <summary>How do I update it?<a class="faq__anchor" href="#updating" aria-label="Link to this question">#</a></summary>
+          <div>
+            <p>Updates arrive in the Kintrinsic app, and you tap to install. Installing a newer file over the top
+              works too, and keeps your key, your family and your limits.</p>
           </div>
         </details>
 
@@ -207,8 +218,8 @@
   <section class="cta-band" aria-label="Get started">
     <div class="container narrow">
       <p class="t-eyebrow">Still curious?</p>
-      <h2 class="t-heading">Try it on the family computer.</h2>
-      <p>Free while in early access. Set it up in minutes, no account, no tracking.</p>
+      <h2 class="t-heading">Try it on the family&nbsp;computer.</h2>
+      <p>Free and open source, always. Set it up in minutes, no account, no tracking.</p>
       <div class="cta-band__row">
         <a class="btn btn-wax" href="/download.html">Get Kintrinsic</a>
         <a class="btn btn-ghost" href="/setup.html">Read the setup guide</a>
@@ -268,12 +279,12 @@
       {
         "@type": "Question",
         "name": "Is it free? What's the catch?",
-        "acceptedAnswer": { "@type": "Answer", "text": "It's free while in early access. There's no catch of the usual kind — no data to sell, no ads, no subscription that quietly profiles your child. Kintrinsic is part of the Signet project, built on the idea that families should own their own keys." }
+        "acceptedAnswer": { "@type": "Answer", "text": "It's free, and it will always be free and open source (MIT licence). There's no catch of the usual kind — no data to sell, no ads, no subscription that quietly profiles your child. Kintrinsic is part of the Kindred family of ForgeSworn apps, built on the idea that families should own their own keys. It can also keep your key in Signet if you use it." }
       },
       {
         "@type": "Question",
         "name": "Which devices does it work on?",
-        "acceptedAnswer": { "@type": "Answer", "text": "Today: Linux computers — Linux Mint 22.x and other Ubuntu-based systems. In preview: de-Googled Android phones such as GrapheneOS on a Pixel. Not yet: Windows, macOS, or iPhone and iPad — Apple doesn't allow the kind of on-device control Kintrinsic needs." }
+        "acceptedAnswer": { "@type": "Answer", "text": "Today: Linux computers — Linux Mint 22.x on an X11 session. In preview: a child's de-Googled Android phone; a Pixel running GrapheneOS is the only supported one. Not supported, and not currently planned: Windows, macOS, or iPhone and iPad — Apple doesn't allow the kind of on-device control Kintrinsic needs." }
       },
       {
         "@type": "Question",
@@ -283,7 +294,7 @@
       {
         "@type": "Question",
         "name": "Can my child just get around it?",
-        "acceptedAnswer": { "@type": "Answer", "text": "Kintrinsic is built for a cooperative home, not an arms race. It comfortably resists the casual stuff — closing it, changing the clock, poking at settings. A determined, technical teenager with full physical access to a computer can eventually find ways around almost anything, and we won't pretend otherwise. The design leans on trust and gentle friction, with the family agreement doing the real work." }
+        "acceptedAnswer": { "@type": "Answer", "text": "Kintrinsic is built for a cooperative home, not an arms race. It comfortably resists the casual stuff — closing it, changing the clock, poking at settings. A determined, technical teenager with full physical access to a computer can eventually find ways around almost anything, and we won't pretend otherwise. The design leans on trust and gentle friction, with the family agreement doing the real work. Kintrinsic is pre-1.0 and has not had an independent security audit; if you find a hole, the security policy on GitHub says how to tell us privately." }
       },
       {
         "@type": "Question",
@@ -293,17 +304,22 @@
       {
         "@type": "Question",
         "name": "Do I need to be technical?",
-        "acceptedAnswer": { "@type": "Answer", "text": "For the Linux computer: if you can install an app and use a settings menu, you can set up Kintrinsic. The Kintrinsic app also has a 'Copy this guide for your AI' button, which gives you a plain-text runbook to paste into ChatGPT or Claude so it can walk you through your own setup one step at a time. The de-Googled phone is more involved and is in preview." }
+        "acceptedAnswer": { "@type": "Answer", "text": "For the Linux computer: if you can install an app and use a settings menu, you can set up Kintrinsic. The Kintrinsic phone app also has a 'Copy this guide for your AI' button, which gives you a plain-text runbook to paste into ChatGPT or Claude so it can walk you through your own setup one step at a time. The de-Googled phone is more involved and is in preview." }
       },
       {
         "@type": "Question",
         "name": "What can I actually set?",
-        "acceptedAnswer": { "@type": "Answer", "text": "Allowed hours, a daily time limit with gentle warnings, specific games and apps (block one, or give it its own hours), website filtering, and 'learning is free' so homework doesn't cost playtime. You can also name what time is for in your own words. Your child can ask for more time from the lock screen, and you approve with a tap." }
+        "acceptedAnswer": { "@type": "Answer", "text": "Allowed hours, a daily time limit with gentle warnings, specific games and apps (block one, or give it its own hours), website filtering (in Firefox on the Linux computer for now), and 'learning is free' so homework doesn't cost playtime. You can also name what time is for in your own words. Your child can ask for more time from the lock screen, and you approve with a tap." }
       },
       {
         "@type": "Question",
         "name": "Is it open source?",
-        "acceptedAnswer": { "@type": "Answer", "text": "Yes. Kintrinsic is published under the MIT licence — on GitHub, and heading for a decentralised home that isn't owned by Microsoft. Every download comes with checksums, so that 'we can't read your data' becomes something you can check yourself." }
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. Kintrinsic is published under the MIT licence — on GitHub, and heading for a decentralised home that isn't owned by Microsoft. Every download has a published checksum, and Android releases carry a build attestation too, so that 'we can't read your data' becomes something you can check yourself." }
+      },
+      {
+        "@type": "Question",
+        "name": "How do I update it?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Updates arrive in the Kintrinsic app, and you tap to install. Installing a newer file over the top works too, and keeps your key, your family and your limits." }
       },
       {
         "@type": "Question",

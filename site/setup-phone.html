@@ -57,10 +57,10 @@
   <header class="page-head">
     <div class="container">
       <p class="t-eyebrow">Setup guide · the phone <span class="chip chip-soon">preview</span></p>
-      <h1 class="t-display">Set up a child's phone.</h1>
+      <h1 class="t-display">Set up a child's&nbsp;phone.</h1>
       <p class="t-sub lede">Longer than the computer, and more involved — about twenty minutes, most of
         it a factory reset running on its own. Pairing and remote lock are proven on real hardware;
-        the rest is in preview with early-access families.</p>
+        the rest is in preview, so expect a few rough edges.</p>
     </div>
   </header>
 
@@ -75,45 +75,46 @@
           better, do this on a phone you're giving them fresh.
         </div>
 
-        <h2 id="need">What you'll need</h2>
+        <h2 id="need">What you'll&nbsp;need</h2>
         <ul>
-          <li>A <strong>Pixel running <a href="https://grapheneos.org">GrapheneOS</a></strong> — a private,
-            Google-free Android. Other Android 14+ phones are being tested but aren't supported yet.</li>
-          <li>A <strong>USB cable</strong> and a computer.</li>
-          <li><strong>The Kintrinsic app</strong> on your own phone.</li>
+          <li>For your child: a <strong>Pixel running <a href="https://grapheneos.org">GrapheneOS</a></strong> (Android 14
+            or newer) — a private, Google-free Android. Other Android 14+ phones are being tested but aren't supported yet.</li>
+          <li>A <strong>USB cable</strong> and a computer with Chrome, Edge or Brave.</li>
+          <li><strong>The Kintrinsic app</strong> on your own phone, which needs Android 10 or newer.</li>
         </ul>
 
-        <h2 id="reset">1 · Factory reset the phone</h2>
+        <h2 id="reset">1 · Factory reset the&nbsp;phone</h2>
         <p>Reset it, and on first boot <strong>skip every account sign-in</strong>. Don't add a Google
           account, don't restore a backup, don't sign into anything. The phone has to be genuinely empty
           — that emptiness is what lets Kintrinsic become its device owner, and it's a one-time window that
           closes as soon as an account is added.</p>
 
-        <h2 id="debug">2 · Turn on USB debugging</h2>
+        <h2 id="debug">2 · Turn on USB&nbsp;debugging</h2>
         <p>On the phone: <strong>Settings → About phone</strong>, then tap <strong>Build number</strong>
           seven times. That unlocks <strong>Developer options</strong>, where you switch on
           <strong>USB debugging</strong>. Plug the phone into the computer and accept the prompt that
           appears on the phone's screen.</p>
 
-        <h2 id="install">3 · Install and hand over control</h2>
+        <h2 id="install">3 · Install and hand over&nbsp;control</h2>
         <p>This step runs from the computer, over the cable: a guided setup fetches the app, installs it,
           makes it the phone's device owner, and starts pairing. You get one prompt on the phone —
           <strong>Pair with guardian</strong> — and that completes it.</p>
         <div class="callout warn">
-          <b>Being rebuilt under the new name.</b> The guided cable setup lived in the old Charter web
-          app, which is being retired as part of the move to Kintrinsic — the same tool is being folded
-          into Kintrinsic itself. Until it ships, phone setup stays hands-on with early-access families,
-          and the <a href="/roadmap.html">roadmap</a> tracks it. The
-          <a href="/setup.html">computer setup</a> needs none of this and works today.</div>
+          <b>Where this lives now.</b> The guided cable setup is part of the Kintrinsic parent app: in
+          <strong>Family</strong>, add your child, choose <strong>Phone</strong>, and follow the cable setup. It needs
+          Chrome, Edge or Brave on a computer, because a phone's own browser can't do it. This is the youngest part
+          of Kintrinsic, so if it snags, the scripted setup in the
+          <a href="https://github.com/forgesworn/kintrinsic/blob/main/android/scripts/charter-provision.sh">repository</a>
+          does the same job from a terminal. The <a href="/setup.html">computer setup</a> needs none of this.</div>
 
-        <h2 id="govern">4 · Name it and sign the charter</h2>
+        <h2 id="govern">4 · Name it and sign the&nbsp;charter</h2>
         <p>Give the phone a name in the Kintrinsic app, choose <strong>Govern this device</strong>, then set its
           allowed hours and daily time and sign. From that moment the phone accepts rules from your key
           and no one else's.</p>
         <p>If your child also has a Kintrinsic computer, the two share <strong>one daily total</strong>
           rather than one each — an hour on both at once counts as an hour, not two.</p>
 
-        <h2 id="lifeline">What still works when the phone is locked</h2>
+        <h2 id="lifeline">What still works when the phone is&nbsp;locked</h2>
         <p>A locked phone is still a phone. Out of hours, your child can always:</p>
         <ul>
           <li><strong>Reach up to five people you name</strong>, by name, plus their country's real
@@ -126,15 +127,15 @@
             those less true.</li>
         </ul>
 
-        <h2 id="wrong">If something goes wrong</h2>
-        <p>To hand the phone back completely, remove Kintrinsic as device owner from the parent app, or factory
-          reset the phone again — a reset always works and always will. Your own key is backed up
+        <h2 id="wrong">If something goes&nbsp;wrong</h2>
+        <p>To hand the phone back completely, remove Kintrinsic as device owner from the parent app, or wipe it from
+          GrapheneOS recovery mode — that always works. (Settings won't offer a reset while Kintrinsic governs the phone.) Your own key is backed up
           separately; losing the phone doesn't lose your ability to manage anything else.</p>
 
         <div class="callout warn">
           <b>Honestly: this is the preview.</b> One-scan pairing and remote lock and unlock are proven on
-          a real GrapheneOS Pixel. Web filtering on the phone, the lifeline and per-app rules are newly
-          landed and being verified with early-access families. The <a href="/roadmap.html">roadmap</a>
+          a real GrapheneOS Pixel. Web filtering on the phone, the lifeline and per-app rules are in the
+          latest releases and still being proven with real families. The <a href="/roadmap.html">roadmap</a>
           is kept current.
         </div>
 
@@ -145,7 +146,7 @@
   <section class="cta-band" aria-label="Get started">
     <div class="container narrow">
       <p class="t-eyebrow">Or start easier</p>
-      <h2 class="t-heading">The computer takes five minutes.</h2>
+      <h2 class="t-heading">The computer takes five&nbsp;minutes.</h2>
       <p>If the phone is more than you fancy tonight, the Linux setup is the proven, quick one.</p>
       <div class="cta-band__row">
         <a class="btn btn-wax" href="/setup.html">The computer guide</a>

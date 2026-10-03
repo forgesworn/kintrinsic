@@ -57,7 +57,7 @@
   <header class="page-head">
     <div class="container">
       <p class="t-eyebrow">Download</p>
-      <h1 class="t-display">Get Kintrinsic.</h1>
+      <h1 class="t-display">Get&nbsp;Kintrinsic.</h1>
       <p class="t-sub lede">Two pieces, and you only strictly need the first: the installer for your
         child's computer, and the app for your own phone. No account, no store, no tracking.</p>
     </div>
@@ -87,10 +87,11 @@
         </div>
         <div>
           <ul class="reqs">
-            <li>Linux Mint 22.x or another Ubuntu-based distro</li>
+            <li>Linux Mint 22.x, on an X11 session (Cinnamon's default)</li>
             <li>A standard (non-admin) account for your child</li>
             <li>A separate admin account for you</li>
-            <li>Five spare minutes — honestly</li>
+            <li>Chromium installed, if you want learning apps</li>
+            <li>About five minutes — honestly</li>
           </ul>
           <p style="margin-top: 1.3rem; font-size: 0.92rem; color: var(--ink-3);">
             New here? The <a href="/setup.html" style="color: var(--kin-accent); font-weight: 600;">setup guide</a>
@@ -118,20 +119,23 @@
             <a class="btn btn-wax" href="https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.16/kintrinsic-0.1.16.apk" data-dl="android" download="Kintrinsic.apk">Download Kintrinsic for Android</a>
           </p>
           <p class="download__meta">
-            About 12 MB · Android 10+ and GrapheneOS · already have it? Installing over
-            the top keeps your key and your family — nothing to set up again.
+            About 10 MB · your phone needs Android 10 or newer (GrapheneOS included)
             <span data-mirror="android"> · or from the <a href="https://nostr.download/9fa570074eaaa4dccdd95cbacab4f17b99c64119981cc12d64e018cc522fc7fc.apk" data-dl-mirror="android" style="color: var(--kin-accent);">Blossom mirror</a></span>
+          </p>
+          <p class="download__meta" style="margin-top: 0.5rem;">
+            Already have it? Updates arrive in the app, and you tap to install. Installing over the top
+            works too, and keeps your key and your family — nothing to set up again.
           </p>
           <div class="callout" style="margin-top: 1.2rem;">
             <b>A note on the name under the hood.</b> Everything you see says <em>Kintrinsic</em> — the
-            apps, the installer, the menus. Only the terminal command and daemon (<code>charterd</code>)
-            and the internal app id keep the earlier name <em>charter</em> — a deliberate, permanent
-            internal name (much like Signal's package id). Same product, same keys.
+            apps, the installer, the menus. Only the terminal command and daemon (<code>charterd</code>),
+            the internal app id and a few other under-the-hood names keep the earlier name <em>charter</em> — deliberate, permanent
+            internal names (much like Signal's package id). Same product, same keys.
           </div>
         </div>
         <div>
           <ul class="reqs">
-            <li>Android 10 or newer — including GrapheneOS</li>
+            <li>Your phone: Android 10 or newer, GrapheneOS included</li>
             <li>No Google Play, no Google account</li>
             <li>Reliable alerts with the screen off</li>
             <li>Your key stays on your phone</li>
@@ -141,7 +145,7 @@
 
       <!-- ---------- installing an APK, without the fright ---------- -->
       <div class="prose" style="margin-top: 2.4rem;">
-        <h2 id="installing">Installing it on your phone</h2>
+        <h2 id="installing">Installing it on your&nbsp;phone</h2>
         <ol>
           <li>Tap the download button above and let the file finish.</li>
           <li>Open the downloaded <code>.apk</code> file from your notifications or Files app.</li>
@@ -156,31 +160,39 @@
           distribute.
         </div>
 
-        <h3>Why isn't it on the Play Store?</h3>
+        <h3>Why isn't it on the Play&nbsp;Store?</h3>
         <p>Because listing there would mean a Google developer account, Google's review of what your
           family is allowed to run, and — for the child-side app — permissions we've deliberately kept
           out of Google's hands. The whole point of Kintrinsic is that no company sits between you and
           your child's device, and that has to include us and them. So we hand you the file directly.</p>
 
-        <h3>If your browser renames the file</h3>
+        <h3>If your browser renames the&nbsp;file</h3>
         <p>Some browsers append <code>.zip</code> to downloads they don't recognise. If yours does,
           rename it so it ends in <code>.apk</code> and it will install normally. The file itself is
           unchanged.</p>
 
-        <details class="honesty" style="margin-top: 1.6rem;">
+        <details class="honesty" id="verifying" style="margin-top: 1.6rem;">
           <summary style="cursor: pointer; font-weight: 600; color: var(--ink);">Verifying this download (optional)</summary>
           <div style="margin-top: 0.8rem;">
-            <p>Checking a download's fingerprint confirms one thing: that the file you received is the
-              file we meant to give you. It's a reasonable thing to want, and we'd rather you could.</p>
-            <p><b>We don't publish checksums yet.</b> They're coming with the public source release,
-              alongside the signing certificate fingerprint, so that what you verify against is
-              something you can also inspect. Publishing a hash on the same page as the file it
-              describes proves very little on its own — we'd rather ship the whole thing at once than
-              the reassuring half of it.</p>
-            <p style="margin-bottom: 0;">Until then: the file is served over HTTPS from this domain and
-              nowhere else. If you'd rather wait for verifiable builds before installing anything, that
-              is a completely sensible call, and the
-              <a href="/roadmap.html">roadmap</a> tracks where it's up to.</p>
+            <p>Checking a download confirms one thing: that the file you have is the file we built. It's a
+              reasonable thing to want, and we'd rather you could. The source is public, and releases are built in
+              public CI, so what you check against is something you can inspect too.</p>
+            <p><b>Android.</b> Every release comes with a <code>SHA256SUMS</code> file and a GitHub build-provenance
+              attestation. Put the two files in one folder, then:</p>
+            <code class="cmd">sha256sum -c SHA256SUMS<br>gh attestation verify kintrinsic-<span data-ver="android">0.1.16</span>.apk --repo forgesworn/kintrinsic</code>
+            <p>The Android app is signed with our release key. Its certificate's SHA-256 fingerprint is
+              <code class="cmd">4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc</code></p>
+            <p><b>Linux.</b> The current package predates that pipeline, so its SHA-256 is published in the release
+              notes and here instead:</p>
+            <code class="cmd"><span data-sha="linux">bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb</span>  kintrinsic_<span data-ver="linux">0.7.9</span>_amd64.deb</code>
+            <p>Save that line as a file and run <code>sha256sum -c</code> on it, or just compare the output of
+              <code>sha256sum kintrinsic_<span data-ver="linux">0.7.9</span>_amd64.deb</code> by eye. Later Linux releases carry
+              <code>SHA256SUMS</code> and an attestation too.</p>
+            <p style="margin-bottom: 0;">Downloads come from
+              <a href="https://github.com/forgesworn/kintrinsic/releases" style="color: var(--kin-accent);">GitHub releases</a>,
+              with a Blossom mirror. The checksum is the same whichever you use. Prefer to wait until
+              you've looked at the code? That's a sensible call, and the
+              <a href="/roadmap.html">roadmap</a> shows where things stand.</p>
           </div>
         </details>
       </div>
@@ -193,11 +205,11 @@
       <div class="download__card">
         <div>
           <p class="t-eyebrow">Your child's phone · preview</p>
-          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for GrapheneOS</h2>
+          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for&nbsp;GrapheneOS</h2>
           <p style="color: var(--ink-2); max-width: 30rem;">
             The app that governs a <em>child's</em> de-Googled Android phone is a different piece of
-            software from the parent app above, and it isn't a download — it's installed over a USB cable
-            onto a freshly reset phone, because that's the only way Android will hand over the control
+            software from the parent app above, and it isn't a separate download — the Kintrinsic app installs it over a
+            USB cable onto a freshly reset phone, because that's the only way Android will hand over the control
             Kintrinsic needs.
           </p>
           <p style="margin-top: 1.4rem;">
@@ -207,7 +219,8 @@
         </div>
         <div>
           <ul class="reqs">
-            <li>A Pixel running GrapheneOS</li>
+            <li>The child's phone: a Pixel running GrapheneOS (Android 14 or newer)</li>
+            <li>Other Android 14+ phones are being tested, but aren't supported yet</li>
             <li>A phone you can factory-reset — it must start empty</li>
             <li>A USB cable and a computer</li>
             <li>Core pairing and remote lock proven on real hardware</li>
@@ -220,8 +233,8 @@
   <section class="cta-band" aria-label="Next step">
     <div class="container narrow">
       <p class="t-eyebrow">Next</p>
-      <h2 class="t-heading">Now set it up.</h2>
-      <p>Fifteen minutes on the computer, and you're done. The phone can wait for another evening.</p>
+      <h2 class="t-heading">Now set it&nbsp;up.</h2>
+      <p>About five minutes on the computer, and you're done. The phone can wait for another evening.</p>
       <div class="cta-band__row">
         <a class="btn btn-wax" href="/setup.html">Read the setup guide</a>
         <a class="btn btn-ghost" href="/faq.html">Read the FAQ</a>
@@ -265,7 +278,7 @@
     "name": "Kintrinsic for Linux",
     "applicationCategory": "SecurityApplication",
     "applicationSubCategory": "Parental controls",
-    "operatingSystem": "Linux (Ubuntu-based, e.g. Linux Mint 22.x)",
+    "operatingSystem": "Linux Mint 22.x (X11)",
     "downloadUrl": "https://nostr.download/bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb.deb",
     "url": "https://kintrinsic.app/download.html",
     "description": "Screen time, app and website rules for a child's Linux computer, enforced on the device and signed by a key the parent holds. No account and no vendor cloud.",
@@ -302,6 +315,10 @@
       document.querySelectorAll("[data-ver]").forEach(function (el) {
         var d = v[el.getAttribute("data-ver")];
         if (d && d.version) el.textContent = d.version;
+      });
+      document.querySelectorAll("[data-sha]").forEach(function (el) {
+        var d = v[el.getAttribute("data-sha")];
+        if (d && d.sha256) el.textContent = d.sha256;
       });
       document.querySelectorAll("[data-dl]").forEach(function (el) {
         var d = v[el.getAttribute("data-dl")];
