@@ -470,6 +470,10 @@ section { padding: var(--section-pad) 0; }
    target size in WCAG 2.2 (2.5.8) without the row growing. */
 .footer ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem 0.7rem; margin-top: -0.4rem; }
 .footer ul a { display: inline-block; padding: 0.4rem 0.35rem; }
+/* Family nav: its own full-width row under the brand + links. */
+.footer__family { flex: 1 0 100%; border-top: 1px solid var(--line); padding-top: 0.9rem; }
+.footer__family ul { margin-top: 0; }
+.footer__family [aria-current="page"] { display: inline-block; padding: 0.4rem 0.35rem; color: var(--ink); font-weight: 600; }
 
 /* ============ subtle reveal ============ */
 @media (prefers-reduced-motion: no-preference) {
