@@ -4,9 +4,10 @@
 //! via `charter-verify`). Delivery-only; never enacts.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use charter_content::CuratorList;
+use charter_link::{LocalOffer, LocalSink};
 use charter_primitives::{kinds, NostrEvent, PubKey};
 use charter_sys::relay::{Filter, PublishOutcome, RelayIoError, RelayTransport, RelayUrl};
 use zeroize::Zeroizing;
@@ -137,6 +138,10 @@ pub struct CharterTransport<R: RelayTransport, E: Entropy> {
     /// schnorr verify plus one ECDH; the whole fetch ceiling is a fraction of a
     /// second, so there is nothing to gain by discarding events unexamined.
     max_inbound: usize,
+    /// Where every machine→guardian wrap this transport builds is offered for
+    /// direct delivery over the local link, before any relay IO starts. `None`
+    /// (the default) keeps the historic relay-only behaviour.
+    local_sink: Option<Arc<dyn LocalSink>>,
 }
 
 impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
@@ -164,6 +169,7 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             guardian_pk,
             relays,
             max_inbound: DEFAULT_MAX_INBOUND,
+            local_sink: None,
         })
     }
 
@@ -188,6 +194,11 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         self.machine_pk
     }
 
+    /// The pinned guardian this transport's wraps are addressed to.
+    pub fn guardian_pubkey(&self) -> PubKey {
+        self.guardian_pk
+    }
+
     /// Change the inbound cap (rate-limit / flood tests).
     pub fn with_max_inbound(mut self, cap: usize) -> Self {
         self.max_inbound = cap;
@@ -197,6 +208,61 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     /// The relay (for test inspection).
     pub fn relay(&self) -> &R {
         &self.relay
+    }
+
+    /// Attach the local-link outbox. From then on every machine→guardian wrap
+    /// this transport builds (REQUEST, STATUS, AUDIT) is offered to `sink`
+    /// once, at build time, before relay IO starts — the identical wrap the
+    /// relays receive, so both copies share one event id. Offering never
+    /// changes relay publish outcomes: the sink must not block on the network
+    /// (`LocalSink::offer`'s contract), and nothing here waits on it.
+    pub fn set_local_sink(&mut self, sink: Arc<dyn LocalSink>) {
+        self.local_sink = Some(sink);
+    }
+
+    /// Builder form of [`Self::set_local_sink`], for construction sites that
+    /// build the transport by value.
+    pub fn with_local_sink(mut self, sink: Arc<dyn LocalSink>) -> Self {
+        self.set_local_sink(sink);
+        self
+    }
+
+    /// Offer an already-built machine→guardian wrap to the local sink, if one
+    /// is attached. Wraps built by this transport are offered automatically;
+    /// this is for a platform's own durable outbox, which re-publishes parked
+    /// wraps through [`Self::publish_prebuilt`] (deliberately NOT an offer:
+    /// it cannot tell what is inside the wrap, and the wrap was offered when it
+    /// was built) and knows each one's inner kind.
+    pub fn offer_local(&self, inner_kind: u16, key: Option<String>, wrap: &NostrEvent) {
+        if let Some(sink) = &self.local_sink {
+            sink.offer(LocalOffer {
+                inner_kind,
+                key,
+                wrap: wrap.clone(),
+            });
+        }
+    }
+
+    /// The local-outbox replacement key for a rumor: STATUS is "latest per
+    /// subject" (`status:<subject hex>`), everything else is kept as is.
+    fn local_key(rumor: &Rumor) -> Option<String> {
+        if rumor.kind != kinds::CHARTER_DEVICE_STATUS {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(&rumor.content)
+            .ok()?
+            .get("subject")?
+            .as_str()
+            .map(|subject| format!("status:{subject}"))
+    }
+
+    /// Build the wrap for a machine→guardian rumor and offer it to the local
+    /// sink. Every outbound path that builds a wrap to the guardian goes
+    /// through here, so none can skip the local offer.
+    fn build_and_offer(&self, rumor: &Rumor, now: u64) -> Option<NostrEvent> {
+        let wrap = self.build_wrap(rumor, now)?;
+        self.offer_local(rumor.kind, Self::local_key(rumor), &wrap);
+        Some(wrap)
     }
 
     fn randomness(&self, now: u64) -> WrapRandomness {
@@ -216,7 +282,15 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     }
 
     async fn publish_rumor(&self, rumor: &Rumor, now: u64) -> Vec<(RelayUrl, PublishOutcome)> {
-        match self.build_wrap(rumor, now) {
+        // A PAIR_OFFER is the only rumor this type sends that is not
+        // machine→guardian (a guardian-side transport addressing an unpaired
+        // ward, which has no local link yet): it is never offered.
+        let wrap = if rumor.kind == kinds::CHARTER_DEVICE_PAIR_OFFER {
+            self.build_wrap(rumor, now)
+        } else {
+            self.build_and_offer(rumor, now)
+        };
+        match wrap {
             Some(wrap) => self.relay.publish(&self.relays, wrap).await,
             None => vec![(
                 "<local>".to_string(),
@@ -234,8 +308,10 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     }
 
     /// Build (without publishing) the gift-wrapped REQUEST for later retry.
+    /// The wrap is offered to the local sink (if any) here, at build time:
+    /// callers build only what they are about to publish.
     pub fn build_request_wrap(&self, request_json: &str, now: u64) -> Option<NostrEvent> {
-        self.build_wrap(
+        self.build_and_offer(
             &Rumor {
                 id: None,
                 pubkey: self.machine_pk,
@@ -250,8 +326,10 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     }
 
     /// Build (without publishing) the gift-wrapped STATUS for later retry.
+    /// Offered to the local sink at build time, like
+    /// [`Self::build_request_wrap`].
     pub fn build_status_wrap(&self, status_json: &str, now: u64) -> Option<NostrEvent> {
-        self.build_wrap(
+        self.build_and_offer(
             &Rumor {
                 id: None,
                 pubkey: self.machine_pk,
@@ -265,7 +343,9 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         )
     }
 
-    /// Publish an already-built wrap (spool retry path).
+    /// Publish an already-built wrap (spool retry path). Not offered to the
+    /// local sink: a wrap built here was offered when it was built, and a
+    /// platform outbox re-offers its parked wraps with [`Self::offer_local`].
     pub async fn publish_prebuilt(&self, wrap: NostrEvent) -> Vec<(RelayUrl, PublishOutcome)> {
         self.relay.publish(&self.relays, wrap).await
     }
@@ -395,17 +475,44 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         let mut out = Vec::new();
         for wrap in wraps.into_iter().take(self.max_inbound) {
             // A tampered/foreign wrap is non-fatal — skip it.
-            if let Ok((rumor, seal_author)) =
-                nip59::unwrap_with_author(&wrap, &self.machine_sk, now, nip59::MAX_JITTER_SECS)
-            {
-                if rumor.kind == inner_kind {
-                    if let Some(ev) = rumor.into_signed_event() {
-                        out.push((ev, seal_author));
-                    }
+            if let Some((ev, seal_author)) = self.open_wrap(&wrap, now) {
+                if ev.kind == inner_kind {
+                    out.push((ev, seal_author));
                 }
             }
         }
         Ok(out)
+    }
+
+    /// The one unwrap every inbound guardian wrap goes through, whichever way
+    /// it arrived: NIP-59 unwrap under the machine key with the transport's
+    /// jitter bound, then the inner event must carry its own id and signature
+    /// (a bare rumor is dropped). Returns the inner event **unverified** with
+    /// the key that sealed it; `charter-verify` authenticates it downstream.
+    fn open_wrap(&self, wrap: &NostrEvent, now: u64) -> Option<(NostrEvent, PubKey)> {
+        let (rumor, seal_author) =
+            nip59::unwrap_with_author(wrap, &self.machine_sk, now, nip59::MAX_JITTER_SECS).ok()?;
+        let ev = rumor.into_signed_event()?;
+        Some((ev, seal_author))
+    }
+
+    /// Unwrap one gift wrap that arrived outside relay polling (the local
+    /// link), through exactly the code [`Self::poll_grants`] and its siblings
+    /// use. The wrap must name this machine in a single `p` tag — the relay
+    /// path gets that from its `#p` filter, so it is checked here instead.
+    /// Returns the inner event (any kind) **unverified**, with its seal
+    /// author; `None` for anything that does not open.
+    pub fn unwrap_inbound(&self, wrap: &NostrEvent, now: u64) -> Option<(NostrEvent, PubKey)> {
+        let me = self.machine_pk.to_hex();
+        let mut p_tags = wrap
+            .tags
+            .iter()
+            .filter(|t| t.first().is_some_and(|n| n == "p"));
+        match (p_tags.next(), p_tags.next()) {
+            (Some(t), None) if t.get(1).is_some_and(|v| *v == me) => {}
+            _ => return None,
+        }
+        self.open_wrap(wrap, now)
     }
 
     /// Poll for delivered GRANT wraps (unverified).

@@ -36,6 +36,7 @@ charter-content = { workspace = true }
 charter-verify = { workspace = true, default-features = false }
 charter-transport = { workspace = true, default-features = false }
 charter-sys = { workspace = true, default-features = false }
+charter-link = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

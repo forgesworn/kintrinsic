@@ -9,6 +9,26 @@
 use charter_primitives::NostrEvent;
 use serde::{Deserialize, Serialize};
 
+pub mod proto;
+pub use proto::*;
+
+#[cfg(feature = "net")]
+mod guardian;
+#[cfg(feature = "net")]
+mod session;
+#[cfg(feature = "net")]
+mod store;
+#[cfg(feature = "net")]
+mod ward;
+
+#[cfg(feature = "net")]
+pub use guardian::{
+    DeliveryRecord, DeliveryState, GuardianEvent, GuardianLink, GuardianLinkConfig, InboxEntry,
+    SendState, SessionInfo,
+};
+#[cfg(feature = "net")]
+pub use ward::{WardIngest, WardLink, WardLinkConfig, WardLinkSnapshot, WardSessionInfo};
+
 /// What a ward reports, in a signed ACK, for a guardian wrap it received over
 /// the local link. Serialised in lowercase on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

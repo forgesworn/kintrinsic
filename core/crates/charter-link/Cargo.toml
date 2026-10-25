@@ -10,7 +10,7 @@ publish = false
 default = []
 # The ward client and guardian listener (tokio sockets). The protocol
 # definitions, codec and signatures compile without it.
-net = ["dep:tokio"]
+net = ["dep:tokio", "dep:getrandom"]
 
 [dependencies]
 charter-primitives = { workspace = true }
@@ -21,3 +21,19 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["net", "io-util", "time", "sync", "rt"] }
+# Session challenges: 32 bytes from the OS (the same crate the Android
+# native libraries already use for wrap keys).
+getrandom = { version = "0.2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
+
+[[test]]
+name = "vectors"
+path = "tests/vectors.rs"
+
+[[test]]
+name = "link"
+path = "tests/link.rs"
+required-features = ["net"]

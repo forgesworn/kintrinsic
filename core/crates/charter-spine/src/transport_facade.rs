@@ -1,13 +1,56 @@
 //! The transport seam the broker depends on. The daemon spine is built against
 //! a **mock** facade so a Phase-2 transport-crypto stall never blocks it; the
-//! `CharterTransportAdapter` bridges the real `charter-transport`.
+//! [`CharterTransportAdapter`] bridges the real `charter-transport`.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use charter_primitives::{NostrEvent, PubKey};
-use charter_transport::{FetchedCuratorList, ReceivedClause, ReceivedGrant};
+use charter_primitives::{kinds, NostrEvent, PubKey};
+use charter_sys::relay::{PublishOutcome, RelayIoError, RelayTransport, RelayUrl};
+use charter_transport::{
+    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant,
+};
+
+/// A guardian wrap that arrived over the local link, unwrapped by the same
+/// code as its relay copy and sorted by inner kind the way the `poll_*`
+/// methods sort relay deliveries. Every inner event is still **unverified**:
+/// the broker authenticates it exactly as it would a polled one.
+#[derive(Debug, Clone)]
+pub enum LocalInbound {
+    Clause(ReceivedClause),
+    Grant(ReceivedGrant),
+    /// A RELEASE `(event, seal_author)`, as `poll_releases` returns it.
+    Release(NostrEvent, PubKey),
+    /// A USAGE_SYNC event (its seal author is unused, as on the poll path).
+    UsageSync(NostrEvent),
+    /// Anything else that unwrapped: not acted on over the local link.
+    Other {
+        inner_kind: u16,
+    },
+}
+
+/// Sort an unwrapped inner event into a [`LocalInbound`] by kind, matching
+/// the `poll_grants` / `poll_clauses` / `poll_releases` / `poll_usage_syncs`
+/// split. A facade over a `CharterTransport` implements
+/// [`TransportFacade::unwrap_local`] as
+/// `t.unwrap_inbound(wrap, now).map(|(ev, author)| classify_inbound(ev, author))`.
+pub fn classify_inbound(event: NostrEvent, seal_author: PubKey) -> LocalInbound {
+    match event.kind {
+        kinds::CHARTER_DEVICE_CLAUSE => LocalInbound::Clause(ReceivedClause {
+            clause: event,
+            seal_author,
+        }),
+        kinds::CHARTER_DEVICE_GRANT => LocalInbound::Grant(ReceivedGrant {
+            grant: event,
+            seal_author,
+        }),
+        kinds::CHARTER_DEVICE_RELEASE => LocalInbound::Release(event, seal_author),
+        kinds::CHARTER_DEVICE_USAGE_SYNC => LocalInbound::UsageSync(event),
+        inner_kind => LocalInbound::Other { inner_kind },
+    }
+}
 
 /// Relay reachability + publish-failure signal for the most recent round of
 /// polling/publishing, read (and reset) once per `Broker::poll_once` call.
@@ -53,6 +96,120 @@ pub trait TransportFacade: Send + Sync {
     /// field existed. `RealTransportFacade` overrides it.
     fn poll_health(&self) -> PollHealth {
         PollHealth::default()
+    }
+
+    /// Unwrap one gift wrap that arrived over the local link, through the
+    /// same NIP-59 code as relay polling, and sort it by inner kind (see
+    /// [`classify_inbound`]). `None` when the wrap does not open for this
+    /// machine. Synchronous: unwrapping is CPU only, never IO.
+    ///
+    /// Default `None`: a facade that cannot unwrap (the scripted
+    /// [`MockTransport`], an older platform facade) refuses every local wrap,
+    /// and its relay path is unaffected.
+    fn unwrap_local(&self, _wrap: &NostrEvent, _now: u64) -> Option<LocalInbound> {
+        None
+    }
+}
+
+/// A [`TransportFacade`] over a real [`CharterTransport`]: every relay error
+/// is folded into [`PollHealth`] (as `RealTransportFacade` does on Linux), and
+/// local wraps are unwrapped by [`CharterTransport::unwrap_inbound`]. The
+/// reference shape for platform facades, and what the spine's own
+/// end-to-end tests run on (over `MockRelayTransport`).
+pub struct CharterTransportAdapter<R: RelayTransport, E: Entropy> {
+    inner: CharterTransport<R, E>,
+    relays_unreachable: AtomicBool,
+    publish_failed: AtomicU32,
+}
+
+impl<R: RelayTransport, E: Entropy> CharterTransportAdapter<R, E> {
+    /// Wrap `inner`; its pinned guardian is the key the broker authenticates
+    /// against.
+    pub fn new(inner: CharterTransport<R, E>) -> Self {
+        CharterTransportAdapter {
+            inner,
+            relays_unreachable: AtomicBool::new(false),
+            publish_failed: AtomicU32::new(0),
+        }
+    }
+
+    /// The wrapped transport (STATUS publishing, test inspection).
+    pub fn inner(&self) -> &CharterTransport<R, E> {
+        &self.inner
+    }
+
+    fn record_poll<T>(&self, r: Result<Vec<T>, RelayIoError>) -> Vec<T> {
+        match r {
+            Ok(v) => v,
+            Err(RelayIoError::Unreachable(_)) => {
+                self.relays_unreachable.store(true, Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+    }
+
+    fn record_publish(&self, outcomes: &[(RelayUrl, PublishOutcome)]) {
+        let failed = outcomes
+            .iter()
+            .filter(|(_, o)| matches!(o, PublishOutcome::Failed(_)))
+            .count() as u32;
+        if failed > 0 {
+            self.publish_failed.fetch_add(failed, Ordering::Relaxed);
+        }
+    }
+}
+
+#[async_trait]
+impl<R: RelayTransport, E: Entropy> TransportFacade for CharterTransportAdapter<R, E> {
+    async fn publish_request(&self, request_json: &str, now: u64) {
+        let outcomes = self.inner.submit_request(request_json, now).await;
+        self.record_publish(&outcomes);
+    }
+
+    async fn poll_grants(&self, since: u64, now: u64) -> Vec<ReceivedGrant> {
+        self.record_poll(self.inner.poll_grants(since, now).await)
+    }
+
+    async fn poll_clauses(&self, since: u64, now: u64) -> Vec<ReceivedClause> {
+        self.record_poll(self.inner.poll_clauses(since, now).await)
+    }
+
+    async fn poll_usage_syncs(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
+        self.record_poll(self.inner.poll_usage_syncs(since, now).await)
+    }
+
+    async fn poll_releases(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
+        self.record_poll(self.inner.poll_releases(since, now).await)
+    }
+
+    async fn poll_curator_lists(&self, curators: &[PubKey], since: u64) -> Vec<FetchedCuratorList> {
+        self.record_poll(self.inner.poll_curator_lists(curators, since).await)
+    }
+
+    async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) {
+        let outcomes = self.inner.emit_audit(tags, now).await;
+        self.record_publish(&outcomes);
+    }
+
+    fn pinned_guardian(&self) -> PubKey {
+        self.inner.guardian_pubkey()
+    }
+
+    fn machine_pubkey(&self) -> PubKey {
+        self.inner.machine_pubkey()
+    }
+
+    fn poll_health(&self) -> PollHealth {
+        PollHealth {
+            relays_unreachable: self.relays_unreachable.swap(false, Ordering::Relaxed),
+            publish_failed: self.publish_failed.swap(0, Ordering::Relaxed),
+        }
+    }
+
+    fn unwrap_local(&self, wrap: &NostrEvent, now: u64) -> Option<LocalInbound> {
+        self.inner
+            .unwrap_inbound(wrap, now)
+            .map(|(ev, author)| classify_inbound(ev, author))
     }
 }
 

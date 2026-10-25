@@ -89,7 +89,7 @@ The normative definition is in the contract. In short:
 | Limit | Guardian listener | Ward client |
 | --- | --- | --- |
 | Unauthenticated connections | 8 concurrent | — |
-| Authenticated sessions | 16 total, 2 per machine (a third closes the oldest) | 4 guardian sessions |
+| Authenticated sessions | 16 total, 4 per machine (a fifth closes the oldest) | 4 guardian sessions |
 | Inbound frames | 120 per minute per session, else close | 120 per minute per session, else close |
 | Inbound wraps held | 256 (inbound store) | 32 queued for ingest per session; reading pauses when full |
 | Outbound held | 64 per ward, 48 h | REQUEST 64 (24 h), AUDIT 64 (48 h), latest STATUS per subject |
@@ -133,7 +133,9 @@ The normative definition is in the contract. In short:
 **Ward → guardian** (requests, audits, status): the ward offers each wrap to
 its local outbox before the relay publish starts. Connected guardian sessions
 receive it at once; a guardian that connects later receives everything still
-in the outbox. Relay publication and the existing relay outbox are unchanged,
+in the outbox. An entry leaves the outbox once a guardian session has
+returned `OK` for it (the relay copy still serves any other guardian
+device), or when its retention expires. Relay publication and the existing relay outbox are unchanged,
 so durable remote delivery is retained.
 
 **Timeouts.** Local work never waits on a relay. A ward without a reachable
