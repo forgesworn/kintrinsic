@@ -14,7 +14,7 @@ import {
 } from "../store/store";
 import type { Child, ChildRequest, RequestKind } from "../domain/types";
 import { liveness, livenessChip } from "../domain/liveness";
-import { useLocalRoute } from "../carrier/localRoute";
+import { useLocalRoute } from "../carrier/useLocalRoute";
 import {
   groupExtrasToday,
   groupProgressBuckets,

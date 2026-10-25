@@ -4,7 +4,8 @@ import { Button } from "../components/ui";
 import { DEFAULT_RELAYS } from "../signer/config";
 import { validateRelays } from "../wire/relayConfig";
 import { useCharter } from "../store/store";
-import { localRouteGapLine, useLocalRoute } from "../carrier/localRoute";
+import { localRouteGapLine } from "../carrier/localRoute";
+import { useLocalRoute } from "../carrier/useLocalRoute";
 
 export default function DeviceRelays({ child, device }: { child: Child; device: Device }) {
   const { createRelayCode, recordDeviceRelays } = useCharter();

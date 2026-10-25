@@ -33,7 +33,7 @@ import type { DecisionContext, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
 import { localRouteAvailable } from "../carrier/localLink";
-import { QueuedForHomeNetworkError, type PublishMeta } from "./routePublish";
+import { QueuedForHomeNetworkError, singleRecipient, type PublishMeta } from "./routePublish";
 
 /** One deliverable device: its domain id, and the key its wraps are sealed to. */
 export interface TargetDevice {
@@ -87,6 +87,17 @@ export interface RealSignerDeps {
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
+
+/**
+ * What happened to each wrap of a multi-device send: which recipients took it,
+ * and which were held by the carrier for the home network. Lets `settle` tell
+ * the guardian the real split instead of one all-or-nothing sentence.
+ */
+class SendBatch {
+  readonly held: QueuedForHomeNetworkError[] = [];
+  readonly reached = new Set<string>();
+  readonly waiting = new Set<string>();
+}
 
 function labelFor(kind: SignerKind): string | undefined {
   if (kind === "signet") return "Signet";
@@ -247,22 +258,31 @@ export class RealSigner implements Signer {
     relays: string[],
     wrap: NostrEvent,
     meta: PublishMeta,
-    held: QueuedForHomeNetworkError[],
+    batch: SendBatch,
   ): Promise<void> {
+    const recipient = singleRecipient(wrap);
     try {
       await this.deps.publish(relays, wrap, meta);
+      if (recipient) batch.reached.add(recipient);
     } catch (err) {
       if (err instanceof QueuedForHomeNetworkError) {
-        held.push(err);
+        batch.held.push(err);
+        if (recipient) batch.waiting.add(recipient);
         return;
       }
       throw err;
     }
   }
 
-  /** Surface "not sent yet" (see `send`) after the whole batch was handed over. */
-  private settle(held: QueuedForHomeNetworkError[]): void {
-    if (held.length > 0) throw QueuedForHomeNetworkError.merge(held);
+  /**
+   * Surface "not sent yet" (see `send`) after the whole batch was handed over.
+   * The error also carries the devices that DID get it, so a partly-delivered
+   * batch is reported as exactly that.
+   */
+  private settle(batch: SendBatch): void {
+    if (batch.held.length === 0) return;
+    const reached = [...batch.reached].filter((m) => !batch.waiting.has(m));
+    throw QueuedForHomeNetworkError.merge(batch.held, reached);
   }
 
   async signClause(childId: string, policy: Policy): Promise<{ ok: true }> {
@@ -270,7 +290,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
-    const held: QueuedForHomeNetworkError[] = [];
+    const held = new SendBatch();
 
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
@@ -342,7 +362,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
-    const held: QueuedForHomeNetworkError[] = [];
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
     await this.authorize(
       "clause",
@@ -389,7 +409,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
-    const held: QueuedForHomeNetworkError[] = [];
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
     await this.authorize("clause", `Give ${minutes} more minutes to ${target.name ?? childId}`);
     const issuedAt = this.nextIssuedAt();
@@ -445,7 +465,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
-    const held: QueuedForHomeNetworkError[] = [];
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
     const lift = opts?.lift === true;
     const who = target.name ?? childId;
@@ -492,7 +512,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
-    const held: QueuedForHomeNetworkError[] = [];
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
 
     await this.authorize(

@@ -16,6 +16,7 @@
 //     finished installing.
 
 import { ACK_RESULTS, type LocalDeliveryState } from "../carrier/localLink";
+import { ASK_EXPIRY_SECS, isAskExpired } from "../domain/askExpiry";
 
 export interface LocalWrapRecord {
   /** The wrap's event id. */
@@ -148,9 +149,10 @@ function waitingText(device: string, states: LocalDeliveryState[]): string {
  * no words for).
  */
 export function answerDeliveryLine(
-  req: { reqId?: string; kind: string; status: string },
+  req: { reqId?: string; kind: string; status: string; createdAt?: number },
   records: LocalWrapRecord[],
   nameOf: (rec: LocalWrapRecord) => string,
+  now: number = Date.now(),
 ): DeliveryLine | null {
   if (!req.reqId) return null;
   const grant = records.find((r) => r.kind === "grant" && r.reqId === req.reqId);
@@ -166,6 +168,12 @@ export function answerDeliveryLine(
   const problem = parts.find((r) => isProblem(r.state));
   if (problem && isProblem(problem.state)) {
     return { tone: "warn", text: problemText(device, problem.state) };
+  }
+  // The answer was signed but the ward never connected, and the ask's own 24 h
+  // window has since closed: the ward would refuse it now, so say so rather
+  // than leave "waiting" up for ever.
+  if (grant.state === "queued" && req.createdAt !== undefined && isAskExpired(req.createdAt, now)) {
+    return { tone: "warn", text: `Expired before it reached ${device}.` };
   }
   // app.open approved but no clause was tracked for this device: the hold went
   // by relays (or not at all) and nothing here can vouch for it.
@@ -192,7 +200,9 @@ export const ANSWER_LINE_WINDOW_MS = 24 * 3600 * 1000;
  * newest first, at most five. Asks answered by relay only have no record and
  * so no line.
  */
-export function answeredLines<R extends { id: string; reqId?: string; kind: string; status: string }>(
+export function answeredLines<
+  R extends { id: string; reqId?: string; kind: string; status: string; createdAt?: number },
+>(
   requests: R[],
   records: LocalWrapRecord[],
   nameOf: (rec: LocalWrapRecord) => string,
@@ -202,8 +212,14 @@ export function answeredLines<R extends { id: string; reqId?: string; kind: stri
   for (const req of requests) {
     if ((req.status !== "approved" && req.status !== "denied") || !req.reqId) continue;
     const grant = records.find((r) => r.kind === "grant" && r.reqId === req.reqId);
-    if (!grant || now - grant.at > ANSWER_LINE_WINDOW_MS) continue;
-    const line = answerDeliveryLine(req, records, nameOf);
+    if (!grant) continue;
+    // A queued answer keeps its line until the ask itself would have expired,
+    // and then shows "Expired before it reached…" for the usual window.
+    const expiresAt = req.createdAt === undefined ? undefined : req.createdAt + ASK_EXPIRY_SECS * 1000;
+    const since =
+      grant.state === "queued" && expiresAt !== undefined && expiresAt > grant.at ? expiresAt : grant.at;
+    if (now - since > ANSWER_LINE_WINDOW_MS) continue;
+    const line = answerDeliveryLine(req, records, nameOf, now);
     if (line) out.push({ req, line, at: grant.at });
   }
   return out

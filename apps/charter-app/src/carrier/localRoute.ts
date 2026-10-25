@@ -2,8 +2,7 @@
 // a live session with the carrier right now, and — when there is no usable
 // route — the plain sentence that says why.
 
-import { useEffect, useState } from "react";
-import { localInfo, localRouteGap, type LocalRouteGap } from "./localLink";
+import { localBridgeSupport, localInfo, type LocalRouteGap } from "./localLink";
 
 export interface LocalRouteView {
   /** null = home-network delivery is usable now. */
@@ -14,12 +13,21 @@ export interface LocalRouteView {
 
 export const NO_LOCAL_ROUTE: LocalRouteView = { gap: "browser", sessions: new Set() };
 
+/**
+ * One reading of the route: AT MOST ONE `localInfo()` call, however many
+ * screens or rows want the answer. The store takes this on its own poll and
+ * shares the result; nothing else should call it on a timer.
+ */
 export function readLocalRoute(): LocalRouteView {
-  const gap = localRouteGap();
+  if (!window.CharterCarrier) return NO_LOCAL_ROUTE;
+  if (localBridgeSupport() !== "full") return { gap: "old-carrier", sessions: new Set() };
+  const info = localInfo();
   // Sessions are shown whenever the carrier reports them, even if it also says
   // the listener isn't fully available: a working session is never "offline".
-  const info = gap === "browser" || gap === "old-carrier" ? null : localInfo();
-  return { gap, sessions: new Set(info?.sessions.map((s) => s.machine) ?? []) };
+  return {
+    gap: info?.available === true ? null : "not-running",
+    sessions: new Set(info?.sessions.map((s) => s.machine) ?? []),
+  };
 }
 
 /** The line to show where relay delivery is discussed, or null when the route works. */
@@ -36,30 +44,8 @@ export function localRouteGapLine(gap: LocalRouteGap | null): string | null {
   }
 }
 
-function same(a: LocalRouteView, b: LocalRouteView): boolean {
+export function sameLocalRoute(a: LocalRouteView, b: LocalRouteView): boolean {
   if (a.gap !== b.gap || a.sessions.size !== b.sessions.size) return false;
   for (const m of a.sessions) if (!b.sessions.has(m)) return false;
   return true;
-}
-
-/** Live view of the route, refreshed while the app is on screen. */
-export function useLocalRoute(pollMs = 4_000): LocalRouteView {
-  const [view, setView] = useState<LocalRouteView>(() => readLocalRoute());
-  useEffect(() => {
-    const refresh = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      const next = readLocalRoute();
-      setView((cur) => (same(cur, next) ? cur : next));
-    };
-    refresh();
-    // A plain browser has no bridge to poll; the gap line never changes there.
-    if (typeof window.CharterCarrier === "undefined") return;
-    const id = setInterval(refresh, pollMs);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", refresh);
-    };
-  }, [pollMs]);
-  return view;
 }

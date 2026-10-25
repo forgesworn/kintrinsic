@@ -132,6 +132,25 @@ describe("a batch with a device that is not on the home network yet", () => {
     // The queued device did not stop the other device's wrap going out.
     expect(send.mock.calls.map((c) => c[0])).toEqual([DPK1, DPK2]);
     expect(routed.map((r) => r.meta.kind)).toEqual(["clause", "clause"]);
+    // ...and the error says the other device DID get it, by machine key.
+    expect((err as QueuedForHomeNetworkError).devices).toEqual(["Robin's laptop"]);
+    expect((err as QueuedForHomeNetworkError).reached).toEqual([DPK2]);
+  });
+
+  it("a device whose every wrap was held is never reported as reached", async () => {
+    installBridge(() => "queued");
+    const relay = vi.fn(async () => {
+      throw new Error("Couldn't reach any relay — check your connection and try again.");
+    });
+    const { signer } = makeSigner(
+      { subject: SUBJECT, devices: [{ id: "d1", pubkey: DPK1 }, { id: "d2", pubkey: DPK2 }], relays: RELAYS },
+      relay,
+    );
+    await signer.connect("local");
+    const err = (await signer.signGiftClause!("c", 15, "Europe/London").catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(err).toBeInstanceOf(QueuedForHomeNetworkError);
+    expect(err.devices).toEqual(["Robin's laptop", "Mia's phone"]);
+    expect(err.reached).toEqual([]);
   });
 
   it("a genuine relay failure with no local hold still aborts with the relay error", async () => {

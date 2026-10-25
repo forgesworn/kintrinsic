@@ -64,11 +64,18 @@ export interface LocalRouteHooks {
  */
 export class QueuedForHomeNetworkError extends Error {
   readonly devices: string[];
-  constructor(devices: string[]) {
+  /**
+   * Machine keys of the devices in the same batch that DID get the change (a
+   * multi-device send where only some were away). Empty when none did, or for
+   * a single wrap. The caller names them; this layer only knows keys.
+   */
+  readonly reached: string[];
+  constructor(devices: string[], reached: string[] = []) {
     const names = [...new Set(devices.length > 0 ? devices : ["their device"])];
     super(QueuedForHomeNetworkError.describe(names));
     this.name = "QueuedForHomeNetworkError";
     this.devices = names;
+    this.reached = [...new Set(reached)];
   }
 
   private static describe(names: string[]): string {
@@ -80,8 +87,11 @@ export class QueuedForHomeNetworkError extends Error {
   }
 
   /** One error naming every device across several queued wraps. */
-  static merge(errors: QueuedForHomeNetworkError[]): QueuedForHomeNetworkError {
-    return new QueuedForHomeNetworkError(errors.flatMap((e) => e.devices));
+  static merge(errors: QueuedForHomeNetworkError[], reached: string[] = []): QueuedForHomeNetworkError {
+    return new QueuedForHomeNetworkError(
+      errors.flatMap((e) => e.devices),
+      [...errors.flatMap((e) => e.reached), ...reached],
+    );
   }
 }
 

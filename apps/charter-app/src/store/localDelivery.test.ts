@@ -197,3 +197,38 @@ describe("rule changes", () => {
     expect(appliedSuffix(["A", "B", "C"])).toBe(" — applied on A, B and C");
   });
 });
+
+describe("a queued answer outliving its ask", () => {
+  const DAY = 24 * 3600 * 1000;
+  const grant = (state: LocalWrapRecord["state"]) =>
+    rec({ wrap: "g", kind: "grant", reqId: REQ, state, at: NOW });
+  const ask = (createdAt: number) => ({ id: "r", reqId: REQ, kind: "time.extend", status: "approved", createdAt });
+
+  it("waits while the ask is inside its 24 h window", () => {
+    const line = answerDeliveryLine(ask(NOW - 1000), [grant("queued")], nameOf, NOW + 1000);
+    expect(line).toEqual({ tone: "info", text: "Waiting for Robin's laptop to join the home network." });
+  });
+
+  it("says it expired before it reached the device once the window has passed", () => {
+    const line = answerDeliveryLine(ask(NOW - 1000), [grant("queued")], nameOf, NOW + DAY);
+    expect(line).toEqual({ tone: "warn", text: "Expired before it reached Robin's laptop." });
+  });
+
+  it("only ever applies to a wrap that was never delivered: a received/sent one keeps waiting", () => {
+    expect(answerDeliveryLine(ask(NOW - 1000), [grant("received")], nameOf, NOW + DAY)?.tone).toBe("info");
+  });
+
+  it("an ACK still wins over the clock", () => {
+    expect(answerDeliveryLine(ask(NOW - 1000), [grant("applied")], nameOf, NOW + 2 * DAY)?.text).toBe(
+      "Applied on Robin's laptop",
+    );
+  });
+
+  it("keeps the queued line on screen past 24 h of answering until the ask has expired, then for a day more", () => {
+    const req = { ...ask(NOW + 20 * 3600 * 1000), id: "r" };
+    // Answered at NOW, but the ask only dates from NOW+20h so it expires at NOW+44h.
+    expect(answeredLines([req], [grant("queued")], nameOf, NOW + 30 * 3600 * 1000)).toHaveLength(1);
+    expect(answeredLines([req], [grant("queued")], nameOf, NOW + 44 * 3600 * 1000)[0].line.text).toMatch(/^Expired before/);
+    expect(answeredLines([req], [grant("queued")], nameOf, NOW + 44 * 3600 * 1000 + DAY + 1)).toHaveLength(0);
+  });
+});

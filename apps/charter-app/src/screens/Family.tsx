@@ -38,7 +38,7 @@ import DeviceRelays from "./DeviceRelays";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
 import { anyOnHomeNetwork, bestLiveness, livenessChip } from "../domain/liveness";
-import { useLocalRoute } from "../carrier/localRoute";
+import { useLocalRoute } from "../carrier/useLocalRoute";
 import { appLockNote, deviceHealthNotes } from "../domain/deviceHealth";
 
 // Accent colors a parent can pick for a child's avatar/chips.
