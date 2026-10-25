@@ -95,6 +95,7 @@ dependencies = [
 name = "charter-guardian-jni"
 version = "0.1.0"
 dependencies = [
+ "charter-link",
  "charter-primitives",
  "charter-proto",
  "charter-sys",
@@ -103,6 +104,22 @@ dependencies = [
  "getrandom 0.2.17",
  "jni",
  "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "charter-link"
+version = "0.1.0"
+dependencies = [
+ "charter-crypto",
+ "charter-primitives",
+ "charter-verify",
+ "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
  "zeroize",
 ]
 
@@ -157,6 +174,7 @@ dependencies = [
  "chacha20",
  "charter-content",
  "charter-crypto",
+ "charter-link",
  "charter-primitives",
  "charter-proto",
  "charter-sys",
@@ -540,6 +558,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
+name = "mio"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -750,6 +779,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -844,8 +883,13 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "socket2",
  "tokio-macros",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

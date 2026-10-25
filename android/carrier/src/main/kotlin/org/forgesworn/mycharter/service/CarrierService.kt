@@ -14,6 +14,8 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.forgesworn.mycharter.carrier.CarrierStore
+import org.forgesworn.mycharter.carrier.hexToKeyBytes
+import org.forgesworn.mycharter.link.LocalLink
 import org.forgesworn.mycharter.native.GuardianNative
 import org.forgesworn.mycharter.relay.RelayFraming
 import org.json.JSONObject
@@ -37,6 +39,8 @@ class CarrierService : Service() {
     private lateinit var store: CarrierStore
     private lateinit var worker: HandlerThread
     private lateinit var handler: Handler
+    /** The home-network listener (local link v1); runs while provisioned. */
+    private lateinit var localLink: LocalLink
     private val sockets = mutableMapOf<String, WebSocket>()
     private var connectedGuardian: String? = null
     private val backoffs = mutableMapOf<String, Long>()
@@ -68,6 +72,9 @@ class CarrierService : Service() {
         store = CarrierStore(this)
         worker = HandlerThread("carrier-worker").apply { start() }
         handler = Handler(worker.looper)
+        localLink = LocalLink(this, store, handler) { wrapJson ->
+            handler.post { if (running) classifyAndNotify(wrapJson) }
+        }
         running = true
         handler.post { connectAll() }
     }
@@ -83,6 +90,9 @@ class CarrierService : Service() {
         sockets.clear()
         openedAt.clear()
         reconnecting.clear()
+        // On the worker, like every other LocalLink call; quitSafely still
+        // delivers it.
+        handler.post { localLink.stop() }
         worker.quitSafely()
         super.onDestroy()
     }
@@ -94,11 +104,15 @@ class CarrierService : Service() {
     private fun connectAll() {
         val p = store.provision() ?: run {
             Log.i(TAG, "not provisioned; stopping")
+            localLink.stop()
             stopSelf()
             return
         }
         val abi = GuardianNative.guardianAbiVersion()
-        check(abi == 2) { "guardian JNI ABI $abi != 2" }
+        check(abi == 3) { "guardian JNI ABI $abi != 3" }
+        // Idempotent: same key + directory keeps the running listener; a new
+        // guardian key restarts it.
+        localLink.start()
         val keyChanged = connectedGuardian != p.guardianPubkeyHex
         connectedGuardian = p.guardianPubkeyHex
         sockets.keys.filter { keyChanged || it !in p.relays }.forEach { relay ->
@@ -136,7 +150,7 @@ class CarrierService : Service() {
                                 if (authId != null) return@post
                                 val challenge = frame.optString(1)
                                 if (challenge.isEmpty() || challenge.length > 4096) return@post
-                                val sk = hexToBytes(p.guardianSkHex) ?: return@post
+                                val sk = hexToKeyBytes(p.guardianSkHex) ?: return@post
                                 val proof = try {
                                     JSONObject(GuardianNative.guardianRelayAuth(relay, challenge, sk, System.currentTimeMillis() / 1000))
                                 } catch (_: Throwable) { return@post } finally { sk.fill(0) }
@@ -218,7 +232,7 @@ class CarrierService : Service() {
         // to go across as the stored hex String — immutable, interned, one
         // fresh uncollectable copy of the guardian's root key per delivered
         // wrap. The array below lives for the length of one classify call.
-        val sk = hexToBytes(p.guardianSkHex) ?: return
+        val sk = hexToKeyBytes(p.guardianSkHex) ?: return
         val verdict = try {
             JSONObject(GuardianNative.guardianClassifyWrap(eventJson, sk, now))
         } catch (t: Throwable) {
@@ -267,20 +281,6 @@ class CarrierService : Service() {
             machine = verdict.optString("machine", ""),
             roster = store.roster(),
         )
-    }
-
-    /** 64 hex chars -> 32 bytes, or null. Deliberately not a String
-     *  intermediate: the point is to hand the JNI something wipeable. */
-    private fun hexToBytes(hex: String): ByteArray? {
-        if (hex.length != 64) return null
-        val out = ByteArray(32)
-        for (i in 0 until 32) {
-            val hi = Character.digit(hex[i * 2], 16)
-            val lo = Character.digit(hex[i * 2 + 1], 16)
-            if (hi < 0 || lo < 0) return null
-            out[i] = ((hi shl 4) or lo).toByte()
-        }
-        return out
     }
 
     companion object {

@@ -4,6 +4,9 @@ import android.webkit.JavascriptInterface
 import org.forgesworn.mycharter.carrier.CarrierStore
 import org.forgesworn.mycharter.carrier.ProvisionPayload
 import org.forgesworn.mycharter.carrier.RosterPayload
+import org.forgesworn.mycharter.link.LinkJson
+import org.forgesworn.mycharter.link.LocalLink
+import org.forgesworn.mycharter.native.GuardianNative
 import org.forgesworn.mycharter.update.SelfUpdater
 
 /**
@@ -42,6 +45,8 @@ class CarrierBridge(
     fun roster(json: String) {
         val r = RosterPayload.parse(json) ?: return
         store.saveRoster(r)
+        // The roster is also the local link's admission list (paired only).
+        LocalLink.current?.refreshAllowed()
     }
 
     /**
@@ -76,6 +81,66 @@ class CarrierBridge(
     /** `{"phase":"idle|downloading|verifying|waiting-user|done|failed","error":…}` */
     @JavascriptInterface
     fun installState(): String = selfUpdater.stateJson()
+
+    // ---- local-network delivery (docs/local-network-design.md) -------------
+    //
+    // Every method is optional on the page side (feature-detected) and never
+    // throws here: a link that is not running answers "unavailable" / empty,
+    // and any native failure (even a stale .so) degrades the same way. The
+    // native calls are quick lock-and-copy reads of in-memory state, so they
+    // do not hold the WebView's bridge thread.
+
+    /** The running link, or null. */
+    private fun link(): LocalLink? = LocalLink.current?.takeIf { it.running }
+
+    private inline fun native(fallback: String, call: () -> String): String =
+        try { call() } catch (_: Throwable) { fallback }
+
+    /** `{"v":1,"available":bool,"listening":bool,"sessions":[{"machine","since"}]}`.
+     *  `available`: the listener runs, so a send is delivered or queued for
+     *  the ward's next connection. `listening`: advertised on a Wi-Fi or
+     *  Ethernet network right now. */
+    @JavascriptInterface
+    fun localInfo(): String = try {
+        val l = link()
+        LinkJson.infoJson(
+            available = l != null,
+            listening = l?.listening == true,
+            sessionsJson = if (l != null) native("[]") { GuardianNative.guardianLinkSessions() } else "[]",
+        )
+    } catch (_: Throwable) {
+        """{"v":1,"available":false,"listening":false,"sessions":[]}"""
+    }
+
+    /** `{"state":"sent"|"queued"|"rejected"|"unavailable"}` */
+    @JavascriptInterface
+    fun localSend(recipientHex: String, wrapJson: String): String {
+        if (link() == null) return LinkJson.UNAVAILABLE_SEND
+        return LinkJson.sendJson(
+            native(LinkJson.UNAVAILABLE_SEND) { GuardianNative.guardianLinkSend(recipientHex, wrapJson) },
+        )
+    }
+
+    /** `{"<wrapId>":{"state":…,"at":unix,"machine":hex}}` for the ids known. */
+    @JavascriptInterface
+    fun localDelivery(wrapIdsJson: String): String {
+        if (link() == null) return "{}"
+        return native("{}") { GuardianNative.guardianLinkDelivery(wrapIdsJson) }
+    }
+
+    /** `[{"id":wrapId,"machine":hex,"wrap":{…},"receivedAt":unix}]` — ward
+     *  wraps received over the link, held until [localConsume]. */
+    @JavascriptInterface
+    fun localInbox(): String {
+        if (link() == null) return "[]"
+        return native("[]") { GuardianNative.guardianLinkInbox() }
+    }
+
+    @JavascriptInterface
+    fun localConsume(idsJson: String) {
+        if (link() == null) return
+        native("") { GuardianNative.guardianLinkConsume(idsJson) }
+    }
 
     companion object { const val JS_NAME = "CharterCarrier" }
 }

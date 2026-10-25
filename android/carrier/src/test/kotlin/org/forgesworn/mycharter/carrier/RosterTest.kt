@@ -40,6 +40,26 @@ class RosterTest {
         assertNull(RosterPayload.parse("""{"v":1}"""))
     }
 
+    // ---- paired (local link admission) ---------------------------------------
+
+    private fun entry(paired: String?) =
+        """{"machine":"$machine","childName":"Mia","deviceLabel":"Pixel 6"${paired?.let { ",\"paired\":$it" } ?: ""}}"""
+
+    @Test fun absentPairedMeansPaired() {
+        assertTrue(RosterPayload.parse(json(entries = "[${entry(null)}]"))!!.entries[0].paired)
+    }
+
+    @Test fun pairedTrueAndFalseAreRead() {
+        assertTrue(RosterPayload.parse(json(entries = "[${entry("true")}]"))!!.entries[0].paired)
+        assertEquals(false, RosterPayload.parse(json(entries = "[${entry("false")}]"))!!.entries[0].paired)
+    }
+
+    @Test fun aMalformedPairedDeniesRatherThanAdmits() {
+        for (bad in listOf("\"true\"", "1", "null", "{}")) {
+            assertEquals(bad, false, RosterPayload.parse(json(entries = "[${entry(bad)}]"))!!.entries[0].paired)
+        }
+    }
+
     // ---- describeWard -------------------------------------------------------
 
     @Test fun aKnownMachineResolves() {

@@ -3,10 +3,12 @@
 //! the websocket, storage, and notifications.
 
 pub mod classify;
+pub mod link;
 
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jlong, jstring};
 use jni::JNIEnv;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use zeroize::Zeroize;
 
 /// Bump on any breaking change to this surface; Kotlin refuses a mismatch.
@@ -17,7 +19,10 @@ use zeroize::Zeroize;
 /// delivers — minted another copy of the family's root signing key that
 /// nothing could erase and only the GC would eventually reclaim. A byte array
 /// can be wiped, by both sides, the moment the call returns.
-pub const ABI_VERSION: jint = 2;
+///
+/// **3 —** the local link (v1): `guardianLink*` start/stop the home-network
+/// listener and carry wraps over it (docs/local-network-design.md).
+pub const ABI_VERSION: jint = 3;
 
 fn out(env: &JNIEnv, s: &str) -> jstring {
     env.new_string(s)
@@ -115,4 +120,120 @@ pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guard
     // `sk` is Zeroizing: wiped here, at the end of the call, rather than left
     // in a freed page for as long as the process lives.
     out(&env, &res)
+}
+
+// ---- local link (ABI 3) ----------------------------------------------------
+//
+// Every entry point returns a JSON string and never unwinds across FFI: a
+// panic, or a string that cannot cross the boundary, becomes the fallback.
+// The shapes and decisions live in `link.rs`.
+
+fn jstr(env: &mut JNIEnv, s: &JString) -> Option<String> {
+    env.get_string(s).ok().map(Into::into)
+}
+
+fn guarded(env: &JNIEnv, fallback: &str, f: impl FnOnce() -> Option<String>) -> jstring {
+    let res = catch_unwind(AssertUnwindSafe(f)).ok().flatten();
+    out(env, res.as_deref().unwrap_or(fallback))
+}
+
+const ERR: &str = r#"{"ok":false,"error":"internal"}"#;
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkStart(
+    mut env: JNIEnv,
+    _class: JClass,
+    state_dir: JString,
+    guardian_sk: JByteArray,
+    allowed_json: JString,
+    preferred_port: jint,
+) -> jstring {
+    // The key is copied into `Zeroizing` and the JVM-side copy is wiped by
+    // the Kotlin caller.
+    let sk = take_sk(&env, &guardian_sk);
+    let dir = jstr(&mut env, &state_dir);
+    let allowed = jstr(&mut env, &allowed_json);
+    guarded(&env, ERR, move || {
+        let Some(sk) = sk else {
+            return Some(link::error_json("bad guardian key"));
+        };
+        Some(link::start(&dir?, sk, &allowed?, preferred_port))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkStop(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    guarded(&env, ERR, || Some(link::stop()))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkAllow(
+    mut env: JNIEnv,
+    _class: JClass,
+    allowed_json: JString,
+) -> jstring {
+    let allowed = jstr(&mut env, &allowed_json);
+    guarded(&env, ERR, || Some(link::allow(&allowed?)))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkSend(
+    mut env: JNIEnv,
+    _class: JClass,
+    recipient_hex: JString,
+    wrap_json: JString,
+) -> jstring {
+    let recipient = jstr(&mut env, &recipient_hex);
+    let wrap = jstr(&mut env, &wrap_json);
+    guarded(&env, r#"{"state":"rejected","reason":"internal"}"#, || {
+        Some(link::send(&recipient?, &wrap?))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkNext(
+    env: JNIEnv,
+    _class: JClass,
+    timeout_ms: jint,
+) -> jstring {
+    guarded(&env, "[]", || Some(link::next(timeout_ms)))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkInbox(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    guarded(&env, "[]", || Some(link::inbox()))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkConsume(
+    mut env: JNIEnv,
+    _class: JClass,
+    ids_json: JString,
+) -> jstring {
+    let ids = jstr(&mut env, &ids_json);
+    guarded(&env, ERR, || Some(link::consume(&ids?)))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkDelivery(
+    mut env: JNIEnv,
+    _class: JClass,
+    ids_json: JString,
+) -> jstring {
+    let ids = jstr(&mut env, &ids_json);
+    guarded(&env, "{}", || Some(link::delivery(&ids?)))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkSessions(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    guarded(&env, "[]", || Some(link::sessions()))
 }

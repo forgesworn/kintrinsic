@@ -3,6 +3,7 @@ package org.forgesworn.mycharter.carrier
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.SecureRandom
 
 /**
  * App-private persistence for the carrier: the provisioned guardian key,
@@ -45,7 +46,8 @@ class CarrierStore(context: Context) {
                 JSONObject()
                     .put("machine", e.machine)
                     .put("childName", e.childName)
-                    .put("deviceLabel", e.deviceLabel),
+                    .put("deviceLabel", e.deviceLabel)
+                    .put("paired", e.paired),
             )
         }
         prefs.edit().putString(K_ROSTER, arr.toString()).apply()
@@ -65,7 +67,7 @@ class CarrierStore(context: Context) {
             if (machine.isEmpty() || childName.isEmpty() || deviceLabel.isEmpty()) {
                 null
             } else {
-                RosterEntry(machine, childName, deviceLabel)
+                RosterEntry(machine, childName, deviceLabel, pairedField(o))
             }
         }
     }
@@ -81,6 +83,20 @@ class CarrierStore(context: Context) {
         return true
     }
 
+    /**
+     * The local link's DNS-SD instance name, `Kintrinsic <4 hex>`: random,
+     * chosen once per install and kept, so wards and network tools see one
+     * stable name that says nothing about the family.
+     */
+    @Synchronized
+    fun linkInstanceName(): String {
+        prefs.getString(K_LINK_NAME, null)?.takeIf { LinkNames.isInstanceName(it) }?.let { return it }
+        val bytes = ByteArray(2).also { SecureRandom().nextBytes(it) }
+        val name = LinkNames.instanceName(bytes)
+        prefs.edit().putString(K_LINK_NAME, name).apply()
+        return name
+    }
+
     fun clear() = prefs.edit().clear().apply()
 
     private companion object {
@@ -89,6 +105,7 @@ class CarrierStore(context: Context) {
         const val K_RELAYS = "relays"
         const val K_ROSTER = "roster"
         const val K_SEEN = "seenReqIds"
+        const val K_LINK_NAME = "linkInstanceName"
         const val SEEN_CAP = 200
     }
 }
