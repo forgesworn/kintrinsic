@@ -1,8 +1,9 @@
 {
-  "versionName": "0.7.9",
-  "versionCode": 709,
-  "url": "https://nostr.download/bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb.deb",
-  "sha256": "bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb",
-  "sizeBytes": 11162984,
-  "builtAt": "2026-09-27T11:44:46Z"
+  "versionName": "0.7.10",
+  "versionCode": 710,
+  "url": "https://nostr.download/42bc19af5468b8dddded6ffd5f220ee7ea9c49d06ad3048d4f3eea49167e1099.deb",
+  "urls": ["https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.7.10/kintrinsic_0.7.10_amd64.deb", "https://nostr.download/42bc19af5468b8dddded6ffd5f220ee7ea9c49d06ad3048d4f3eea49167e1099.deb"],
+  "sha256": "42bc19af5468b8dddded6ffd5f220ee7ea9c49d06ad3048d4f3eea49167e1099",
+  "sizeBytes": 12572150,
+  "builtAt": "2026-10-25T16:30:56Z"
 }
