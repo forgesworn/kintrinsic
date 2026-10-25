@@ -113,6 +113,7 @@ dependencies = [
  "async-trait",
  "charter-content",
  "charter-crypto",
+ "charter-link",
  "charter-primitives",
  "charter-proto",
  "charter-schedule",
@@ -128,6 +129,21 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "charter-link"
+version = "0.1.0"
+dependencies = [
+ "charter-crypto",
+ "charter-primitives",
+ "charter-verify",
+ "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
  "tokio",
  "zeroize",
 ]
@@ -167,6 +183,7 @@ dependencies = [
  "async-trait",
  "charter-content",
  "charter-crypto",
+ "charter-link",
  "charter-primitives",
  "charter-proto",
  "charter-schedule",
@@ -220,6 +237,7 @@ dependencies = [
  "chacha20",
  "charter-content",
  "charter-crypto",
+ "charter-link",
  "charter-primitives",
  "charter-proto",
  "charter-sys",

@@ -9,6 +9,9 @@
 //! `RealRelayTransport` (rustls + compiled-in webpki roots, feature
 //! `real-relay`); host tests inject `MockRelayTransport`.
 
+use std::sync::Arc;
+
+use charter_link::LocalSink;
 use charter_primitives::PubKey;
 use charter_sys::relay::{PublishOutcome, RelayTransport, RelayUrl};
 use charter_transport::transport::{CharterTransport, Entropy, ReceivedClause};
@@ -103,6 +106,16 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
     /// Attach the durable offline spool rooted under `base`.
     pub fn with_outbox(mut self, base: &std::path::Path) -> Self {
         self.outbox = Some(crate::outbox::Outbox::new(base));
+        self
+    }
+
+    /// Attach the local link's outbox: every STATUS and AUDIT wrap this
+    /// facade builds is offered to it before relay IO starts (the identical
+    /// wrap, so both copies share one event id).
+    pub fn with_local_sink(mut self, sink: Option<Arc<dyn LocalSink>>) -> Self {
+        if let Some(sink) = sink {
+            self.transport.set_local_sink(sink);
+        }
         self
     }
 }
@@ -216,13 +229,16 @@ pub fn real_relay(
     guardian: PubKey,
     relays: Vec<RelayUrl>,
     base: &std::path::Path,
+    local_sink: Option<Arc<dyn LocalSink>>,
 ) -> Result<std::sync::Arc<dyn WardenRelay>, String> {
     let transport =
         charter_sys::relay::RealRelayTransport::default().with_auth_signer(std::sync::Arc::new(
             charter_sys::signer::RealMachineSigner::from_secret(machine_sk),
         ));
     Ok(std::sync::Arc::new(
-        BlockingRelay::new(transport, machine_sk, guardian, relays)?.with_outbox(base),
+        BlockingRelay::new(transport, machine_sk, guardian, relays)?
+            .with_outbox(base)
+            .with_local_sink(local_sink),
     ))
 }
 
@@ -305,6 +321,15 @@ impl AndroidTransportFacade {
     /// Attach the durable offline spool rooted under `base`.
     pub fn with_outbox(mut self, base: &std::path::Path) -> Self {
         self.outbox = Some(crate::outbox::Outbox::new(base));
+        self
+    }
+
+    /// Attach the local link's outbox: every REQUEST and AUDIT wrap the
+    /// broker publishes is offered to it before relay IO starts.
+    pub fn with_local_sink(mut self, sink: Option<Arc<dyn LocalSink>>) -> Self {
+        if let Some(sink) = sink {
+            self.transport.set_local_sink(sink);
+        }
         self
     }
 
@@ -401,6 +426,20 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
     }
     fn machine_pubkey(&self) -> PubKey {
         self.machine
+    }
+    /// A wrap from the local link, opened by the same NIP-59 code as a polled
+    /// one and sorted by kind. A RELEASE is handed back here like any other
+    /// kind; the warden asks the broker NOT to apply it
+    /// (`handle_release: false`) and runs its own `try_apply_releases`, so
+    /// there is still exactly one place that unpairs an Android device.
+    fn unwrap_local(
+        &self,
+        wrap: &charter_primitives::NostrEvent,
+        now: u64,
+    ) -> Option<charter_spine::LocalInbound> {
+        self.transport
+            .unwrap_inbound(wrap, now)
+            .map(|(ev, author)| charter_spine::classify_inbound(ev, author))
     }
     /// Read-and-reset, once per broker `poll_once` round.
     fn poll_health(&self) -> charter_spine::transport_facade::PollHealth {

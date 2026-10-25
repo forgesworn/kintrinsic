@@ -8,6 +8,7 @@
 mod breakglass;
 mod dto;
 pub mod install;
+mod link;
 pub mod outbox;
 pub mod relay;
 pub mod system;
@@ -21,7 +22,9 @@ use warden::{Warden, WARDEN};
 
 /// Bump on any breaking change to this surface; Kotlin refuses a mismatch.
 /// 2: `charterInit` takes the app's versionName (STATUS `appVersionName`).
-pub const ABI_VERSION: jint = 2;
+/// 3: the local link — `charterLinkDiscovered`, `charterLinkKick`,
+///    `charterLinkState`.
+pub const ABI_VERSION: jint = 3;
 
 // ---- helpers --------------------------------------------------------------
 
@@ -641,6 +644,51 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterS
     _obj: JObject,
 ) {
     *WARDEN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+// ---- local link -----------------------------------------------------------
+
+/// Kotlin's NsdManager result: the FULL current set of guardian carrier
+/// addresses, `{"addrs":["192.168.1.5:47615"]}` → `{"ok":true}`. Never blocks
+/// on the network.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterLinkDiscovered(
+    mut env: JNIEnv,
+    _class: JClass,
+    addrs_json: JString,
+) -> jstring {
+    let json = match jstr(&mut env, addrs_json) {
+        Ok(s) => s,
+        Err(e) => return out(&env, &err_json(&e)),
+    };
+    with_warden(&env, |w| match w.link_discovered(&json) {
+        Ok(()) => "{\"ok\":true}".into(),
+        Err(e) => err_json(&e),
+    })
+}
+
+/// Network change, screen-on, liveness alarm: retry the link now (its timers
+/// stop while the phone sleeps). `{"ok":true}`.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterLinkKick(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    with_warden(&env, |w| {
+        w.link_kick();
+        "{\"ok\":true}".into()
+    })
+}
+
+/// The link snapshot (`connected`, `sessions`, `candidates`, `remembered`,
+/// `outbox`, `lastError`) plus `running` and `appliedSeq`, or
+/// `{"running":false,…}` while there is no link.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterLinkState(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    with_warden(&env, |w| w.link_state_json())
 }
 
 // ---- lock plumbing --------------------------------------------------------

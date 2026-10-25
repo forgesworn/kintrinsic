@@ -213,6 +213,20 @@ pub struct Warden {
     listening_lock_started: Option<u64>,
     /// Blocks on the broker's async surface (submit / poll).
     rt: std::sync::Arc<tokio::runtime::Runtime>,
+    /// The local link to the guardian carrier on the home network, up while
+    /// the broker is (it is rebuilt with it and stopped on unpair). Its sink
+    /// is attached to both transports, so every machine→guardian wrap is
+    /// offered to it before relay IO starts.
+    link: Option<crate::link::LinkHandle>,
+    /// Bumped each time a link is started, so an ingest that finishes after
+    /// a rebuild or an unpair is never absorbed into the next pairing.
+    link_gen: u64,
+    /// How many wraps received over the link were `applied` (Kotlin posts an
+    /// immediate enforcement tick when this moves). Memory only.
+    link_applied_seq: u64,
+    /// The lock this warden lives behind, for the link's ingest to reach
+    /// back into: `&WARDEN` in production, a test's own in host tests.
+    link_home: crate::link::WardenHome,
     /// Machine-wide clause mirror of the sole ward's clauses — what
     /// `time_extend_eod` reads for the today-only grant cap (the Linux
     /// single-ward layout).
@@ -311,6 +325,10 @@ impl Warden {
                 now_unix_ms(),
             ),
             rt: std::sync::Arc::new(rt),
+            link: None,
+            link_gen: 0,
+            link_applied_seq: 0,
+            link_home: &WARDEN,
             mode: EnforceMode::parse(enforce_mode),
             enforcer: EnforcerCore::new(),
             usage: None,
@@ -332,6 +350,8 @@ impl Warden {
     fn rebuild_relay(&mut self) {
         #[cfg(feature = "real-relay")]
         {
+            // The old link belongs to the old pairing and relay set.
+            self.retire_link(std::time::Duration::ZERO, false);
             // No machine key (M6) means no identity to seal or sign with, so
             // no transport at all: the tick still enforces the cached clauses.
             if let (Some(g), false, Some(sk)) = (
@@ -339,7 +359,11 @@ impl Warden {
                 self.relays.is_empty(),
                 self.machine_sk.as_deref().copied(),
             ) {
-                self.relay = crate::relay::real_relay(sk, g, self.relays.clone(), &self.base).ok();
+                // The link first: both transports take its sink.
+                self.start_link();
+                let sink = self.link.as_ref().map(|l| l.sink());
+                self.relay =
+                    crate::relay::real_relay(sk, g, self.relays.clone(), &self.base, sink).ok();
                 self.broker = self
                     .build_broker(Box::new(
                         charter_sys::relay::RealRelayTransport::default().with_auth_signer(
@@ -349,11 +373,120 @@ impl Warden {
                         ),
                     ))
                     .ok();
+                // Nothing to ingest into without a broker.
+                if self.broker.is_none() {
+                    self.retire_link(std::time::Duration::ZERO, false);
+                }
             } else {
                 self.relay = None;
                 self.broker = None;
             }
         }
+    }
+
+    /// Start a local link to the pinned guardian (state under the base dir).
+    /// A link that will not start is logged and left off: relays carry on.
+    #[cfg_attr(
+        not(any(feature = "real-relay", feature = "mock", test)),
+        allow(dead_code)
+    )]
+    fn start_link(&mut self) {
+        self.retire_link(std::time::Duration::ZERO, false);
+        let (Some(guardian), Some(sk)) = (self.guardian, self.machine_sk.as_deref().copied())
+        else {
+            return;
+        };
+        self.link_gen += 1;
+        match crate::link::LinkHandle::spawn(
+            self.link_home,
+            self.link_gen,
+            sk,
+            guardian,
+            self.base.clone(),
+        ) {
+            Ok(l) => self.link = Some(l),
+            Err(e) => eprintln!("charter-link: not started: {e}"),
+        }
+    }
+
+    /// Stop the local link, if one is running (never blocks). `forget` on
+    /// unpair: its outbox and remembered address go too.
+    fn retire_link(&mut self, grace: std::time::Duration, forget: bool) {
+        if let Some(l) = self.link.take() {
+            l.retire(grace, forget);
+        }
+    }
+
+    /// The broker that serves link generation `gen`, if that link is still
+    /// the live one.
+    pub(crate) fn link_broker(&self, gen: u64) -> Option<std::sync::Arc<AndroidBroker>> {
+        match &self.link {
+            Some(l) if l.gen() == gen => self.broker.clone(),
+            _ => None,
+        }
+    }
+
+    /// Finish a wrap the broker ingested from link generation `gen`, under
+    /// the warden lock, and say what to ACK. A RELEASE goes through
+    /// [`Warden::try_apply_releases`] — the same verification and epoch floor
+    /// as a polled one. After any `applied` clause the ward's clauses are
+    /// mirrored for the broker's EOD cap, as the poll path does.
+    pub(crate) fn absorb_local(
+        &mut self,
+        gen: u64,
+        out: charter_spine::LocalIngestOutcome,
+        now: u64,
+    ) -> charter_link::AckResult {
+        use charter_link::AckResult;
+        let live = matches!(&self.link, Some(l) if l.gen() == gen);
+        let mut result = out.result;
+        if let Some(release) = out.release {
+            result = if !live {
+                AckResult::Failed
+            } else {
+                let (applied, detail) = self.try_apply_releases(&[release], now);
+                eprintln!("charter-link: {detail}");
+                if applied {
+                    AckResult::Applied
+                } else {
+                    AckResult::Refused
+                }
+            };
+        }
+        if result == AckResult::Applied {
+            if out.inner_kind == Some(CHARTER_DEVICE_CLAUSE) {
+                self.mirror_ward_clauses();
+                self.check_self_update(now);
+            }
+            self.link_applied_seq += 1;
+        }
+        result
+    }
+
+    /// Kotlin's discovery result: the full current set of guardian carrier
+    /// addresses (`{"addrs":["192.168.1.5:47615"]}`).
+    pub fn link_discovered(&self, addrs_json: &str) -> Result<(), String> {
+        let addrs = crate::link::parse_discovered(addrs_json)?;
+        if let Some(l) = &self.link {
+            l.set_discovered(addrs);
+        }
+        Ok(())
+    }
+
+    /// A network change, screen-on or liveness alarm: retry the link now
+    /// (tokio timers do not run while the phone is in deep sleep).
+    pub fn link_kick(&self) {
+        if let Some(l) = &self.link {
+            l.kick();
+        }
+    }
+
+    /// The `charterLinkState` body.
+    pub fn link_state_json(&self) -> String {
+        crate::link::state_json(
+            self.link.as_ref().map(|l| l.snapshot()),
+            self.link_applied_seq,
+        )
     }
 
     /// Stand up the spine broker over `relay` (M9 crash-reconcile runs inside
@@ -373,7 +506,8 @@ impl Warden {
             .ok_or("machine key unavailable")?;
         let sys = AndroidSystem::with_base(&self.base).map_err(|e| format!("system: {e:?}"))?;
         let facade = AndroidTransportFacade::new(relay, machine_sk, guardian, self.relays.clone())?
-            .with_outbox(&self.base);
+            .with_outbox(&self.base)
+            .with_local_sink(self.link.as_ref().map(|l| l.sink()));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -488,6 +622,9 @@ impl Warden {
         self.pair_token = None;
         self.relay = None;
         self.broker = None;
+        // A short grace so the ACK for a release that arrived over the link
+        // still goes out; the link then stops (nothing is paired any more).
+        self.retire_link(std::time::Duration::from_millis(1500), true);
         self.last_status = None;
         self.enforcer = EnforcerCore::new();
         self.usage = None;
@@ -1576,10 +1713,10 @@ impl Warden {
     /// in-memory relay whose clones share one store.
     #[cfg(any(test, feature = "mock"))]
     #[allow(dead_code)] // test seam: callers live under cfg(test)
-    pub fn wire_test_relay(
-        &mut self,
-        mock: charter_sys::relay::MockRelayTransport,
-    ) -> Result<(), String> {
+    pub fn wire_test_relay<R>(&mut self, mock: R) -> Result<(), String>
+    where
+        R: charter_sys::relay::RelayTransport + Send + Sync + Clone + 'static,
+    {
         let guardian = self.guardian.ok_or("pair first")?;
         let machine_sk = self
             .machine_sk
@@ -1593,10 +1730,33 @@ impl Warden {
                 guardian,
                 self.relays.clone(),
             )?
-            .with_outbox(&self.base),
+            .with_outbox(&self.base)
+            .with_local_sink(self.link.as_ref().map(|l| l.sink())),
         ));
         self.broker = Some(self.build_broker(Box::new(mock))?);
         Ok(())
+    }
+
+    /// Test seam: start a local link whose ingest reaches back into `home`,
+    /// then wire both relay halves over `mock` with the link's sink attached
+    /// (what `rebuild_relay` does in a real-relay build). The warden must be
+    /// moved into `home` before any wrap arrives.
+    #[cfg(any(test, feature = "mock"))]
+    #[allow(dead_code)] // test seam: callers live under cfg(test)
+    pub fn wire_test_relay_with_link<R>(
+        &mut self,
+        mock: R,
+        home: crate::link::WardenHome,
+    ) -> Result<(), String>
+    where
+        R: charter_sys::relay::RelayTransport + Send + Sync + Clone + 'static,
+    {
+        self.link_home = home;
+        self.start_link();
+        if self.link.is_none() {
+            return Err("link did not start".into());
+        }
+        self.wire_test_relay(mock)
     }
 
     /// Test seam: inject a relay facade and select the LEGACY direct-ingest
@@ -8747,5 +8907,468 @@ mod parity_port_tests {
         std::fs::write(status_seq_path(&base), b"12\x00junk").unwrap();
         assert_eq!(load_status_seq(&base), None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// The local link (v1), end to end: an in-process guardian carrier listener
+/// on 127.0.0.1, this warden's link connecting out to it, and a relay set
+/// that reaches nothing — so everything below arrives over the link alone.
+#[cfg(test)]
+mod link_loop_tests {
+    use super::*;
+    use charter_link::{
+        AckResult, DeliveryState, GuardianEvent, GuardianLink, GuardianLinkConfig, SendState,
+    };
+    use charter_sys::relay::{
+        Filter, MockRelayTransport, PublishOutcome, RelayIoError, RelayTransport, RelayUrl,
+    };
+    use charter_transport::nip59::{self, Rumor, WrapRandomness};
+    use charter_verify::test_support::{ClauseBuilder, TestGuardian};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// The pinned test guardian's raw secret (`TestGuardian::new()`).
+    fn guardian_sk() -> [u8; 32] {
+        let mut s = [0u8; 32];
+        s[31] = 0x11;
+        s
+    }
+
+    fn temp_base(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("charter-jni-link-{}-{}", std::process::id(), label));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    fn wall() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn locked(decisions: &[dto::ChildDecision]) -> bool {
+        decisions.first().map(|d| d.locked).unwrap_or(false)
+    }
+
+    /// A relay set that is down until switched up: queries are
+    /// `Unreachable`, publishes fail. Up, it is the shared in-memory mock.
+    #[derive(Clone)]
+    struct SwitchRelay {
+        store: MockRelayTransport,
+        up: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl RelayTransport for SwitchRelay {
+        async fn publish(
+            &self,
+            relays: &[RelayUrl],
+            ev: NostrEvent,
+        ) -> Vec<(RelayUrl, PublishOutcome)> {
+            if self.up.load(Ordering::SeqCst) {
+                self.store.publish(relays, ev).await
+            } else {
+                relays
+                    .iter()
+                    .map(|r| (r.clone(), PublishOutcome::Failed("unreachable".into())))
+                    .collect()
+            }
+        }
+        async fn query(
+            &self,
+            relays: &[RelayUrl],
+            filter: Filter,
+        ) -> Result<Vec<NostrEvent>, RelayIoError> {
+            if self.up.load(Ordering::SeqCst) {
+                self.store.query(relays, filter).await
+            } else {
+                Err(RelayIoError::Unreachable("down".into()))
+            }
+        }
+    }
+
+    struct Rig {
+        home: crate::link::WardenHome,
+        carrier: Arc<GuardianLink>,
+        _grt: tokio::runtime::Runtime,
+        guardian: TestGuardian,
+        machine: PubKey,
+        relay: SwitchRelay,
+        t0: u64,
+        dirs: Vec<PathBuf>,
+    }
+
+    impl Rig {
+        fn new(label: &str) -> Rig {
+            let base = temp_base(label);
+            let gdir = temp_base(&format!("{label}-carrier"));
+            let guardian = TestGuardian::new();
+            let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+            let t0 = wall();
+            let uri = format!(
+                "bunker://{}?relay=wss://relay.example&kind=charter",
+                guardian.pubkey().to_hex()
+            );
+            w.pair(&uri, t0 - 600).unwrap();
+            let machine = PubKey::from_hex(&w.machine_pubkey_hex()).unwrap();
+            let relay = SwitchRelay {
+                store: MockRelayTransport::new(),
+                up: Arc::new(AtomicBool::new(false)),
+            };
+            let home: crate::link::WardenHome = Box::leak(Box::new(Mutex::new(None)));
+            w.wire_test_relay_with_link(relay.clone(), home).unwrap();
+            *home.lock().unwrap() = Some(w);
+
+            let grt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let carrier = GuardianLink::start(
+                GuardianLinkConfig {
+                    guardian_sk: zeroize::Zeroizing::new(guardian_sk()),
+                    state_dir: gdir.clone(),
+                    preferred_port: 0,
+                    allow_loopback: true,
+                },
+                vec![machine],
+                grt.handle(),
+            )
+            .unwrap();
+            let rig = Rig {
+                home,
+                carrier,
+                _grt: grt,
+                guardian,
+                machine,
+                relay,
+                t0,
+                dirs: vec![base, gdir],
+            };
+            rig.with(|w| {
+                w.link_discovered(&format!(
+                    r#"{{"addrs":["127.0.0.1:{}"]}}"#,
+                    rig.carrier.port()
+                ))
+                .unwrap()
+            });
+            assert!(
+                rig.wait(10, || rig.state()["connected"] == true),
+                "the ward link never came up: {}",
+                rig.state()
+            );
+            rig
+        }
+
+        fn with<T>(&self, f: impl FnOnce(&mut Warden) -> T) -> T {
+            f(self.home.lock().unwrap().as_mut().expect("warden"))
+        }
+
+        fn state(&self) -> serde_json::Value {
+            serde_json::from_str(&self.with(|w| w.link_state_json())).unwrap()
+        }
+
+        fn wait(&self, secs: u64, mut f: impl FnMut() -> bool) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            while Instant::now() < deadline {
+                if f() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            f()
+        }
+
+        fn wrap(&self, ev: &NostrEvent, seed: u8) -> NostrEvent {
+            let at = wall();
+            nip59::wrap(
+                &Rumor::from_signed_event(ev),
+                &guardian_sk(),
+                self.machine.as_bytes(),
+                &WrapRandomness {
+                    ephemeral_secret: [seed; 32],
+                    seal_nonce: [seed.wrapping_add(1); 32],
+                    wrap_nonce: [seed.wrapping_add(2); 32],
+                    seal_created_at: at,
+                    wrap_created_at: at,
+                },
+            )
+            .expect("wrap")
+        }
+
+        /// Send `wrap` over the link and return the ward's signed ACK result
+        /// (the carrier verified its signature before recording it).
+        fn send_acked(&self, wrap: &NostrEvent) -> AckResult {
+            assert_eq!(
+                self.carrier.send(&self.machine, wrap.clone()),
+                SendState::Sent
+            );
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                for e in self.carrier.next_events(Duration::from_millis(200)) {
+                    if let GuardianEvent::Delivery {
+                        wrap: id,
+                        state: DeliveryState::Acked(r),
+                        ..
+                    } = e
+                    {
+                        if id == wrap.id {
+                            return r;
+                        }
+                    }
+                }
+            }
+            panic!("no ACK for {}", wrap.id.to_hex());
+        }
+
+        /// The first inbound inner event of `kind` in the carrier's inbox,
+        /// opened with the guardian key.
+        fn inbox_rumor(&self, kind: u16) -> Option<Rumor> {
+            self.carrier.inbox().into_iter().find_map(|e| {
+                nip59::unwrap_with_author(&e.wrap, &guardian_sk(), wall(), nip59::MAX_JITTER_SECS)
+                    .ok()
+                    .map(|(r, _)| r)
+                    .filter(|r| r.kind == kind)
+            })
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            self.carrier.shutdown();
+            *self.home.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            for d in &self.dirs {
+                let _ = std::fs::remove_dir_all(d);
+            }
+        }
+    }
+
+    fn open_all_week(issued_at: u64) -> serde_json::Value {
+        let day = json!([{"start": "00:00", "end": "23:59"}]);
+        json!({
+            "v": 1, "tz": "Europe/London",
+            "weekly": {"mon": day, "tue": day, "wed": day, "thu": day,
+                       "fri": day, "sat": day, "sun": day},
+            "issuedAt": issued_at
+        })
+    }
+
+    #[test]
+    fn a_clause_over_the_link_is_stored_mirrored_and_acked_applied() {
+        let rig = Rig::new(concat!(module_path!(), line!()));
+        let t0 = rig.t0;
+        let subj = rig.machine.to_hex();
+        assert!(!rig.with(|w| locked(&w.tick(Some(&subj), true, t0 as i64, None))));
+
+        let sched = ClauseBuilder::schedule(t0 - 50)
+            .body(json!({"v":1,"tz":"Europe/London","paused":true,"weekly":{},"issuedAt": t0 - 50}))
+            .build(&rig.guardian);
+        let wrap = rig.wrap(&sched, 20);
+        assert_eq!(rig.send_acked(&wrap), AckResult::Applied);
+
+        rig.with(|w| {
+            assert!(
+                locked(&w.tick(Some(&subj), true, t0 as i64 + 1, None)),
+                "the paused schedule from the link is enforced"
+            );
+            let mirrored = w
+                .machine_clauses
+                .get_clause(charter_proto::ClauseKind::Schedule.store_key())
+                .unwrap()
+                .expect("mirrored into the machine-wide store");
+            assert!(mirrored.contains("\"paused\":true"), "{mirrored}");
+        });
+        assert_eq!(rig.state()["appliedSeq"], 1);
+
+        // The same clause in a fresh wrap (the carrier records one ACK per
+        // wrap id): verified, already held.
+        assert_eq!(rig.send_acked(&rig.wrap(&sched, 25)), AckResult::Unchanged);
+        assert_eq!(
+            rig.state()["appliedSeq"],
+            1,
+            "only `applied` moves the count"
+        );
+
+        // A clause signed by someone else is refused, and changes nothing.
+        let forger = TestGuardian::from_seed(0x22);
+        let forged = ClauseBuilder::schedule(t0 - 10)
+            .body(json!({"v":1,"tz":"Europe/London","weekly":{},"issuedAt": t0 - 10}))
+            .build(&forger);
+        assert_eq!(rig.send_acked(&rig.wrap(&forged, 30)), AckResult::Refused);
+        assert!(rig.with(|w| locked(&w.tick(Some(&subj), true, t0 as i64 + 2, None))));
+    }
+
+    #[test]
+    fn a_request_reaches_the_carrier_with_relays_unreachable() {
+        use charter_primitives::kinds::CHARTER_DEVICE_REQUEST;
+        let rig = Rig::new(concat!(module_path!(), line!()));
+        let req_id = rig
+            .with(|w| {
+                w.submit_request(
+                    "time.extend",
+                    "{\"minutesRequested\":15,\"reason\":\"\",\"limitHit\":\"budget\"}",
+                )
+            })
+            .expect("submit");
+        assert!(
+            rig.wait(10, || rig.inbox_rumor(CHARTER_DEVICE_REQUEST).is_some()),
+            "the REQUEST never reached the carrier"
+        );
+        let r = rig.inbox_rumor(CHARTER_DEVICE_REQUEST).unwrap();
+        let p = charter_proto::RequestPayload::from_json(&r.content).unwrap();
+        assert_eq!(p.req_id.to_hex(), req_id);
+        // The relay set reaches nothing (`SwitchRelay` is down), so the link
+        // carried it alone.
+        assert!(!rig.relay.up.load(Ordering::SeqCst));
+        // The carrier's OK takes it out of the ward's link outbox.
+        assert!(
+            rig.wait(10, || rig.state()["outbox"] == 0),
+            "{}",
+            rig.state()
+        );
+    }
+
+    #[test]
+    fn a_time_extend_grant_over_the_link_extends_once_despite_the_relay_copy() {
+        use charter_primitives::kinds::CHARTER_DEVICE_REQUEST;
+        use charter_proto::OpType;
+        use charter_spine::lifecycle::RequestState;
+        use charter_verify::test_support::GrantBuilder;
+
+        let rig = Rig::new(concat!(module_path!(), line!()));
+        let t0 = rig.t0;
+        let subj = rig.machine.to_hex();
+        let sched = ClauseBuilder::schedule(t0 - 500)
+            .body(open_all_week(t0 - 500))
+            .build(&rig.guardian);
+        let budget = ClauseBuilder::budget(t0 - 499)
+            .body(json!({"v": 1, "tz": "Europe/London", "dailyMinutes": 1, "issuedAt": t0 - 499}))
+            .build(&rig.guardian);
+        assert_eq!(rig.send_acked(&rig.wrap(&sched, 20)), AckResult::Applied);
+        assert_eq!(rig.send_acked(&rig.wrap(&budget, 30)), AckResult::Applied);
+
+        // Burn the minute, then ask for more.
+        rig.with(|w| {
+            w.tick(Some(&subj), true, t0 as i64, None);
+            assert!(locked(&w.tick(Some(&subj), true, t0 as i64 + 300, None)));
+            w.submit_request(
+                "time.extend",
+                "{\"minutesRequested\":30,\"reason\":\"\",\"limitHit\":\"budget\"}",
+            )
+            .expect("submit");
+        });
+        assert!(rig.wait(10, || rig.inbox_rumor(CHARTER_DEVICE_REQUEST).is_some()));
+        let request = charter_proto::RequestPayload::from_json(
+            &rig.inbox_rumor(CHARTER_DEVICE_REQUEST).unwrap().content,
+        )
+        .unwrap();
+        assert_eq!(request.op, OpType::TimeExtend);
+
+        let now = wall();
+        let mut gb = GrantBuilder::install_allow(request.req_id, request.nonce)
+            .op(OpType::TimeExtend)
+            .params(json!({"minutesGranted": 30, "limitHit": "budget"}))
+            .ts(now)
+            .exp(now + 240);
+        gb.created_at = now;
+        let grant = gb.build(&rig.guardian);
+        let grant_wrap = rig.wrap(&grant, 40);
+        let seq_before = rig.state()["appliedSeq"].as_u64().unwrap();
+        assert_eq!(rig.send_acked(&grant_wrap), AckResult::Applied);
+        assert_eq!(rig.state()["appliedSeq"].as_u64().unwrap(), seq_before + 1);
+
+        let first = rig.with(|w| {
+            let d = w.tick(Some(&subj), true, t0 as i64 + 310, None);
+            assert!(!locked(&d), "the extension over the link unlocks");
+            assert_eq!(w.list_requests(10)[0].state, RequestState::Enacted);
+            d[0].remaining_secs
+        });
+
+        // Relays come back and serve the identical wrap: nothing changes.
+        rig.relay.up.store(true, Ordering::SeqCst);
+        rig.relay.store.inject(grant_wrap.clone());
+        let r = poll_once_locked(rig.home, wall());
+        assert!(r.polled, "{}", r.reason);
+        let second = rig.with(|w| {
+            let d = w.tick(Some(&subj), true, t0 as i64 + 311, None);
+            assert_eq!(w.list_requests(10)[0].state, RequestState::Enacted);
+            d[0].remaining_secs
+        });
+        assert!(
+            second <= first,
+            "the relay copy must not extend again: {first}s then {second}s"
+        );
+        // And the grant again in a fresh wrap: already answered.
+        assert_eq!(rig.send_acked(&rig.wrap(&grant, 45)), AckResult::Unchanged);
+    }
+
+    #[test]
+    fn a_release_over_the_link_unpairs_but_a_forged_one_does_not() {
+        use charter_primitives::kinds::CHARTER_DEVICE_RELEASE;
+        let rig = Rig::new(concat!(module_path!(), line!()));
+        let t0 = rig.t0;
+        let subj = rig.machine.to_hex();
+        let sched = ClauseBuilder::schedule(t0 - 50)
+            .body(json!({"v":1,"tz":"Europe/London","paused":true,"weekly":{},"issuedAt": t0 - 50}))
+            .build(&rig.guardian);
+        assert_eq!(rig.send_acked(&rig.wrap(&sched, 20)), AckResult::Applied);
+        assert!(rig.with(|w| locked(&w.tick(Some(&subj), true, t0 as i64, None))));
+
+        let release = |signer: &charter_sys::signer::SeedSigner| {
+            let payload = charter_proto::ReleasePayload {
+                v: 1,
+                machine: rig.machine,
+                issued_at: t0,
+            };
+            charter_verify::test_support::sign_event(
+                signer,
+                CHARTER_DEVICE_RELEASE,
+                t0,
+                vec![charter_primitives::kinds::marker_tag()],
+                payload.to_json(),
+            )
+        };
+
+        // Sealed with the guardian's key but signed by an attacker.
+        let attacker = charter_sys::signer::SeedSigner::from_seed(0x99);
+        let forged = rig.wrap(&release(&attacker), 40);
+        assert_eq!(rig.send_acked(&forged), AckResult::Refused);
+        rig.with(|w| {
+            assert!(w.pairing_state().paired, "a forged release must not unpair");
+            assert!(locked(&w.tick(Some(&subj), true, t0 as i64 + 1, None)));
+        });
+        assert_eq!(rig.state()["running"], true);
+        assert!(
+            rig.dirs[0].join("link-peer.json").exists(),
+            "handshake remembered"
+        );
+
+        // The guardian's own release, over the link alone.
+        let genuine = rig.wrap(&release(&rig.guardian.signer), 50);
+        let seq_before = rig.state()["appliedSeq"].as_u64().unwrap();
+        assert_eq!(rig.send_acked(&genuine), AckResult::Applied);
+        rig.with(|w| {
+            assert!(
+                !w.pairing_state().paired,
+                "unpaired by the guardian release"
+            );
+            assert!(!locked(&w.tick(Some(&subj), true, t0 as i64 + 2, None)));
+        });
+        let st = rig.state();
+        assert_eq!(
+            st["running"], false,
+            "the link stops with the pairing: {st}"
+        );
+        assert_eq!(st["appliedSeq"].as_u64().unwrap(), seq_before + 1);
+        // Its remembered guardian address goes with it once it has stopped.
+        let peer = rig.dirs[0].join("link-peer.json");
+        assert!(
+            rig.wait(10, || !peer.exists()),
+            "link state wiped on unpair"
+        );
     }
 }

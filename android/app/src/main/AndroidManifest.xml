@@ -39,6 +39,10 @@
     <!-- Charter Hotspot: app-hosted local-only AP (fail-closed guest network). -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Local link: the ward's own MulticastLock while it browses for the
+         guardian carrier (a foreground-service process gets no automatic
+         one). Normal permission, install-time. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
