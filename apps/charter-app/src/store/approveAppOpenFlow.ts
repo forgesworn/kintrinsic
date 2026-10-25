@@ -24,7 +24,10 @@ export interface ApproveAppOpenFlowDeps {
 }
 
 export type ApproveAppOpenOutcome =
-  | { outcome: "approved" }
+  /** `holdQueued` is set when the hold clause was signed but the carrier is
+   *  holding it (wholly or for some devices) for the home network: it will
+   *  still reach the device and open the app, so the approval stands. */
+  | { outcome: "approved"; holdQueued?: Extract<ClauseDelivery, { outcome: "queued" }> }
   /** The Decision echo's own confirm was declined — the hold DID land (the
    *  app opens), only the courtesy "closes the loop" signal didn't send. Not
    *  an error: nothing to refuse, nothing false was claimed either. */
@@ -33,13 +36,10 @@ export type ApproveAppOpenOutcome =
    *  step is allowed to proceed past this. */
   | { outcome: "refused"; message: string };
 
-/** Human copy for a clause that didn't send, by why. */
+/** Human copy for a clause that was never signed or had nowhere to go. */
 function refusalMessage(
-  delivery: Extract<ClauseDelivery, { outcome: "cancelled" | "undelivered" | "queued" }>,
+  delivery: Extract<ClauseDelivery, { outcome: "cancelled" | "undelivered" }>,
 ): string {
-  // Held by the carrier for a ward that isn't on the home network: not a
-  // failure to sign, but not delivered either — the ask stays pending.
-  if (delivery.outcome === "queued") return delivery.message;
   return delivery.outcome === "cancelled"
     ? "Nothing was changed — the hold wasn't signed."
     : "Can't reach their device right now, so nothing was changed. Turn on parent approval, then try again.";
@@ -57,10 +57,16 @@ export async function runApproveAppOpenFlow(
   deps: ApproveAppOpenFlowDeps,
 ): Promise<ApproveAppOpenOutcome> {
   const delivery = await deps.saveHold();
-  if (delivery.outcome !== "sent") {
+  // A hold the carrier is keeping for the home network IS signed and WILL
+  // reach the device and open the app. Calling that "nothing was changed"
+  // would be untrue, and leaving the ask pending invites a second signature —
+  // so it goes on to the grant, which is then also queued or delivered.
+  if (delivery.outcome !== "sent" && delivery.outcome !== "queued") {
     return { outcome: "refused", message: refusalMessage(delivery) };
   }
   const ok = await deps.sendDecision();
   if (!ok) return { outcome: "decision-cancelled" };
-  return { outcome: "approved" };
+  return delivery.outcome === "queued"
+    ? { outcome: "approved", holdQueued: delivery }
+    : { outcome: "approved" };
 }

@@ -2472,7 +2472,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // the separately-tested orchestrator rather than reimplementing the
       // sequencing inline here.
       let holdWraps: string[] = [];
-      let waiting = "";
+      let decisionWaiting: string[] = [];
       const result = await runApproveAppOpenFlow({
         saveHold: async () => {
           const delivery = await savePolicy(req.childId, devicePolicy.id, composed);
@@ -2481,7 +2481,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         },
         sendDecision: async () => {
           const sent = await signDecisionIfConnected(id, "approved", decisionContext(req, minutesGranted));
-          if (sent.status === "queued") waiting = waitingAnswerNote(sent.devices);
+          if (sent.status === "queued") decisionWaiting = sent.devices;
           return sent.status !== "cancelled";
         },
       });
@@ -2496,6 +2496,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       if (req.reqId && holdWraps.length > 0) {
         dispatch({ type: "LINK_LOCAL_WRAPS", wraps: holdWraps, reqId: req.reqId });
       }
+      // Held clause and/or held grant: the approval stands, and the log says
+      // who it is still waiting for.
+      const waitingDevices = [...(result.holdQueued?.devices ?? []), ...decisionWaiting];
+      const waiting =
+        result.holdQueued || decisionWaiting.length > 0 ? waitingAnswerNote([...new Set(waitingDevices)]) : "";
       dispatch({ type: "SET_REQUEST_STATUS", id, status: "approved" });
       // Belt and braces (F1 review): resolve through `identityDisplayLabel`
       // rather than trust `req.appLabel`/`req.appId` verbatim.

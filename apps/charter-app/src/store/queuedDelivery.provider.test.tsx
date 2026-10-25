@@ -306,6 +306,72 @@ describe("queued home-network delivery", () => {
       expect(container.querySelector(".banner-warn")).not.toBeNull();
     });
 
+    describe("an app-open approval whose hold clause is queued", () => {
+      const OPEN_REQ = "7a".repeat(32);
+      const openAsk = (): ChildRequest => ({
+        ...ask(Date.now() - 60_000),
+        kind: "app.open",
+        title: "Robin's laptop asks to open Minecraft",
+        appId: "com.mojang.minecraftpe",
+        appLabel: "Minecraft",
+        reqId: OPEN_REQ,
+        limitHit: undefined,
+        minutesRequested: undefined,
+      });
+      const withApps = (): Child => {
+        const c = child([laptop()]);
+        c.policies[0] = {
+          ...c.policies[0],
+          apps: { enabled: true, posture: "blocklist", blocked: ["com.mojang.minecraftpe"], allowed: [] },
+        } as Child["policies"][number];
+        return c;
+      };
+      const approveOpen = async () => {
+        await act(async () => {
+          await api.approveAppOpen("r1", Math.floor(Date.now() / 1000) + 1800, "30m");
+        });
+        await tick(50);
+      };
+      const wrapOf = (kind: "grant" | "clause") =>
+        api.state.localDeliveries!.find((r) => r.kind === kind && r.reqId === OPEN_REQ)!.wrap;
+
+      it("counts as answered (not 'nothing was changed'), waiting for the home network, and is applied only when grant AND clause are acked", async () => {
+        await mount({ children: [withApps()], requests: [openAsk()] }, <AnsweredDelivery />);
+        await approveOpen();
+
+        expect(request().status).toBe("approved");
+        expect(text()).toContain("Waiting for Robin's laptop to join the home network.");
+        expect(activity().some((a) => a.startsWith("You let them open Minecraft") && a.endsWith("waiting for Robin's laptop to join the home network"))).toBe(true);
+        expect(sentWraps).toHaveLength(2); // the hold clause, then the grant
+
+        wrapState.set(wrapOf("grant"), "applied");
+        await tick(3_100);
+        expect(text()).not.toContain("Applied on");
+
+        wrapState.set(wrapOf("clause"), "applied");
+        await tick(3_100);
+        expect(text()).toContain("Applied on Robin's laptop");
+      });
+
+      it("cannot be signed again once answered", async () => {
+        await mount({ children: [withApps()], requests: [openAsk()] }, <AnsweredDelivery />);
+        await approveOpen();
+        await approveOpen();
+        expect(sentWraps).toHaveLength(2);
+      });
+
+      it("a genuine failure (no relay, no local route at all) still refuses and leaves the ask pending", async () => {
+        sendState = () => "rejected";
+        await mount({ children: [withApps()], requests: [openAsk()] }, <AnsweredDelivery />);
+        await expect(
+          act(async () => {
+            await api.approveAppOpen("r1", Math.floor(Date.now() / 1000) + 1800, "30m");
+          }),
+        ).rejects.toThrow(/Couldn't reach any relay/);
+        expect(request().status).toBe("pending");
+      });
+    });
+
     it("a plain relay failure with no local queue keeps today's behaviour: the ask stays pending", async () => {
       sendState = () => "rejected"; // the carrier did not take it either
       await mount({ children: [child([laptop()])], requests: [ask(Date.now() - 60_000)] }, <AnsweredDelivery />);
