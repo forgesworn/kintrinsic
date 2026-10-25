@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -59,6 +59,10 @@ pub struct WardLinkConfig {
     /// The pinned guardian: the only key this ward will authenticate to.
     pub guardian: PubKey,
     pub state_dir: PathBuf,
+    /// Accept loopback (127.0.0.0/8) guardian addresses. Tests only: the
+    /// spec admits private and link-local addresses, and on a shared machine
+    /// a loopback "guardian" is any local process. Production passes `false`.
+    pub allow_loopback: bool,
 }
 
 impl std::fmt::Debug for WardLinkConfig {
@@ -67,6 +71,7 @@ impl std::fmt::Debug for WardLinkConfig {
             .field("machine_sk", &"<redacted>")
             .field("guardian", &self.guardian)
             .field("state_dir", &self.state_dir)
+            .field("allow_loopback", &self.allow_loopback)
             .finish()
     }
 }
@@ -194,6 +199,7 @@ struct Inner {
     machine: PubKey,
     guardian: PubKey,
     dir: PathBuf,
+    allow_loopback: bool,
     rt: tokio::runtime::Handle,
     ingest: Arc<dyn WardIngest>,
     state: Mutex<State>,
@@ -217,13 +223,25 @@ impl LocalSink for Outbox {
     }
 }
 
-/// Only addresses the guardian listener would itself accept a ward from;
-/// loopback is allowed (it is this machine).
-fn usable(a: &SocketAddrV4) -> bool {
-    a.port() != 0 && peer_address_allowed((*a.ip()).into(), true)
+/// Only addresses the guardian listener would itself accept a ward from:
+/// private or link-local, and loopback only when `allow_loopback` (tests).
+fn usable(a: &SocketAddrV4, allow_loopback: bool) -> bool {
+    a.port() != 0 && peer_address_allowed((*a.ip()).into(), allow_loopback)
 }
 
 impl WardLink {
+    /// Every file this link keeps under `state_dir` (its outbox and the last
+    /// guardian address that authenticated, plus their write-in-progress
+    /// temporaries), for a platform to delete on unpair once the link has
+    /// stopped. Moved-aside corrupt copies (`<name>.corrupt-<unix>`) are not
+    /// listed; they are never read back.
+    pub fn state_files(state_dir: &Path) -> Vec<PathBuf> {
+        [OUTBOX_FILE, PEER_FILE]
+            .iter()
+            .flat_map(|f| [state_dir.join(f), state_dir.join(format!("{f}.tmp"))])
+            .collect()
+    }
+
     /// Load the outbox and remembered guardian address from `state_dir` and
     /// start connecting on `rt`.
     pub fn spawn(
@@ -263,13 +281,14 @@ impl WardLink {
             .value
             .filter(|p| p.guardian == cfg.guardian)
             .and_then(|p| p.addr.parse::<SocketAddrV4>().ok())
-            .filter(usable);
+            .filter(|a| usable(a, cfg.allow_loopback));
 
         let inner = Arc::new(Inner {
             sk: cfg.machine_sk,
             machine,
             guardian: cfg.guardian,
             dir,
+            allow_loopback: cfg.allow_loopback,
             rt: rt.clone(),
             ingest,
             outbox_file,
@@ -300,9 +319,10 @@ impl WardLink {
     /// Replace the discovered guardian addresses (the remembered address
     /// stays a candidate) and retry at once.
     pub fn set_discovered(&self, addrs: Vec<SocketAddrV4>) {
+        let allow_loopback = self.inner.allow_loopback;
         let mut st = lock(&self.inner.state);
         let mut d: Vec<SocketAddrV4> = Vec::new();
-        for a in addrs.into_iter().filter(usable) {
+        for a in addrs.into_iter().filter(|a| usable(a, allow_loopback)) {
             if !d.contains(&a) {
                 d.push(a);
             }
@@ -771,9 +791,47 @@ mod tests {
 
     #[test]
     fn usable_addresses() {
-        assert!(usable(&"192.168.1.5:47615".parse().unwrap()));
-        assert!(usable(&"127.0.0.1:47615".parse().unwrap()));
-        assert!(!usable(&"192.168.1.5:0".parse().unwrap()));
-        assert!(!usable(&"8.8.8.8:47615".parse().unwrap()));
+        for loopback in [false, true] {
+            assert!(usable(&"192.168.1.5:47615".parse().unwrap(), loopback));
+            assert!(usable(&"10.0.0.2:47615".parse().unwrap(), loopback));
+            assert!(usable(&"169.254.3.4:47615".parse().unwrap(), loopback));
+            assert!(!usable(&"192.168.1.5:0".parse().unwrap(), loopback));
+            assert!(!usable(&"8.8.8.8:47615".parse().unwrap(), loopback));
+        }
+        // Loopback is opt-in (tests only).
+        assert!(!usable(&"127.0.0.1:47615".parse().unwrap(), false));
+        assert!(usable(&"127.0.0.1:47615".parse().unwrap(), true));
+    }
+
+    /// However many addresses discovery hands over, the remembered guardian
+    /// address stays the first candidate (a flood cannot crowd it out).
+    #[test]
+    fn the_remembered_peer_survives_a_flood_of_discovered_addresses() {
+        let remembered: SocketAddrV4 = "192.168.1.200:47615".parse().unwrap();
+        let st = State {
+            closed: false,
+            discovered: (1..=40)
+                .map(|i| SocketAddrV4::new([10, 0, 0, i].into(), 1))
+                .collect(),
+            remembered: Some(remembered),
+            backoff: HashMap::new(),
+            connecting: HashSet::new(),
+            sessions: HashMap::new(),
+            next_session: 1,
+            outbox: Vec::new(),
+            next_seq: 1,
+            last_error: None,
+        };
+        let c = st.candidates();
+        assert_eq!(c.len(), MAX_CANDIDATES);
+        assert_eq!(c[0], remembered);
+    }
+
+    #[test]
+    fn state_files_are_the_outbox_and_the_remembered_peer() {
+        let dir = Path::new("/state");
+        let files = WardLink::state_files(dir);
+        assert!(files.contains(&dir.join(OUTBOX_FILE)));
+        assert!(files.contains(&dir.join(PEER_FILE)));
     }
 }

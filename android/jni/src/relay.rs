@@ -47,10 +47,19 @@ pub trait WardenRelay: Send + Sync {
     fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String>;
     /// Retry parked offline wraps (the §2.2 spool); returns (sent, remaining).
     fn drain_outbox(&self, now: u64) -> (usize, usize);
-    /// Gift-wrap + publish a device AUDIT (kind 31000) to the guardian —
-    /// tags only, content always empty. Used by the break-glass override so
-    /// an emergency unlock is LOUD (contract §Break-glass override event).
-    fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) -> Result<usize, String>;
+    /// Gift-wrap (without publishing) a device AUDIT (kind 31000) to the
+    /// guardian — tags only, content always empty. Used by the break-glass
+    /// override so an emergency unlock is LOUD (contract §Break-glass
+    /// override event). The wrap is offered to the local link here, once;
+    /// the caller keeps it and retries it with [`Self::publish_wrap`].
+    fn build_audit_wrap(
+        &self,
+        tags: Vec<Vec<String>>,
+        now: u64,
+    ) -> Option<charter_primitives::NostrEvent>;
+    /// Publish an already-built wrap verbatim (not offered to the local link
+    /// again). Returns how many relays accepted; none is an Err.
+    fn publish_wrap(&self, wrap: charter_primitives::NostrEvent) -> Result<usize, String>;
     /// Bring-up diagnostic: how many RAW gift-wraps the relay holds for this
     /// machine since `since` — distinguishes "nothing arrives" from "wraps
     /// arrive but fail to unwrap" without exposing their contents.
@@ -172,8 +181,16 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         Ok(accepted)
     }
 
-    fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) -> Result<usize, String> {
-        let outcomes = self.rt.block_on(self.transport.emit_audit(tags, now));
+    fn build_audit_wrap(
+        &self,
+        tags: Vec<Vec<String>>,
+        now: u64,
+    ) -> Option<charter_primitives::NostrEvent> {
+        self.transport.build_audit_wrap(tags, now)
+    }
+
+    fn publish_wrap(&self, wrap: charter_primitives::NostrEvent) -> Result<usize, String> {
+        let outcomes = self.rt.block_on(self.transport.publish_prebuilt(wrap));
         let accepted = outcomes
             .iter()
             .filter(|(_, o)| matches!(o, PublishOutcome::Ok))

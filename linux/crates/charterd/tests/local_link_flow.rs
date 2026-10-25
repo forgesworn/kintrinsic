@@ -200,6 +200,7 @@ async fn rig(name: &str, enactors: EnactorRegistry) -> Rig {
             machine_sk: Zeroizing::new(machine_sk()),
             guardian: guardian.pubkey(),
             state_dir: wdir.clone(),
+            allow_loopback: true,
         },
         BrokerIngest::new(broker.clone(), control.clone()),
         &rt,

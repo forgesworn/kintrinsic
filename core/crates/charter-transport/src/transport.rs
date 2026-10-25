@@ -368,16 +368,12 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         self.publish_rumor(&rumor, now).await
     }
 
-    /// Emit a gift-wrapped AUDIT. **Content is always empty** (privacy); only
-    /// routing/classification tags ride along.
-    pub async fn emit_audit(
-        &self,
-        tags: Vec<Vec<String>>,
-        now: u64,
-    ) -> Vec<(RelayUrl, PublishOutcome)> {
+    /// The AUDIT rumor: the marker plus `tags`. **Content is always empty**
+    /// (privacy); only routing/classification tags ride along.
+    fn audit_rumor(&self, tags: Vec<Vec<String>>, now: u64) -> Rumor {
         let mut all_tags = vec![kinds::marker_tag()];
         all_tags.extend(tags);
-        let rumor = Rumor {
+        Rumor {
             id: None,
             pubkey: self.machine_pk,
             created_at: now,
@@ -385,8 +381,28 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             tags: all_tags,
             content: String::new(), // always empty
             sig: None,
-        };
+        }
+    }
+
+    /// Emit a gift-wrapped AUDIT. **Content is always empty** (privacy); only
+    /// routing/classification tags ride along.
+    pub async fn emit_audit(
+        &self,
+        tags: Vec<Vec<String>>,
+        now: u64,
+    ) -> Vec<(RelayUrl, PublishOutcome)> {
+        let rumor = self.audit_rumor(tags, now);
         self.publish_rumor(&rumor, now).await
+    }
+
+    /// Build (without publishing) the gift-wrapped AUDIT, for a platform
+    /// that journals an audit until a relay takes it: build it ONCE, keep the
+    /// wrap with the journal entry and retry it with
+    /// [`Self::publish_prebuilt`]. Offered to the local sink here, at build
+    /// time, like [`Self::build_request_wrap`] — so the guardian sees one
+    /// event id however many rounds the relays stay down.
+    pub fn build_audit_wrap(&self, tags: Vec<Vec<String>>, now: u64) -> Option<NostrEvent> {
+        self.build_and_offer(&self.audit_rumor(tags, now), now)
     }
 
     /// Wrap + publish a STATUS (kind 31114, content = the `StatusPayload` JSON),

@@ -121,6 +121,7 @@ fn spawn_ward(
             machine_sk: zsk(m),
             guardian: pinned,
             state_dir: dir.to_path_buf(),
+            allow_loopback: true,
         },
         ingest,
         rt.handle(),
@@ -1211,6 +1212,82 @@ fn a_restarted_ward_uses_the_remembered_guardian_address() {
     assert_eq!(w3.snapshot().remembered, None);
 }
 
+/// L8: loopback is opt-in. A production ward (`allow_loopback: false`) takes
+/// no loopback candidate from discovery, and a remembered loopback guardian
+/// address is not used either.
+#[test]
+fn a_ward_without_loopback_refuses_loopback_candidates_and_remembered_peers() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let m = pk("m");
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    // A test ward (loopback allowed) connects and remembers 127.0.0.1.
+    let w1 = spawn_ward(
+        &rt,
+        "m",
+        pk("g"),
+        wdir.path(),
+        Recorder::new(AckResult::Applied),
+    );
+    w1.set_discovered(vec![lo(guardian.port())]);
+    assert!(wait_until(5, || w1.snapshot().connected));
+    w1.shutdown();
+    drop(w1);
+    assert!(wait_until(5, || guardian.sessions().is_empty()));
+
+    let strict = WardLink::spawn(
+        WardLinkConfig {
+            machine_sk: zsk("m"),
+            guardian: pk("g"),
+            state_dir: wdir.path().to_path_buf(),
+            allow_loopback: false,
+        },
+        Recorder::new(AckResult::Applied),
+        rt.handle(),
+    )
+    .unwrap();
+    assert_eq!(
+        strict.snapshot().remembered,
+        None,
+        "a remembered loopback peer must not be used"
+    );
+    strict.set_discovered(vec![lo(guardian.port()), lo(1)]);
+    assert_eq!(strict.snapshot().candidates, 0);
+    // A private address is still taken.
+    strict.set_discovered(vec![
+        lo(guardian.port()),
+        "192.168.1.5:47615".parse().unwrap(),
+    ]);
+    assert_eq!(strict.snapshot().candidates, 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(guardian.sessions().is_empty(), "no session over loopback");
+    strict.shutdown();
+}
+
+/// What a platform deletes on unpair covers everything the link wrote.
+#[test]
+fn state_files_cover_every_file_the_ward_link_writes() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let m = pk("m");
+    let g = pk("g");
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    let ward = spawn_ward(&rt, "m", g, wdir.path(), Recorder::new(AckResult::Applied));
+    ward.sink()
+        .offer(offer(kinds::CHARTER_DEVICE_AUDIT, None, wrap(&g, 1)));
+    ward.set_discovered(vec![lo(guardian.port())]);
+    assert!(wait_until(5, || ward.snapshot().connected));
+    let outbox = wdir.path().join("link-outbox.json");
+    let peer = wdir.path().join("link-peer.json");
+    assert!(wait_until(5, || outbox.exists() && peer.exists()));
+    ward.shutdown();
+    let listed = WardLink::state_files(wdir.path());
+    for entry in std::fs::read_dir(wdir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        assert!(listed.contains(&path), "{path:?} is not in state_files");
+    }
+}
+
 #[test]
 fn preferred_port_falls_back_when_taken() {
     let rt = rt();
@@ -1326,6 +1403,7 @@ fn an_ingest_in_flight_finishes_when_the_ward_shuts_down() {
             machine_sk: zsk("m"),
             guardian: pk("g"),
             state_dir: wdir.path().to_path_buf(),
+            allow_loopback: true,
         },
         slow.clone(),
         rt.handle(),

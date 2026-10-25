@@ -227,6 +227,9 @@ pub struct Warden {
     /// The lock this warden lives behind, for the link's ingest to reach
     /// back into: `&WARDEN` in production, a test's own in host tests.
     link_home: crate::link::WardenHome,
+    /// Whether the link may dial a loopback guardian. Only host tests (a
+    /// carrier on 127.0.0.1) turn it on; production keeps it `false`.
+    link_allow_loopback: bool,
     /// Machine-wide clause mirror of the sole ward's clauses — what
     /// `time_extend_eod` reads for the today-only grant cap (the Linux
     /// single-ward layout).
@@ -329,6 +332,7 @@ impl Warden {
             link_gen: 0,
             link_applied_seq: 0,
             link_home: &WARDEN,
+            link_allow_loopback: false,
             mode: EnforceMode::parse(enforce_mode),
             enforcer: EnforcerCore::new(),
             usage: None,
@@ -403,6 +407,7 @@ impl Warden {
             sk,
             guardian,
             self.base.clone(),
+            self.link_allow_loopback,
         ) {
             Ok(l) => self.link = Some(l),
             Err(e) => eprintln!("charter-link: not started: {e}"),
@@ -1752,6 +1757,8 @@ impl Warden {
         R: charter_sys::relay::RelayTransport + Send + Sync + Clone + 'static,
     {
         self.link_home = home;
+        // The test carrier listens on 127.0.0.1.
+        self.link_allow_loopback = true;
         self.start_link();
         if self.link.is_none() {
             return Err("link did not start".into());
@@ -3705,26 +3712,33 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
         }
     };
 
-    // Phase 3b (unlocked): flush any spooled break-glass audits — the ward's
-    // emergency unlock happened immediately; this is the LOUD half catching
-    // up (offline it waited here, durably).
+    // Phase 3b: flush any spooled break-glass audits — the ward's emergency
+    // unlock happened immediately; this is the LOUD half catching up
+    // (offline it waited here, durably). Each audit's wrap is built ONCE
+    // (locked: the spool is read-modify-written beside `break_glass`, and the
+    // build is local crypto plus the link outbox offer) and kept with it;
+    // the relays (unlocked) get that identical wrap every round until one
+    // takes it. Rebuilding per round made a new event — and a new "override"
+    // alert on the guardian's phone over the local link — every ~15 s.
     {
-        let pending = guard(lock)
+        let wraps = guard(lock)
             .as_ref()
-            .map(|w| w.break_glass.pending_audits())
+            .map(|w| {
+                w.break_glass
+                    .wraps_to_publish(|tags| relay.build_audit_wrap(tags.to_vec(), now))
+            })
             .unwrap_or_default();
-        if !pending.is_empty() {
-            let mut all_sent = true;
-            for tags in pending {
-                if relay.emit_audit(tags, now).is_err() {
-                    all_sent = false;
-                    break;
-                }
+        let mut sent = Vec::new();
+        for wrap in wraps {
+            let id = wrap.id;
+            if relay.publish_wrap(wrap).is_err() {
+                break;
             }
-            if all_sent {
-                if let Some(w) = guard(lock).as_ref() {
-                    w.break_glass.clear_audits();
-                }
+            sent.push(id);
+        }
+        if !sent.is_empty() {
+            if let Some(w) = guard(lock).as_ref() {
+                w.break_glass.mark_sent(&sent);
             }
         }
     }
@@ -5826,6 +5840,103 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&status_rumor.content).unwrap();
         assert_eq!(payload["machine"], machine.to_hex());
         assert_eq!(payload["locked"], true);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A break-glass audit journaled while the relays are down is built
+    /// ONCE: however many poll rounds it waits, the local link is offered one
+    /// wrap and every relay retry is that same event. (Rebuilding it per
+    /// round put a new wrap in the link outbox every ~15 s, and the guardian
+    /// raised a fresh "override" alert for each.)
+    #[test]
+    fn a_journaled_break_glass_audit_is_one_wrap_however_many_rounds_it_waits() {
+        use charter_link::{LocalOffer, LocalSink};
+        use charter_primitives::kinds::CHARTER_DEVICE_AUDIT;
+        use charter_sys::relay::MockRelayTransport;
+        use std::sync::Arc;
+
+        struct Offers(Mutex<Vec<LocalOffer>>);
+        impl LocalSink for Offers {
+            fn offer(&self, o: LocalOffer) {
+                self.0.lock().unwrap().push(o);
+            }
+        }
+
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        let t0 = IN_WINDOW as u64;
+        w.pair(&uri, t0 - 100).unwrap();
+        let sk = *w.machine_sk.clone().expect("machine key");
+        let sink = Arc::new(Offers(Mutex::new(Vec::new())));
+        let relays = vec!["wss://relay.example".to_string()];
+
+        // Every relay refuses.
+        let down = MockRelayTransport::new().with_failing_relay("wss://relay.example");
+        let relay = crate::relay::BlockingRelay::new(down, sk, guardian.pubkey(), relays.clone())
+            .unwrap()
+            .with_local_sink(Some(sink.clone() as Arc<dyn LocalSink>));
+        w.inject_relay(Arc::new(relay));
+        let res: serde_json::Value = serde_json::from_str(&w.break_glass(t0)).unwrap();
+        assert_eq!(res["allowed"], json!(true));
+        let lock = Mutex::new(Some(w));
+
+        for round in 0..4u64 {
+            assert!(poll_once_locked(&lock, t0 + 15 * round).polled);
+        }
+        let audits = |sink: &Offers| -> Vec<LocalOffer> {
+            sink.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|o| o.inner_kind == CHARTER_DEVICE_AUDIT)
+                .cloned()
+                .collect()
+        };
+        let offered = audits(&sink);
+        assert_eq!(offered.len(), 1, "one link-outbox entry for one override");
+        let spooled = {
+            let g = lock.lock().unwrap();
+            g.as_ref().unwrap().break_glass.entries()
+        };
+        assert_eq!(spooled.len(), 1, "still journaled: no relay took it");
+        assert_eq!(
+            spooled[0].wrap.as_ref().map(|w| w.id),
+            Some(offered[0].wrap.id),
+            "the journaled wrap is the one the link was offered"
+        );
+
+        // The relays come back: the SAME wrap is published, not a new one,
+        // and the link is not offered it again.
+        let up = MockRelayTransport::new();
+        let relay = crate::relay::BlockingRelay::new(up.clone(), sk, guardian.pubkey(), relays)
+            .unwrap()
+            .with_local_sink(Some(sink.clone() as Arc<dyn LocalSink>));
+        lock.lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .inject_relay(Arc::new(relay));
+        assert!(poll_once_locked(&lock, t0 + 60).polled);
+        assert!(
+            futures_events(&up)
+                .iter()
+                .any(|e| e.id == offered[0].wrap.id),
+            "the relays get the journaled wrap verbatim"
+        );
+        assert!(lock
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .break_glass
+            .entries()
+            .is_empty());
+        assert_eq!(audits(&sink).len(), 1, "no second offer");
         let _ = std::fs::remove_dir_all(&base);
     }
 

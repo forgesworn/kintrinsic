@@ -651,7 +651,8 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// `Event::Expire`, then bound the terminal history it just added to.
     ///
     /// Run at construction and at the **top** of every [`Broker::poll_once`] —
-    /// before the transport is asked for anything. The ordering is the point:
+    /// before the transport is asked for anything, and (after construction)
+    /// always under the handler turn, so it cannot race a grant mid-enact. The ordering is the point:
     /// `on_grant` only routes to a record that is still `Pending`, so sweeping
     /// first is what guarantees a grant delivered late (or redelivered inside
     /// the cursor lookback) cannot land on an ask that has already aged out.
@@ -1320,7 +1321,16 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // Age out stale Pending records BEFORE fetching anything: a grant
         // delivered (or redelivered) this round must not be able to land on an
         // ask that is already past its TTL. See `expire_stale_pending`.
-        self.expire_stale_pending();
+        //
+        // Under the handler turn, and never across relay IO: a local-link
+        // grant being enacted holds the turn while its record still reads
+        // `Pending` (the write-back comes at the end), so a sweep outside the
+        // turn could expire that record underneath it — memory `Expired`,
+        // disk `Enacted`, an ACK saying `applied`.
+        {
+            let _turn = self.handlers.lock().await;
+            self.expire_stale_pending();
+        }
         let now = self.now();
         let cursor = {
             let st = self.state.lock().expect("state lock");
@@ -1809,6 +1819,36 @@ mod ttl_and_caps_tests {
             ),
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    /// L1: the poll's TTL sweep waits for the handler turn. A local-link
+    /// grant mid-enact holds the turn while its record still reads Pending;
+    /// the sweep must not expire it underneath.
+    #[tokio::test]
+    async fn the_poll_sweep_waits_for_a_handler_turn_in_progress() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        let hex = ask(&b, MIA).await.expect("submitted").to_hex();
+        b.sys().mock_clock().advance_secs(PENDING_TTL_SECS);
+
+        // Someone (a link ingest) holds the turn.
+        let turn = b.handlers.lock().await;
+        let poll = b.poll_once();
+        tokio::pin!(poll);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut poll)
+                .await
+                .is_err(),
+            "the poll must wait for the turn"
+        );
+        assert_eq!(
+            state_of(&b, &hex),
+            RequestState::Pending,
+            "nothing may be expired while another handler holds the turn"
+        );
+        drop(turn);
+        poll.await;
+        assert_eq!(state_of(&b, &hex), RequestState::Expired);
     }
 
     #[tokio::test]

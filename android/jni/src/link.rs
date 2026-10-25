@@ -55,19 +55,17 @@ pub struct LinkHandle {
     state_dir: PathBuf,
 }
 
-/// The files `charter-link`'s ward keeps under its state dir (its outbox and
-/// the last guardian address that authenticated), wiped on unpair.
-const LINK_STATE_FILES: [&str; 2] = ["link-outbox.json", "link-peer.json"];
-
 impl LinkHandle {
     /// Start a link to `guardian` with its state (outbox, remembered
-    /// address) under `state_dir`.
+    /// address) under `state_dir`. `allow_loopback` is for host tests (a
+    /// carrier on 127.0.0.1); production passes `false`.
     pub fn spawn(
         home: WardenHome,
         gen: u64,
         machine_sk: [u8; 32],
         guardian: PubKey,
         state_dir: PathBuf,
+        allow_loopback: bool,
     ) -> Result<LinkHandle, String> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -87,6 +85,7 @@ impl LinkHandle {
                 machine_sk: zeroize::Zeroizing::new(machine_sk),
                 guardian,
                 state_dir: state_dir.clone(),
+                allow_loopback,
             },
             ingest,
             rt.handle(),
@@ -142,8 +141,10 @@ impl LinkHandle {
         let wipe = forget.then(|| self.state_dir.clone());
         let forget_files = move |dir: &Option<PathBuf>| {
             if let Some(dir) = dir {
-                for f in LINK_STATE_FILES {
-                    let _ = std::fs::remove_file(dir.join(f));
+                // charter-link's own list of what it keeps (outbox and the
+                // remembered guardian address).
+                for f in WardLink::state_files(dir) {
+                    let _ = std::fs::remove_file(f);
                 }
             }
         };

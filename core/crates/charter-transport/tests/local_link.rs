@@ -284,6 +284,43 @@ async fn every_machine_wrap_is_offered_locally_before_relay_io_with_the_same_id(
     assert_eq!(log, expected);
 }
 
+/// A journaled AUDIT is built once (one local offer) and its retries
+/// re-publish the identical wrap without offering it again.
+#[tokio::test]
+async fn a_prebuilt_audit_is_offered_once_however_often_it_is_retried() {
+    let log: Log = Arc::default();
+    let relay = RecordingRelay {
+        inner: MockRelayTransport::new().with_failing_relay("wss://down"),
+        log: log.clone(),
+    };
+    let sink = Arc::new(RecordingSink {
+        log: log.clone(),
+        offers: Mutex::default(),
+    });
+    let t = transport(relay).with_local_sink(sink.clone());
+    let audit = t
+        .build_audit_wrap(vec![vec!["outcome".into(), "override".into()]], NOW)
+        .unwrap();
+    for _ in 0..3 {
+        t.publish_prebuilt(audit.clone()).await;
+    }
+    let offers = sink.offers.lock().unwrap().clone();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].inner_kind, kinds::CHARTER_DEVICE_AUDIT);
+    assert_eq!(offers[0].key, None);
+    assert_eq!(offers[0].wrap, audit);
+    let id = audit.id.to_hex();
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            format!("offer {id}"),
+            format!("publish {id}"),
+            format!("publish {id}"),
+            format!("publish {id}"),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_sink_changes_no_relay_outcome() {
     let subject = PubKey::from_bytes([0xA1; 32]);

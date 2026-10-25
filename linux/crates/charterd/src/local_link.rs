@@ -168,6 +168,79 @@ pub fn poll_overdue(age: Option<Duration>) -> bool {
     age.is_some_and(|a| a >= POLL_OVERDUE)
 }
 
+/// The respawn budget of the poll task: at most this many respawns ...
+pub const POLL_MAX_RESPAWNS: usize = 3;
+/// ... within this window. One more death inside it is fatal: the daemon
+/// exits non-zero and systemd restarts it (`Restart=always`), which is how a
+/// panic inline in the loop was recovered from before the poll moved off it.
+pub const POLL_RESPAWN_WINDOW: Duration = Duration::from_secs(600);
+
+/// How many times the poll task has been respawned recently.
+#[derive(Debug, Default)]
+pub struct RespawnBudget {
+    recent: std::collections::VecDeque<Instant>,
+}
+
+impl RespawnBudget {
+    /// Spend one respawn at `now`; `false` (nothing spent) when
+    /// [`POLL_MAX_RESPAWNS`] already happened inside [`POLL_RESPAWN_WINDOW`].
+    pub fn take(&mut self, now: Instant) -> bool {
+        while let Some(&t) = self.recent.front() {
+            if now.saturating_duration_since(t) >= POLL_RESPAWN_WINDOW {
+                self.recent.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.recent.len() >= POLL_MAX_RESPAWNS {
+            return false;
+        }
+        self.recent.push_back(now);
+        true
+    }
+}
+
+/// What [`BrokerPoller::check`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollerCheck {
+    /// The task is running (or ended because a release applied, which the
+    /// loop acts on itself).
+    Running,
+    /// The task had died (the reason); a new one is running.
+    Respawned(String),
+    /// The task died again with the respawn budget spent (the reason): the
+    /// daemon should exit non-zero so systemd restarts it.
+    GaveUp(String),
+}
+
+/// One relay round, as the poll task runs it.
+type Round = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = PollCounts> + Send>> + Send + Sync>;
+
+fn round_of<F, Fut>(f: F) -> Round
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = PollCounts> + Send + 'static,
+{
+    Arc::new(move || -> Pin<Box<dyn Future<Output = PollCounts> + Send>> { Box::pin(f()) })
+}
+
+/// Clears the in-flight stamp when the round ends, however it ends: on
+/// return, on a panic unwinding through it, or when the task is aborted.
+struct InFlight(Arc<Mutex<Option<Instant>>>);
+
+impl InFlight {
+    fn start(slot: &Arc<Mutex<Option<Instant>>>) -> InFlight {
+        set(slot, Some(Instant::now()));
+        InFlight(slot.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        set(&self.0, None);
+    }
+}
+
 /// Runs `Broker::poll_once` on its own task, one round at a time, every
 /// `every` after the previous round finished.
 ///
@@ -182,10 +255,21 @@ pub fn poll_overdue(age: Option<Duration>) -> bool {
 /// pass, as it always has. A poll that wedges therefore leaves the daemon
 /// enforcing cached clauses (it is reported via [`Self::in_flight_for`]); it
 /// can no longer get the daemon killed and `--thaw-all`ed.
+///
+/// A task that DIES (a panic in an enactor, a poisoned lock) is noticed by
+/// [`Self::check`], which the loop calls every iteration: it is respawned,
+/// and after [`POLL_MAX_RESPAWNS`] respawns inside [`POLL_RESPAWN_WINDOW`]
+/// the loop exits so systemd restarts the daemon. Enforcement of cached
+/// clauses never depended on the task, so it carries on throughout.
 pub struct BrokerPoller {
     results: tokio::sync::mpsc::UnboundedReceiver<PollCounts>,
+    tx: tokio::sync::mpsc::UnboundedSender<PollCounts>,
     in_flight: Arc<Mutex<Option<Instant>>>,
     handle: tokio::task::JoinHandle<()>,
+    round: Round,
+    control: Arc<LinkControl>,
+    every: Duration,
+    budget: RespawnBudget,
 }
 
 impl BrokerPoller {
@@ -199,14 +283,48 @@ impl BrokerPoller {
         T: TransportFacade + 'static,
         E: Entropy + 'static,
     {
+        Self::with_round(
+            round_of(move || {
+                let broker = broker.clone();
+                async move { broker.poll_once().await }
+            }),
+            control,
+            every,
+        )
+    }
+
+    /// [`Self::spawn`] over any round (tests).
+    fn with_round(round: Round, control: Arc<LinkControl>, every: Duration) -> Self {
         let (tx, results) = tokio::sync::mpsc::unbounded_channel();
         let in_flight: Arc<Mutex<Option<Instant>>> = Arc::default();
-        let flight = in_flight.clone();
-        let handle = tokio::spawn(async move {
+        let handle = Self::start(&round, &control, &in_flight, &tx, every);
+        BrokerPoller {
+            results,
+            tx,
+            in_flight,
+            handle,
+            round,
+            control,
+            every,
+            budget: RespawnBudget::default(),
+        }
+    }
+
+    fn start(
+        round: &Round,
+        control: &Arc<LinkControl>,
+        flight: &Arc<Mutex<Option<Instant>>>,
+        tx: &tokio::sync::mpsc::UnboundedSender<PollCounts>,
+        every: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let (round, control, flight, tx) =
+            (round.clone(), control.clone(), flight.clone(), tx.clone());
+        tokio::spawn(async move {
             while !control.released() {
-                set(&flight, Some(Instant::now()));
-                let counts = broker.poll_once().await;
-                set(&flight, None);
+                let counts = {
+                    let _flight = InFlight::start(&flight);
+                    round().await
+                };
                 if counts.released {
                     control.mark_released();
                 }
@@ -215,12 +333,7 @@ impl BrokerPoller {
                 }
                 tokio::time::sleep(every).await;
             }
-        });
-        BrokerPoller {
-            results,
-            in_flight,
-            handle,
-        }
+        })
     }
 
     /// Every round finished since the last call, oldest first.
@@ -238,6 +351,42 @@ impl BrokerPoller {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .map(|t| t.elapsed())
+    }
+
+    /// Notice a poll task that has died and respawn it (see the type docs).
+    /// A task that ended because a release applied is `Running`: the loop
+    /// acts on the release itself.
+    pub async fn check(&mut self, now: Instant) -> PollerCheck {
+        if !self.handle.is_finished() || self.control.released() {
+            return PollerCheck::Running;
+        }
+        let why = match (&mut self.handle).await {
+            Ok(()) => "it ended".to_string(),
+            Err(e) if e.is_panic() => {
+                let payload = e.into_panic();
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "no message".into());
+                format!("it panicked: {msg}")
+            }
+            Err(_) => "it was cancelled".to_string(),
+        };
+        // The drop guard has cleared it already; a stale stamp must never
+        // outlive its task, so make sure.
+        set(&self.in_flight, None);
+        if !self.budget.take(now) {
+            return PollerCheck::GaveUp(why);
+        }
+        self.handle = Self::start(
+            &self.round,
+            &self.control,
+            &self.in_flight,
+            &self.tx,
+            self.every,
+        );
+        PollerCheck::Respawned(why)
     }
 
     /// Stop polling (release / shutdown). A round in flight is cancelled at
@@ -265,19 +414,30 @@ pub fn resumed_from_suspend(prev_suspended_secs: u64, now_suspended_secs: u64) -
 /// The DNS-SD domain the carrier registers in.
 pub const SERVICE_DOMAIN: &str = "local";
 
+/// At most this many discovered instances are kept. The ward offers the link
+/// its remembered guardian address first whatever is discovered, so a flood
+/// of announcements can at worst hide a carrier that has moved address.
+pub const MAX_DISCOVERED: usize = 32;
+
 /// The current discovery results, keyed by avahi's `(interface, name)`: the
 /// same instance seen on two interfaces is two entries, and an `ItemRemove`
-/// names exactly the entry it removes.
+/// names exactly the entry it removes. Bounded by [`MAX_DISCOVERED`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DiscoverySet {
     found: BTreeMap<(i32, String), SocketAddrV4>,
 }
 
 impl DiscoverySet {
-    /// Record a resolved instance; `true` if the address set changed.
+    /// Record a resolved instance; `true` if the address set changed. A new
+    /// instance is ignored once [`MAX_DISCOVERED`] are known (an update to a
+    /// known one is still taken).
     pub fn insert(&mut self, interface: i32, name: &str, addr: SocketAddrV4) -> bool {
+        let key = (interface, name.to_string());
+        if self.found.len() >= MAX_DISCOVERED && !self.found.contains_key(&key) {
+            return false;
+        }
         let before = self.addrs();
-        self.found.insert((interface, name.to_string()), addr);
+        self.found.insert(key, addr);
         self.addrs() != before
     }
 
@@ -315,17 +475,29 @@ pub fn is_carrier_service(service_type: &str, domain: &str) -> bool {
 }
 
 /// A resolved `(address, port)` from `ResolveService` as an IPv4 socket
-/// address. IPv6 (including a scoped link-local `fe80::…%eth0`), an empty or
-/// garbage address and port 0 are all `None`: the link is IPv4 only.
+/// address. Only a private or link-local IPv4 address is taken (the spec's
+/// home-network rule): IPv6 (including a scoped link-local `fe80::…%eth0`),
+/// loopback, public, an empty or garbage address and port 0 are all `None`.
 pub fn parse_resolved(address: &str, port: u16) -> Option<SocketAddrV4> {
     if port == 0 {
         return None;
     }
     let ip: Ipv4Addr = address.trim().parse().ok()?;
-    if ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+    if !charter_link::peer_address_allowed(ip.into(), false) {
         return None;
     }
     Some(SocketAddrV4::new(ip, port))
+}
+
+/// avahi's `AVAHI_LOOKUP_RESULT_LOCAL` and `AVAHI_LOOKUP_RESULT_OUR_OWN`.
+const LOOKUP_RESULT_LOCAL: u32 = 8;
+const LOOKUP_RESULT_OUR_OWN: u32 = 16;
+
+/// Whether a browse item was registered on THIS machine. The ward never
+/// advertises and the carrier is the guardian's phone, so a local result is
+/// never the carrier — only something a local user published.
+pub fn is_local_origin(flags: u32) -> bool {
+    flags & (LOOKUP_RESULT_LOCAL | LOOKUP_RESULT_OUR_OWN) != 0
 }
 
 /// D-Bus error names that mean "this avahi has no such method/interface"
@@ -380,7 +552,10 @@ pub mod avahi {
     use zbus::export::futures_util::StreamExt;
     use zbus::zvariant::OwnedObjectPath;
 
-    use super::{is_carrier_service, is_unknown_member, parse_resolved, DiscoverySet, OnceLog};
+    use super::{
+        is_carrier_service, is_local_origin, is_unknown_member, parse_resolved, DiscoverySet,
+        OnceLog,
+    };
 
     const AVAHI: &str = "org.freedesktop.Avahi";
     const SERVER: &str = "org.freedesktop.Avahi.Server";
@@ -509,12 +684,12 @@ pub mod avahi {
             tokio::select! {
                 m = new.next() => {
                     let Some(m) = m else { break Ended::Failed("browser signals ended".into()) };
-                    let Ok((iface, proto, name, stype, domain, _flags)) =
+                    let Ok((iface, proto, name, stype, domain, flags)) =
                         m.body().deserialize::<(i32, i32, String, String, String, u32)>()
                     else {
                         continue;
                     };
-                    if !is_carrier_service(&stype, &domain) {
+                    if !is_carrier_service(&stype, &domain) || is_local_origin(flags) {
                         continue;
                     }
                     let reply = tokio::time::timeout(
@@ -584,6 +759,38 @@ mod tests {
         assert_eq!(parse_resolved("0.0.0.0", 47615), None);
         assert_eq!(parse_resolved("255.255.255.255", 47615), None);
         assert_eq!(parse_resolved("224.0.0.251", 5353), None);
+        // Home-network addresses only: private and link-local.
+        assert_eq!(parse_resolved("172.16.0.9", 1), Some(a("172.16.0.9:1")));
+        assert_eq!(parse_resolved("169.254.7.7", 1), Some(a("169.254.7.7:1")));
+        assert_eq!(parse_resolved("127.0.0.1", 47615), None);
+        assert_eq!(parse_resolved("8.8.8.8", 47615), None);
+        assert_eq!(parse_resolved("100.64.0.1", 47615), None);
+    }
+
+    #[test]
+    fn results_registered_on_this_machine_are_not_the_carrier() {
+        assert!(!is_local_origin(0));
+        assert!(!is_local_origin(1 | 2 | 4)); // cached, wide-area, multicast
+        assert!(is_local_origin(8));
+        assert!(is_local_origin(16));
+        assert!(is_local_origin(8 | 16 | 4));
+    }
+
+    #[test]
+    fn the_discovery_set_is_bounded_but_known_instances_still_update() {
+        let mut s = DiscoverySet::default();
+        for i in 0..MAX_DISCOVERED {
+            assert!(s.insert(2, &format!("k{i}"), a(&format!("10.0.0.{}:1", i + 1))));
+        }
+        assert!(
+            !s.insert(2, "one-too-many", a("10.0.1.1:1")),
+            "a new instance past the cap is ignored"
+        );
+        assert_eq!(s.addrs().len(), MAX_DISCOVERED);
+        assert!(s.insert(2, "k0", a("10.0.2.1:1")), "a known instance moves");
+        assert!(s.addrs().contains(&a("10.0.2.1:1")));
+        assert!(s.remove(2, "k1"));
+        assert!(s.insert(2, "one-too-many", a("10.0.1.1:1")), "room again");
     }
 
     #[test]
@@ -681,6 +888,140 @@ mod tests {
         assert!(!poll_overdue(Some(Duration::from_secs(179))));
         assert!(poll_overdue(Some(POLL_OVERDUE)));
         assert!(poll_overdue(Some(Duration::from_secs(3600))));
+    }
+
+    #[test]
+    fn the_respawn_budget_is_three_in_ten_minutes() {
+        let mut b = RespawnBudget::default();
+        let t0 = Instant::now();
+        assert!(b.take(t0));
+        assert!(b.take(t0 + Duration::from_secs(60)));
+        assert!(b.take(t0 + Duration::from_secs(120)));
+        assert!(
+            !b.take(t0 + Duration::from_secs(180)),
+            "a fourth inside the window"
+        );
+        // The first ages out of the window: one more is allowed.
+        assert!(b.take(t0 + POLL_RESPAWN_WINDOW));
+        assert!(!b.take(t0 + POLL_RESPAWN_WINDOW + Duration::from_secs(1)));
+    }
+
+    fn counts() -> PollCounts {
+        PollCounts::default()
+    }
+
+    /// Wait (on the test's runtime) until `f` holds.
+    async fn until(mut f: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition never held");
+    }
+
+    /// M1: a round that panics leaves no in-flight stamp behind, is noticed,
+    /// and the task is respawned and polls again.
+    #[tokio::test]
+    async fn a_panicked_poll_task_is_noticed_cleared_and_respawned() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let round = round_of(move || {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    panic!("enactor blew up");
+                }
+                counts()
+            }
+        });
+        let mut p = BrokerPoller::with_round(round, LinkControl::new(), Duration::from_secs(3600));
+        until(|| p.handle.is_finished()).await;
+        assert_eq!(p.in_flight_for(), None, "the drop guard cleared the stamp");
+        match p.check(Instant::now()).await {
+            PollerCheck::Respawned(why) => assert!(why.contains("enactor blew up"), "{why}"),
+            other => panic!("expected a respawn, got {other:?}"),
+        }
+        until(|| calls.load(Ordering::SeqCst) == 2).await;
+        let mut got = Vec::new();
+        until(|| {
+            got.extend(p.drain());
+            !got.is_empty()
+        })
+        .await;
+        assert_eq!(p.check(Instant::now()).await, PollerCheck::Running);
+        p.abort();
+    }
+
+    /// M1: a task that keeps dying is respawned three times, then given up
+    /// on (the daemon exits and systemd restarts it).
+    #[tokio::test]
+    async fn a_poll_task_that_keeps_dying_is_given_up_on_after_three_respawns() {
+        let die = Arc::new(AtomicBool::new(true));
+        let round = round_of(move || {
+            let die = die.load(Ordering::SeqCst);
+            async move {
+                if die {
+                    panic!("poisoned");
+                }
+                counts()
+            }
+        });
+        let mut p = BrokerPoller::with_round(round, LinkControl::new(), Duration::from_secs(1));
+        let now = Instant::now();
+        for i in 0..POLL_MAX_RESPAWNS {
+            until(|| p.handle.is_finished()).await;
+            assert!(
+                matches!(p.check(now).await, PollerCheck::Respawned(_)),
+                "respawn {i}"
+            );
+        }
+        until(|| p.handle.is_finished()).await;
+        assert!(matches!(p.check(now).await, PollerCheck::GaveUp(_)));
+        assert_eq!(p.in_flight_for(), None);
+    }
+
+    /// A task that ended because a release applied is not a crash.
+    #[tokio::test]
+    async fn a_poll_task_that_ended_on_a_release_is_not_respawned() {
+        let control = LinkControl::new();
+        let round = round_of(|| async {
+            PollCounts {
+                released: true,
+                ..PollCounts::default()
+            }
+        });
+        let mut p = BrokerPoller::with_round(round, control.clone(), Duration::from_secs(1));
+        until(|| p.handle.is_finished()).await;
+        assert!(control.released());
+        assert_eq!(p.check(Instant::now()).await, PollerCheck::Running);
+        assert_eq!(p.drain().len(), 1);
+    }
+
+    /// The stamp is set only while a round runs.
+    #[tokio::test]
+    async fn the_in_flight_stamp_covers_exactly_a_running_round() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let g = gate.clone();
+        let round = round_of(move || {
+            let g = g.clone();
+            async move {
+                g.notified().await;
+                counts()
+            }
+        });
+        let mut p = BrokerPoller::with_round(round, LinkControl::new(), Duration::from_secs(3600));
+        until(|| p.in_flight_for().is_some()).await;
+        gate.notify_one();
+        until(|| p.in_flight_for().is_none()).await;
+        let mut got = Vec::new();
+        until(|| {
+            got.extend(p.drain());
+            !got.is_empty()
+        })
+        .await;
+        p.abort();
     }
 
     #[test]

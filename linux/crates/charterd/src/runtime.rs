@@ -1987,6 +1987,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     machine_sk: zeroize::Zeroizing::new(secret),
                     guardian,
                     state_dir: link_state_dir(&config.key_path),
+                    // The carrier is the guardian's phone, never this
+                    // machine: a loopback "guardian" is a local process.
+                    allow_loopback: false,
                 },
                 ingest,
                 &tokio::runtime::Handle::current(),
@@ -2168,6 +2171,33 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         if link_control.released() {
             restart_after_release(poller.as_ref(), ward_link.as_deref());
             return Ok(());
+        }
+        // M1: a poll task that died (a panicking enactor, a poisoned lock)
+        // is respawned; one that keeps dying ends the daemon non-zero, so
+        // systemd restarts it — the recovery a panic inline in the loop used
+        // to get. Enforcement below runs on cached clauses either way.
+        if let Some(p) = poller.as_mut() {
+            match p.check(std::time::Instant::now()).await {
+                crate::local_link::PollerCheck::Running => {}
+                crate::local_link::PollerCheck::Respawned(why) => {
+                    poll_overdue_logged = false;
+                    eprintln!(
+                        "charterd: ERROR — the guardian relay poll task stopped ({why}); \
+                         restarted it. Enforcement carried on from cached clauses"
+                    );
+                }
+                crate::local_link::PollerCheck::GaveUp(why) => {
+                    if let Some(l) = ward_link.as_deref() {
+                        l.shutdown();
+                    }
+                    return Err(format!(
+                        "the guardian relay poll task stopped again ({why}) after {} restarts \
+                         in {} minutes",
+                        crate::local_link::POLL_MAX_RESPAWNS,
+                        crate::local_link::POLL_RESPAWN_WINDOW.as_secs() / 60
+                    ));
+                }
+            }
         }
         // N1: the usage ledgers may drop a far-future day key back only while
         // the kernel reports the clock NTP-synchronised. Read every tick: a
