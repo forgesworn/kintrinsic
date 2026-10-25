@@ -356,13 +356,20 @@ mod tests {
                 userns_unconfined_sysctl: dir.join("userns-unconfined"),
                 trees: vec![dir.join("tree")],
             };
-            fs::write(&paths.rules, RULES).unwrap();
-            fs::write(&paths.compiled, COMPILED).unwrap();
+            // The fixture trees belong to the test runner, which must not be
+            // the ward. Hosted runners commonly use uid 1001.
+            let ward_uid = if fs::metadata(&dir).unwrap().uid() == 1001 {
+                "1003"
+            } else {
+                "1001"
+            };
+            fs::write(&paths.rules, RULES.replace("1001", ward_uid)).unwrap();
+            fs::write(&paths.compiled, COMPILED.replace("1001", ward_uid)).unwrap();
             fs::write(&paths.conf, CONF).unwrap();
             fs::write(&paths.pid_file, "4242\n").unwrap();
             fs::write(dir.join("proc/4242/comm"), "fapolicyd\n").unwrap();
-            fs::write(&paths.group, GROUP).unwrap();
-            fs::write(&paths.passwd, PASSWD).unwrap();
+            fs::write(&paths.group, GROUP.replace("1001", ward_uid)).unwrap();
+            fs::write(&paths.passwd, PASSWD.replace("1001", ward_uid)).unwrap();
             fs::write(&paths.userns_sysctl, "1\n").unwrap();
             fs::write(&paths.userns_unconfined_sysctl, "1\n").unwrap();
             Self { dir, paths }
@@ -378,10 +385,6 @@ mod tests {
     #[test]
     fn every_link_present_is_armed() {
         let f = Fixture::new("ok");
-        // The test tree is owned by whoever runs the test; make sure that is
-        // not "a ward" for this fixture.
-        let me = fs::metadata(&f.dir).unwrap().uid();
-        assert_ne!(me, 1001, "run the tests as someone other than uid 1001");
         assert_eq!(
             probe(&f.paths),
             AppLockReport {
@@ -412,7 +415,10 @@ mod tests {
                     fs::write(&p.group, "charter-managed:x:990:kid,sib\n").unwrap();
                     fs::write(
                         &p.passwd,
-                        format!("{PASSWD}sib:x:1002:1002::/srv/sib:/bin/bash\n"),
+                        format!(
+                            "{}sib:x:1002:1002::/srv/sib:/bin/bash\n",
+                            fs::read_to_string(&p.passwd).unwrap()
+                        ),
                     )
                     .unwrap();
                 }),
