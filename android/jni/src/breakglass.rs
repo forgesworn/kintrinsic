@@ -10,8 +10,10 @@
 //!    the audit is journaled and emitted on the next successful poll. Each
 //!    entry's gift-wrap is built ONCE and kept with it, so every retry is the
 //!    identical event: the guardian (on the relays or the local link, which
-//!    is offered the wrap when it is built) sees one override, not one per
-//!    poll round the relays were down.
+//!    is offered the wrap once it is journaled) sees one override, not one per
+//!    poll round the relays were down. A wrap that has waited a day is built
+//!    afresh (once a day), because the guardian refuses a wrap dated more
+//!    than two days from its own clock.
 //!
 //! Deliberately NO rate limit and NO cooldown: a technical cap on an
 //! emergency button rebuilds the cage. Overuse is a conversation, and the
@@ -20,6 +22,14 @@
 use std::path::{Path, PathBuf};
 
 use charter_primitives::{EventId, NostrEvent};
+use charter_transport::nip59::MAX_JITTER_SECS;
+
+/// A journaled wrap dated this far from now is rebuilt before it is published
+/// again. Every guardian path (the carrier, the PWA's relay read and LAN
+/// drain) refuses a wrap more than [`MAX_JITTER_SECS`] (two days) from its own
+/// clock, so rebuilding at one day keeps every copy well inside that however
+/// long the ward stays offline. Once a day is one extra alert at most.
+pub const REBUILD_AFTER_SECS: u64 = 24 * 3600;
 
 /// How much the override opens.
 pub const SCOPE_CALLS: &str = "calls";
@@ -130,34 +140,72 @@ impl BreakGlass {
             .collect()
     }
 
-    fn write_entries(&self, all: &[SpooledAudit]) {
+    /// Write the spool (atomically: a temporary file renamed over it, so a
+    /// crash or a full disk never leaves half a journal). Whether it landed.
+    fn write_entries(&self, all: &[SpooledAudit]) -> bool {
         if all.is_empty() {
-            self.clear_audits();
-            return;
+            return match std::fs::remove_file(self.spool_path()) {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            };
         }
-        if let Ok(json) = serde_json::to_string(all) {
-            let _ = std::fs::write(self.spool_path(), json);
+        let Ok(json) = serde_json::to_string(all) else {
+            return false;
+        };
+        let tmp = self.dir.join("pending-audits.json.tmp");
+        let ok =
+            std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, self.spool_path()).is_ok();
+        if !ok {
+            let _ = std::fs::remove_file(&tmp);
         }
+        ok
     }
 
-    /// Give every journaled audit that has none its wrap (`build`, which also
-    /// offers it to the local link), store it with the entry, and return the
-    /// wraps to publish, oldest first. An entry whose build fails keeps
-    /// waiting and is tried again next round.
+    /// Give every journaled audit that has no wrap, or one dated more than
+    /// [`REBUILD_AFTER_SECS`] from `now`, a new wrap (`build`, which must NOT
+    /// offer it to the local link), store it with the entry, and only once
+    /// that write has landed hand each new wrap to `offer` (the local link).
+    /// Returns the wraps to publish, oldest first, never one outside the
+    /// guardian's freshness window. An entry is never dropped for its age; one
+    /// whose build fails keeps waiting and is tried again next round.
+    ///
+    /// If the journal cannot be written (a full disk) nothing is offered: an
+    /// offer made for a wrap the journal does not hold would be followed by
+    /// another, with a new id, every round.
     pub fn wraps_to_publish(
         &self,
+        now: u64,
         mut build: impl FnMut(&[Vec<String>]) -> Option<NostrEvent>,
+        mut offer: impl FnMut(&NostrEvent),
     ) -> Vec<NostrEvent> {
         let mut all = self.entries();
-        let mut built = false;
-        for e in all.iter_mut().filter(|e| e.wrap.is_none()) {
-            e.wrap = build(&e.tags);
-            built |= e.wrap.is_some();
+        let mut fresh: Vec<NostrEvent> = Vec::new();
+        for e in all.iter_mut() {
+            let due = e
+                .wrap
+                .as_ref()
+                .is_none_or(|w| now.abs_diff(w.created_at) > REBUILD_AFTER_SECS);
+            if !due {
+                continue;
+            }
+            if let Some(w) = build(&e.tags) {
+                fresh.push(w.clone());
+                e.wrap = Some(w);
+            }
         }
-        if built {
-            self.write_entries(&all);
+        if !fresh.is_empty() {
+            if self.write_entries(&all) {
+                for w in &fresh {
+                    offer(w);
+                }
+            } else {
+                eprintln!("charter: break-glass journal not written; the local link is not offered its audit this round");
+            }
         }
-        all.into_iter().filter_map(|e| e.wrap).collect()
+        all.into_iter()
+            .filter_map(|e| e.wrap)
+            .filter(|w| now.abs_diff(w.created_at) <= MAX_JITTER_SECS)
+            .collect()
     }
 
     /// Drop the entries whose wrap a relay has taken.
@@ -170,7 +218,8 @@ impl BreakGlass {
         }
     }
 
-    /// Drain the spool (called once the emits have been handed to the relay).
+    /// Drain the spool.
+    #[cfg(test)]
     pub fn clear_audits(&self) {
         let _ = std::fs::remove_file(self.spool_path());
     }
@@ -239,11 +288,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A fixed "now" for the spool tests.
+    const T0: u64 = 1_782_752_400;
+
     fn fake_wrap(n: u8) -> NostrEvent {
+        fake_wrap_at(n, T0)
+    }
+
+    fn fake_wrap_at(n: u8, created_at: u64) -> NostrEvent {
         NostrEvent {
             id: EventId::from_bytes([n; 32]),
             pubkey: charter_primitives::PubKey::from_bytes([2; 32]),
-            created_at: 1,
+            created_at,
             kind: charter_primitives::kinds::GIFT_WRAP,
             tags: vec![],
             content: String::new(),
@@ -261,8 +317,10 @@ mod tests {
             builds += 1;
             Some(fake_wrap(builds))
         };
-        let first = bg.wraps_to_publish(&mut build);
-        let again = BreakGlass::new(&base).wraps_to_publish(&mut build);
+        let mut offered = Vec::new();
+        let first = bg.wraps_to_publish(T0, &mut build, |w| offered.push(w.id));
+        let again =
+            BreakGlass::new(&base).wraps_to_publish(T0 + 60, &mut build, |w| offered.push(w.id));
         assert_eq!(
             first, again,
             "the stored wrap is reused, across restarts too"
@@ -270,8 +328,13 @@ mod tests {
         assert_eq!(first.len(), 1);
         // A second audit gets its own wrap; the first keeps its own.
         bg.queue_audit(audit_tags(SCOPE_CALLS, 300));
-        let both = bg.wraps_to_publish(&mut build);
+        let both = bg.wraps_to_publish(T0 + 120, &mut build, |w| offered.push(w.id));
         assert_eq!(builds, 2);
+        assert_eq!(
+            offered,
+            vec![first[0].id, both[1].id],
+            "each wrap offered once"
+        );
         assert_eq!(both[0], first[0]);
         assert_eq!(both.len(), 2);
         // Only what was sent leaves the spool.
@@ -289,9 +352,84 @@ mod tests {
         let legacy = vec![audit_tags(SCOPE_FULL, 600)];
         std::fs::write(bg.spool_path(), serde_json::to_string(&legacy).unwrap()).unwrap();
         assert_eq!(bg.pending_audits(), legacy);
-        let wraps = bg.wraps_to_publish(|_| Some(fake_wrap(9)));
+        let wraps = bg.wraps_to_publish(T0, |_| Some(fake_wrap(9)), |_| {});
         assert_eq!(wraps, vec![fake_wrap(9)]);
         assert_eq!(bg.entries()[0].wrap, Some(fake_wrap(9)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// M2: a journaled wrap that has waited more than a day is built afresh
+    /// (one new wrap, one new link offer) rather than published with a date
+    /// the guardian refuses; it is never dropped for its age, and no copy
+    /// outside the guardian's two-day window is ever handed out.
+    #[test]
+    fn a_wrap_waiting_over_a_day_is_rebuilt_once_and_never_sent_stale() {
+        let base = tmp("stale");
+        let bg = BreakGlass::new(&base);
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        let mut n = 0u8;
+        let mut offered = Vec::new();
+        let mut round = |now: u64, offered: &mut Vec<NostrEvent>| {
+            bg.wraps_to_publish(
+                now,
+                |_| {
+                    n += 1;
+                    Some(fake_wrap_at(n, now))
+                },
+                |w| offered.push(w.clone()),
+            )
+        };
+        let first = round(T0, &mut offered);
+        assert_eq!(first.len(), 1);
+        // Still offline a day later (but not more): the same wrap.
+        let later = round(T0 + REBUILD_AFTER_SECS, &mut offered);
+        assert_eq!(later, first);
+        assert_eq!(offered.len(), 1);
+        // Past a day: one rebuild, one new offer, and the new wrap is current.
+        let rebuilt = round(T0 + REBUILD_AFTER_SECS + 15, &mut offered);
+        assert_eq!(rebuilt.len(), 1, "never dropped for its age");
+        assert_ne!(rebuilt[0].id, first[0].id);
+        assert_eq!(rebuilt[0].created_at, T0 + REBUILD_AFTER_SECS + 15);
+        assert_eq!(offered.len(), 2);
+        assert_eq!(offered[1].id, rebuilt[0].id);
+        // The next rounds reuse it: rebuilt once, not every round.
+        let again = round(T0 + REBUILD_AFTER_SECS + 30, &mut offered);
+        assert_eq!(again, rebuilt);
+        assert_eq!(offered.len(), 2);
+        assert_eq!(bg.entries()[0].wrap.as_ref().unwrap().id, rebuilt[0].id);
+
+        // A wrap already outside the window (a clock that jumped) whose
+        // rebuild fails is kept, but never handed out to publish.
+        let far = T0 + 10 * REBUILD_AFTER_SECS;
+        let none = bg.wraps_to_publish(far, |_| None, |_| panic!("nothing new to offer"));
+        assert!(
+            none.is_empty(),
+            "a wrap the guardian would refuse is not sent"
+        );
+        assert_eq!(bg.entries().len(), 1, "still journaled");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L1: a wrap the journal could not hold (a full disk) is not offered to
+    /// the local link, so a failing disk cannot put a new offer, with a new
+    /// id, in the link outbox every round.
+    #[test]
+    fn a_wrap_that_could_not_be_journaled_is_not_offered() {
+        let base = tmp("nodisk");
+        let bg = BreakGlass::new(&base);
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        // The temporary file's name is taken by a directory: the write fails.
+        std::fs::create_dir_all(bg.dir.join("pending-audits.json.tmp")).unwrap();
+        let mut offers = 0;
+        let wraps = bg.wraps_to_publish(T0, |_| Some(fake_wrap(4)), |_| offers += 1);
+        assert_eq!(offers, 0, "not offered while unjournaled");
+        assert_eq!(wraps.len(), 1, "the relays still get it");
+        assert_eq!(bg.entries()[0].wrap, None, "the journal is unchanged");
+        // The disk recovers: journaled, then offered, once.
+        std::fs::remove_dir_all(bg.dir.join("pending-audits.json.tmp")).unwrap();
+        let wraps = bg.wraps_to_publish(T0 + 15, |_| Some(fake_wrap(5)), |_| offers += 1);
+        assert_eq!(offers, 1);
+        assert_eq!(bg.entries()[0].wrap, Some(wraps[0].clone()));
         let _ = std::fs::remove_dir_all(&base);
     }
 

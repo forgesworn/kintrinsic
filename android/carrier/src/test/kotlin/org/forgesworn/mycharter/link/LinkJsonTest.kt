@@ -25,6 +25,19 @@ class LinkJsonTest {
         assertEquals("[]", LinkJson.allowedJson(emptyList()))
     }
 
+    @Test fun acceptAddressesAreTheHomeNetworksOwnIpv4() {
+        val ip = { s: String -> java.net.InetAddress.getByName(s) }
+        val wifi = LinkJson.ipv4Addresses(
+            listOf(ip("192.168.1.20"), ip("fe80::1"), ip("127.0.0.1"), ip("0.0.0.0"), ip("192.168.1.20")),
+        )
+        assertEquals(listOf("192.168.1.20"), wifi)
+        val eth = LinkJson.ipv4Addresses(listOf(ip("10.0.0.4")))
+        assertEquals("""["10.0.0.4","192.168.1.20"]""", LinkJson.acceptAddressesJson(listOf(wifi, eth, wifi)))
+        // Addresses not known yet: accept nothing rather than everything.
+        assertEquals("[]", LinkJson.acceptAddressesJson(listOf(emptyList())))
+        assertEquals("[]", LinkJson.acceptAddressesJson(emptyList()))
+    }
+
     @Test fun startedPortReadsOnlyASuccess() {
         assertEquals(47615, LinkJson.startedPort("""{"ok":true,"port":47615}"""))
         assertEquals(0, LinkJson.startedPort("""{"ok":false,"error":"x"}"""))

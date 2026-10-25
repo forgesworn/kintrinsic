@@ -181,9 +181,9 @@ LAN is never presented as total disconnection.
 
 | Surface | Local delivery | Notes |
 | --- | --- | --- |
-| Android guardian carrier | **Yes** (listener) | Holds a `MulticastLock` while registered on Wi-Fi so a pocketed phone still answers discovery (battery cost measured in the hardware gates). Needs the local guardian key, which the carrier already holds when parent approval is set up on the phone. A remote NIP-46 signer does not work offline. Foreground service `specialUse`. Older consoles and older APKs feature-detect the bridge and stay on relays. |
+| Android guardian carrier | **Yes** (listener) | Holds a `MulticastLock` while registered on Wi-Fi so a pocketed phone still answers discovery (battery cost measured in the hardware gates). Accepts wards only on its Wi-Fi/Ethernet addresses, so mobile data, if also up, is never a way in. Needs the local guardian key, which the carrier already holds when parent approval is set up on the phone. A remote NIP-46 signer does not work offline. Foreground service `specialUse`. Older consoles and older APKs feature-detect the bridge and stay on relays. |
 | Browser PWA (no carrier) | **No**, relays only | A page cannot listen for connections, browse DNS-SD or open raw TCP (Direct Sockets is limited to Isolated Web Apps on ChromeOS). Chrome 147 allows `ws://` to a LAN IP literal from an `https` page only after a Local Network Access prompt, Android WebView does not support that prompt, and the ward would still need a reachable listener. The app says so where delivery is discussed. |
-| Android ward | **Yes** (client) | `NsdManager` discovery while no session is up, holding its own `MulticastLock` for the duration (a foreground-service process does not get the system's automatic lock). Outbound TCP from the native library, unaffected by the cleartext policy and outside the ward's split-tunnel DNS VPN. A foreground service keeps network access in Doze, but whether an incoming packet wakes a dozing phone is not documented: a locked, dark phone may process a change only at its next liveness wake, and always on screen-on. Measured in the hardware gates. |
+| Android ward | **Yes** (client) | `NsdManager` discovery while no session is up, holding its own `MulticastLock` for the duration (a foreground-service process does not get the system's automatic lock). Discovery browses in windows (a minute, then ten minutes' rest with the lock released, sooner on a network change, screen-on or liveness kick); the remembered address is retried meanwhile. Outbound TCP from the native library, unaffected by the cleartext policy and outside the ward's split-tunnel DNS VPN. Wi-Fi without internet is not the default network while mobile data is up, so the link binds its sockets to the Wi-Fi network the guardian was found on (`android_setsocknetwork`). A foreground service keeps network access in Doze, but whether an incoming packet wakes a dozing phone is not documented: a locked, dark phone may process a change only at its next liveness wake, and always on screen-on. Measured in the hardware gates. |
 | Linux ward (`charterd`) | **Yes** (client) | Needs `avahi-daemon` for discovery (installed by default on Linux Mint and Ubuntu desktop); without it, only the remembered last address is tried. Outbound only: no firewall change. |
 | Older wards, older carriers | Relays only | No behaviour change. |
 
@@ -297,8 +297,10 @@ async mutex around each handler call, never across relay IO. With
 ### Native library entry points (both ABIs move from 2 to 3)
 
 Ward (`android/jni`, Kotlin `CharterNative`):
-`charterLinkDiscovered(addrsJson: String): String` (`{"addrs":["192.168.1.5:47615"]}`),
-`charterLinkKick(): String`, `charterLinkState(): String`.
+`charterLinkDiscovered(addrsJson: String): String` (`{"addrs":["192.168.1.5:47615"],"netHandle":<long>}`;
+`netHandle`, the `Network.getNetworkHandle()` the sockets are bound to, is optional and kept when absent),
+`charterLinkKick(): String`, `charterLinkState(): String` (the link snapshot plus `running`, `appliedSeq` and
+`gen`, a process-unique link generation that moves when a new link starts).
 
 Guardian (`android/jni-guardian`, Kotlin `GuardianNative`):
 `guardianLinkStart(stateDir: String, guardianSk: ByteArray, allowedJson: String, preferredPort: Int): String`
@@ -306,8 +308,10 @@ Guardian (`android/jni-guardian`, Kotlin `GuardianNative`):
 `guardianLinkSend(recipientHex: String, wrapJson: String): String` (`{"state":"sent"|"queued"|"rejected","reason"?}`),
 `guardianLinkNext(timeoutMs: Int): String` (JSON array of events), `guardianLinkInbox(): String`,
 `guardianLinkConsume(idsJson: String): String`, `guardianLinkDelivery(idsJson: String): String`,
-`guardianLinkSessions(): String`. The Rust side owns the sockets on its own runtime thread; a dedicated
-Kotlin thread loops on `guardianLinkNext`. Kotlin does no cryptography.
+`guardianLinkSessions(): String`, `guardianLinkAcceptAddresses(addrsJson: String): String` (a JSON array of the
+Wi-Fi/Ethernet IPv4 addresses to accept on, or `null` for any). The Rust side owns the sockets on its own runtime
+thread; one process-wide Kotlin thread loops on `guardianLinkNext` and hands events to the current service
+instance. Kotlin does no cryptography.
 
 ### Carrier bridge (`window.CharterCarrier`, every addition optional and feature-detected)
 

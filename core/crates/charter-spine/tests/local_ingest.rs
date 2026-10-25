@@ -1063,3 +1063,191 @@ async fn the_brokers_request_and_audit_wraps_are_offered_and_also_published() {
     let offered: Vec<NostrEvent> = offers.into_iter().map(|o| o.wrap).collect();
     assert_eq!(published, offered);
 }
+
+// ---------------------------------------------------------------------------
+// The ACK does not wait for the audit publish
+// ---------------------------------------------------------------------------
+
+fn audit_wraps_on_relay(w: &Ward) -> usize {
+    block_on_aside(w.relay.query(
+        &[],
+        Filter {
+            kinds: vec![kinds::GIFT_WRAP],
+            p_tags: vec![w.guardian.pubkey()],
+            ..Default::default()
+        },
+    ))
+    .map(|v| v.len())
+    .unwrap_or(0)
+}
+
+/// The mock relay's query is immediate; drive it on a throwaway runtime so
+/// this helper works from inside a test runtime too.
+fn block_on_aside<F: std::future::Future + Send>(f: F) -> F::Output
+where
+    F::Output: Send,
+{
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(f)
+        })
+        .join()
+        .unwrap()
+    })
+}
+
+/// L9: with the relays hanging, a grant delivered over the local link reports
+/// its outcome (the ward's ACK) at once; its audits come back with it and go
+/// out afterwards, when the caller emits them.
+#[tokio::test]
+async fn a_deferred_local_grant_answers_before_its_audit_is_published() {
+    let w = Ward::new();
+    let (reg, inbox) = time_extend_enactors();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let b = Broker::new(
+        MockSystem::over_disk(NOW, w.disk.clone()),
+        StallingFacade {
+            inner: w.adapter(None),
+            stall: AtomicBool::new(false),
+            entered: entered.clone(),
+            release: release.clone(),
+        },
+        ScriptedEntropy::new(1),
+        reg,
+        Box::new(NullEventSink),
+        SUBJECT,
+    );
+    b.submit(OpType::TimeExtend, json!({"minutes": 15}), None)
+        .await
+        .unwrap();
+    let rec = b.status("").pop().expect("the ask");
+    let before = audit_wraps_on_relay(&w);
+
+    b.transport().stall.store(true, Ordering::SeqCst);
+    let (out, audits) = tokio::time::timeout(
+        Duration::from_secs(5),
+        b.ingest_local_deferred(&w.wrap(&extend_grant(&w, &rec), 1), LOCAL),
+    )
+    .await
+    .expect("the outcome must not wait for a hanging audit publish");
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(inbox.lock().unwrap().len(), 1, "enacted before the answer");
+    assert!(!audits.is_empty(), "the enactment's audit is handed back");
+    assert_eq!(audit_wraps_on_relay(&w), before, "nothing published yet");
+
+    // The caller emits them after its ACK: the publish hangs, then finishes.
+    let emit = b.emit_local_audits(audits);
+    tokio::pin!(emit);
+    tokio::select! {
+        _ = &mut emit => panic!("the audit publish should be stuck"),
+        _ = entered.notified() => {}
+    }
+    release.notify_one();
+    emit.await;
+    assert!(
+        audit_wraps_on_relay(&w) > before,
+        "the deferred audit reached the relay"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A release applied outside the broker (Android's own release path)
+// ---------------------------------------------------------------------------
+
+/// An enactor that parks inside `enact` (holding the handler turn) until
+/// released.
+#[derive(Clone)]
+struct GatedEnactor {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Enactor for GatedEnactor {
+    fn op(&self) -> OpType {
+        OpType::InstallFlatpak
+    }
+    async fn enact(
+        &self,
+        _grant: &VerifiedGrant,
+        _ctx: &EnactContext,
+    ) -> Result<EnactOutcome, EnactError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(EnactOutcome { detail: None })
+    }
+}
+
+/// M1: `mark_released` waits for a handler already running (here a local
+/// grant mid-enactment) to finish, and once it returns no handler writes:
+/// a clause arriving after it is refused and stored nowhere, and a relay
+/// round stops at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mark_released_waits_for_the_running_handler_and_nothing_writes_after_it() {
+    let w = Ward::new();
+    let gate = GatedEnactor {
+        entered: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let mut reg = EnactorRegistry::new();
+    reg.register(Box::new(gate.clone()));
+    let b = Arc::new(w.broker_at(NOW, reg, None));
+    b.submit_as(
+        OpType::InstallFlatpak,
+        json!({"ref": "org.test.App"}),
+        None,
+        Some(1),
+    )
+    .await
+    .unwrap();
+    let rec = only_request(&b);
+    let grant = GrantBuilder::install_allow(rec.req_id, rec.nonce).build(&w.guardian);
+    let grant_wrap = w.wrap(&grant, 1);
+
+    let bl = b.clone();
+    let local = tokio::spawn(async move { bl.ingest_local(&grant_wrap, LOCAL).await });
+    gate.entered.notified().await;
+
+    // The release, from a plain (blocking) thread as on Android.
+    let bm = b.clone();
+    let marked = Arc::new(AtomicBool::new(false));
+    let m = marked.clone();
+    let mark = tokio::task::spawn_blocking(move || {
+        bm.mark_released();
+        m.store(true, Ordering::SeqCst);
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !marked.load(Ordering::SeqCst),
+        "mark_released must wait for the handler holding the turn"
+    );
+    gate.release.notify_one();
+    let out = local.await.unwrap();
+    assert_eq!(
+        out.result,
+        AckResult::Applied,
+        "the handler already running finishes"
+    );
+    mark.await.unwrap();
+    assert!(marked.load(Ordering::SeqCst));
+
+    // After it: nothing is written, over either route.
+    let clause = ClauseBuilder::schedule(100)
+        .subject(ALICE)
+        .body(json!({"marker": "after-release"}))
+        .build(&w.guardian);
+    assert_eq!(
+        b.ingest_local(&w.wrap(&clause, 2), LOCAL).await.result,
+        AckResult::Refused
+    );
+    assert_eq!(stored_child_clause(&b, &ALICE, ClauseKind::Schedule), None);
+    w.relay.inject(w.wrap(&clause, 3));
+    let counts = b.poll_once().await;
+    assert!(counts.released);
+    assert_eq!(counts.clauses_accepted, 0);
+    assert_eq!(stored_child_clause(&b, &ALICE, ClauseKind::Schedule), None);
+}

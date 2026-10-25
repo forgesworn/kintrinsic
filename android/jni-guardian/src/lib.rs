@@ -180,6 +180,18 @@ pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guard
     guarded(&env, ERR, || Some(link::accepting(on != 0)))
 }
 
+/// Accept wards only on these local IPv4 addresses (the carrier's Wi-Fi and
+/// Ethernet interfaces): a JSON array of address strings, or `null` for any.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkAcceptAddresses(
+    mut env: JNIEnv,
+    _class: JClass,
+    addrs_json: JString,
+) -> jstring {
+    let addrs = jstr(&mut env, &addrs_json);
+    guarded(&env, ERR, || Some(link::accept_addresses(&addrs?)))
+}
+
 #[no_mangle]
 pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkAllow(
     mut env: JNIEnv,

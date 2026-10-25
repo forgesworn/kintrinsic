@@ -517,6 +517,30 @@ impl DeferredAudits {
     }
 }
 
+/// The audits a local ingest decided on, handed back by
+/// [`Broker::ingest_local_deferred`] so the ward can send its ACK first and
+/// publish these after (relay IO that may take seconds when the relays are
+/// unreachable, which is when the local link matters most). Must be passed to
+/// [`Broker::emit_local_audits`]; dropping them loses the audit.
+#[must_use = "local audits must be emitted with Broker::emit_local_audits"]
+#[derive(Default)]
+pub struct LocalAudits(DeferredAudits);
+
+impl LocalAudits {
+    /// Nothing to publish.
+    pub fn is_empty(&self) -> bool {
+        self.0 .0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for LocalAudits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LocalAudits")
+            .field(&self.0 .0.len())
+            .finish()
+    }
+}
+
 /// The privileged broker spine, generic over the system layer + transport.
 pub struct Broker<S: SystemLayer, T: TransportFacade, E: Entropy> {
     sys: S,
@@ -1308,6 +1332,22 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         (true, audits)
     }
 
+    /// A release has applied outside this broker (Android's own release
+    /// path, `try_apply_releases`): from now on every handler refuses, as
+    /// after [`Broker::on_release`]. Takes the handler turn, so it returns
+    /// only once a handler already running (a relay round's clause, a local
+    /// grant being enacted) has finished; whatever that handler wrote is then
+    /// on disk before the caller wipes the stores, and nothing can write after.
+    ///
+    /// Blocking: call it from a plain thread or a `spawn_blocking` thread,
+    /// never from inside an async task (`tokio::sync::Mutex::blocking_lock`
+    /// panics there). No handler body takes the caller's own locks, so
+    /// waiting for the turn under them cannot deadlock.
+    pub fn mark_released(&self) {
+        let _turn = self.handlers.blocking_lock();
+        self.released.store(true, AtomicOrdering::SeqCst);
+    }
+
     /// Whether a release has applied on this broker (see `released`).
     fn is_released(&self) -> bool {
         self.released.load(AtomicOrdering::SeqCst)
@@ -1431,9 +1471,25 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         wrap: &NostrEvent,
         opts: LocalIngestOptions,
     ) -> LocalIngestOutcome {
+        let (out, audits) = self.ingest_local_deferred(wrap, opts).await;
+        self.emit_local_audits(audits).await;
+        out
+    }
+
+    /// [`Broker::ingest_local`] without the audit publish: the outcome comes
+    /// back as soon as the handler has finished, and the audits it decided on
+    /// come back with it for the caller to publish with
+    /// [`Broker::emit_local_audits`] once the ACK is on its way. The ward's
+    /// ACK for a grant then never waits for relay IO.
+    pub async fn ingest_local_deferred(
+        &self,
+        wrap: &NostrEvent,
+        opts: LocalIngestOptions,
+    ) -> (LocalIngestOutcome, LocalAudits) {
         let mut out = LocalIngestOutcome::refused();
+        let mut deferred = DeferredAudits::default();
         let Some(inbound) = self.transport.unwrap_local(wrap, self.now()) else {
-            return out;
+            return (out, LocalAudits(deferred));
         };
         match inbound {
             LocalInbound::Clause(clause) => {
@@ -1455,7 +1511,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                     self.expire_stale_pending();
                     self.grant_disposition(grant).await
                 };
-                audits.emit(&self.transport).await;
+                deferred = audits;
                 out.result = disposition.ack();
             }
             LocalInbound::Release(event, seal_author) => {
@@ -1466,7 +1522,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                         let _turn = self.handlers.lock().await;
                         self.on_release(&event, self.now())
                     };
-                    audits.emit(&self.transport).await;
+                    deferred = audits;
                     if applied {
                         out.result = AckResult::Applied;
                         out.released = true;
@@ -1487,7 +1543,13 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 out.result = AckResult::Ignored;
             }
         }
-        out
+        (out, LocalAudits(deferred))
+    }
+
+    /// Publish the audits [`Broker::ingest_local_deferred`] handed back, in
+    /// order. Relay IO, outside the handler turn.
+    pub async fn emit_local_audits(&self, audits: LocalAudits) {
+        audits.0.emit(&self.transport).await;
     }
 
     /// The current subscription cursor (the `since` used by the next poll).

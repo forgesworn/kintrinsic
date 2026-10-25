@@ -27,7 +27,9 @@ pub use guardian::{
     SendState, SessionInfo,
 };
 #[cfg(feature = "net")]
-pub use ward::{WardIngest, WardLink, WardLinkConfig, WardLinkSnapshot, WardSessionInfo};
+pub use ward::{
+    PrepareSocket, WardIngest, WardLink, WardLinkConfig, WardLinkSnapshot, WardSessionInfo,
+};
 
 /// What a ward reports, in a signed ACK, for a guardian wrap it received over
 /// the local link. Serialised in lowercase on the wire.

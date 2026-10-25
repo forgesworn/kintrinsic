@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4};
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use charter_primitives::{kinds, EventId, NostrEvent, PubKey};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpStream;
+use tokio::net::TcpSocket;
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
@@ -53,6 +54,15 @@ pub trait WardIngest: Send + Sync + 'static {
     fn ingest(&self, wrap: NostrEvent) -> Pin<Box<dyn Future<Output = AckResult> + Send>>;
 }
 
+/// A platform hook run on each outbound socket after it is created and before
+/// it connects, given its file descriptor. Android uses it to bind the socket
+/// to the Wi-Fi network the guardian was discovered on
+/// (`android_setsocknetwork`): Wi-Fi without internet is not the default
+/// network while mobile data is up, and an unbound socket would route the
+/// private address out over mobile data. An `Err` skips that attempt (it is
+/// logged and backed off like a failed connect).
+pub type PrepareSocket = Arc<dyn Fn(RawFd) -> io::Result<()> + Send + Sync>;
+
 /// Configuration for [`WardLink::spawn`].
 pub struct WardLinkConfig {
     pub machine_sk: Zeroizing<[u8; 32]>,
@@ -63,6 +73,8 @@ pub struct WardLinkConfig {
     /// spec admits private and link-local addresses, and on a shared machine
     /// a loopback "guardian" is any local process. Production passes `false`.
     pub allow_loopback: bool,
+    /// See [`PrepareSocket`]. `None` (Linux) connects on default routing.
+    pub prepare_socket: Option<PrepareSocket>,
 }
 
 impl std::fmt::Debug for WardLinkConfig {
@@ -72,6 +84,7 @@ impl std::fmt::Debug for WardLinkConfig {
             .field("guardian", &self.guardian)
             .field("state_dir", &self.state_dir)
             .field("allow_loopback", &self.allow_loopback)
+            .field("prepare_socket", &self.prepare_socket.is_some())
             .finish()
     }
 }
@@ -200,6 +213,7 @@ struct Inner {
     guardian: PubKey,
     dir: PathBuf,
     allow_loopback: bool,
+    prepare_socket: Option<PrepareSocket>,
     rt: tokio::runtime::Handle,
     ingest: Arc<dyn WardIngest>,
     state: Mutex<State>,
@@ -289,6 +303,7 @@ impl WardLink {
             guardian: cfg.guardian,
             dir,
             allow_loopback: cfg.allow_loopback,
+            prepare_socket: cfg.prepare_socket,
             rt: rt.clone(),
             ingest,
             outbox_file,
@@ -508,9 +523,18 @@ async fn connector(inner: Arc<Inner>) {
 }
 
 async fn attempt(inner: Arc<Inner>, addr: SocketAddrV4) {
+    let socket = match TcpSocket::new_v4() {
+        Ok(s) => s,
+        Err(e) => return inner.fail(addr, format!("socket for {addr}: {e}")),
+    };
+    if let Some(prepare) = &inner.prepare_socket {
+        if let Err(e) = prepare(socket.as_raw_fd()) {
+            eprintln!("charter-link: not dialling {addr}: preparing the socket failed: {e}");
+            return inner.fail(addr, format!("prepare socket for {addr}: {e}"));
+        }
+    }
     let stream =
-        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(SocketAddr::V4(addr))).await
-        {
+        match tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(SocketAddr::V4(addr))).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return inner.fail(addr, format!("connect {addr}: {e}")),
             Err(_) => return inner.fail(addr, format!("connect {addr}: timed out")),

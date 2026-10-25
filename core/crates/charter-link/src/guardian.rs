@@ -268,6 +268,8 @@ struct SeenFile {
 
 struct Session {
     machine: PubKey,
+    /// The carrier's own address this session was accepted on.
+    local: IpAddr,
     since: u64,
     started: Instant,
     tx: mpsc::Sender<Vec<u8>>,
@@ -283,6 +285,10 @@ struct State {
     /// False while the carrier is off any home network: connections are
     /// refused, sessions closed; queue and inbox are kept.
     accepting: bool,
+    /// The carrier's own IPv4 addresses a ward may connect to (its Wi-Fi and
+    /// Ethernet interfaces); `None` admits any. See
+    /// [`GuardianLink::set_accept_addresses`].
+    accept_addrs: Option<HashSet<Ipv4Addr>>,
     allowed: HashSet<PubKey>,
     sessions: HashMap<u64, Session>,
     next_session: u64,
@@ -387,6 +393,7 @@ impl GuardianLink {
         let state = State {
             closed: false,
             accepting: true,
+            accept_addrs: None,
             allowed: allowed.into_iter().collect(),
             sessions: HashMap::new(),
             next_session: 1,
@@ -472,6 +479,27 @@ impl GuardianLink {
             for id in all {
                 self.inner.drop_session(&mut st, id);
             }
+        }
+    }
+
+    /// Accept ward connections only on these local IPv4 addresses (the
+    /// carrier's Wi-Fi and Ethernet interfaces), or on any (`None`, the
+    /// default). The listener is bound to every interface, so without this a
+    /// phone on Wi-Fi with mobile data up would also take connections that
+    /// arrive over mobile data. A connection whose local address is not in the
+    /// set closes at once, and so does every session accepted on an address
+    /// that has left it. An empty set admits nothing.
+    pub fn set_accept_addresses(&self, addrs: Option<Vec<Ipv4Addr>>) {
+        let mut st = lock(&self.inner.state);
+        st.accept_addrs = addrs.map(|v| v.into_iter().collect());
+        let gone: Vec<u64> = st
+            .sessions
+            .iter()
+            .filter(|(_, s)| !local_allowed(&st, s.local))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in gone {
+            self.inner.drop_session(&mut st, id);
         }
     }
 
@@ -937,6 +965,22 @@ impl Inner {
     }
 }
 
+/// Whether a connection that arrived on the carrier's address `local` may be
+/// served (see [`GuardianLink::set_accept_addresses`]).
+fn local_allowed(st: &State, local: IpAddr) -> bool {
+    let Some(set) = &st.accept_addrs else {
+        return true;
+    };
+    let v4 = match local {
+        IpAddr::V4(v4) => v4,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4,
+            None => return false,
+        },
+    };
+    set.contains(&v4)
+}
+
 async fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
     loop {
         let accepted = tokio::select! {
@@ -951,7 +995,15 @@ async fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
                 continue;
             }
         };
-        if !peer_address_allowed(peer.ip(), inner.allow_loopback) || !lock(&inner.state).accepting {
+        let Ok(local) = stream.local_addr().map(|a| a.ip()) else {
+            drop(stream);
+            continue;
+        };
+        let admitted = {
+            let st = lock(&inner.state);
+            st.accepting && local_allowed(&st, local)
+        };
+        if !peer_address_allowed(peer.ip(), inner.allow_loopback) || !admitted {
             drop(stream);
             continue;
         }
@@ -959,7 +1011,7 @@ async fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
             drop(stream);
             continue;
         };
-        tokio::spawn(connection(inner.clone(), stream, peer, slot));
+        tokio::spawn(connection(inner.clone(), stream, peer, local, slot));
     }
 }
 
@@ -999,7 +1051,13 @@ impl Drop for Unauthenticated {
     }
 }
 
-async fn connection(inner: Arc<Inner>, stream: TcpStream, peer: SocketAddr, slot: Unauthenticated) {
+async fn connection(
+    inner: Arc<Inner>,
+    stream: TcpStream,
+    peer: SocketAddr,
+    local: IpAddr,
+    slot: Unauthenticated,
+) {
     let _ = stream.set_nodelay(true);
     let (mut rd, mut wr) = stream.into_split();
     let mut rate = RateLimit::new();
@@ -1021,7 +1079,11 @@ async fn connection(inner: Arc<Inner>, stream: TcpStream, peer: SocketAddr, slot
     let (tx, rx) = mpsc::channel::<Vec<u8>>(SESSION_CHANNEL);
     let id = {
         let mut st = lock(&inner.state);
-        if st.closed || !st.accepting || !st.allowed.contains(&machine) {
+        if st.closed
+            || !st.accepting
+            || !local_allowed(&st, local)
+            || !st.allowed.contains(&machine)
+        {
             return;
         }
         // A fifth session from the same machine closes its oldest, before
@@ -1067,6 +1129,7 @@ async fn connection(inner: Arc<Inner>, stream: TcpStream, peer: SocketAddr, slot
             id,
             Session {
                 machine,
+                local,
                 since: now_unix(),
                 started: Instant::now(),
                 tx: tx.clone(),

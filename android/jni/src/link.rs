@@ -12,14 +12,21 @@
 //! Locking: the warden lock is taken twice per inbound wrap, briefly — once to
 //! snapshot the broker, once to absorb the outcome — and never across the
 //! ingest await or any network IO. Both steps run on the blocking pool, so a
-//! warden lock held for a relay round (`submit_request`) never stalls the
-//! link's sessions.
+//! warden lock held for a relay round (`submit_request`) does not stall the
+//! link's other sessions; that wrap's own ACK does wait for the lock.
+//!
+//! Routing: Wi-Fi without internet is not Android's default network while
+//! mobile data is up, and a socket on default routing would send the private
+//! guardian address out over mobile data. Kotlin passes the handle of the
+//! Wi-Fi network the guardian was discovered on (`Network.getNetworkHandle`)
+//! with the address set, and every outbound socket is bound to it with
+//! `android_setsocknetwork` before it connects.
 
 use std::future::Future;
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +60,48 @@ pub struct LinkHandle {
     /// into the new one.
     gen: u64,
     state_dir: PathBuf,
+    /// The `Network.getNetworkHandle()` every outbound socket is bound to;
+    /// 0 (`NETWORK_UNSPECIFIED`) leaves it on default routing.
+    net_handle: Arc<AtomicU64>,
+}
+
+/// Bind a socket to an Android network (NDK, libandroid, API 23+).
+#[cfg(target_os = "android")]
+mod netbind {
+    use std::os::fd::RawFd;
+
+    #[link(name = "android")]
+    extern "C" {
+        /// `int android_setsocknetwork(net_handle_t network, int fd)`, with
+        /// `net_handle_t` a `uint64_t` (`<android/multinetwork.h>`).
+        fn android_setsocknetwork(network: u64, fd: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+
+    pub fn bind(network: u64, fd: RawFd) -> std::io::Result<()> {
+        // SAFETY: a plain syscall wrapper over an fd the caller owns for the
+        // duration of the call; no pointers cross.
+        if unsafe { android_setsocknetwork(network, fd) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+}
+
+/// The socket hook: bind to the current network handle, if one is set.
+#[cfg(target_os = "android")]
+fn prepare_socket(net: Arc<AtomicU64>) -> Option<charter_link::PrepareSocket> {
+    Some(Arc::new(move |fd| match net.load(Ordering::SeqCst) {
+        0 => Ok(()),
+        h => netbind::bind(h, fd)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("bind to network {h}: {e}"))),
+    }))
+}
+
+/// Host builds route on the default network (there is only one).
+#[cfg(not(target_os = "android"))]
+fn prepare_socket(_net: Arc<AtomicU64>) -> Option<charter_link::PrepareSocket> {
+    None
 }
 
 impl LinkHandle {
@@ -75,6 +124,7 @@ impl LinkHandle {
             .build()
             .map_err(|e| format!("link runtime: {e}"))?;
         let inflight = Arc::new(AtomicUsize::new(0));
+        let net_handle = Arc::new(AtomicU64::new(0));
         let ingest = Arc::new(WardenIngest {
             home,
             gen,
@@ -86,6 +136,7 @@ impl LinkHandle {
                 guardian,
                 state_dir: state_dir.clone(),
                 allow_loopback,
+                prepare_socket: prepare_socket(net_handle.clone()),
             },
             ingest,
             rt.handle(),
@@ -97,6 +148,7 @@ impl LinkHandle {
             inflight,
             gen,
             state_dir,
+            net_handle,
         })
     }
 
@@ -109,8 +161,19 @@ impl LinkHandle {
         self.link.sink()
     }
 
-    pub fn set_discovered(&self, addrs: Vec<SocketAddrV4>) {
-        self.link.set_discovered(addrs);
+    /// The full discovered set, and the network to bind to when Kotlin
+    /// named one (`None` keeps the current handle).
+    pub fn set_discovered(&self, found: Discovered) {
+        if let Some(h) = found.net_handle {
+            self.net_handle.store(h, Ordering::SeqCst);
+        }
+        self.link.set_discovered(found.addrs);
+    }
+
+    /// The network handle outbound sockets are bound to (0: none).
+    #[cfg(test)]
+    pub fn net_handle(&self) -> u64 {
+        self.net_handle.load(Ordering::SeqCst)
     }
 
     pub fn kick(&self) {
@@ -220,15 +283,21 @@ impl WardIngest for WardenIngest {
         let token = Inflight(self.inflight.clone());
         // A task of its own, so the session closing mid-ingest (shutdown, a
         // dropped connection) cannot cancel a broker handler half way.
+        let inflight = self.inflight.clone();
         let task = tokio::spawn(async move {
             let _token = token;
-            ingest_one(home, gen, wrap).await
+            ingest_one(home, gen, wrap, inflight).await
         });
         Box::pin(async move { task.await.unwrap_or(AckResult::Failed) })
     }
 }
 
-async fn ingest_one(home: WardenHome, gen: u64, wrap: NostrEvent) -> AckResult {
+async fn ingest_one(
+    home: WardenHome,
+    gen: u64,
+    wrap: NostrEvent,
+    inflight: Arc<AtomicUsize>,
+) -> AckResult {
     // Locked, briefly: which broker serves this link generation.
     let broker =
         tokio::task::spawn_blocking(move || guard(home).as_ref().and_then(|w| w.link_broker(gen)))
@@ -240,15 +309,28 @@ async fn ingest_one(home: WardenHome, gen: u64, wrap: NostrEvent) -> AckResult {
         return AckResult::Failed;
     };
     // Unlocked: the broker's own verification, under its own handler turn.
-    let out = broker
-        .ingest_local(
+    let (out, audits) = broker
+        .ingest_local_deferred(
             &wrap,
             LocalIngestOptions {
                 handle_release: false,
             },
         )
         .await;
-    drop(broker);
+    // The audits are relay IO (seconds with the relays down, which is when
+    // the link matters): they go out on a task of their own, so the ACK does
+    // not wait for them. Counted in flight, so a retiring link lets them
+    // finish (up to `DRAIN_LIMIT`).
+    if audits.is_empty() {
+        drop(broker);
+    } else {
+        inflight.fetch_add(1, Ordering::SeqCst);
+        let token = Inflight(inflight);
+        tokio::spawn(async move {
+            let _token = token;
+            broker.emit_local_audits(audits).await;
+        });
+    }
     // Locked, briefly: the release path, the clause mirror, the applied count.
     tokio::task::spawn_blocking(move || match guard(home).as_mut() {
         Some(w) => w.absorb_local(gen, out, now_unix()),
@@ -265,27 +347,48 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// `{"addrs":["192.168.1.5:47615", …]}` → the IPv4 socket addresses in it.
-/// Anything that is not an `ip:port` IPv4 string is skipped (the link drops
-/// public and port-0 addresses itself); a body that is not that shape at all
-/// is an error.
-pub fn parse_discovered(json: &str) -> Result<Vec<SocketAddrV4>, String> {
+/// What Kotlin's discovery reported (`charterLinkDiscovered`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    pub addrs: Vec<SocketAddrV4>,
+    /// `Network.getNetworkHandle()` of the Wi-Fi/Ethernet network the
+    /// addresses were found on (0: default routing); `None` when the body
+    /// carried none (an older caller), which keeps the current handle.
+    pub net_handle: Option<u64>,
+}
+
+/// `{"addrs":["192.168.1.5:47615", …],"netHandle":<long>}` → the IPv4 socket
+/// addresses in it and the network to bind to. Anything in `addrs` that is
+/// not an `ip:port` IPv4 string is skipped (the link drops public and port-0
+/// addresses itself); `netHandle` is optional, and one that is not a
+/// non-negative integer is ignored; a body that is not that shape at all is
+/// an error.
+pub fn parse_discovered(json: &str) -> Result<Discovered, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("bad json: {e}"))?;
     let arr = v
         .get("addrs")
         .and_then(|a| a.as_array())
         .ok_or("expected {\"addrs\":[…]}")?;
-    Ok(arr
-        .iter()
-        .filter_map(|a| a.as_str())
-        .filter_map(|s| s.trim().parse::<SocketAddrV4>().ok())
-        .collect())
+    Ok(Discovered {
+        addrs: arr
+            .iter()
+            .filter_map(|a| a.as_str())
+            .filter_map(|s| s.trim().parse::<SocketAddrV4>().ok())
+            .collect(),
+        net_handle: v.get("netHandle").and_then(|h| h.as_u64()),
+    })
 }
 
 /// The `charterLinkState` body: the link snapshot plus the warden's count of
-/// locally ingested wraps that were `applied`, or `{"running":false}`.
-pub fn state_json(snapshot: Option<charter_link::WardLinkSnapshot>, applied_seq: u64) -> String {
-    let mut v = match snapshot.and_then(|s| serde_json::to_value(s).ok()) {
+/// locally ingested wraps that were `applied` and the link's generation
+/// (`gen`, process-unique: it moves whenever a new link starts, which has
+/// been told no discovered address yet), or `{"running":false}`.
+pub fn state_json(
+    snapshot: Option<(charter_link::WardLinkSnapshot, u64)>,
+    applied_seq: u64,
+) -> String {
+    let gen = snapshot.as_ref().map(|(_, g)| *g);
+    let mut v = match snapshot.and_then(|(s, _)| serde_json::to_value(s).ok()) {
         Some(serde_json::Value::Object(m)) => m,
         _ => {
             let mut m = serde_json::Map::new();
@@ -297,6 +400,9 @@ pub fn state_json(snapshot: Option<charter_link::WardLinkSnapshot>, applied_seq:
     };
     v.insert("running".into(), true.into());
     v.insert("appliedSeq".into(), applied_seq.into());
+    if let Some(g) = gen {
+        v.insert("gen".into(), g.into());
+    }
     serde_json::Value::Object(v).to_string()
 }
 
@@ -310,16 +416,53 @@ mod tests {
             r#"{"addrs":["192.168.1.5:47615"," 10.0.0.2:1 ","fe80::1","nope",7,"1.2.3.4"]}"#,
         )
         .unwrap();
+        assert_eq!(a.net_handle, None, "an older body names no network");
         assert_eq!(
-            a,
+            a.addrs,
             vec![
                 "192.168.1.5:47615".parse().unwrap(),
                 "10.0.0.2:1".parse().unwrap()
             ]
         );
-        assert!(parse_discovered(r#"{"addrs":[]}"#).unwrap().is_empty());
+        assert!(parse_discovered(r#"{"addrs":[]}"#)
+            .unwrap()
+            .addrs
+            .is_empty());
         assert!(parse_discovered("[]").is_err());
         assert!(parse_discovered("not json").is_err());
+    }
+
+    #[test]
+    fn the_discovered_network_handle_parses() {
+        let d = parse_discovered(r#"{"addrs":["192.168.1.5:47615"],"netHandle":432902426637}"#)
+            .unwrap();
+        assert_eq!(d.net_handle, Some(432_902_426_637));
+        assert_eq!(d.addrs, vec!["192.168.1.5:47615".parse().unwrap()]);
+        // No network: default routing.
+        let d = parse_discovered(r#"{"addrs":[],"netHandle":0}"#).unwrap();
+        assert_eq!(d.net_handle, Some(0));
+        // Junk is ignored, not an error.
+        for junk in [r#""12""#, "-5", "1.5", "null"] {
+            let d = parse_discovered(&format!(r#"{{"addrs":[],"netHandle":{junk}}}"#)).unwrap();
+            assert_eq!(d.net_handle, None, "{junk}");
+        }
+    }
+
+    #[test]
+    fn state_with_a_link_carries_its_generation() {
+        let snap = charter_link::WardLinkSnapshot {
+            connected: false,
+            sessions: vec![],
+            candidates: 1,
+            remembered: None,
+            outbox: 0,
+            last_error: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(&state_json(Some((snap, 9)), 2)).unwrap();
+        assert_eq!(v["running"], true);
+        assert_eq!(v["gen"], 9);
+        assert_eq!(v["appliedSeq"], 2);
+        assert_eq!(v["candidates"], 1);
     }
 
     #[test]

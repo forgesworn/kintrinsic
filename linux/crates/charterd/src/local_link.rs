@@ -144,9 +144,15 @@ where
         let broker = self.broker.clone();
         let control = self.control.clone();
         Box::pin(async move {
-            let out = broker.ingest_local(&wrap, INGEST_OPTIONS).await;
+            let (out, audits) = broker.ingest_local_deferred(&wrap, INGEST_OPTIONS).await;
             if out.released {
                 control.mark_released();
+            }
+            // The ACK goes out as soon as this returns; the audits are relay
+            // IO (seconds when the relays are unreachable, the case the link
+            // serves), so they follow on a task of their own.
+            if !audits.is_empty() {
+                tokio::spawn(async move { broker.emit_local_audits(audits).await });
             }
             out.result
         })

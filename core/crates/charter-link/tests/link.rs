@@ -122,6 +122,7 @@ fn spawn_ward(
             guardian: pinned,
             state_dir: dir.to_path_buf(),
             allow_loopback: true,
+            prepare_socket: None,
         },
         ingest,
         rt.handle(),
@@ -1241,6 +1242,7 @@ fn a_ward_without_loopback_refuses_loopback_candidates_and_remembered_peers() {
             guardian: pk("g"),
             state_dir: wdir.path().to_path_buf(),
             allow_loopback: false,
+            prepare_socket: None,
         },
         Recorder::new(AckResult::Applied),
         rt.handle(),
@@ -1404,6 +1406,7 @@ fn an_ingest_in_flight_finishes_when_the_ward_shuts_down() {
             guardian: pk("g"),
             state_dir: wdir.path().to_path_buf(),
             allow_loopback: true,
+            prepare_socket: None,
         },
         slow.clone(),
         rt.handle(),
@@ -1842,4 +1845,152 @@ fn one_ward_flooding_the_inbox_does_not_evict_another() {
         .map(|e| e.id)
         .collect();
     assert_eq!(kept, mine.iter().map(|w| w.id).collect::<Vec<_>>());
+}
+
+// ---------------------------------------------------------------------------
+// Platform socket hook (Android binds each socket to the Wi-Fi network)
+// ---------------------------------------------------------------------------
+
+fn spawn_ward_with_hook(
+    rt: &Runtime,
+    m: &str,
+    pinned: PubKey,
+    dir: &Path,
+    hook: charter_link::PrepareSocket,
+) -> Arc<WardLink> {
+    WardLink::spawn(
+        WardLinkConfig {
+            machine_sk: zsk(m),
+            guardian: pinned,
+            state_dir: dir.to_path_buf(),
+            allow_loopback: true,
+            prepare_socket: Some(hook),
+        },
+        Recorder::new(AckResult::Applied),
+        rt.handle(),
+    )
+    .unwrap()
+}
+
+/// A socket the platform cannot prepare (the Wi-Fi network it should be bound
+/// to has gone) is not dialled on default routing: that attempt is skipped,
+/// logged and backed off.
+#[test]
+fn a_failing_socket_hook_skips_the_candidate() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![pk("m")]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let ward = spawn_ward_with_hook(
+        &rt,
+        "m",
+        pk("g"),
+        wdir.path(),
+        Arc::new(move |fd| {
+            assert!(fd >= 0, "the hook is given the socket's descriptor");
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("network gone"))
+        }),
+    );
+    ward.set_discovered(vec![lo(guardian.port())]);
+    assert!(wait_until(5, || ward.snapshot().last_error.is_some_and(
+        |e| e.contains("prepare socket") && e.contains("network gone")
+    )));
+    assert!(calls.load(Ordering::SeqCst) >= 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!ward.snapshot().connected);
+    assert!(
+        guardian.sessions().is_empty(),
+        "an unprepared socket never connects"
+    );
+    ward.shutdown();
+}
+
+/// The hook runs on every attempt, before the connect: once it succeeds the
+/// session comes up as usual.
+#[test]
+fn the_socket_hook_runs_before_each_connect() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![pk("m")]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let ward = spawn_ward_with_hook(
+        &rt,
+        "m",
+        pk("g"),
+        wdir.path(),
+        Arc::new(move |_| {
+            if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(std::io::Error::other("not yet"))
+            } else {
+                Ok(())
+            }
+        }),
+    );
+    ward.set_discovered(vec![lo(guardian.port())]);
+    assert!(wait_until(10, || ward.snapshot().connected));
+    assert!(calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(guardian.sessions().len(), 1);
+    ward.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Accepting only on the carrier's home-network addresses
+// ---------------------------------------------------------------------------
+
+/// The listener is bound to every interface; a connection that arrives on an
+/// address outside the carrier's Wi-Fi/Ethernet set (mobile data) closes at
+/// once, a live session on an address that leaves the set closes, and `None`
+/// admits any again.
+#[test]
+fn connections_on_addresses_outside_the_accept_set_close() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![pk("m")]);
+    let port = guardian.port();
+
+    guardian.set_accept_addresses(Some(vec![Ipv4Addr::new(10, 255, 255, 1)]));
+    rt.block_on(async {
+        let mut s = TcpStream::connect(lo(port)).await.unwrap();
+        send(
+            &mut s,
+            &Frame::Hello {
+                v: 1,
+                challenge: [1; 32],
+            },
+        )
+        .await;
+        assert!(
+            is_closed(&recv(&mut s, 3).await),
+            "not on an accepted address: closed before any CHALLENGE"
+        );
+    });
+
+    guardian.set_accept_addresses(Some(vec![
+        Ipv4Addr::new(10, 255, 255, 1),
+        Ipv4Addr::LOCALHOST,
+    ]));
+    rt.block_on(async {
+        let (mut s, _) = raw_ward_ready(port, "m").await;
+        barrier(&mut s, 1).await;
+        assert_eq!(guardian.sessions().len(), 1);
+        // The interface goes: its session closes.
+        guardian.set_accept_addresses(Some(vec![Ipv4Addr::new(10, 255, 255, 1)]));
+        loop {
+            match recv(&mut s, 3).await {
+                Recv::Closed => break,
+                Recv::Frame(_) => continue,
+                Recv::Timeout => panic!("the session stayed up"),
+            }
+        }
+    });
+    assert!(wait_until(5, || guardian.sessions().is_empty()));
+
+    guardian.set_accept_addresses(None);
+    rt.block_on(async {
+        let (mut s, _) = raw_ward_ready(port, "m").await;
+        barrier(&mut s, 2).await;
+    });
 }

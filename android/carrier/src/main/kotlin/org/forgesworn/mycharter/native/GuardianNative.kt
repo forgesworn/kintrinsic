@@ -50,6 +50,11 @@ object GuardianNative {
      *  begins NOT accepting; `false` closes sessions, keeps queue and inbox. */
     external fun guardianLinkAccepting(on: Boolean): String
 
+    /** Accept wards only on these local IPv4 addresses (the Wi-Fi/Ethernet
+     *  interfaces): a JSON array of address strings, or `null` for any. A
+     *  connection on any other address (mobile data) closes at once. */
+    external fun guardianLinkAcceptAddresses(addrsJson: String): String
+
     /** Replace the admitted machine keys; sessions no longer allowed close. */
     external fun guardianLinkAllow(allowedJson: String): String
 

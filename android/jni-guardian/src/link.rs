@@ -7,6 +7,7 @@
 //! design.md`, "Native library entry points" and "Carrier bridge").
 
 use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -86,6 +87,25 @@ pub fn parse_allowed(json: &str) -> Result<Vec<PubKey>, String> {
     out.sort_by_key(|k| *k.as_bytes());
     out.dedup();
     Ok(out)
+}
+
+/// The carrier's home-network addresses: `null` (accept on any address) or a
+/// JSON array of IPv4 address strings. Entries that are not IPv4 addresses
+/// are skipped (that only ever refuses a connection); anything else is an
+/// error, so a garbled push never silently widens the set.
+pub fn parse_accept_addresses(json: &str) -> Result<Option<Vec<Ipv4Addr>>, String> {
+    let v: Value = serde_json::from_str(json).map_err(|_| "addresses are not JSON".to_string())?;
+    if v.is_null() {
+        return Ok(None);
+    }
+    let arr = v.as_array().ok_or("addresses are not an array or null")?;
+    let mut out: Vec<Ipv4Addr> = arr
+        .iter()
+        .filter_map(|e| e.as_str().and_then(|s| s.trim().parse().ok()))
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(Some(out))
 }
 
 /// A JSON array of 64-hex wrap ids; invalid entries are skipped.
@@ -222,6 +242,23 @@ pub fn accepting(on: bool) -> String {
     match current() {
         Some(link) => {
             link.set_accepting(on);
+            ok_json()
+        }
+        None => error_json("link not running"),
+    }
+}
+
+/// Accept wards only on these local addresses (the carrier's Wi-Fi and
+/// Ethernet interfaces), so a ward reaching the phone over mobile data is
+/// refused even while Wi-Fi is also up. `null` accepts on any address.
+pub fn accept_addresses(addrs_json: &str) -> String {
+    let addrs = match parse_accept_addresses(addrs_json) {
+        Ok(a) => a,
+        Err(e) => return error_json(&e),
+    };
+    match current() {
+        Some(link) => {
+            link.set_accept_addresses(addrs);
             ok_json()
         }
         None => error_json("link not running"),
@@ -476,6 +513,25 @@ mod tests {
     /// One test for everything touching the process-global link, so the
     /// parallel test runner never races it.
     #[test]
+    fn accept_addresses_parse() {
+        assert_eq!(parse_accept_addresses("null").unwrap(), None);
+        assert_eq!(
+            parse_accept_addresses(
+                r#"["192.168.1.20"," 10.0.0.3 ","fe80::1",7,"nope","192.168.1.20"]"#
+            )
+            .unwrap(),
+            Some(vec![
+                Ipv4Addr::new(10, 0, 0, 3),
+                Ipv4Addr::new(192, 168, 1, 20)
+            ])
+        );
+        assert_eq!(parse_accept_addresses("[]").unwrap(), Some(vec![]));
+        assert!(parse_accept_addresses("{}").is_err());
+        assert!(parse_accept_addresses("\"192.168.1.20\"").is_err());
+        assert!(parse_accept_addresses("not json").is_err());
+    }
+
+    #[test]
     fn global_link_lifecycle() {
         // Nothing running: every call degrades, none panics.
         stop();
@@ -487,6 +543,7 @@ mod tests {
         assert_eq!(parse(&allow("[]"))["ok"], json!(false));
         assert_eq!(parse(&consume("[]"))["ok"], json!(false));
         assert_eq!(parse(&accepting(true))["ok"], json!(false));
+        assert_eq!(parse(&accept_addresses("null"))["ok"], json!(false));
 
         // Bad inputs are refused before anything binds.
         assert_eq!(parse(&start("", key(1), "[]", 0))["ok"], json!(false));
@@ -514,6 +571,12 @@ mod tests {
         assert_eq!(parse(&allow(&format!("[\"{B}\"]")))["ok"], json!(true));
         assert_eq!(parse(&accepting(true))["ok"], json!(true));
         assert_eq!(parse(&accepting(false))["ok"], json!(true));
+        assert_eq!(
+            parse(&accept_addresses(r#"["192.168.1.20"]"#))["ok"],
+            json!(true)
+        );
+        assert_eq!(parse(&accept_addresses("null"))["ok"], json!(true));
+        assert_eq!(parse(&accept_addresses("{}"))["ok"], json!(false));
 
         // Running: queries answer, a send to an unknown recipient is refused.
         assert_eq!(inbox(), "[]");

@@ -1990,6 +1990,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     // The carrier is the guardian's phone, never this
                     // machine: a loopback "guardian" is a local process.
                     allow_loopback: false,
+                    prepare_socket: None,
                 },
                 ingest,
                 &tokio::runtime::Handle::current(),

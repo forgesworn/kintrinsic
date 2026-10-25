@@ -50,13 +50,17 @@ pub trait WardenRelay: Send + Sync {
     /// Gift-wrap (without publishing) a device AUDIT (kind 31000) to the
     /// guardian — tags only, content always empty. Used by the break-glass
     /// override so an emergency unlock is LOUD (contract §Break-glass
-    /// override event). The wrap is offered to the local link here, once;
-    /// the caller keeps it and retries it with [`Self::publish_wrap`].
+    /// override event). NOT offered to the local link: the caller journals
+    /// it first and then offers it with [`Self::offer_audit_local`], and
+    /// retries it with [`Self::publish_wrap`].
     fn build_audit_wrap(
         &self,
         tags: Vec<Vec<String>>,
         now: u64,
     ) -> Option<charter_primitives::NostrEvent>;
+    /// Offer an AUDIT wrap from [`Self::build_audit_wrap`] to the local link,
+    /// once it is journaled.
+    fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent);
     /// Publish an already-built wrap verbatim (not offered to the local link
     /// again). Returns how many relays accepted; none is an Err.
     fn publish_wrap(&self, wrap: charter_primitives::NostrEvent) -> Result<usize, String>;
@@ -72,6 +76,10 @@ pub trait WardenRelay: Send + Sync {
 /// current-thread tokio runtime and `block_on`s each operation.
 pub struct BlockingRelay<R: RelayTransport + Send + Sync + Clone> {
     transport: CharterTransport<R, OsEntropy>,
+    /// The same identity with no local sink: builds the break-glass AUDIT
+    /// wraps, which are offered to the link only once journaled
+    /// ([`WardenRelay::offer_audit_local`]).
+    audit_builder: CharterTransport<R, OsEntropy>,
     /// A second handle to the same transport for raw-wrap probing (the
     /// orchestration layer hides raw counts by design).
     probe: R,
@@ -98,6 +106,13 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
         );
         Ok(BlockingRelay {
             probe: relay.clone(),
+            audit_builder: CharterTransport::new(
+                relay.clone(),
+                OsEntropy,
+                machine_sk,
+                guardian,
+                relays.clone(),
+            ),
             machine_pk,
             transport: CharterTransport::new(
                 relay,
@@ -186,7 +201,12 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         tags: Vec<Vec<String>>,
         now: u64,
     ) -> Option<charter_primitives::NostrEvent> {
-        self.transport.build_audit_wrap(tags, now)
+        self.audit_builder.build_audit_wrap(tags, now)
+    }
+
+    fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent) {
+        self.transport
+            .offer_local(charter_primitives::kinds::CHARTER_DEVICE_AUDIT, None, wrap);
     }
 
     fn publish_wrap(&self, wrap: charter_primitives::NostrEvent) -> Result<usize, String> {

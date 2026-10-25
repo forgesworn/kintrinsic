@@ -87,6 +87,11 @@ impl EnforceMode {
     }
 }
 
+/// The last local-link generation handed out, process-wide: a new `Warden`
+/// (`charterShutdown` then `charterInit`) never reuses a generation an old
+/// one's link may still be ingesting under.
+static LINK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The whole warden. One per process; behind a global Mutex — the single-writer
 /// discipline the file stores assume (persistence.rs:408-414).
 pub struct Warden {
@@ -400,7 +405,7 @@ impl Warden {
         else {
             return;
         };
-        self.link_gen += 1;
+        self.link_gen = LINK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         match crate::link::LinkHandle::spawn(
             self.link_home,
             self.link_gen,
@@ -469,11 +474,12 @@ impl Warden {
     }
 
     /// Kotlin's discovery result: the full current set of guardian carrier
-    /// addresses (`{"addrs":["192.168.1.5:47615"]}`).
+    /// addresses and the network they were found on
+    /// (`{"addrs":["192.168.1.5:47615"],"netHandle":…}`).
     pub fn link_discovered(&self, addrs_json: &str) -> Result<(), String> {
-        let addrs = crate::link::parse_discovered(addrs_json)?;
+        let found = crate::link::parse_discovered(addrs_json)?;
         if let Some(l) = &self.link {
-            l.set_discovered(addrs);
+            l.set_discovered(found);
         }
         Ok(())
     }
@@ -489,7 +495,7 @@ impl Warden {
     /// The `charterLinkState` body.
     pub fn link_state_json(&self) -> String {
         crate::link::state_json(
-            self.link.as_ref().map(|l| l.snapshot()),
+            self.link.as_ref().map(|l| (l.snapshot(), l.gen())),
             self.link_applied_seq,
         )
     }
@@ -611,6 +617,14 @@ impl Warden {
     /// unlocked decision, so Kotlin lifts all restrictions. Caller has already
     /// authenticated the event via `verify_release`.
     fn apply_release(&mut self) {
+        // The broker first, before anything is wiped: a relay round or a
+        // local-link ingest may be inside one of its handlers right now (the
+        // link runs beside the poll thread). `mark_released` waits for that
+        // handler to finish and makes every later one refuse, so nothing it
+        // stores can land in the directories cleared below.
+        if let Some(b) = &self.broker {
+            b.mark_released();
+        }
         if let Some(subject) = self.subject {
             let _ = self.child_clauses.clear_for(&subject.to_hex());
         }
@@ -3716,16 +3730,21 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
     // unlock happened immediately; this is the LOUD half catching up
     // (offline it waited here, durably). Each audit's wrap is built ONCE
     // (locked: the spool is read-modify-written beside `break_glass`, and the
-    // build is local crypto plus the link outbox offer) and kept with it;
-    // the relays (unlocked) get that identical wrap every round until one
-    // takes it. Rebuilding per round made a new event — and a new "override"
-    // alert on the guardian's phone over the local link — every ~15 s.
+    // build is local crypto), journaled, and only then offered to the link
+    // outbox; the relays (unlocked) get that identical wrap every round until
+    // one takes it. Rebuilding per round made a new event — and a new
+    // "override" alert on the guardian's phone over the local link — every
+    // ~15 s. A wrap that has waited over a day is rebuilt once a day, so no
+    // copy falls outside the guardian's two-day freshness window.
     {
         let wraps = guard(lock)
             .as_ref()
             .map(|w| {
-                w.break_glass
-                    .wraps_to_publish(|tags| relay.build_audit_wrap(tags.to_vec(), now))
+                w.break_glass.wraps_to_publish(
+                    now,
+                    |tags| relay.build_audit_wrap(tags.to_vec(), now),
+                    |wrap| relay.offer_audit_local(wrap),
+                )
             })
             .unwrap_or_default();
         let mut sent = Vec::new();
@@ -9268,6 +9287,42 @@ mod link_loop_tests {
         })
     }
 
+    /// M5: the network the guardian was found on is kept for binding every
+    /// outbound socket; a body without one (an older caller) keeps it, and 0
+    /// returns to default routing.
+    #[test]
+    fn the_discovered_network_handle_is_kept_for_the_sockets() {
+        let rig = Rig::new(concat!(module_path!(), line!()));
+        let port = rig.carrier.port();
+        let handle = || rig.with(|w| w.link.as_ref().expect("link").net_handle());
+        assert_eq!(handle(), 0, "default routing until a network is named");
+        rig.with(|w| {
+            w.link_discovered(&format!(
+                r#"{{"addrs":["127.0.0.1:{port}"],"netHandle":432902426637}}"#
+            ))
+        })
+        .unwrap();
+        assert_eq!(handle(), 432_902_426_637);
+        rig.with(|w| w.link_discovered(&format!(r#"{{"addrs":["127.0.0.1:{port}"]}}"#)))
+            .unwrap();
+        assert_eq!(handle(), 432_902_426_637, "an older body keeps it");
+        rig.with(|w| w.link_discovered(r#"{"addrs":[],"netHandle":0}"#))
+            .unwrap();
+        assert_eq!(handle(), 0);
+    }
+
+    /// L3: link generations are process-wide, so a second warden in the same
+    /// process (`charterShutdown` then `charterInit`) never reuses one an
+    /// ingest from the first may still be finishing under.
+    #[test]
+    fn link_generations_never_repeat_across_wardens() {
+        let a = Rig::new(concat!(module_path!(), line!(), "a"));
+        let b = Rig::new(concat!(module_path!(), line!(), "b"));
+        let (ga, gb) = (a.state()["gen"].clone(), b.state()["gen"].clone());
+        assert!(ga.as_u64().is_some() && gb.as_u64().is_some());
+        assert_ne!(ga, gb);
+    }
+
     #[test]
     fn a_clause_over_the_link_is_stored_mirrored_and_acked_applied() {
         let rig = Rig::new(concat!(module_path!(), line!()));
@@ -9458,10 +9513,43 @@ mod link_loop_tests {
             "handshake remembered"
         );
 
+        // A task still holding the broker (a relay round, a link ingest in
+        // flight) when the release lands.
+        let old_broker = rig
+            .with(|w| w.link_broker(w.link_gen))
+            .expect("the live broker");
+
         // The guardian's own release, over the link alone.
         let genuine = rig.wrap(&release(&rig.guardian.signer), 50);
         let seq_before = rig.state()["appliedSeq"].as_u64().unwrap();
         assert_eq!(rig.send_acked(&genuine), AckResult::Applied);
+
+        // M1: that broker writes nothing after the release, though the clause
+        // still verifies against the released guardian.
+        let later = ClauseBuilder::schedule(t0 - 10)
+            .body(json!({"v":1,"tz":"Europe/London","paused":true,"weekly":{},"issuedAt": t0 - 10}))
+            .build(&rig.guardian);
+        let out = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(old_broker.ingest_local(
+                &rig.wrap(&later, 60),
+                charter_spine::LocalIngestOptions {
+                    handle_release: false,
+                },
+            ));
+        assert_eq!(out.result, AckResult::Refused, "refused after the release");
+        drop(old_broker);
+        rig.with(|w| {
+            assert_eq!(
+                w.child_clauses
+                    .get_child_clause(&subj, charter_proto::ClauseKind::Schedule.store_key())
+                    .unwrap(),
+                None,
+                "nothing written back into the wiped store"
+            );
+        });
         rig.with(|w| {
             assert!(
                 !w.pairing_state().paired,

@@ -60,7 +60,10 @@ class CharterService : Service() {
     private lateinit var slowHandler: Handler
     private lateinit var controller: WardenController
     /** The local link's own thread: NsdManager callbacks, the link monitor
-     *  and the link's JNI calls, so none of them waits behind a relay poll. */
+     *  and the link's JNI calls, off the tick and poll threads. Those JNI calls
+     *  take the native warden lock briefly, so one can still wait while a
+     *  request is being sent (`charterSubmitRequest` holds it across its
+     *  relay publish); nothing on this thread is UI-critical. */
     private lateinit var linkWorker: HandlerThread
     private lateinit var linkHandler: Handler
     private lateinit var linkDiscovery: LinkDiscovery
@@ -142,11 +145,16 @@ class CharterService : Service() {
     }
 
     /** Retry the local link now (network change, screen-on, liveness alarm):
-     *  its native timers stop while the phone sleeps. Any thread. */
-    private fun kickLink() {
+     *  its native timers stop while the phone sleeps. Any thread.
+     *  [rediscover] also ends a resting discovery window; the liveness alarm
+     *  passes false, since it fires about every minute and would otherwise keep
+     *  discovery (and its MulticastLock) running all the time. */
+    private fun kickLink(rediscover: Boolean = true) {
         if (!::linkHandler.isInitialized) return
         linkHandler.post {
             runCatching { org.forgesworn.charter.native.CharterCore.linkKick() }
+            // A resting discovery browses again at once.
+            if (rediscover) linkDiscovery.wake()
         }
         linkHandler.removeCallbacks(linkMonitor)
         linkHandler.post(linkMonitor)
@@ -327,7 +335,7 @@ class CharterService : Service() {
             val tickDue = LivenessPolicy.tickDue(now, lastTickAt, interactive, TICK_MS)
             val pollDue = LivenessPolicy.pollDue(now, lastPollAt, interactive, SLOW_TICK_MS, DARK_SLOW_TICK_MS)
             Log.i(TAG, "liveness kick: tick due=$tickDue poll due=$pollDue screen=${if (interactive) "on" else "off"}")
-            kickLink()
+            kickLink(rediscover = false)
             if (tickDue) {
                 val wl = tickWake
                 runCatching { wl?.acquire(TICK_WAKE_MS) }

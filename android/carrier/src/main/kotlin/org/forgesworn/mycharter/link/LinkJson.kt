@@ -1,6 +1,8 @@
 package org.forgesworn.mycharter.link
 
 import org.forgesworn.mycharter.carrier.RosterEntry
+import java.net.Inet4Address
+import java.net.InetAddress
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,6 +25,21 @@ object LinkJson {
 
     fun allowedMachines(roster: List<RosterEntry>): List<String> =
         roster.filter { it.paired && HEX64.matches(it.machine) }.map { it.machine }.distinct()
+
+    /** A home network's own IPv4 addresses (from its `LinkProperties`): the
+     *  only local addresses the listener takes wards on. */
+    fun ipv4Addresses(addrs: List<InetAddress>): List<String> =
+        addrs.asSequence()
+            .filterIsInstance<Inet4Address>()
+            .filterNot { it.isAnyLocalAddress || it.isLoopbackAddress || it.isMulticastAddress }
+            .mapNotNull { it.hostAddress }
+            .distinct()
+            .toList()
+
+    /** `guardianLinkAcceptAddresses`' body: every home network's addresses,
+     *  one sorted JSON array. Empty (accept nothing) until they are known. */
+    fun acceptAddressesJson(byNetwork: Collection<List<String>>): String =
+        JSONArray(byNetwork.flatten().distinct().sorted()).toString()
 
     /** `guardianLinkStart`'s port, or 0 when it did not start. */
     fun startedPort(raw: String): Int {

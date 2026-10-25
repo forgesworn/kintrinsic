@@ -30,7 +30,7 @@ pub mod transport_facade;
 pub mod usage_pool;
 
 pub use audit::{AuditOutcome, AuditRecord};
-pub use broker::{Broker, LocalIngestOptions, LocalIngestOutcome};
+pub use broker::{Broker, LocalAudits, LocalIngestOptions, LocalIngestOutcome};
 pub use enactor::{EnactOutcome, Enactor, EnactorRegistry};
 pub use error::{BrokerError, EnactError};
 pub use lifecycle::{transition, Effect, Event, RequestRecord, RequestState};

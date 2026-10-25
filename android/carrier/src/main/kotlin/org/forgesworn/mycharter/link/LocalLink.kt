@@ -2,6 +2,7 @@ package org.forgesworn.mycharter.link
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -64,19 +65,19 @@ class LocalLink(
     private var stopped = false
     /** Usable LAN networks -> whether each is Wi-Fi. */
     private val lans = HashMap<Network, Boolean>()
+    /** Each LAN network's own IPv4 addresses: the only local addresses the
+     *  listener takes wards on (it is bound to every interface). */
+    private val lanAddrs = HashMap<Network, List<String>>()
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var registration: NsdManager.RegistrationListener? = null
     private var registeredPort = 0
     private var retryPosted = false
 
-    @Volatile private var looping = false
-    private var loop: Thread? = null
-
     /** Start (idempotent) the native listener, the event thread and the
      *  network watch. Worker thread. */
     fun start() {
         stopped = false
-        current = this
+        synchronized(EVENTS) { current = this }
         watchNetworks()
         val p = store.provision() ?: return
         val sk = hexToKeyBytes(p.guardianSkHex) ?: return
@@ -112,18 +113,19 @@ class LocalLink(
         // The native link is process-global: a newer service instance may
         // already own it (a restart in the same process), and a late stop from
         // the old one must not take it down. Everything else here is ours.
-        val owner = current === this
+        val owner = synchronized(EVENTS) {
+            (current === this).also { if (it) current = null }
+        }
         stopped = true
-        if (owner) current = null
-        looping = false
         netCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
         netCallback = null
         lans.clear()
+        lanAddrs.clear()
         unregister()
         releaseMulticast()
         port = 0
-        // The event thread wakes from its wait and exits on `looping`; its
-        // reference is kept so a quick restart reuses it rather than racing it.
+        // The event thread is the process's (see [EVENTS]): it finds no
+        // current instance and exits, and never hands an event to this one.
         if (owner) runCatching { GuardianNative.guardianLinkStop() }
     }
 
@@ -139,40 +141,19 @@ class LocalLink(
 
     // ---- event thread ------------------------------------------------------
 
-    private fun startLoop() {
-        looping = true
-        if (loop?.isAlive == true) return
-        loop = Thread({ runLoop() }, "kintrinsic-link-events").apply {
-            isDaemon = true
-            start()
-        }
-    }
+    private fun startLoop() = startEventThread()
 
-    private fun runLoop() {
-        while (looping) {
-            val began = SystemClock.elapsedRealtime()
-            val raw = try {
-                GuardianNative.guardianLinkNext(NEXT_TIMEOUT_MS)
-            } catch (t: Throwable) {
-                Log.w(TAG, "next failed: ${t.message}")
-                "[]"
-            }
-            val events = LinkJson.parseEvents(raw)
-            for (e in events) {
-                when (e) {
-                    // Classification and notification dedupe (by reqId /
-                    // audit wrap id) are the relay path's: a request that
-                    // arrives both ways notifies once. The wrap itself is
-                    // already in the native inbox for the console.
-                    is LinkJson.Event.Wrap -> runCatching { onWrap(e.wrapJson) }
-                    is LinkJson.Event.Session ->
-                        Log.i(TAG, "ward ${e.machine.take(8)} ${if (e.up) "on" else "off"} the home network")
-                }
-            }
-            // An immediate empty answer means no link (stopped, or a restart
-            // in progress): never spin on it.
-            if (events.isEmpty() && SystemClock.elapsedRealtime() - began < 100) {
-                try { Thread.sleep(1000) } catch (_: InterruptedException) { return }
+    /** A ward wrap from the event thread, for the instance that owns it now. */
+    private fun dispatch(events: List<LinkJson.Event>) {
+        for (e in events) {
+            when (e) {
+                // Classification and notification dedupe (by reqId /
+                // audit wrap id) are the relay path's: a request that
+                // arrives both ways notifies once. The wrap itself is
+                // already in the native inbox for the console.
+                is LinkJson.Event.Wrap -> runCatching { onWrap(e.wrapJson) }
+                is LinkJson.Event.Session ->
+                    Log.i(TAG, "ward ${e.machine.take(8)} ${if (e.up) "on" else "off"} the home network")
             }
         }
     }
@@ -196,8 +177,16 @@ class LocalLink(
                 onNetworksChanged()
             }
 
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                val addrs = LinkJson.ipv4Addresses(lp.linkAddresses.map { it.address })
+                if (stopped || lanAddrs[network] == addrs) return
+                lanAddrs[network] = addrs
+                onNetworksChanged()
+            }
+
             override fun onLost(network: Network) {
-                if (lans.remove(network) != null) onNetworksChanged()
+                val gone = lans.remove(network) != null
+                if (lanAddrs.remove(network) != null || gone) onNetworksChanged()
             }
         }
         try {
@@ -221,8 +210,16 @@ class LocalLink(
         // Off any home network the listener refuses wards (a mobile network's
         // carrier-grade NAT can hand out 10/8 peers); sends still queue.
         // Rust starts every new link refusing, so this is what turns it on.
+        // On one, it takes wards only on the home networks' own addresses:
+        // with mobile data also up, a connection arriving over mobile data
+        // closes at once. The addresses go first, so accepting never opens
+        // wider than them.
         if (running) {
             try {
+                if (want) {
+                    val addrs = lans.keys.map { lanAddrs[it] ?: emptyList() }
+                    GuardianNative.guardianLinkAcceptAddresses(LinkJson.acceptAddressesJson(addrs))
+                }
                 GuardianNative.guardianLinkAccepting(want)
             } catch (t: Throwable) {
                 Log.w(TAG, "accepting failed: ${t.message}")
@@ -314,8 +311,58 @@ class LocalLink(
         private const val RETRY_MS = 30_000L
 
         /** The running carrier's link, for the bridge; null when the service
-         *  is not running it. */
+         *  is not running it. Set and cleared under [EVENTS]. */
         @Volatile var current: LocalLink? = null
             private set
+
+        /**
+         * The one event thread, owned by the process, not by a service
+         * instance: the native link is process-global, so two threads (an old
+         * instance's still waiting in `guardianLinkNext` beside a new one's)
+         * would split its events, and whatever the old one drained went to a
+         * stopped instance and was lost. This thread hands every batch to the
+         * instance that is [current] when the batch arrives, and exits once
+         * there is none. Its exit and a new start are decided under this
+         * lock, so a stop followed by a start never leaves no thread.
+         */
+        private val EVENTS = Any()
+        private var eventThread: Thread? = null
+
+        private fun startEventThread() {
+            synchronized(EVENTS) {
+                if (eventThread != null) return
+                eventThread = Thread({ runEvents() }, "kintrinsic-link-events").apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+        }
+
+        private fun runEvents() {
+            while (true) {
+                synchronized(EVENTS) {
+                    if (current == null) {
+                        eventThread = null
+                        return
+                    }
+                }
+                val began = SystemClock.elapsedRealtime()
+                val raw = try {
+                    GuardianNative.guardianLinkNext(NEXT_TIMEOUT_MS)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "next failed: ${t.message}")
+                    "[]"
+                }
+                val events = LinkJson.parseEvents(raw)
+                // Whoever owns the link NOW; with no owner the batch is
+                // dropped (wraps stay in the native inbox for the console).
+                if (events.isNotEmpty()) current?.dispatch(events)
+                // An immediate empty answer means no link (stopped, or a
+                // restart in progress): never spin on it.
+                if (events.isEmpty() && SystemClock.elapsedRealtime() - began < 100) {
+                    try { Thread.sleep(1000) } catch (_: InterruptedException) { }
+                }
+            }
+        }
     }
 }

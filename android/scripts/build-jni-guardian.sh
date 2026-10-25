@@ -11,6 +11,20 @@ case "$PROFILE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
+# Gate: the shipped graph must carry no `mock` (the ward script's check:
+# every package with the features it is built with, dev-dependencies left
+# out). The gate proves it can read the listing first: the graph always
+# builds charter-link with its `net` feature.
+graph=$(cargo tree --locked --target all -e normal,build --prefix none --format '{p} [{f}]')
+if ! grep -qE '^charter-link .*\[([^]]*,)?net(,[^]]*)?\]' <<<"$graph"; then
+  echo "FATAL: the mock gate cannot read cargo tree's feature lists" >&2
+  exit 1
+fi
+if grep -qE '\[([^]]*,)?mock(,[^]]*)?\]' <<<"$graph"; then
+  echo "FATAL: mock feature leaked into the guardian release graph" >&2
+  exit 1
+fi
+
 # 16 KB page alignment (Android 15 / GrapheneOS requirement) — same gate as
 # the ward .so.
 for so in ../carrier/src/main/jniLibs/*/libcharter_guardian_jni.so; do
