@@ -218,6 +218,16 @@ class LocalLink(
     private fun reconcile() {
         if (stopped) return
         val want = running && lans.isNotEmpty()
+        // Off any home network the listener refuses wards (a mobile network's
+        // carrier-grade NAT can hand out 10/8 peers); sends still queue.
+        // Rust starts every new link refusing, so this is what turns it on.
+        if (running) {
+            try {
+                GuardianNative.guardianLinkAccepting(want)
+            } catch (t: Throwable) {
+                Log.w(TAG, "accepting failed: ${t.message}")
+            }
+        }
         if (registration != null && (!want || registeredPort != port)) unregister()
         if (want && registration == null) register(port)
         updateMulticast()

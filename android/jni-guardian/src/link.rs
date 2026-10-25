@@ -7,7 +7,7 @@
 //! design.md`, "Native library entry points" and "Carrier bridge").
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -168,6 +168,9 @@ pub fn start(
     let Some(rt) = runtime() else {
         return error_json("no runtime");
     };
+    if let Err(e) = claim_state_dir(&dir, &guardian) {
+        return error_json(&format!("could not prepare state: {e}"));
+    }
     let cfg = GuardianLinkConfig {
         guardian_sk: sk,
         state_dir: dir.clone(),
@@ -176,6 +179,9 @@ pub fn start(
     };
     match GuardianLink::start(cfg, allowed, rt.handle()) {
         Ok(link) => {
+            // Refuse wards until the carrier confirms a home network
+            // (`accepting`); sends still queue meanwhile.
+            link.set_accepting(false);
             let port = link.port();
             *g = Some(Running {
                 link,
@@ -186,6 +192,39 @@ pub fn start(
             start_ok_json(port)
         }
         Err(e) => error_json(&format!("could not listen: {e}")),
+    }
+}
+
+/// The marker naming the guardian a state directory belongs to.
+pub const OWNER_FILE: &str = "guardian";
+
+/// Make `dir` this guardian's: if it holds another guardian's state (or
+/// unmarked state), delete its files first, so a queue, inbox or delivery
+/// record never survives into another guardian's link. Then record the owner.
+pub fn claim_state_dir(dir: &Path, guardian: &PubKey) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let marker = dir.join(OWNER_FILE);
+    let owner = std::fs::read_to_string(&marker).ok();
+    if owner.as_deref().map(str::trim) == Some(guardian.to_hex().as_str()) {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    std::fs::write(&marker, guardian.to_hex())
+}
+
+/// Accept ward connections only while on a home network.
+pub fn accepting(on: bool) -> String {
+    match current() {
+        Some(link) => {
+            link.set_accepting(on);
+            ok_json()
+        }
+        None => error_json("link not running"),
     }
 }
 
@@ -281,7 +320,7 @@ pub fn sessions() -> String {
 
 /// Test hook: whether a link is running from `dir`.
 #[cfg(test)]
-fn running_from(dir: &std::path::Path) -> bool {
+fn running_from(dir: &Path) -> bool {
     global().as_ref().is_some_and(|r| r.dir == dir)
 }
 
@@ -312,6 +351,33 @@ mod tests {
 
     fn parse(s: &str) -> Value {
         serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn a_state_dir_is_wiped_for_another_guardian_only() {
+        let d = tmp("claim");
+        let g1 = charter_link::public_key(&key(1)).unwrap();
+        let g2 = charter_link::public_key(&key(2)).unwrap();
+        // Unmarked state is not trusted to be ours.
+        std::fs::write(d.join("link-inbox.json"), "{}").unwrap();
+        claim_state_dir(&d, &g1).unwrap();
+        assert!(!d.join("link-inbox.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(d.join(OWNER_FILE)).unwrap(),
+            g1.to_hex()
+        );
+        // Same guardian: kept.
+        std::fs::write(d.join("link-inbox.json"), "{}").unwrap();
+        claim_state_dir(&d, &g1).unwrap();
+        assert!(d.join("link-inbox.json").exists());
+        // Another guardian: wiped and re-marked.
+        claim_state_dir(&d, &g2).unwrap();
+        assert!(!d.join("link-inbox.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(d.join(OWNER_FILE)).unwrap(),
+            g2.to_hex()
+        );
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -420,6 +486,7 @@ mod tests {
         assert_eq!(delivery(&format!("[\"{A}\"]")), "{}");
         assert_eq!(parse(&allow("[]"))["ok"], json!(false));
         assert_eq!(parse(&consume("[]"))["ok"], json!(false));
+        assert_eq!(parse(&accepting(true))["ok"], json!(false));
 
         // Bad inputs are refused before anything binds.
         assert_eq!(parse(&start("", key(1), "[]", 0))["ok"], json!(false));
@@ -445,6 +512,8 @@ mod tests {
         assert_eq!(s2["port"].as_u64(), Some(port));
         assert!(Arc::ptr_eq(&first, &current().unwrap()));
         assert_eq!(parse(&allow(&format!("[\"{B}\"]")))["ok"], json!(true));
+        assert_eq!(parse(&accepting(true))["ok"], json!(true));
+        assert_eq!(parse(&accepting(false))["ok"], json!(true));
 
         // Running: queries answer, a send to an unknown recipient is refused.
         assert_eq!(inbox(), "[]");

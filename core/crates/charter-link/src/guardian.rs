@@ -271,6 +271,9 @@ struct Session {
 
 struct State {
     closed: bool,
+    /// False while the carrier is off any home network: connections are
+    /// refused, sessions closed; queue and inbox are kept.
+    accepting: bool,
     allowed: HashSet<PubKey>,
     sessions: HashMap<u64, Session>,
     next_session: u64,
@@ -315,6 +318,7 @@ impl GuardianLink {
 
         let mut state = State {
             closed: false,
+            accepting: true,
             allowed: allowed.into_iter().collect(),
             sessions: HashMap::new(),
             next_session: 1,
@@ -377,6 +381,21 @@ impl GuardianLink {
             .collect();
         for id in gone {
             self.inner.drop_session(&mut st, id);
+        }
+    }
+
+    /// Accept ward connections (`true`, the default) or refuse them while the
+    /// carrier has no home network (`false`): new connections close at once
+    /// and every session closes. Queued wraps, the inbox and delivery records
+    /// are kept.
+    pub fn set_accepting(&self, on: bool) {
+        let mut st = lock(&self.inner.state);
+        st.accepting = on;
+        if !on {
+            let all: Vec<u64> = st.sessions.keys().copied().collect();
+            for id in all {
+                self.inner.drop_session(&mut st, id);
+            }
         }
     }
 
@@ -683,7 +702,7 @@ async fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
                 continue;
             }
         };
-        if !peer_address_allowed(peer.ip(), inner.allow_loopback) {
+        if !peer_address_allowed(peer.ip(), inner.allow_loopback) || !lock(&inner.state).accepting {
             drop(stream);
             continue;
         }
@@ -726,7 +745,11 @@ async fn connection(inner: Arc<Inner>, stream: TcpStream, peer: SocketAddr) {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(SESSION_CHANNEL);
     let id = {
         let mut st = lock(&inner.state);
-        if st.closed || !st.allowed.contains(&machine) || st.sessions.len() >= MAX_SESSIONS {
+        if st.closed
+            || !st.accepting
+            || !st.allowed.contains(&machine)
+            || st.sessions.len() >= MAX_SESSIONS
+        {
             return;
         }
         let mut mine: Vec<(Instant, u64)> = st

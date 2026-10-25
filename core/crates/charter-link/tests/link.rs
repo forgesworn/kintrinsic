@@ -11,7 +11,8 @@ use charter_crypto::{schnorr_sign, sha256};
 use charter_link::{
     decode_frame, encode_frame, frame_len, guardian_proof_sign, guardian_proof_verify, public_key,
     sign_ack, verify_ack, ward_proof_sign, AckResult, DeliveryState, Frame, GuardianEvent,
-    GuardianLink, GuardianLinkConfig, LocalOffer, WardIngest, WardLink, WardLinkConfig, MAX_FRAME,
+    GuardianLink, GuardianLinkConfig, LocalOffer, SendState, WardIngest, WardLink, WardLinkConfig,
+    MAX_FRAME,
 };
 use charter_primitives::{kinds, EventId, NostrEvent, PubKey, Sig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -582,6 +583,42 @@ fn set_allowed_closes_sessions_no_longer_allowed() {
         up: false
     }));
     assert!(wait_until(5, || !ward.snapshot().connected));
+}
+
+#[test]
+fn not_accepting_refuses_connections_and_keeps_the_queue() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let m = pk("m");
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    let rec = Recorder::new(AckResult::Applied);
+    let ward = spawn_ward(&rt, "m", pk("g"), wdir.path(), rec.clone());
+    ward.set_discovered(vec![lo(guardian.port())]);
+    assert!(wait_until(5, || guardian.sessions().len() == 1));
+
+    // Off the home network: sessions close, new connections are refused,
+    // sends queue.
+    guardian.set_accepting(false);
+    assert!(guardian.sessions().is_empty());
+    assert!(wait_until(5, || !ward.snapshot().connected));
+    let port = guardian.port();
+    let refused = rt.block_on(async {
+        let mut s = TcpStream::connect(lo(port)).await.unwrap();
+        recv(&mut s, 3).await
+    });
+    assert!(
+        is_closed(&refused),
+        "expected a closed socket, got {refused:?}"
+    );
+    let w = wrap(&m, 77);
+    assert_eq!(guardian.send(&m, w.clone()), SendState::Queued);
+    assert!(guardian.sessions().is_empty());
+
+    // Back on: the ward reconnects and the queued wrap goes out.
+    guardian.set_accepting(true);
+    ward.kick();
+    assert!(wait_until(10, || rec.ids().contains(&w.id)));
+    assert_eq!(guardian.sessions().len(), 1);
 }
 
 // ---------------------------------------------------------------------------

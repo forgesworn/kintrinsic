@@ -6,7 +6,7 @@ pub mod classify;
 pub mod link;
 
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::JNIEnv;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use zeroize::Zeroize;
@@ -167,6 +167,17 @@ pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guard
     _class: JClass,
 ) -> jstring {
     guarded(&env, ERR, || Some(link::stop()))
+}
+
+/// Accept wards (`true`) only while on a home network; `false` refuses new
+/// connections and closes sessions, keeping the queue and inbox.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianLinkAccepting(
+    env: JNIEnv,
+    _class: JClass,
+    on: jboolean,
+) -> jstring {
+    guarded(&env, ERR, || Some(link::accepting(on != 0)))
 }
 
 #[no_mangle]

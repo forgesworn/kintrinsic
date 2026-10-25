@@ -46,6 +46,10 @@ object GuardianNative {
 
     external fun guardianLinkStop(): String
 
+    /** Accept ward connections only while on a home network. A started link
+     *  begins NOT accepting; `false` closes sessions, keeps queue and inbox. */
+    external fun guardianLinkAccepting(on: Boolean): String
+
     /** Replace the admitted machine keys; sessions no longer allowed close. */
     external fun guardianLinkAllow(allowedJson: String): String
 
