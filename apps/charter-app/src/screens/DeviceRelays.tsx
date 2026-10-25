@@ -4,6 +4,7 @@ import { Button } from "../components/ui";
 import { DEFAULT_RELAYS } from "../signer/config";
 import { validateRelays } from "../wire/relayConfig";
 import { useCharter } from "../store/store";
+import { localRouteGapLine, useLocalRoute } from "../carrier/localRoute";
 
 export default function DeviceRelays({ child, device }: { child: Child; device: Device }) {
   const { createRelayCode, recordDeviceRelays } = useCharter();
@@ -13,6 +14,7 @@ export default function DeviceRelays({ child, device }: { child: Child; device: 
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const routeLine = localRouteGapLine(useLocalRoute().gap);
 
   async function generate() {
     setError("");
@@ -41,6 +43,7 @@ export default function DeviceRelays({ child, device }: { child: Child; device: 
           }} />
         </label>
         <p className="card-sub">Use at least two relays, one wss:// address per line. Choose relays run by different operators so an outage leaves another route open.</p>
+        {routeLine && <p className="card-sub">{routeLine}</p>}
         <Button variant="secondary" disabled={busy} onClick={() => void generate()}>
           {busy ? "Signing…" : "Create relay code"}
         </Button>

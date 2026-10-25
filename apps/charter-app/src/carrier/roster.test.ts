@@ -35,8 +35,8 @@ describe("buildCarrierRoster", () => {
     });
     const roster = buildCarrierRoster([c]);
     expect(roster).toEqual([
-      { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6" },
-      { machine: "b".repeat(64), childName: "Mia", deviceLabel: "School laptop" },
+      { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6", paired: true },
+      { machine: "b".repeat(64), childName: "Mia", deviceLabel: "School laptop", paired: true },
     ]);
   });
 
@@ -49,8 +49,19 @@ describe("buildCarrierRoster", () => {
       devices: [device({ pairing: "unpaired", devicePubkey: "c".repeat(64) })],
     });
     expect(buildCarrierRoster([c])).toEqual([
-      { machine: "c".repeat(64), childName: "Mia", deviceLabel: "Pixel 6" },
+      { machine: "c".repeat(64), childName: "Mia", deviceLabel: "Pixel 6", paired: false },
     ]);
+  });
+
+  it("marks only a fully paired device as paired (the carrier admits only those at the handshake)", () => {
+    const c = child({
+      devices: [
+        device({ id: "d1", pairing: "paired", devicePubkey: "a".repeat(64) }),
+        device({ id: "d2", pairing: "pairing", devicePubkey: "b".repeat(64) }),
+        device({ id: "d3", pairing: "unpaired", devicePubkey: "c".repeat(64) }),
+      ],
+    });
+    expect(buildCarrierRoster([c]).map((e) => e.paired)).toEqual([true, false, false]);
   });
 
   it("skips a device with no pubkey yet — it has no machine identity to key on", () => {

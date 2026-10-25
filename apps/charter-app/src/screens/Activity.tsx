@@ -4,6 +4,7 @@ import { EmptyState, SectionLabel } from "../components/ui";
 import { WardHeading, WardTabs } from "../components/wards";
 import { goToWard, useWardRoute } from "../domain/wardRoute";
 import { useCharter } from "../store/store";
+import { appliedSuffix, recordsOf, ruleAppliedMachines } from "../store/localDelivery";
 import { WeeklyPicture, type DeviceMeta } from "../insights/WeeklyPicture";
 import { outOfHoursLine, weeklyView } from "../insights/usageHistory";
 import { unrecognisedGuardTz } from "../domain/unrecognisedTime";
@@ -235,6 +236,19 @@ export default function Activity() {
   const childName = (id: string) =>
     state.children.find((c) => c.id === id)?.name;
 
+  // "— applied on {device}" once the ward's own acknowledgement of a rule
+  // change arrives over the home network. Derived at render time from the
+  // delivery record, never written into the stored sentence.
+  const deliveries = recordsOf(state.localDeliveries);
+  const appliedNote = (ev: ActivityEvent): string => {
+    const names = ruleAppliedMachines(ev.wraps, deliveries).map(
+      (m) =>
+        state.children.flatMap((c) => c.devices).find((d) => d.devicePubkey === m)?.label ??
+        "their device",
+    );
+    return appliedSuffix(names);
+  };
+
   const shownWeeks = (
     childFilter === EVERYONE
       ? state.children
@@ -295,6 +309,7 @@ export default function Activity() {
                           {OUTCOME_STYLE[ev.outcome].label}.{" "}
                         </span>
                         {ev.summary}
+                        {appliedNote(ev)}
                       </span>
                       <br />
                       <span className="row-sub">

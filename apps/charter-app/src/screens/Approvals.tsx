@@ -29,6 +29,7 @@ import { identityDisplayLabel } from "../domain/launchSignatures";
 import { resolveChildTz } from "../domain/childTz";
 import { appOpenWindowUnix, startOfDayUnix, startOfWeekUnix, type AppOpenWindow } from "../wire/grant";
 import { isAskExpired } from "../domain/askExpiry";
+import AnsweredDelivery from "./AnsweredDelivery";
 
 // =============================================================================
 // Approvals — the requests queue. The highest-frequency parent action.
@@ -165,9 +166,12 @@ export default function Approvals() {
 
   if (groups.length === 0) {
     return (
-      <EmptyState emoji="🎉" title="All caught up">
-        No requests right now. We'll let you know the moment someone asks.
-      </EmptyState>
+      <div className="stack">
+        <AnsweredDelivery />
+        <EmptyState emoji="🎉" title="All caught up">
+          No requests right now. We'll let you know the moment someone asks.
+        </EmptyState>
+      </div>
     );
   }
 
@@ -242,6 +246,7 @@ export default function Approvals() {
   return (
     <div className="stack">
       {decideError && <Banner tone="warn">{decideError}</Banner>}
+      <AnsweredDelivery />
       {!signerConnected && (
         <Banner tone="info">
           <span>

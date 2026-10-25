@@ -14,6 +14,7 @@ import type { GuardianOps } from "../wire/giftwrap";
 import type { Policy } from "../domain/types";
 import { RealSigner, type ChildTarget } from "./realSigner";
 import { relayAuthSigner } from "./relayAuth";
+import { withLocalRoute, type LocalRouteHooks } from "./routePublish";
 
 export interface SignetSignerConfig {
   /** The paired guardian `bunker://…` URI (from the pairing flow). */
@@ -25,6 +26,8 @@ export interface SignetSignerConfig {
   now?: () => number;
   /** Override the relay pool (tests). */
   pool?: SimplePool;
+  /** Home-network delivery bookkeeping (device names, delivery tracking). */
+  localRoute?: LocalRouteHooks;
 }
 
 /**
@@ -53,16 +56,18 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
     };
   };
 
+  const relayPublish = async (relays: string[], event: NostrEvent): Promise<void> => {
+    // Fan out, but ONE accepted relay is the bar for "sent" — same honesty
+    // rule as localSigner: all-relays-refused must surface, not read as ok.
+    const results = await Promise.allSettled(pool.publish(relays, event, { onauth: authenticate }));
+    if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
+      throw new Error("Couldn't reach any relay — check your connection and try again.");
+    }
+  };
+
   return new RealSigner({
     connectGuardian,
-    publish: async (relays: string[], event: NostrEvent) => {
-      // Fan out, but ONE accepted relay is the bar for "sent" — same honesty
-      // rule as localSigner: all-relays-refused must surface, not read as ok.
-      const results = await Promise.allSettled(pool.publish(relays, event, { onauth: authenticate }));
-      if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
-        throw new Error("Couldn't reach any relay — check your connection and try again.");
-      }
-    },
+    publish: withLocalRoute(relayPublish, config.localRoute),
     resolveChild: config.resolveChild,
     childPolicies: config.childPolicies,
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),

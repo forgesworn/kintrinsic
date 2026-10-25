@@ -500,6 +500,12 @@ export interface ActivityEvent {
    * See `domain/groupProgress.ts`'s `groupExtrasToday`.
    */
   minutesGranted?: number;
+  /**
+   * Present only on a rule-change line whose clause wraps were handed to the
+   * carrier for home-network delivery: their event ids, so the Activity screen
+   * can say "applied on {device}" once the ward's ACK arrives. Never wire data.
+   */
+  wraps?: string[];
 }
 
 /** The signing helper the parent uses to authorize changes/decisions. */

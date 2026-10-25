@@ -141,8 +141,25 @@ describe("pushCarrierRoster", () => {
     const payload = JSON.parse(roster.mock.calls[0][0]);
     expect(payload.v).toBe(1);
     expect(payload.entries).toEqual([
-      { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6" },
+      { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6", paired: true },
     ]);
+  });
+
+  it("tells the carrier which machines are paired, so only those are admitted over the home network", () => {
+    const roster = vi.fn();
+    window.CharterCarrier = { provision: vi.fn(), roster, isCarrier: () => true };
+    const mixed: Child[] = [
+      {
+        ...CHILDREN[0],
+        devices: [
+          { ...CHILDREN[0].devices[0], id: "p", devicePubkey: "a".repeat(64), pairing: "paired" },
+          { ...CHILDREN[0].devices[0], id: "q", devicePubkey: "b".repeat(64), pairing: "pairing" },
+        ],
+      },
+    ];
+    expect(pushCarrierRoster(mixed)).toBe(true);
+    const entries = JSON.parse(roster.mock.calls[0][0]).entries as { machine: string; paired: boolean }[];
+    expect(entries.map((e) => [e.machine[0], e.paired])).toEqual([["a", true], ["b", false]]);
   });
 
   it("pushes an empty roster (not a no-op) when there is nothing to name yet", () => {

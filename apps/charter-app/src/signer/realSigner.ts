@@ -32,6 +32,8 @@ import {
 import type { DecisionContext, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
+import { localRouteAvailable } from "../carrier/localLink";
+import { QueuedForHomeNetworkError, type PublishMeta } from "./routePublish";
 
 /** One deliverable device: its domain id, and the key its wraps are sealed to. */
 export interface TargetDevice {
@@ -62,7 +64,7 @@ export interface RealSignerDeps {
   /** Establish a guardian session (prod: NIP-46 bunker connect). */
   connectGuardian: (kind: SignerKind) => Promise<GuardianOps>;
   /** Publish a finalized event to the given relays. */
-  publish: (relays: string[], event: NostrEvent) => Promise<void>;
+  publish: (relays: string[], event: NostrEvent, meta?: PublishMeta) => Promise<void>;
   /** Resolve a child id to its subject + device pubkeys + relays. */
   resolveChild: (childId: string) => ChildTarget | undefined;
   /**
@@ -83,6 +85,8 @@ export interface RealSignerDeps {
    */
   confirmGate?: ConfirmGate;
 }
+
+const CLAUSE_META: PublishMeta = { kind: "clause" };
 
 function labelFor(kind: SignerKind): string | undefined {
   if (kind === "signet") return "Signet";
@@ -224,11 +228,41 @@ export class RealSigner implements Signer {
         `No paired device to send this to yet — pair ${who}'s phone first, then try again.`,
       );
     }
-    if (target.relays.length === 0) {
+    // A ward reachable over the home network needs no relay to receive this.
+    if (target.relays.length === 0 && !localRouteAvailable()) {
       throw new Error(
         `No relay is set up to reach ${who}'s device, so this couldn't be sent.`,
       );
     }
+  }
+
+  /**
+   * Publish one wrap. A ward that is simply not on the home network yet (the
+   * relays failed, the carrier is holding the wrap) must not stop the REST of
+   * the batch going out — the carrier can queue every one of them — so that
+   * one outcome is remembered and thrown by `settle` once the batch is done.
+   * Anything else still aborts, as it always has.
+   */
+  private async send(
+    relays: string[],
+    wrap: NostrEvent,
+    meta: PublishMeta,
+    held: QueuedForHomeNetworkError[],
+  ): Promise<void> {
+    try {
+      await this.deps.publish(relays, wrap, meta);
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) {
+        held.push(err);
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /** Surface "not sent yet" (see `send`) after the whole batch was handed over. */
+  private settle(held: QueuedForHomeNetworkError[]): void {
+    if (held.length > 0) throw QueuedForHomeNetworkError.merge(held);
   }
 
   async signClause(childId: string, policy: Policy): Promise<{ ok: true }> {
@@ -236,6 +270,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held: QueuedForHomeNetworkError[] = [];
 
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
@@ -247,9 +282,10 @@ export class RealSigner implements Signer {
       for (const clause of clauses) {
         for (const device of target.devices) {
           const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-          await this.deps.publish(target.relays, wrap);
+          await this.send(target.relays, wrap, CLAUSE_META, held);
         }
       }
+      this.settle(held);
       return { ok: true };
     }
 
@@ -263,9 +299,10 @@ export class RealSigner implements Signer {
       const clauses = policyToClauses(target.subject, effective, issuedAt);
       for (const clause of clauses) {
         const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-        await this.deps.publish(target.relays, wrap);
+        await this.send(target.relays, wrap, CLAUSE_META, held);
       }
     }
+    this.settle(held);
     return { ok: true };
   }
 
@@ -305,6 +342,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held: QueuedForHomeNetworkError[] = [];
     this.requireDeliverable(target, childId);
     await this.authorize(
       "clause",
@@ -328,8 +366,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
+    this.settle(held);
     return { ok: true };
   }
 
@@ -350,6 +389,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held: QueuedForHomeNetworkError[] = [];
     this.requireDeliverable(target, childId);
     await this.authorize("clause", `Give ${minutes} more minutes to ${target.name ?? childId}`);
     const issuedAt = this.nextIssuedAt();
@@ -377,8 +417,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
+    this.settle(held);
     return { ok: true };
   }
 
@@ -404,6 +445,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held: QueuedForHomeNetworkError[] = [];
     this.requireDeliverable(target, childId);
     const lift = opts?.lift === true;
     const who = target.name ?? childId;
@@ -435,8 +477,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
+    this.settle(held);
     return { ok: true };
   }
 
@@ -449,6 +492,7 @@ export class RealSigner implements Signer {
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held: QueuedForHomeNetworkError[] = [];
     this.requireDeliverable(target, childId);
 
     await this.authorize(
@@ -462,8 +506,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
+    this.settle(held);
     return { ok: true };
   }
 
@@ -572,7 +617,7 @@ export class RealSigner implements Signer {
         ts,
       });
       const wrap = await giftWrapGrant(payload, install.machine, guardian, ts);
-      await this.deps.publish(target.relays, wrap);
+      await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: install.reqId });
       return { ok: true };
     }
 
@@ -596,7 +641,7 @@ export class RealSigner implements Signer {
         ts,
       });
       const wrap = await giftWrapGrant(payload, appOpen.machine, guardian, ts);
-      await this.deps.publish(target.relays, wrap);
+      await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: appOpen.reqId });
       return { ok: true };
     }
 
@@ -645,7 +690,7 @@ export class RealSigner implements Signer {
     });
     // The GRANT answers exactly ONE device — the machine that brokered the ask.
     const wrap = await giftWrapGrant(payload, wire.machine, guardian, ts);
-    await this.deps.publish(target.relays, wrap);
+    await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: wire.reqId });
     return { ok: true };
   }
 }

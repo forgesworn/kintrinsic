@@ -76,3 +76,21 @@ describe("undeliveredNote", () => {
     for (const d of all) expect(typeof undeliveredNote(d)).toBe("string");
   });
 });
+
+describe("a change held for a device that is not on the home network yet", () => {
+  const queued: ClauseDelivery = {
+    outcome: "queued",
+    message: "Not sent yet — it'll reach Robin's laptop when it's on the home network.",
+  };
+
+  it("is saved but plainly not sent, in the activity line", () => {
+    expect(undeliveredNote(queued)).toBe(
+      " — saved here. Not sent yet: it'll reach Robin's laptop when it's on the home network.",
+    );
+  });
+
+  it("a sent change, with or without tracked wraps, adds no note", () => {
+    expect(undeliveredNote({ outcome: "sent" })).toBe("");
+    expect(undeliveredNote({ outcome: "sent", wraps: ["w1"] })).toBe("");
+  });
+});

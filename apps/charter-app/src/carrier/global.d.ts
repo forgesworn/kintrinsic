@@ -21,6 +21,19 @@ declare global {
       installUpdate?: (url: string, sha256: string) => string;
       /** `{"phase":"idle|downloading|verifying|waiting-user|done|failed","error":string|null}` */
       installState?: () => string;
+      /** Local-network delivery (design: docs/local-network-design.md). Every
+       *  method below is OPTIONAL — older APKs lack them, a plain browser has
+       *  no bridge at all — and returns/accepts JSON strings. Prefer the typed
+       *  wrappers in `./localLink`, which feature-detect and never throw.
+       *  `{"v":1,"available":bool,"listening":bool,"sessions":[{"machine":hex,"since":unix}]}` */
+      localInfo?: () => string;
+      /** `{"state":"sent"|"queued"|"rejected"|"unavailable"}` */
+      localSend?: (recipientHex: string, wrapJson: string) => string;
+      /** `{"<wrapId>":{"state":…,"at":unix,"machine":hex}}` */
+      localDelivery?: (wrapIdsJson: string) => string;
+      /** `[{"id":wrapId,"machine":hex,"wrap":{…},"receivedAt":unix}]` */
+      localInbox?: () => string;
+      localConsume?: (idsJson: string) => void;
     };
   }
 }

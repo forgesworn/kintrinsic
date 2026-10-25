@@ -4,12 +4,15 @@ import type { Signer } from "./Signer";
 import { createMockSigner, type ConfirmGate } from "./mockSigner";
 import { createSignetSigner } from "./signetSigner";
 import { createLocalSigner } from "./localSigner";
+import type { LocalRouteHooks } from "./routePublish";
 
 export interface SelectSignerDeps {
   resolveChild: (childId: string) => ChildTarget | undefined;
   /** The child's current policy list (app-scope aggregation — see RealSigner). */
   childPolicies: (childId: string) => Policy[];
   confirmGate: ConfirmGate;
+  /** Home-network delivery bookkeeping, shared by both real signers. */
+  localRoute?: LocalRouteHooks;
 }
 
 /**
@@ -25,6 +28,7 @@ export function selectSigner(signerState: SignerState, deps: SelectSignerDeps): 
       resolveChild: deps.resolveChild,
       childPolicies: deps.childPolicies,
       confirmGate: deps.confirmGate,
+      localRoute: deps.localRoute,
       // Start disconnected (mount effect reconnects), but carry autoSign forward.
       initial: { connected: false, kind: "local", autoSign: signerState.autoSign },
     });
@@ -34,6 +38,7 @@ export function selectSigner(signerState: SignerState, deps: SelectSignerDeps): 
       getBunkerUri: async () => signerState.bunkerUri!,
       resolveChild: deps.resolveChild,
       childPolicies: deps.childPolicies,
+      localRoute: deps.localRoute,
     });
   }
   return createMockSigner({ initial: signerState, confirmGate: deps.confirmGate });

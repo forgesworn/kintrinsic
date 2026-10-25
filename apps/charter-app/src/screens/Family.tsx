@@ -37,7 +37,8 @@ import UnlockDevice from "./UnlockDevice";
 import DeviceRelays from "./DeviceRelays";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
-import { bestLiveness, livenessChip } from "../domain/liveness";
+import { anyOnHomeNetwork, bestLiveness, livenessChip } from "../domain/liveness";
+import { useLocalRoute } from "../carrier/localRoute";
 import { appLockNote, deviceHealthNotes } from "../domain/deviceHealth";
 
 // Accent colors a parent can pick for a child's avatar/chips.
@@ -116,7 +117,12 @@ function ChildCard({ child }: { child: Child }) {
   const connectedCount = child.devices.filter((d) => d.pairing === "paired").length;
   // "Connected" now means reachable NOW, not merely set up — the reading a
   // guardian would take from the word anyway.
-  const childChip = livenessChip(bestLiveness(child.devices, Date.now()), Date.now());
+  const { sessions } = useLocalRoute();
+  const childChip = livenessChip(
+    bestLiveness(child.devices, Date.now()),
+    Date.now(),
+    anyOnHomeNetwork(child.devices, sessions),
+  );
 
   function saveName() {
     const next = draftName.trim();
@@ -461,6 +467,8 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   // moment the child is locked out, not only after some "locked" signal.
   const canUnlock = paired && isValidDevicePubkey(device.devicePubkey);
   const seen = lastSeenLabel(device.lastSeenAt, Date.now());
+  const { sessions: homeSessions } = useLocalRoute();
+  const onHomeNetwork = paired && !!device.devicePubkey && homeSessions.has(device.devicePubkey);
   // Kintrinsic's install lock is closed on every chartered phone, which is why a
   // ward could not update an app from their store at all. A guardian-opened,
   // signed, self-closing window is the stand-down — the same clause a stuck
@@ -528,7 +536,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
             first while sounding like both. */}
         <div className="card-sub">
           {paired ? "Managed by Kintrinsic" : "Disconnected"}
-          {paired ? ` · ${seen ?? "waiting to hear from it"}` : ""}
+          {paired ? ` · ${onHomeNetwork ? "On home network" : (seen ?? "waiting to hear from it")}` : ""}
         </div>
         {reportedName && (
           <div className="card-sub">Kintrinsic {reportedName}</div>

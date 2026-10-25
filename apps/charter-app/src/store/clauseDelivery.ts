@@ -16,8 +16,20 @@
  * and the ward's device has NOT been told.
  */
 export type ClauseDelivery =
-  | { outcome: "sent" }
+  | {
+      outcome: "sent";
+      /** Clause wraps the carrier took for home-network delivery (see
+       *  `localDelivery.ts`); absent when everything went by relays only. */
+      wraps?: string[];
+    }
   | { outcome: "undelivered"; why: "no-signer" | "no-device" }
+  /**
+   * The relays failed but the carrier is holding the change for a ward device
+   * that is not on the home network right now. Saved here and on its way, but
+   * NOT sent: callers must not treat this as `sent` (an approval stays
+   * pending). `message` is the guardian-facing sentence.
+   */
+  | { outcome: "queued"; message: string; wraps?: string[] }
   | { outcome: "cancelled" };
 
 /**
@@ -45,6 +57,9 @@ export function clauseDeliveryPrecheck(
  * Empty string when the change really did go, so the happy path reads clean.
  */
 export function undeliveredNote(d: ClauseDelivery): string {
+  if (d.outcome === "queued") {
+    return ` — saved here. ${d.message.replace(/^Not sent yet — /, "Not sent yet: ")}`;
+  }
   if (d.outcome !== "undelivered") return "";
   return d.why === "no-signer"
     ? " — saved here, but not sent yet: turn on parent approval to send it"

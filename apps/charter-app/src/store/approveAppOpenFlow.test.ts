@@ -65,3 +65,16 @@ describe("runApproveAppOpenFlow", () => {
     expect(result).toEqual({ outcome: "decision-cancelled" });
   });
 });
+
+describe("runApproveAppOpenFlow: a hold queued for a device that isn't home", () => {
+  it("is NOT treated as sent — no Decision echo goes out, and the guardian is told why", async () => {
+    const sendDecision = vi.fn(async () => true);
+    const message = "Not sent yet — it'll reach Robin's laptop when it's on the home network.";
+    const result = await runApproveAppOpenFlow({
+      saveHold: async () => ({ outcome: "queued" as const, message }),
+      sendDecision,
+    });
+    expect(result).toEqual({ outcome: "refused", message });
+    expect(sendDecision).not.toHaveBeenCalled();
+  });
+});

@@ -34,7 +34,12 @@ export type ApproveAppOpenOutcome =
   | { outcome: "refused"; message: string };
 
 /** Human copy for a clause that didn't send, by why. */
-function refusalMessage(delivery: Extract<ClauseDelivery, { outcome: "cancelled" | "undelivered" }>): string {
+function refusalMessage(
+  delivery: Extract<ClauseDelivery, { outcome: "cancelled" | "undelivered" | "queued" }>,
+): string {
+  // Held by the carrier for a ward that isn't on the home network: not a
+  // failure to sign, but not delivered either — the ask stays pending.
+  if (delivery.outcome === "queued") return delivery.message;
   return delivery.outcome === "cancelled"
     ? "Nothing was changed — the hold wasn't signed."
     : "Can't reach their device right now, so nothing was changed. Turn on parent approval, then try again.";
