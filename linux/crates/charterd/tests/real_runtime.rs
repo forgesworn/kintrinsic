@@ -143,3 +143,67 @@ fn transport_facade_exposes_machine_and_guardian_pubkeys() {
     let expected_machine = PubKey::from_bytes(charter_crypto::xonly_pubkey(&secret).unwrap());
     assert_eq!(facade.machine_pubkey(), expected_machine);
 }
+
+/// A guardian wrap that arrives over the local link opens through the same
+/// NIP-59 unwrap as a relay copy and is sorted by inner kind; a wrap that is
+/// not addressed to this machine does not open.
+#[test]
+fn the_real_facade_unwraps_a_local_wrap_exactly_like_a_relay_copy() {
+    use charter_primitives::{kinds, EventId, NostrEvent, Sig};
+    use charter_transport::nip59::{self, Rumor, WrapRandomness};
+    use charterd::transport_facade::{LocalInbound, TransportFacade};
+
+    fn secret(b: u8) -> [u8; 32] {
+        let mut s = [0u8; 32];
+        s[31] = b;
+        s
+    }
+    let pk = |s: &[u8; 32]| PubKey::from_bytes(charter_crypto::xonly_pubkey(s).unwrap());
+    let (machine_sk, guardian_sk, other_sk) = (secret(0x22), secret(0x11), secret(0x33));
+    let now = 1_700_000_000;
+
+    let mut clause = NostrEvent {
+        id: EventId::from_bytes([0; 32]),
+        pubkey: pk(&guardian_sk),
+        created_at: now,
+        kind: kinds::CHARTER_DEVICE_CLAUSE,
+        tags: vec![kinds::marker_tag()],
+        content: r#"{"v":1,"kind":"schedule"}"#.into(),
+        sig: Sig::from_bytes([0; 64]),
+    };
+    clause.id = charter_verify::event::event_id(&clause);
+    clause.sig =
+        Sig::from_bytes(charter_crypto::schnorr_sign(&guardian_sk, clause.id.as_bytes()).unwrap());
+    let wrap_to = |recipient: &PubKey| {
+        nip59::wrap(
+            &Rumor::from_signed_event(&clause),
+            &guardian_sk,
+            recipient.as_bytes(),
+            &WrapRandomness {
+                ephemeral_secret: secret(0x41),
+                seal_nonce: [1; 32],
+                wrap_nonce: [2; 32],
+                seal_created_at: now,
+                wrap_created_at: now,
+            },
+        )
+        .unwrap()
+    };
+
+    let facade = RealTransportFacade::new(
+        machine_sk,
+        pk(&guardian_sk),
+        vec!["wss://relay.example".into()],
+    );
+    match facade.unwrap_local(&wrap_to(&pk(&machine_sk)), now) {
+        Some(LocalInbound::Clause(c)) => {
+            assert_eq!(c.clause.id, clause.id);
+            assert_eq!(c.seal_author, pk(&guardian_sk));
+        }
+        other => panic!("expected a clause, got {other:?}"),
+    }
+    assert!(
+        facade.unwrap_local(&wrap_to(&pk(&other_sk)), now).is_none(),
+        "a wrap for another machine does not open"
+    );
+}
