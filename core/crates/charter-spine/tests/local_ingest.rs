@@ -7,7 +7,9 @@
 #![cfg(feature = "mock")]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use charter_link::{AckResult, LocalOffer, LocalSink};
@@ -19,17 +21,20 @@ use charter_spine::enforcer_runtime::EnforcerRuntime;
 use charter_spine::multi_child::ExtensionInbox;
 use charter_spine::ports::NullEventSink;
 use charter_spine::{
-    Broker, CharterTransportAdapter, EnactError, EnactorRegistry, LocalIngestOptions,
-    RequestRecord, RequestState,
+    Broker, CharterTransportAdapter, EnactError, EnactorRegistry, LocalInbound, LocalIngestOptions,
+    PollHealth, RequestRecord, RequestState, TransportFacade,
 };
 use charter_sys::persistence::{ChildClauseStore, ConsumedIdStore, MockDisk, PairingStore};
 use charter_sys::relay::{Filter, MockRelayTransport, RelayTransport};
 use charter_sys::{MockSystem, SystemLayer};
 use charter_transport::nip59::{self, Rumor, WrapRandomness};
-use charter_transport::{CharterTransport, ScriptedEntropy};
+use charter_transport::{
+    CharterTransport, FetchedCuratorList, ReceivedClause, ReceivedGrant, ScriptedEntropy,
+};
 use charter_verify::test_support::{sign_event, ClauseBuilder, GrantBuilder, TestGuardian};
 use charter_verify::VerifiedGrant;
 use serde_json::json;
+use tokio::sync::Notify;
 
 const NOW: u64 = 1_700_001_000;
 /// The grant builder's default validity window (`ts`, `exp`).
@@ -78,12 +83,8 @@ impl Ward {
         }
     }
 
-    fn broker_at(
-        &self,
-        now: u64,
-        enactors: EnactorRegistry,
-        sink: Option<Arc<dyn LocalSink>>,
-    ) -> B {
+    /// The real facade over this ward's relay.
+    fn adapter(&self, sink: Option<Arc<dyn LocalSink>>) -> Facade {
         let mut t = CharterTransport::new(
             self.relay.clone(),
             ScriptedEntropy::new(7),
@@ -94,9 +95,18 @@ impl Ward {
         if let Some(sink) = sink {
             t.set_local_sink(sink);
         }
+        CharterTransportAdapter::new(t)
+    }
+
+    fn broker_at(
+        &self,
+        now: u64,
+        enactors: EnactorRegistry,
+        sink: Option<Arc<dyn LocalSink>>,
+    ) -> B {
         Broker::new(
             MockSystem::over_disk(now, self.disk.clone()),
-            CharterTransportAdapter::new(t),
+            self.adapter(sink),
             // Distinct per boot only matters for ids generated after it.
             ScriptedEntropy::new(1),
             enactors,
@@ -697,6 +707,66 @@ async fn a_release_is_handed_back_untouched_otherwise() {
     assert!(stored_child_clause(&b, &SUBJECT, ClauseKind::Schedule).is_some());
 }
 
+/// A clause that verifies against the released guardian must never land in
+/// the stores a release just cleared, or it survives into a later pairing.
+#[tokio::test]
+async fn nothing_is_stored_locally_after_a_release_applies() {
+    let w = Ward::new();
+    let b = w.broker();
+    pair(&b, &w.guardian);
+    let before = ClauseBuilder::schedule(100)
+        .subject(SUBJECT)
+        .build(&w.guardian);
+    assert_eq!(
+        b.ingest_local(&w.wrap(&before, 1), LOCAL).await.result,
+        AckResult::Applied
+    );
+    let rel = b
+        .ingest_local(&w.wrap(&release_event(&w.guardian, NOW), 2), LOCAL)
+        .await;
+    assert!(rel.released);
+    assert!(stored_child_clause(&b, &SUBJECT, ClauseKind::Schedule).is_none());
+
+    let after = ClauseBuilder::schedule(200)
+        .subject(SUBJECT)
+        .build(&w.guardian);
+    assert_eq!(
+        b.ingest_local(&w.wrap(&after, 3), LOCAL).await.result,
+        AckResult::Refused
+    );
+    // The relay copy of the same clause: the poll stops, nothing is stored.
+    w.relay.inject(w.wrap(&after, 4));
+    let counts = b.poll_once().await;
+    assert!(counts.released);
+    assert_eq!(counts.clauses_accepted, 0);
+    assert!(stored_child_clause(&b, &SUBJECT, ClauseKind::Schedule).is_none());
+    assert!(!paired(&b));
+}
+
+/// The same, with the release arriving through a relay poll.
+#[tokio::test]
+async fn nothing_is_stored_after_a_polled_release_applies() {
+    let w = Ward::new();
+    let b = w.broker();
+    pair(&b, &w.guardian);
+    w.relay.inject(w.wrap(&release_event(&w.guardian, NOW), 1));
+    assert!(b.poll_once().await.released);
+    assert!(!paired(&b));
+
+    let after = ClauseBuilder::schedule(200)
+        .subject(SUBJECT)
+        .build(&w.guardian);
+    assert_eq!(
+        b.ingest_local(&w.wrap(&after, 2), LOCAL).await.result,
+        AckResult::Refused
+    );
+    w.relay.inject(w.wrap(&after, 3));
+    let counts = b.poll_once().await;
+    assert!(counts.released);
+    assert_eq!(counts.clauses_accepted, 0);
+    assert!(stored_child_clause(&b, &SUBJECT, ClauseKind::Schedule).is_none());
+}
+
 #[tokio::test]
 async fn a_forged_release_is_refused() {
     let w = Ward::new();
@@ -826,6 +896,125 @@ async fn local_ingest_racing_a_poll_enacts_each_grant_once() {
     let counts = counter.0.lock().unwrap().clone();
     assert_eq!(counts.len(), ROUNDS as usize);
     assert!(counts.values().all(|n| *n == 1), "{counts:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The handler turn is never held across relay IO
+// ---------------------------------------------------------------------------
+
+/// The real facade, except that the first audit emission once `stall` is set
+/// parks until `release`: a relay publish that hangs.
+struct StallingFacade {
+    inner: Facade,
+    stall: AtomicBool,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl TransportFacade for StallingFacade {
+    async fn publish_request(&self, request_json: &str, now: u64) {
+        self.inner.publish_request(request_json, now).await
+    }
+    async fn poll_grants(&self, since: u64, now: u64) -> Vec<ReceivedGrant> {
+        self.inner.poll_grants(since, now).await
+    }
+    async fn poll_clauses(&self, since: u64, now: u64) -> Vec<ReceivedClause> {
+        self.inner.poll_clauses(since, now).await
+    }
+    async fn poll_usage_syncs(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
+        self.inner.poll_usage_syncs(since, now).await
+    }
+    async fn poll_releases(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
+        self.inner.poll_releases(since, now).await
+    }
+    async fn poll_curator_lists(&self, curators: &[PubKey], since: u64) -> Vec<FetchedCuratorList> {
+        self.inner.poll_curator_lists(curators, since).await
+    }
+    async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) {
+        if self.stall.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.emit_audit(tags, now).await
+    }
+    fn pinned_guardian(&self) -> PubKey {
+        self.inner.pinned_guardian()
+    }
+    fn machine_pubkey(&self) -> PubKey {
+        self.inner.machine_pubkey()
+    }
+    fn poll_health(&self) -> PollHealth {
+        self.inner.poll_health()
+    }
+    fn unwrap_local(&self, wrap: &NostrEvent, now: u64) -> Option<LocalInbound> {
+        self.inner.unwrap_local(wrap, now)
+    }
+}
+
+/// "A healthy local exchange must not wait for failing relay attempts": a
+/// grant whose audit publish hangs must not hold up an unrelated wrap that
+/// arrives over the local link meanwhile.
+#[tokio::test]
+async fn a_local_wrap_never_waits_behind_a_stuck_audit_publish() {
+    let w = Ward::new();
+    let (reg, inbox) = time_extend_enactors();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let b = Broker::new(
+        MockSystem::over_disk(NOW, w.disk.clone()),
+        StallingFacade {
+            inner: w.adapter(None),
+            stall: AtomicBool::new(false),
+            entered: entered.clone(),
+            release: release.clone(),
+        },
+        ScriptedEntropy::new(1),
+        reg,
+        Box::new(NullEventSink),
+        SUBJECT,
+    );
+    b.submit(OpType::TimeExtend, json!({"minutes": 15}), None)
+        .await
+        .unwrap();
+    let rec = b.status("").pop().expect("the ask");
+    let grant_wrap = w.wrap(&extend_grant(&w, &rec), 1);
+    let clause = ClauseBuilder::schedule(100)
+        .subject(ALICE)
+        .body(json!({"marker": "local"}))
+        .build(&w.guardian);
+    let clause_wrap = w.wrap(&clause, 2);
+
+    b.transport().stall.store(true, Ordering::SeqCst);
+    let grant = b.ingest_local(&grant_wrap, LOCAL);
+    tokio::pin!(grant);
+    tokio::select! {
+        _ = &mut grant => panic!("the grant's audit publish should be stuck"),
+        _ = entered.notified() => {}
+    }
+
+    // The grant is parked inside its audit publish; the clause goes through.
+    let out = tokio::time::timeout(Duration::from_secs(5), b.ingest_local(&clause_wrap, LOCAL))
+        .await
+        .expect("a local wrap must not wait behind a stuck audit publish");
+    assert_eq!(out.result, AckResult::Applied);
+    let stored = b
+        .sys()
+        .child_clauses()
+        .get_child_clause(&ALICE.to_hex(), ClauseKind::Schedule.store_key())
+        .unwrap()
+        .map(|j| serde_json::from_str::<serde_json::Value>(&j).unwrap());
+    assert_eq!(stored, Some(json!({"marker": "local"})));
+
+    // Unstick the relay: the grant finishes exactly as it would have.
+    release.notify_one();
+    let out = grant.await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(
+        b.status(&rec.req_id.to_hex())[0].state,
+        RequestState::Enacted
+    );
+    assert_eq!(inbox.lock().unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 //! internally synchronized so the headless tests drive it directly.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 
 use charter_link::AckResult;
@@ -370,13 +371,17 @@ enum GrantDisposition {
     Rejected(GrantRejection),
     /// Routed, verified, and the request moved to this state.
     Resolved(RequestState),
+    /// A release has already applied on this broker; nothing was done.
+    AfterRelease,
 }
 
 impl GrantDisposition {
     fn ack(self) -> AckResult {
         use RequestState as S;
         match self {
-            GrantDisposition::Malformed | GrantDisposition::NoRecord => AckResult::Refused,
+            GrantDisposition::Malformed
+            | GrantDisposition::NoRecord
+            | GrantDisposition::AfterRelease => AckResult::Refused,
             GrantDisposition::AlreadyResolved(state) => match state {
                 // Answered by an earlier copy (Enacting is only visible to a
                 // caller outside the handler turn).
@@ -490,6 +495,28 @@ pub struct PollCounts {
     pub publish_failed: u32,
 }
 
+/// Audit events a handler decided on while holding the handler turn, in the
+/// order it decided them, each with the timestamp it would have been emitted
+/// at. Emitted by [`DeferredAudits::emit`] once the turn is released — see
+/// `Broker::handlers`.
+#[must_use = "deferred audits must be emitted"]
+#[derive(Default)]
+struct DeferredAudits(Vec<(Vec<Vec<String>>, u64)>);
+
+impl DeferredAudits {
+    fn push(&mut self, tags: Vec<Vec<String>>, now: u64) {
+        self.0.push((tags, now));
+    }
+
+    /// Publish every recorded audit, in order. Must be called WITHOUT the
+    /// handler turn held: this is relay IO.
+    async fn emit<T: TransportFacade>(self, transport: &T) {
+        for (tags, now) in self.0 {
+            transport.emit_audit(tags, now).await;
+        }
+    }
+}
+
 /// The privileged broker spine, generic over the system layer + transport.
 pub struct Broker<S: SystemLayer, T: TransportFacade, E: Entropy> {
     sys: S,
@@ -499,12 +526,30 @@ pub struct Broker<S: SystemLayer, T: TransportFacade, E: Entropy> {
     events: Box<dyn EventSink>,
     subject: PubKey,
     state: Mutex<State>,
-    /// One handler at a time: every `on_*` call from [`Broker::poll_once`]
-    /// and [`Broker::ingest_local`] holds this turn, so a wrap arriving over
-    /// the local link and its relay copy can never interleave inside the
-    /// same handler. Taken around each handler call only — never across a
-    /// relay query.
+    /// One handler at a time: every `on_*` call, and every handler run from
+    /// [`Broker::poll_once`] and [`Broker::ingest_local`], holds this turn,
+    /// so a wrap arriving over the local link and its relay copy can never
+    /// interleave inside the same handler.
+    ///
+    /// Invariants:
+    /// - **Never held across relay IO** — no relay query and no publish
+    ///   (`emit_audit`, `publish_request`). A handler records the audits it
+    ///   decides on in [`DeferredAudits`]; they are emitted after the turn is
+    ///   released, so a local exchange never waits behind a hanging relay.
+    /// - **Not re-entrant.** Only the public entry points take it; the
+    ///   handler bodies (`grant_disposition`, `clause_disposition`,
+    ///   `usage_sync_result`, `on_release`) never call an `on_*` method, and
+    ///   enactors are handed a grant and an [`EnactContext`], never the
+    ///   broker. A body taking the turn again would deadlock.
     handlers: tokio::sync::Mutex<()>,
+    /// Set, under the handler turn, the moment a RELEASE applies — before the
+    /// turn drops and before its audit goes out. Every handler checks it
+    /// under the turn and refuses once it is set: a clause or grant that
+    /// still verifies against the released guardian (the facade keeps its
+    /// key) must never be written into the stores the release just cleared,
+    /// or it would survive into a later pairing. Never cleared; the caller
+    /// restarts after a release.
+    released: AtomicBool,
 }
 
 impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
@@ -551,6 +596,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 submits: BTreeMap::new(),
             }),
             handlers: tokio::sync::Mutex::new(()),
+            released: AtomicBool::new(false),
         };
         // A daemon that was off for a week comes up with a week-old Pending set.
         // Age it out HERE, before anything can poll: otherwise the first poll
@@ -787,17 +833,28 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// Handle a delivered (unverified) grant: verify (consume-before-enact),
     /// reduce, enact. A rejected grant never enacts.
     pub async fn on_grant(&self, received: ReceivedGrant) {
-        let _turn = self.handlers.lock().await;
-        self.grant_disposition(received).await;
+        let (_, audits) = {
+            let _turn = self.handlers.lock().await;
+            self.grant_disposition(received).await
+        };
+        audits.emit(&self.transport).await;
     }
 
-    /// [`Broker::on_grant`]'s body, reporting what became of the grant. The
-    /// caller holds the handler turn.
-    async fn grant_disposition(&self, received: ReceivedGrant) -> GrantDisposition {
+    /// [`Broker::on_grant`]'s body, reporting what became of the grant and
+    /// the audits to emit once the caller has released the handler turn
+    /// (which it holds for this call).
+    async fn grant_disposition(
+        &self,
+        received: ReceivedGrant,
+    ) -> (GrantDisposition, DeferredAudits) {
+        let mut audits = DeferredAudits::default();
+        if self.is_released() {
+            return (GrantDisposition::AfterRelease, audits);
+        }
         // Route by the (unverified) reqId to find the pending record.
         let payload = match GrantPayload::from_json(&received.grant.content) {
             Ok(p) => p,
-            Err(_) => return GrantDisposition::Malformed,
+            Err(_) => return (GrantDisposition::Malformed, audits),
         };
         let key = payload.req_id.to_hex();
         let mut rec = {
@@ -805,8 +862,8 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             match st.requests.get(&key) {
                 Some(r) if r.state == RequestState::Pending => r.clone(),
                 // Already resolved.
-                Some(r) => return GrantDisposition::AlreadyResolved(r.state),
-                None => return GrantDisposition::NoRecord,
+                Some(r) => return (GrantDisposition::AlreadyResolved(r.state), audits),
+                None => return (GrantDisposition::NoRecord, audits),
             }
         };
 
@@ -838,7 +895,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         for eff in effects1 {
             match eff {
                 Effect::Enact(vg) => to_enact = Some(vg),
-                Effect::Audit(a) => self.transport.emit_audit(a.tags(), now).await,
+                Effect::Audit(a) => audits.push(a.tags(), now),
                 Effect::Notify => self.events.request_updated(&key, rec.state),
                 Effect::Persist => {
                     // Best-effort in the receive pipeline; the durable guarantee
@@ -889,7 +946,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             for eff in effects2 {
                 match eff {
                     Effect::Enact(_) => {}
-                    Effect::Audit(a) => self.transport.emit_audit(a.tags(), now).await,
+                    Effect::Audit(a) => audits.push(a.tags(), now),
                     Effect::Notify => self.events.request_updated(&key, rec.state),
                     Effect::Persist => {
                         // Best-effort in the receive pipeline; the durable guarantee
@@ -923,10 +980,11 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // A grant resolves the request to a terminal state (Enacted / Denied /
         // Failed); bound the retained terminal history.
         self.prune_terminal();
-        match rejection {
+        let disposition = match rejection {
             Some(r) => GrantDisposition::Rejected(r),
             None => GrantDisposition::Resolved(resolved),
-        }
+        };
+        (disposition, audits)
     }
 
     /// Handle a delivered (unverified) clause: authenticate + rollback-protect,
@@ -957,6 +1015,9 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// [`Broker::on_clause`]'s body, in the detail an ACK needs. The caller
     /// holds the handler turn.
     fn clause_disposition(&self, received: &ReceivedClause) -> ClauseDisposition {
+        if self.is_released() {
+            return ClauseDisposition::Refused;
+        }
         let payload = match ClausePayload::from_json(&received.clause.content) {
             Ok(p) => p,
             Err(_) => return ClauseDisposition::Refused,
@@ -1110,6 +1171,9 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// [`Broker::on_usage_sync`]'s body, reporting what became of the sync.
     /// The caller holds the handler turn.
     fn usage_sync_result(&self, event: &NostrEvent) -> AckResult {
+        if self.is_released() {
+            return AckResult::Refused;
+        }
         let Ok(payload) = UsageSyncPayload::from_json(&event.content) else {
             return AckResult::Refused;
         };
@@ -1197,20 +1261,33 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     ///   sibling).
     ///
     /// Returns true when a release was applied. Everything on disk that made
-    /// this a managed device is gone by then; the caller restarts.
-    async fn on_release(&self, event: &charter_primitives::NostrEvent, now: u64) -> bool {
+    /// this a managed device is gone by then; the caller restarts. The caller
+    /// holds the handler turn for this call, and emits the returned audit
+    /// after releasing it.
+    fn on_release(
+        &self,
+        event: &charter_primitives::NostrEvent,
+        now: u64,
+    ) -> (bool, DeferredAudits) {
+        let mut audits = DeferredAudits::default();
+        if self.is_released() {
+            return (false, audits);
+        }
         let guardian = self.transport.pinned_guardian();
         let machine = self.transport.machine_pubkey();
         if charter_verify::verify_release(event, &guardian, &machine, now).is_err() {
-            return false;
+            return (false, audits);
         }
         let Ok(payload) = charter_proto::ReleasePayload::from_json(&event.content) else {
-            return false;
+            return (false, audits);
         };
         let paired_at = self.paired_at();
         if payload.issued_at < paired_at {
-            return false;
+            return (false, audits);
         }
+        // Still under the handler turn: from here on every handler refuses
+        // (see `released`), so nothing can land in the stores cleared below.
+        self.released.store(true, AtomicOrdering::SeqCst);
         // Order matters: the clauses first, so a crash between the two leaves a
         // still-pinned device with no rules rather than an unpinned device
         // still enforcing rules nobody can lift.
@@ -1219,19 +1296,26 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // Say it on the audit feed BEFORE the caller tears the daemon down —
         // this is the last thing this process will ever have a guardian to
         // tell, and "your laptop stopped being managed" is worth a line.
-        self.transport
-            .emit_audit(
-                vec![
-                    vec!["event".into(), "release-applied".into()],
-                    vec!["issued_at".into(), payload.issued_at.to_string()],
-                ],
-                now,
-            )
-            .await;
-        true
+        // (Emitted by the caller, before it reports the release.)
+        audits.push(
+            vec![
+                vec!["event".into(), "release-applied".into()],
+                vec!["issued_at".into(), payload.issued_at.to_string()],
+            ],
+            now,
+        );
+        (true, audits)
+    }
+
+    /// Whether a release has applied on this broker (see `released`).
+    fn is_released(&self) -> bool {
+        self.released.load(AtomicOrdering::SeqCst)
     }
 
     /// Poll the transport once and process all delivered grants + clauses.
+    ///
+    /// Once a release has applied on this broker — this poll's or a local
+    /// one's — it stops processing and reports `released`.
     pub async fn poll_once(&self) -> PollCounts {
         // Age out stale Pending records BEFORE fetching anything: a grant
         // delivered (or redelivered) this round must not be able to land on an
@@ -1243,19 +1327,27 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             st.cursor
         };
         let mut counts = PollCounts::default();
+        let stopped = PollCounts {
+            released: true,
+            ..PollCounts::default()
+        };
+        if self.is_released() {
+            return stopped;
+        }
         // RELEASE first, and RETURN on it (S7). A release means this device is
         // no longer managed by anyone; ingesting the same round's clauses
         // afterwards would write rules straight back into the store we just
         // emptied, and the caller is about to tear the daemon down regardless.
         //
         // Each handler call below holds the handler turn (see `handlers`) for
-        // that call only; the `poll_*` relay queries run outside it, so a
-        // local-link ingest is never stuck behind relay IO.
+        // that call only; the `poll_*` relay queries and audit publishes run
+        // outside it, so a local-link ingest is never stuck behind relay IO.
         for (event, _seal_author) in self.transport.poll_releases(cursor, now).await {
-            let applied = {
+            let (applied, audits) = {
                 let _turn = self.handlers.lock().await;
-                self.on_release(&event, now).await
+                self.on_release(&event, now)
             };
+            audits.emit(&self.transport).await;
             if applied {
                 counts.released = true;
                 return counts;
@@ -1272,15 +1364,34 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 ClauseOutcome::WriteFailed => counts.clauses_write_failed += 1,
                 ClauseOutcome::Refused => {}
             }
+            if self.is_released() {
+                return stopped;
+            }
         }
         for (event, _seal_author) in self.transport.poll_usage_syncs(cursor, now).await {
-            let _turn = self.handlers.lock().await;
-            self.usage_sync_result(&event);
+            {
+                let _turn = self.handlers.lock().await;
+                self.usage_sync_result(&event);
+            }
+            if self.is_released() {
+                return stopped;
+            }
+        }
+        if self.is_released() {
+            return stopped;
         }
         crate::curator_sync::refresh_curator_lists(&self.sys, &self.transport).await;
         for grant in self.transport.poll_grants(cursor, now).await {
-            let _turn = self.handlers.lock().await;
-            self.grant_disposition(grant).await;
+            let (_, audits) = {
+                let _turn = self.handlers.lock().await;
+                self.grant_disposition(grant).await
+            };
+            // Before `poll_health` below, so a failed audit publish counts in
+            // this round's `publish_failed`.
+            audits.emit(&self.transport).await;
+            if self.is_released() {
+                return stopped;
+            }
         }
         let health = self.transport.poll_health();
         counts.relays_unreachable = health.relays_unreachable;
@@ -1327,18 +1438,26 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 out.req_id = GrantPayload::from_json(&grant.grant.content)
                     .ok()
                     .map(|p| p.req_id);
-                let _turn = self.handlers.lock().await;
-                // As at the top of `poll_once`: a grant must not land on an
-                // ask that has already aged out.
-                self.expire_stale_pending();
-                out.result = self.grant_disposition(grant).await.ack();
+                let (disposition, audits) = {
+                    let _turn = self.handlers.lock().await;
+                    // As at the top of `poll_once`: a grant must not land on an
+                    // ask that has already aged out.
+                    self.expire_stale_pending();
+                    self.grant_disposition(grant).await
+                };
+                audits.emit(&self.transport).await;
+                out.result = disposition.ack();
             }
             LocalInbound::Release(event, seal_author) => {
                 out.inner_kind = Some(event.kind);
                 out.inner_id = Some(event.id);
                 if opts.handle_release {
-                    let _turn = self.handlers.lock().await;
-                    if self.on_release(&event, self.now()).await {
+                    let (applied, audits) = {
+                        let _turn = self.handlers.lock().await;
+                        self.on_release(&event, self.now())
+                    };
+                    audits.emit(&self.transport).await;
+                    if applied {
                         out.result = AckResult::Applied;
                         out.released = true;
                     }
