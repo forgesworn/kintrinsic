@@ -134,6 +134,27 @@ describe("the words for a held change", () => {
     );
   });
 
+  it("a device the send did not get to is named in every sentence, beside who got it and who is waiting (H2)", () => {
+    const failed = "Not sent to Robin's laptop: Couldn't reach any relay.";
+    const reachedAndFailed = {
+      outcome: "queued",
+      message: "Not sent to every device.",
+      devices: [],
+      reached: ["Mia's phone"],
+      failed: [failed],
+    } as Extract<ClauseDelivery, { outcome: "queued" }>;
+    expect(queuedSendLine(reachedAndFailed)).toBe(`Reached Mia's phone. ${failed}`);
+    expect(undeliveredNote(reachedAndFailed)).toBe(` — Reached Mia's phone. ${failed}`);
+    expect(queuedSaveWarning(reachedAndFailed)).toBe(`Saved here. Mia's phone already got it. ${failed}`);
+
+    const refused = "Mia's phone didn't accept this change.";
+    const heldAndFailed = { ...all, failed: [refused] } as Extract<ClauseDelivery, { outcome: "queued" }>;
+    expect(queuedSendLine(heldAndFailed)).toBe(`Robin's laptop will get it when it's on the home network. ${refused}`);
+    expect(queuedSaveWarning(heldAndFailed)).toBe(
+      `Saved here. It'll reach Robin's laptop when it's on the home network. ${refused}`,
+    );
+  });
+
   it("an all-queued change keeps the plain 'not sent yet' sentence", () => {
     expect(queuedSendLine(all as Extract<ClauseDelivery, { outcome: "queued" }>)).toBe(
       "Not sent yet — it'll reach Robin's laptop when it's on the home network.",

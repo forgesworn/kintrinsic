@@ -32,6 +32,8 @@ import AnsweredDelivery from "../screens/AnsweredDelivery";
 import Limits from "../screens/Limits";
 import { GiveTime } from "../components/GiveTime";
 import { FinishNow } from "../components/FinishNow";
+import Activity from "../screens/Activity";
+import Family from "../screens/Family";
 import { useLocalRoute } from "../carrier/useLocalRoute";
 import type { Child, ChildRequest } from "../domain/types";
 
@@ -97,6 +99,9 @@ describe("queued home-network delivery", () => {
 
   /** What the fake carrier does with a wrap for each ward device. */
   let sendState: (recipient: string) => "queued" | "sent" | "rejected";
+  /** What the ward makes of a wrap the carrier SENT it: its receipt by
+   *  default; "sent" = no OK yet; or an ACK. */
+  let wardAnswer: (recipient: string) => string;
   /** What the carrier reports per wrap id (the ward's receipt / ACK). */
   let wrapState: Map<string, string>;
   let sentWraps: { recipient: string; id: string }[];
@@ -109,6 +114,7 @@ describe("queued home-network delivery", () => {
     resetGuardianKeyCacheForTests();
     localStorage.setItem("charter.guardian.key.v1", nip19.nsecEncode(guardianSk));
     sendState = () => "queued";
+    wardAnswer = () => "received";
     wrapState = new Map();
     sentWraps = [];
     sessions = [];
@@ -121,7 +127,7 @@ describe("queued home-network delivery", () => {
         const id = (JSON.parse(wrapJson) as { id: string }).id;
         const state = sendState(recipient);
         sentWraps.push({ recipient, id });
-        wrapState.set(id, state === "sent" ? "received" : state);
+        wrapState.set(id, state === "sent" ? wardAnswer(recipient) : state);
         return JSON.stringify({ state });
       },
       localDelivery: (idsJson: string) =>
@@ -479,6 +485,182 @@ describe("queued home-network delivery", () => {
       const warn = [...container.querySelectorAll(".banner-warn")].map((b) => b.textContent);
       expect(warn).toContain("Saved here. It'll reach Robin's laptop when it's on the home network. Mia's phone already got it.");
       expect(activity().some((a) => a.includes("Reached Mia's phone. Robin's laptop will get it when it's on the home network."))).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------- H1 ----
+  describe("sent but not confirmed, relays down: held, never a failure (H1)", () => {
+    beforeEach(() => {
+      sendState = () => "sent";
+      wardAnswer = () => "sent"; // the session took it; no OK inside the window
+    });
+
+    it("an answer is recorded as answered, says it is waiting to confirm, and cannot be signed again", async () => {
+      await mount({ children: [child([laptop()])], requests: [ask(Date.now() - 60_000)] }, <AnsweredDelivery />);
+      const p = api.approveRequest("r1", 15);
+      await tick(3_500); // the receipt window runs out
+      await act(async () => {
+        await p;
+      });
+      await tick(50);
+
+      expect(request().status).toBe("approved");
+      expect(text()).toContain("Sent to Robin's laptop over the home network. Waiting for it to confirm.");
+      expect(sentWraps).toHaveLength(1);
+
+      // The probe's deny-after-a-failed-approve: no second, conflicting GRANT.
+      await act(async () => {
+        await api.denyRequest("r1");
+      });
+      await tick(50);
+      expect(sentWraps).toHaveLength(1);
+      expect(request().status).toBe("approved");
+    });
+
+    it("a gift says it is held for the home network (no retry invited) and is logged once", async () => {
+      await mount({}, <GiveTime child={child([laptop()])} />);
+      await click(button("Give time"));
+      await click(button("Give 30 min"));
+      await tick(3_500);
+
+      expect(text()).toContain("30 minutes saved for Robin. Not sent yet — it'll reach Robin's laptop when it's on the home network.");
+      expect(text()).not.toMatch(/Couldn't reach any relay/);
+      expect(activity().filter((a) => a.startsWith("You gave 30 more minutes"))).toHaveLength(1);
+    });
+  });
+
+  // ---------------------------------------------------------------- H2 ----
+  describe("one device failing never abandons the others (H2)", () => {
+    const TWO = (): Partial<CharterState> => ({ children: [child([laptop(), phone()])] });
+
+    it("probe A2 through GiveTime: the phone got it, the laptop didn't — logged and shown, not an error", async () => {
+      sendState = (r) => (r === PHONE ? "sent" : "rejected");
+      await mount(TWO(), <GiveTime child={child([laptop(), phone()])} />);
+      await click(button("Give time"));
+      await click(button("Give 30 min"));
+      await tick(50);
+
+      const expected = "Reached Mia's phone. Not sent to Robin's laptop: Couldn't reach any relay.";
+      expect(text()).toContain(`30 minutes saved for Robin. ${expected}`);
+      expect(activity().some((a) => a.startsWith("You gave 30 more minutes") && a.endsWith(` — ${expected}`))).toBe(true);
+      expect(sentWraps.map((w) => w.recipient).sort()).toEqual([LAPTOP, PHONE].sort());
+    });
+
+    it("probe A through FinishNow: the laptop is held, the phone failed — the hold is reported", async () => {
+      sendState = (r) => (r === LAPTOP ? "queued" : "rejected");
+      await mount(TWO(), <FinishNow child={child([laptop(), phone()])} />);
+      await click(button("Finish now"));
+      await click(button("Warn, then finish"));
+      await tick(50);
+
+      const expected =
+        "Robin's laptop will get it when it's on the home network. Not sent to Mia's phone: Couldn't reach any relay.";
+      expect(text()).toContain(expected);
+      expect(activity().some((a) => a.startsWith("You asked them to finish up now") && a.endsWith(` — ${expected}`))).toBe(true);
+    });
+
+    it("a rule save that reached one device and not the other is saved, with a warning naming both", async () => {
+      sendState = (r) => (r === PHONE ? "sent" : "rejected");
+      window.location.hash = "/limits/c1";
+      await mount(TWO(), <Limits />);
+      await click(button("Apps & web"));
+      await click(button("Block Minecraft"));
+      await click(button("Save limit"));
+      await tick(50);
+
+      const warn = [...container.querySelectorAll(".banner-warn")].map((b) => b.textContent);
+      expect(warn).toContain("Saved here. Mia's phone already got it. Not sent to Robin's laptop: Couldn't reach any relay.");
+      expect(text()).not.toMatch(/Couldn’t save/);
+    });
+
+    it("nothing reached anywhere is still a plain error, naming the devices", async () => {
+      sendState = () => "rejected";
+      await mount(TWO(), <GiveTime child={child([laptop(), phone()])} />);
+      await click(button("Give time"));
+      await click(button("Give 30 min"));
+      await tick(50);
+      expect(text()).toContain(
+        "Not sent to Robin's laptop and Mia's phone: Couldn't reach any relay — check your connection and try again.",
+      );
+      expect(activity().some((a) => a.startsWith("You gave"))).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------- M1 ----
+  describe("a held install window or update never reads as done (M1)", () => {
+    const PHONE_ONLY = (): Partial<CharterState> => ({ children: [child([phone()])] });
+
+    it("store: both report 'queued' with the waiting sentence, not true", async () => {
+      await mount(PHONE_ONLY());
+      let r: unknown;
+      await act(async () => {
+        r = await api.openMaintenanceWindow("c1", 10);
+      });
+      expect(r).toEqual({ outcome: "queued", message: "Not sent yet — it'll reach Mia's phone when it's on the home network." });
+    });
+
+    it("Family: a held window shows it is waiting, with no 'Installs are open' countdown and nothing stored", async () => {
+      await mount(PHONE_ONLY(), <Family />);
+      await click(button("Allow installs"));
+      await tick(50);
+
+      expect(text()).toContain("Installs aren’t open yet. Not sent yet — it'll reach Mia's phone when it's on the home network.");
+      expect(text()).not.toContain("Installs are open");
+      expect(() => button("Close now")).toThrow();
+      expect(activity().some((a) => a.startsWith("You allowed installs for 30 minutes") && a.includes("Not sent yet"))).toBe(true);
+    });
+
+    it("Family: a window that reached the phone opens the countdown as before", async () => {
+      sendState = () => "sent";
+      await mount(PHONE_ONLY(), <Family />);
+      await click(button("Allow installs"));
+      await tick(50);
+      expect(text()).toContain("Installs are open");
+      expect(text()).not.toContain("aren’t open yet");
+    });
+  });
+
+  // ---------------------------------------------------------------- M2 ----
+  describe("a problem ACK is never 'reached' or 'applied' (M2)", () => {
+    it("probe C through GiveTime: a ward that refused it is an error, not 'sent to'", async () => {
+      sendState = () => "sent";
+      wardAnswer = () => "refused";
+      await mount({}, <GiveTime child={child([laptop()])} />);
+      await click(button("Give time"));
+      await click(button("Give 30 min"));
+      await tick(50);
+      expect(text()).toContain("Robin's laptop didn't accept this change.");
+      expect(text()).not.toMatch(/sent to Robin/);
+    });
+
+    it("a refusing device beside one that got it is named as not getting it, never as 'Reached'", async () => {
+      sendState = () => "sent";
+      wardAnswer = (r) => (r === LAPTOP ? "refused" : "received");
+      await mount({ children: [child([laptop(), phone()])] }, <GiveTime child={child([laptop(), phone()])} />);
+      await click(button("Give time"));
+      await click(button("Give 30 min"));
+      await tick(50);
+      expect(text()).toContain("Reached Mia's phone. Robin's laptop didn't accept this change.");
+      expect(text()).not.toMatch(/Reached[^.]*Robin's laptop/);
+    });
+
+    it("a gift's later ACK shows on its activity line: applied, or a plain warning", async () => {
+      sendState = () => "sent";
+      await mount({ children: [child([laptop(), phone()])] }, <Activity />);
+      await act(async () => {
+        await api.giveTime("c1", 30);
+      });
+      await tick(50);
+      const [laptopWrap, phoneWrap] = [LAPTOP, PHONE].map((m) => sentWraps.find((w) => w.recipient === m)!.id);
+      expect(api.state.activity[0].wraps?.sort()).toEqual([laptopWrap, phoneWrap].sort());
+
+      wrapState.set(phoneWrap, "applied");
+      wrapState.set(laptopWrap, "refused");
+      await tick(3_100);
+      expect(text()).toContain("— applied on Mia's phone");
+      expect(text()).toContain("— Robin's laptop didn't accept this change.");
+      expect(text()).not.toContain("applied on Robin's laptop");
+      expect(container.querySelector(".activity-problem")).not.toBeNull();
     });
   });
 });

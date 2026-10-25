@@ -17,6 +17,7 @@
 
 import { ACK_RESULTS, type LocalDeliveryState } from "../carrier/localLink";
 import { ASK_EXPIRY_SECS, isAskExpired } from "../domain/askExpiry";
+import { clauseProblemText, isProblemAck, type ProblemAck } from "../signer/routePublish";
 
 export interface LocalWrapRecord {
   /** The wrap's event id. */
@@ -41,9 +42,31 @@ export const POLL_GIVE_UP_MS = 48 * 3600 * 1000;
 
 const ALL_STATES: readonly string[] = ["queued", "sent", "received", "rejected", ...ACK_RESULTS];
 
-/** True once nothing more will happen to the wrap: acked, or refused by the carrier. */
+const isAck = (state: LocalDeliveryState): boolean => (ACK_RESULTS as readonly string[]).includes(state);
+
+/**
+ * True once nothing more will happen to the wrap: a ward ACK other than
+ * `failed`. Mirrors the carrier (`DeliveryState::advanced_by` in
+ * charter-link's guardian.rs): a later ACK still replaces `failed`, and an ACK
+ * still follows `rejected` or `received`, so those are not final.
+ */
 export function isFinalState(state: LocalDeliveryState): boolean {
-  return state !== "queued" && state !== "sent" && state !== "received";
+  return isAck(state) && state !== "failed";
+}
+
+/**
+ * Whether the carrier's `next` state replaces the recorded `prev`, exactly as
+ * the carrier itself decides: states only move forward, a later ACK replaces
+ * only a `failed` one, and repeats are no-ops. So a late "sent" never undoes
+ * an ACK, and an `applied` after a `failed` retry is shown.
+ */
+export function advancedBy(prev: LocalDeliveryState, next: LocalDeliveryState): boolean {
+  if (prev === next) return false;
+  if (prev === "failed" && isAck(next)) return true;
+  if (isAck(prev)) return false;
+  if (isAck(next)) return true;
+  if ((prev === "queued" || prev === "sent") && (next === "received" || next === "rejected")) return true;
+  return prev === "queued" && next === "sent";
 }
 
 export function isApplied(state: LocalDeliveryState): boolean {
@@ -84,8 +107,8 @@ export function addRecord(list: LocalWrapRecord[], rec: LocalWrapRecord, now: nu
 
 /**
  * Fold the carrier's latest per-wrap states in. Returns the SAME array when
- * nothing changed, so a quiet poll causes no re-render. A final state is never
- * overwritten (a late "sent" must not undo an ACK).
+ * nothing changed, so a quiet poll causes no re-render. A state only moves the
+ * way the carrier's does (`advancedBy`): a late "sent" must not undo an ACK.
  */
 export function applyStates(
   list: LocalWrapRecord[],
@@ -94,7 +117,7 @@ export function applyStates(
   let changed = false;
   const next = list.map((r) => {
     const s = states[r.wrap]?.state;
-    if (!s || s === r.state || isFinalState(r.state)) return r;
+    if (!s || !ALL_STATES.includes(s) || !advancedBy(r.state, s)) return r;
     changed = true;
     return { ...r, state: s };
   });
@@ -112,7 +135,8 @@ export function linkRecords(list: LocalWrapRecord[], wraps: string[], reqId: str
   return changed ? next : list;
 }
 
-/** Wrap ids worth asking the carrier about right now. */
+/** Wrap ids worth asking the carrier about right now (for the 48 h the
+ *  carrier keeps a wrap, while anything can still change). */
 export function idsToPoll(list: LocalWrapRecord[], now: number): string[] {
   return list.filter((r) => !isFinalState(r.state) && now - r.at <= POLL_GIVE_UP_MS).map((r) => r.wrap);
 }
@@ -120,6 +144,11 @@ export function idsToPoll(list: LocalWrapRecord[], now: number): string[] {
 // ---------------------------------------------------------------------------
 // Words
 // ---------------------------------------------------------------------------
+
+/** The carrier still holds it: queued, or sent with no receipt yet. */
+function isHeld(state: LocalDeliveryState): boolean {
+  return state === "queued" || state === "sent";
+}
 
 export interface DeliveryLine {
   tone: "ok" | "warn" | "info";
@@ -165,14 +194,20 @@ export function answerDeliveryLine(
       ? [grant, ...records.filter((r) => r.kind === "clause" && r.reqId === req.reqId && r.machine === grant.machine)]
       : [grant];
 
-  const problem = parts.find((r) => isProblem(r.state));
-  if (problem && isProblem(problem.state)) {
-    return { tone: "warn", text: problemText(device, problem.state) };
+  if (isProblem(grant.state)) {
+    return { tone: "warn", text: problemText(device, grant.state) };
   }
-  // The answer was signed but the ward never connected, and the ask's own 24 h
-  // window has since closed: the ward would refuse it now, so say so rather
-  // than leave "waiting" up for ever.
-  if (grant.state === "queued" && req.createdAt !== undefined && isAskExpired(req.createdAt, now)) {
+  // The clause sent with an app-open approval: its problem ACK (a newer rule
+  // already standing included) is a plain warning, never "applied".
+  const clauseProblem = parts.slice(1).find((r) => isProblemAck(r.state));
+  if (clauseProblem && isProblemAck(clauseProblem.state)) {
+    return { tone: "warn", text: clauseProblemText(device, clauseProblem.state) };
+  }
+  // The answer was signed but never reached the ward — held for a ward that
+  // never connected, or sent to a session that died before its OK — and the
+  // ask's own 24 h window has since closed: the ward would refuse it now, so
+  // say so rather than leave "waiting" up for ever.
+  if (isHeld(grant.state) && req.createdAt !== undefined && isAskExpired(req.createdAt, now)) {
     return { tone: "warn", text: `Expired before it reached ${device}.` };
   }
   // app.open approved but no clause was tracked for this device: the hold went
@@ -217,7 +252,7 @@ export function answeredLines<
     // and then shows "Expired before it reached…" for the usual window.
     const expiresAt = req.createdAt === undefined ? undefined : req.createdAt + ASK_EXPIRY_SECS * 1000;
     const since =
-      grant.state === "queued" && expiresAt !== undefined && expiresAt > grant.at ? expiresAt : grant.at;
+      isHeld(grant.state) && expiresAt !== undefined && expiresAt > grant.at ? expiresAt : grant.at;
     if (now - since > ANSWER_LINE_WINDOW_MS) continue;
     const line = answerDeliveryLine(req, records, nameOf, now);
     if (line) out.push({ req, line, at: grant.at });
@@ -248,4 +283,33 @@ export function appliedSuffix(deviceNames: string[]): string {
   if (names.length === 0) return "";
   if (names.length === 1) return ` — applied on ${names[0]}`;
   return ` — applied on ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/**
+ * Devices (by machine key) whose ward ACKed a tracked clause wrap of a change
+ * with a problem — refused, failed, expired or superseded — for the plain
+ * warning on the activity line, the counterpart of "applied on". A device whose
+ * `failed` was later replaced by an ACK is no longer listed.
+ */
+export function ruleProblems(
+  wraps: string[] | undefined,
+  records: LocalWrapRecord[],
+): { machine: string; ack: ProblemAck }[] {
+  if (!wraps || wraps.length === 0) return [];
+  const out: { machine: string; ack: ProblemAck }[] = [];
+  for (const r of records) {
+    if (r.kind !== "clause" || !wraps.includes(r.wrap) || !isProblemAck(r.state)) continue;
+    if (out.some((p) => p.machine === r.machine)) continue;
+    out.push({ machine: r.machine, ack: r.state });
+  }
+  return out;
+}
+
+/** The plain warning sentences for `ruleProblems`, named. */
+export function problemNotes(
+  wraps: string[] | undefined,
+  records: LocalWrapRecord[],
+  nameOf: (machine: string) => string,
+): string[] {
+  return ruleProblems(wraps, records).map((p) => clauseProblemText(nameOf(p.machine), p.ack));
 }

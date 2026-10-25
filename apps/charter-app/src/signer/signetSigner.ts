@@ -68,6 +68,7 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
   return new RealSigner({
     connectGuardian,
     publish: withLocalRoute(relayPublish, config.localRoute),
+    deviceName: config.localRoute?.deviceName,
     resolveChild: config.resolveChild,
     childPolicies: config.childPolicies,
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),

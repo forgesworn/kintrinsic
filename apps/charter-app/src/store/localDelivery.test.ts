@@ -12,7 +12,9 @@ import {
   linkRecords,
   pruneRecords,
   recordsOf,
+  problemNotes,
   ruleAppliedMachines,
+  ruleProblems,
   type LocalWrapRecord,
 } from "./localDelivery";
 
@@ -59,17 +61,41 @@ describe("the delivery record", () => {
     expect(applyStates(next, { a: { state: "applied" } })[0].state).toBe("applied");
   });
 
-  it("polls only non-final, recent entries", () => {
+  // L1: `rejected` and `failed` are no longer final — the carrier lets a
+  // later ACK replace them (`advanced_by` in charter-link's guardian.rs), so
+  // they are polled until the carrier gives the wrap up.
+  it("polls only non-final, recent entries (failed and rejected can still be followed by an ACK)", () => {
     const list = [
       rec({ wrap: "queued", state: "queued" }),
       rec({ wrap: "sent", state: "sent" }),
       rec({ wrap: "received", state: "received" }),
       rec({ wrap: "done", state: "applied" }),
       rec({ wrap: "rejected", state: "rejected" }),
+      rec({ wrap: "failed", state: "failed" }),
+      rec({ wrap: "refused", state: "refused" }),
       rec({ wrap: "stale", state: "queued", at: NOW - 49 * 3600 * 1000 }),
     ];
-    expect(idsToPoll(list, NOW)).toEqual(["queued", "sent", "received"]);
-    expect(["queued", "sent", "received"].some((s) => isFinalState(s as never))).toBe(false);
+    expect(idsToPoll(list, NOW)).toEqual(["queued", "sent", "received", "rejected", "failed"]);
+    expect(["queued", "sent", "received", "rejected", "failed"].some((s) => isFinalState(s as never))).toBe(false);
+    expect(["applied", "unchanged", "refused", "expired", "superseded", "ignored"].every((s) => isFinalState(s as never))).toBe(true);
+  });
+
+  it("moves states exactly as the carrier does (L1)", () => {
+    const one = (state: string) => [rec({ wrap: "a", state: state as never })];
+    const after = (from: string, to: string) => applyStates(one(from), { a: { state: to as never } })[0].state;
+    // A later ACK replaces a failed one, and follows rejected / received.
+    expect(after("failed", "applied")).toBe("applied");
+    expect(after("rejected", "applied")).toBe("applied");
+    expect(after("received", "unchanged")).toBe("unchanged");
+    // Forward only: a late "sent" never undoes received or an ACK.
+    expect(after("received", "sent")).toBe("received");
+    expect(after("applied", "failed")).toBe("applied");
+    expect(after("refused", "applied")).toBe("refused");
+    expect(after("sent", "queued")).toBe("sent");
+    expect(after("queued", "sent")).toBe("sent");
+    expect(after("received", "rejected")).toBe("received");
+    // Garbage from the bridge changes nothing.
+    expect(after("sent", "bogus")).toBe("sent");
   });
 
   it("links wraps to an ask once, sharing the array when nothing changes", () => {
@@ -190,6 +216,44 @@ describe("rule changes", () => {
     expect(ruleAppliedMachines(["nope"], records)).toEqual([]);
   });
 
+  it("never counts a refused, failed, expired or superseded device as applied, and names it as a problem (M2)", () => {
+    const records = [
+      rec({ wrap: "c1", machine: M1, state: "applied" }),
+      rec({ wrap: "c2", machine: M2, state: "superseded" }),
+      rec({ wrap: "c3", machine: M2, state: "refused" }),
+    ];
+    expect(ruleAppliedMachines(["c1", "c2"], records)).toEqual([M1]);
+    expect(ruleProblems(["c1", "c2", "c3"], records)).toEqual([{ machine: M2, ack: "superseded" }]);
+    expect(problemNotes(["c3"], records, () => "Mia's phone")).toEqual(["Mia's phone didn't accept this change."]);
+    expect(problemNotes(["c2"], records, () => "Mia's phone")).toEqual([
+      "Mia's phone already had a newer change, so it didn't use this one.",
+    ]);
+    for (const [state, words] of [
+      ["failed", "Mia's phone couldn't carry this out. It may need another try."],
+      ["expired", "Mia's phone didn't act on this: it had already expired there."],
+    ] as const) {
+      expect(problemNotes(["x"], [rec({ wrap: "x", machine: M2, state })], () => "Mia's phone")).toEqual([words]);
+    }
+    // Not problems: still on the way, applied, or not acted on over the link.
+    for (const state of ["queued", "sent", "received", "applied", "unchanged", "ignored", "rejected"] as const) {
+      expect(ruleProblems(["x"], [rec({ wrap: "x", state })])).toEqual([]);
+    }
+    expect(ruleProblems(undefined, records)).toEqual([]);
+  });
+
+  it("an app-open hold clause a device superseded is a plain warning, never 'Applied on'", () => {
+    const req = { reqId: REQ, kind: "app.open", status: "approved" };
+    const line = answerDeliveryLine(
+      req,
+      [
+        rec({ wrap: "g", kind: "grant", reqId: REQ, state: "applied" }),
+        rec({ wrap: "c", kind: "clause", reqId: REQ, state: "superseded" }),
+      ],
+      nameOf,
+    );
+    expect(line).toEqual({ tone: "warn", text: "Robin's laptop already had a newer change, so it didn't use this one." });
+  });
+
   it("appends '— applied on {device}', empty when nothing was acked", () => {
     expect(appliedSuffix([])).toBe("");
     expect(appliedSuffix(["Robin's laptop"])).toBe(" — applied on Robin's laptop");
@@ -214,8 +278,20 @@ describe("a queued answer outliving its ask", () => {
     expect(line).toEqual({ tone: "warn", text: "Expired before it reached Robin's laptop." });
   });
 
-  it("only ever applies to a wrap that was never delivered: a received/sent one keeps waiting", () => {
+  it("only ever applies to a wrap that never reached the ward: a received one keeps waiting", () => {
     expect(answerDeliveryLine(ask(NOW - 1000), [grant("received")], nameOf, NOW + DAY)?.tone).toBe("info");
+  });
+
+  // L5: a grant stuck at `sent` (the session died before the ward's OK; the
+  // carrier sends it again at the next READY) never reached the ward either.
+  it("a grant stuck at 'sent' reads as expired too once the ask has aged out", () => {
+    expect(answerDeliveryLine(ask(NOW - 1000), [grant("sent")], nameOf, NOW + 1000)?.tone).toBe("info");
+    expect(answerDeliveryLine(ask(NOW - 1000), [grant("sent")], nameOf, NOW + DAY)).toEqual({
+      tone: "warn",
+      text: "Expired before it reached Robin's laptop.",
+    });
+    const req = { ...ask(NOW + 20 * 3600 * 1000), id: "r" };
+    expect(answeredLines([req], [grant("sent")], nameOf, NOW + 30 * 3600 * 1000)).toHaveLength(1);
   });
 
   it("an ACK still wins over the clock", () => {

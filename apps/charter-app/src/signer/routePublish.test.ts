@@ -173,10 +173,10 @@ describe("withLocalRoute: with a local route", () => {
     expect(done).toHaveBeenCalledTimes(1);
   });
 
-  it("counts any ward ACK result as receipt", async () => {
+  it("counts a settling ward ACK as receipt, and resolves with it", async () => {
     installBridge("sent", "applied");
     const relay = vi.fn(() => new Promise<void>(() => {}));
-    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toBeUndefined();
+    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toEqual({ routed: true, local: "applied" });
   });
 
   it("swallows a relay rejection that happens after the local route succeeded", async () => {
@@ -212,7 +212,7 @@ describe("withLocalRoute: with a local route", () => {
   it("falls back to the relay result when the carrier rejects the wrap", async () => {
     const b = installBridge("rejected");
     const relay = vi.fn(async () => {});
-    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toBeUndefined();
+    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toEqual({ routed: false });
     expect(b.delivery).not.toHaveBeenCalled();
 
     const failing = vi.fn(async () => {
@@ -224,21 +224,65 @@ describe("withLocalRoute: with a local route", () => {
   it("falls back to relays when the carrier says unavailable or answers garbage", async () => {
     installBridge("unavailable");
     const relay = vi.fn(async () => {});
-    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toBeUndefined();
+    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toEqual({ routed: false });
     installBridge("sent");
     window.CharterCarrier!.localSend = () => "garbage";
-    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toBeUndefined();
+    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toEqual({ routed: false });
   });
 
-  it("when sent but never confirmed and relays fail, the relay error stands", async () => {
+  // Amended rule (docs/local-network-design.md, "Routing and fallback" step 4):
+  // the carrier keeps a SENT wrap until the ward's OK and sends it again at the
+  // next READY, so "sent, no receipt yet" is held — exactly like queued. A hard
+  // failure here invited a retry that signed a second gift (double minutes) or
+  // a conflicting answer to the same ask.
+  it("when sent but never confirmed and relays fail, it is held for the home network, not a failure (the carrier keeps it until the ward's OK)", async () => {
     installBridge("sent", "sent");
     const relay = vi.fn(async () => {
       throw new Error("Couldn't reach any relay — check your connection and try again.");
     });
-    const p = withLocalRoute(relay)(RELAYS, wrap());
-    const assertion = expect(p).rejects.toThrow("Couldn't reach any relay");
+    const p = withLocalRoute(relay, { deviceName: () => "Mia's phone" })(RELAYS, wrap());
+    const assertion = expect(p).rejects.toBeInstanceOf(QueuedForHomeNetworkError);
     await vi.advanceTimersByTimeAsync(LOCAL_RECEIPT_WINDOW_MS + 200);
     await assertion;
+    const err = (await p.catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(err.message).toBe("Not sent yet — it'll reach Mia's phone when it's on the home network.");
+    expect(err.wraps).toEqual([wrap().id]);
+  });
+
+  it("queued that becomes sent during the wait is still held when relays fail", async () => {
+    const b = installBridge("queued", "queued");
+    let failRelay!: (e: Error) => void;
+    const relay = vi.fn(() => new Promise<void>((_, reject) => (failRelay = reject)));
+    const p = withLocalRoute(relay)(RELAYS, wrap());
+    const assertion = expect(p).rejects.toBeInstanceOf(QueuedForHomeNetworkError);
+    b.state.current = "sent"; // the ward connected; no OK yet
+    failRelay(new Error("Couldn't reach any relay — check your connection and try again."));
+    await vi.advanceTimersByTimeAsync(10);
+    await assertion;
+  });
+
+  it("resolves with a refusing ward's ACK so the caller can tell it from a receipt", async () => {
+    installBridge("sent", "refused");
+    const relay = vi.fn(() => new Promise<void>(() => {}));
+    await expect(withLocalRoute(relay)(RELAYS, wrap())).resolves.toEqual({ routed: true, local: "refused" });
+  });
+
+  it("an 'ignored' ACK is not a receipt: the relay result decides", async () => {
+    installBridge("sent", "ignored");
+    const ok = vi.fn(async () => {});
+    await expect(withLocalRoute(ok)(RELAYS, wrap())).resolves.toEqual({ routed: true, local: "ignored" });
+    const failing = vi.fn(async () => {
+      throw new Error("Couldn't reach any relay — check your connection and try again.");
+    });
+    await expect(withLocalRoute(failing)(RELAYS, wrap())).rejects.toThrow("Couldn't reach any relay");
+  });
+
+  it("with zero relays and a carrier that won't take it, says no relay is set up for that device (L4)", async () => {
+    installBridge("rejected");
+    const relay = vi.fn(async () => {});
+    await expect(withLocalRoute(relay, { deviceName: () => "Robin's laptop" })([], wrap())).rejects.toThrow(
+      "No relay is set up to reach Robin's laptop, so this couldn't be sent.",
+    );
   });
 
   it("queued + relay failure throws QueuedForHomeNetworkError naming the device", async () => {
@@ -264,7 +308,7 @@ describe("withLocalRoute: with a local route", () => {
 
   it("queued + relay success is plain success (the relay copy is durable)", async () => {
     installBridge("queued");
-    await expect(withLocalRoute(async () => {})(RELAYS, wrap())).resolves.toBeUndefined();
+    await expect(withLocalRoute(async () => {})(RELAYS, wrap())).resolves.toEqual({ routed: true, local: "queued" });
   });
 
   it("with zero relays, queued is 'not sent yet' and received is success", async () => {
@@ -274,7 +318,7 @@ describe("withLocalRoute: with a local route", () => {
     expect(relay).not.toHaveBeenCalled();
 
     installBridge("sent", "received");
-    await expect(withLocalRoute(relay)([], wrap())).resolves.toBeUndefined();
+    await expect(withLocalRoute(relay)([], wrap())).resolves.toEqual({ routed: true, local: "received" });
   });
 
   it("reports the wrap to the tracker with its recipient, state and meta", async () => {
@@ -294,7 +338,7 @@ describe("withLocalRoute: with a local route", () => {
     installBridge("sent", "received");
     await expect(
       withLocalRoute(async () => {}, { onRouted: () => { throw new Error("boom"); } })(RELAYS, wrap()),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ routed: true, local: "received" });
   });
 });
 

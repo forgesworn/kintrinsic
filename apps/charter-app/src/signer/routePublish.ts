@@ -11,9 +11,16 @@
 //      receipt. Receipt (or any later ACK) completes the publish without
 //      waiting for relays; the relay publish carries on in the background;
 //   3. otherwise the relay result decides, exactly as before;
-//   4. if the relays failed but the carrier is HOLDING the wrap for a ward
-//      that is not connected, say so — "not sent yet" — which is neither
-//      success nor a hard failure (QueuedForHomeNetworkError).
+//   4. if the relays failed but the carrier is HOLDING the wrap — queued for a
+//      ward that is not connected, or sent with no receipt yet — say so: "not
+//      sent yet", which is neither success nor a hard failure
+//      (QueuedForHomeNetworkError). The carrier keeps every wrap until the
+//      ward's OK, so a held wrap WILL arrive; reporting it as a failure would
+//      invite a retry that signs a second gift or a conflicting answer.
+//
+// The publish resolves with what the home network saw (`PublishOutcome`), so
+// a caller can tell a ward's receipt from a ward's refusal: any ACK ends the
+// wait, but only some of them mean the change was taken.
 //
 // With no usable local route (a browser, an older APK, no Wi-Fi) this is the
 // relay publish and nothing else, byte for byte what it was before.
@@ -56,13 +63,66 @@ export interface LocalRouteHooks {
   onRouted?: (wrap: RoutedWrap) => void;
 }
 
+/** A ward's ACK that means it did NOT take the change (see the ACK table in
+ *  spec/contract.md). Never counted as reached or applied. */
+export type ProblemAck = "refused" | "failed" | "expired" | "superseded";
+
+export function isProblemAck(state: LocalDeliveryState | undefined): state is ProblemAck {
+  return state === "refused" || state === "failed" || state === "expired" || state === "superseded";
+}
+
+/** One device a multi-device send did not get to: the ward's own problem ACK,
+ *  or the publish error (the relays failed and the carrier did not hold it). */
+export interface FailedDevice {
+  /** The device's machine key. */
+  machine: string;
+  ack?: ProblemAck;
+  /** The guardian-facing error message, when there was no ACK. */
+  error?: string;
+}
+
+/** "{device} didn't accept this change." — the plain words for a clause's problem ACK. */
+export function clauseProblemText(device: string, ack: ProblemAck): string {
+  switch (ack) {
+    case "refused":
+      return `${device} didn't accept this change.`;
+    case "failed":
+      return `${device} couldn't carry this out. It may need another try.`;
+    case "expired":
+      return `${device} didn't act on this: it had already expired there.`;
+    case "superseded":
+      return `${device} already had a newer change, so it didn't use this one.`;
+  }
+}
+
 /**
- * The relays failed, but the carrier is holding the change for a ward device
- * that is not on the home network right now; it goes out as soon as it is.
- * Callers show this as a WARNING and must not treat it as success — an ask
- * answered this way stays pending.
+ * The sentence for one device a send did not get to. `partial` is for a send
+ * that DID reach or is held for another device: there, "try again" would
+ * re-sign the change for that device too, so the invitation is left off.
+ */
+export function failedDeviceText(
+  device: string,
+  f: Pick<FailedDevice, "ack" | "error">,
+  opts: { partial?: boolean } = {},
+): string {
+  if (f.ack) return clauseProblemText(device, f.ack);
+  const why = f.error ?? "it couldn't be reached.";
+  return `Not sent to ${device}: ${opts.partial ? why.replace(/ — check your connection and try again\.?$/, ".") : why}`;
+}
+
+/**
+ * The carrier is holding the change for a ward device — queued for one that is
+ * not on the home network right now, or sent to one that has not confirmed yet
+ * — and the relays failed. It is delivered as soon as the ward reads it.
+ * Callers show this as a WARNING: not success, and not a failure that invites a
+ * retry. An ask answered this way is recorded as answered (the store's status
+ * guards then stop a second, conflicting signature).
+ *
+ * A multi-device send uses the same error for any PARTIAL outcome: at least one
+ * device reached or held, and the rest named in `devices` (held) or `failed`.
  */
 export class QueuedForHomeNetworkError extends Error {
+  /** Names of the devices the carrier is holding the change for. */
   readonly devices: string[];
   /**
    * Machine keys of the devices in the same batch that DID get the change (a
@@ -70,15 +130,30 @@ export class QueuedForHomeNetworkError extends Error {
    * a single wrap. The caller names them; this layer only knows keys.
    */
   readonly reached: string[];
-  constructor(devices: string[], reached: string[] = []) {
-    const names = [...new Set(devices.length > 0 ? devices : ["their device"])];
-    super(QueuedForHomeNetworkError.describe(names));
+  /** Devices in the same batch the change did not get to. */
+  readonly failed: FailedDevice[];
+  /** Ids of the batch's wraps the carrier took, so their ACKs can be shown. */
+  readonly wraps: string[];
+  constructor(
+    devices: string[],
+    reached: string[] = [],
+    failed: FailedDevice[] = [],
+    wraps: string[] = [],
+  ) {
+    const fallback = devices.length === 0 && reached.length === 0 && failed.length === 0;
+    const names = [...new Set(fallback ? ["their device"] : devices)];
+    super(QueuedForHomeNetworkError.describe(names, failed.length));
     this.name = "QueuedForHomeNetworkError";
     this.devices = names;
     this.reached = [...new Set(reached)];
+    this.failed = failed;
+    this.wraps = [...new Set(wraps)];
   }
 
-  private static describe(names: string[]): string {
+  private static describe(names: string[], failed: number): string {
+    if (names.length === 0) {
+      return failed > 0 ? "Not sent to every device." : "Not sent yet.";
+    }
     if (names.length === 1) {
       return `Not sent yet — it'll reach ${names[0]} when it's on the home network.`;
     }
@@ -87,22 +162,38 @@ export class QueuedForHomeNetworkError extends Error {
   }
 
   /** One error naming every device across several queued wraps. */
-  static merge(errors: QueuedForHomeNetworkError[], reached: string[] = []): QueuedForHomeNetworkError {
+  static merge(
+    errors: QueuedForHomeNetworkError[],
+    reached: string[] = [],
+    failed: FailedDevice[] = [],
+    wraps: string[] = [],
+  ): QueuedForHomeNetworkError {
     return new QueuedForHomeNetworkError(
       errors.flatMap((e) => e.devices),
       [...errors.flatMap((e) => e.reached), ...reached],
+      [...errors.flatMap((e) => e.failed), ...failed],
+      [...errors.flatMap((e) => e.wraps), ...wraps],
     );
   }
 }
 
 export const NO_RELAY_MESSAGE = "Couldn't reach any relay — check your connection and try again.";
 
+/** What the home network saw of a publish that resolved. */
+export interface PublishOutcome {
+  /** The carrier took the wrap (sent or held), so a delivery record exists. */
+  routed: boolean;
+  /** The last home-network state seen for it, when the carrier took it. A
+   *  problem ACK (`isProblemAck`) means the ward did NOT take the change. */
+  local?: LocalDeliveryState;
+}
+
 type RelayPublish = (relays: string[], event: NostrEvent) => Promise<void>;
 export type RoutedPublish = (
   relays: string[],
   event: NostrEvent,
   meta?: PublishMeta,
-) => Promise<void>;
+) => Promise<PublishOutcome>;
 
 /** The single `p`-tag recipient of a kind-1059 wrap, else null. */
 export function singleRecipient(event: NostrEvent): string | null {
@@ -115,9 +206,16 @@ export function singleRecipient(event: NostrEvent): string | null {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function isReceipt(state: LocalDeliveryState | undefined): boolean {
-  // received, or any ward ACK. `rejected` is the carrier refusing the wrap;
-  // queued/sent mean no receipt yet.
-  return state !== undefined && state !== "queued" && state !== "sent" && state !== "rejected";
+  // received, or a ward ACK that settles the wrap. `rejected` is the carrier
+  // refusing the wrap; queued/sent mean no receipt yet; `ignored` is a kind
+  // the ward does not act on over the link, so only the relay copy counts.
+  return (
+    state !== undefined &&
+    state !== "queued" &&
+    state !== "sent" &&
+    state !== "rejected" &&
+    state !== "ignored"
+  );
 }
 
 /**
@@ -129,7 +227,11 @@ function isReceipt(state: LocalDeliveryState | undefined): boolean {
 export function withLocalRoute(relayPublish: RelayPublish, hooks: LocalRouteHooks = {}): RoutedPublish {
   return async (relays, event, meta = { kind: "other" }) => {
     const recipient = singleRecipient(event);
-    if (!recipient || !localRouteAvailable()) return relayPublish(relays, event);
+    if (!recipient || !localRouteAvailable()) {
+      await relayPublish(relays, event);
+      return { routed: false };
+    }
+    const deviceName = () => hooks.deviceName?.(recipient) ?? "their device";
 
     // Both routes start now. The relay promise is observed here, once, so a
     // rejection after the local route has already succeeded can never surface
@@ -137,7 +239,9 @@ export function withLocalRoute(relayPublish: RelayPublish, hooks: LocalRouteHook
     const relay: { state: "pending" | "ok" | "failed"; error?: unknown } = { state: "pending" };
     const relayRun: Promise<void> =
       relays.length === 0
-        ? Promise.reject(new Error(NO_RELAY_MESSAGE))
+        ? // Nothing to publish to: if the carrier can't take it either, say so
+          // plainly rather than blame relays that were never configured.
+          Promise.reject(new Error(`No relay is set up to reach ${deviceName()}, so this couldn't be sent.`))
         : (async () => relayPublish(relays, event))(); // starts synchronously
     const relayDone = relayRun.then(
       () => {
@@ -152,9 +256,11 @@ export function withLocalRoute(relayPublish: RelayPublish, hooks: LocalRouteHook
     const sent = localSend(recipient, event);
     let lastLocal: LocalDeliveryState | undefined =
       sent === "sent" || sent === "queued" ? sent : undefined;
-    if (lastLocal !== undefined) {
+    const routed = lastLocal !== undefined;
+    const outcome = (): PublishOutcome => (routed ? { routed, local: lastLocal } : { routed });
+    if (sent === "sent" || sent === "queued") {
       try {
-        hooks.onRouted?.({ wrapId: event.id, machine: recipient, state: lastLocal, meta });
+        hooks.onRouted?.({ wrapId: event.id, machine: recipient, state: sent, meta });
       } catch {
         // Tracking is bookkeeping; it must never fail a delivery.
       }
@@ -165,11 +271,11 @@ export function withLocalRoute(relayPublish: RelayPublish, hooks: LocalRouteHook
       for (;;) {
         const entry = localDelivery([event.id])?.[event.id];
         if (entry) lastLocal = entry.state;
-        if (isReceipt(lastLocal)) return; // the ward has it; relays carry on unobserved
-        if (lastLocal === "rejected") break;
+        if (isReceipt(lastLocal)) return outcome(); // the ward has it; relays carry on unobserved
+        if (lastLocal === "rejected" || lastLocal === "ignored") break;
         // A relay that already took it is as good as a receipt for the caller —
         // no reason to hold the guardian for the rest of the window.
-        if (relay.state === "ok") return;
+        if (relay.state === "ok") return outcome();
         if (Date.now() >= deadline) break;
         // Wake early if the relay settles meanwhile; once it has settled,
         // only the clock is worth waiting for.
@@ -180,16 +286,19 @@ export function withLocalRoute(relayPublish: RelayPublish, hooks: LocalRouteHook
     }
 
     await relayDone;
-    if (relay.state === "ok") return;
+    if (relay.state === "ok") return outcome();
 
     // Relays failed. One last look: the receipt may have landed while we waited.
     if (lastLocal === "sent" || lastLocal === "queued") {
       const entry = localDelivery([event.id])?.[event.id];
       if (entry) lastLocal = entry.state;
     }
-    if (isReceipt(lastLocal)) return;
-    if (lastLocal === "queued") {
-      throw new QueuedForHomeNetworkError([hooks.deviceName?.(recipient) ?? "their device"]);
+    if (isReceipt(lastLocal)) return outcome();
+    // Held: queued for a ward that isn't connected, or sent and not yet
+    // confirmed. Either way the carrier keeps it until the ward's OK and sends
+    // it again at the next READY, so it WILL arrive — never a hard failure.
+    if (lastLocal === "queued" || lastLocal === "sent") {
+      throw new QueuedForHomeNetworkError([deviceName()], [], [], [event.id]);
     }
     throw relay.error;
   };

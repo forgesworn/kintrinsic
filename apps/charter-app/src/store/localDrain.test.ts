@@ -162,6 +162,22 @@ describe("home-network drain", () => {
     expect(consume).toHaveBeenCalledWith([w.id]);
   });
 
+  // L2: the relay copy landed the ask this tick, but the state holding it is
+  // not written yet. The local copy is a duplicate — and must wait for that
+  // ask to be in the persisted state, not be consumed on the previous write.
+  it("a local duplicate of an ask not yet persisted waits for that ask before it is consumed", () => {
+    const store = makeStore();
+    const w = giftWrapRequest(request("ab".repeat(32)));
+    store.ctx.seenReqIds.add("ab".repeat(32)); // dispatched by the relay poll, not yet rendered
+    const queue = new ConsumeQueue();
+    drainLocalInbox({ inbox: () => [entry(w)], ingest: (x) => ingestWrap(x, store.ctx), queue });
+    const consume = vi.fn();
+    queue.flush({ persistedOk: true, hasRequest: () => false, consume });
+    expect(consume).not.toHaveBeenCalled();
+    queue.flush({ persistedOk: true, hasRequest: (r) => r === "ab".repeat(32), consume });
+    expect(consume).toHaveBeenCalledWith([w.id]);
+  });
+
   it("works the other way round: local first, the relay copy is then skipped", () => {
     const store = makeStore();
     const w = giftWrapRequest(request("ff".repeat(32)));

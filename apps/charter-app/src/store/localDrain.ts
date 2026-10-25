@@ -96,7 +96,12 @@ export function drainLocalInbox(deps: {
       continue;
     }
     if (result.kind === "unlanded") continue;
-    deps.queue.add(entry.id, result.kind === "request" ? result.reqId : undefined);
+    // A duplicate waits for its ask too: the copy that landed it may have been
+    // recorded this tick and not yet written to storage.
+    deps.queue.add(
+      entry.id,
+      result.kind === "request" || result.kind === "duplicate" ? result.reqId : undefined,
+    );
   }
   return entries.length;
 }

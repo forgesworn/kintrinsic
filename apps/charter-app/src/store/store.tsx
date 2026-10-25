@@ -98,7 +98,12 @@ import {
 } from "./localDelivery";
 import { localConsume, localDelivery, localInbox } from "../carrier/localLink";
 import { readLocalRoute, sameLocalRoute, type LocalRouteView } from "../carrier/localRoute";
-import { QueuedForHomeNetworkError, type LocalRouteHooks, type RoutedWrap } from "../signer/routePublish";
+import {
+  QueuedForHomeNetworkError,
+  failedDeviceText,
+  type LocalRouteHooks,
+  type RoutedWrap,
+} from "../signer/routePublish";
 import type { UpdateManifest } from "../wire/types";
 import { fetchManifest, fetchDebManifest, APK_PATH, type DebManifest } from "./updateCheck";
 import { makeEmpty, makeSeed } from "../data/seed";
@@ -538,9 +543,9 @@ export interface CharterContextValue {
   /** Ask a ward to finish up now (or, with `lift`, allow them back on). */
   standDown: (childId: string, lift?: boolean) => Promise<SendResult>;
   /** Open a short, signed window during which the ward drops its install lock. */
-  openMaintenanceWindow: (childId: string, minutes: number) => Promise<boolean>;
+  openMaintenanceWindow: (childId: string, minutes: number) => Promise<SendResult>;
   /** Publish the `update` clause to every governed device the child uses. */
-  sendCharterUpdate: (childId: string) => Promise<boolean>;
+  sendCharterUpdate: (childId: string) => Promise<SendResult>;
   /** QR onboarding: the outstanding pairing wait, if a QR is on screen. */
   phonePairing: { childId: string; token: string; foundMachine: string | null } | null;
   /** Mint a one-time token and start watching for its STATUS echo. */
@@ -729,9 +734,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   // Home-network delivery bookkeeping, handed to whichever real signer is
-  // built. The batches collect the clause wraps of a rule change in flight so
-  // its activity line (and an app-open approval) can be tied to their ACKs.
-  const clauseBatches = useRef(new Map<string, string[]>());
+  // built. Each send reports the wraps the carrier took for IT (the signer's
+  // own result), so its activity line (and an app-open approval) is tied to
+  // exactly its own ACKs — never to a concurrent send to the same child.
   const localRoute = useRef<LocalRouteHooks>({
     deviceName: (machine) => {
       for (const c of stateRef.current.children) {
@@ -763,18 +768,25 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           state: w.state,
         },
       });
-      if (w.meta.kind === "clause" && found) clauseBatches.current.get(found.childId)?.push(w.wrapId);
     },
   }).current;
 
-  /** A queued send, with machine keys turned into the names the guardian knows. */
+  /** A queued (or partial) send, with machine keys turned into the names the
+   *  guardian knows. */
   const queuedDelivery = useCallback(
-    (err: QueuedForHomeNetworkError): Extract<ClauseDelivery, { outcome: "queued" }> => ({
-      outcome: "queued",
-      message: err.message,
-      devices: err.devices,
-      reached: err.reached.map((m) => localRoute.deviceName?.(m) ?? "their device"),
-    }),
+    (err: QueuedForHomeNetworkError): Extract<ClauseDelivery, { outcome: "queued" }> => {
+      const name = (m: string) => localRoute.deviceName?.(m) ?? "their device";
+      return {
+        outcome: "queued",
+        message: err.message,
+        devices: err.devices,
+        reached: err.reached.map(name),
+        ...(err.failed.length > 0
+          ? { failed: err.failed.map((f) => failedDeviceText(name(f.machine), f, { partial: true })) }
+          : {}),
+        ...(err.wraps.length > 0 ? { wraps: err.wraps } : {}),
+      };
+    },
     [localRoute],
   );
 
@@ -1423,12 +1435,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // change for them. The gift IS signed either way, so it is logged — with
       // the real split of who got it and who is still waiting.
       let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
         try {
-          await s.signGiftClause(childId, minutes, tz, groupId);
+          wraps = (await s.signGiftClause(childId, minutes, tz, groupId)).wraps;
         } catch (err) {
           if (!(err instanceof QueuedForHomeNetworkError)) throw err;
           queued = queuedDelivery(err);
+          wraps = queued.wraps;
         }
         // Record the standing alongside the gift. "You gave 5 more minutes"
         // reads the same whether the ward was on target or two hours over;
@@ -1450,6 +1464,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           "rule-changed",
           (note ? `${what} (${note})` : what) + (queued ? undeliveredNote(queued) : ""),
           groupId ? { bucketId: groupId, minutesGranted: minutes } : undefined,
+          wraps,
         );
         return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
@@ -1475,18 +1490,22 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // guardian phone's — the same rule a gift's expiry follows (C-1).
       const tz = resolveChildTz(devicePolicy);
       let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
         try {
-          await s.signStandDownClause(childId, { lift, tz });
+          wraps = (await s.signStandDownClause(childId, { lift, tz })).wraps;
         } catch (err) {
           if (!(err instanceof QueuedForHomeNetworkError)) throw err;
           queued = queuedDelivery(err);
+          wraps = queued.wraps;
         }
         addActivity(
           childId,
           "rule-changed",
           (lift ? "You allowed them back on" : "You asked them to finish up now") +
             (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
         );
         return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
@@ -1498,16 +1517,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   const openMaintenanceWindow = useCallback(
-    async (childId: string, minutes: number): Promise<boolean> => {
+    async (childId: string, minutes: number): Promise<SendResult> => {
       const s = signer.current;
       if (!s?.signMaintenanceClause || !s.status().connected) return false;
       let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
         try {
-          await s.signMaintenanceClause(childId, minutes);
+          wraps = (await s.signMaintenanceClause(childId, minutes)).wraps;
         } catch (err) {
           if (!(err instanceof QueuedForHomeNetworkError)) throw err;
           queued = queuedDelivery(err);
+          wraps = queued.wraps;
         }
         addActivity(
           childId,
@@ -1515,8 +1536,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           (minutes <= 0
             ? "You closed the install window"
             : `You allowed installs for ${minutes} minutes`) + (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
         );
-        return true;
+        // Held for the home network is NOT an open window: the screen must
+        // say it is waiting, not count down one the phone never received.
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
         if (err instanceof SignerCancelled) return false;
         throw err;
@@ -1526,7 +1551,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   const sendCharterUpdate = useCallback(
-    async (childId: string): Promise<boolean> => {
+    async (childId: string): Promise<SendResult> => {
       const manifest = updateManifest;
       if (!manifest || !signer.current!.status().connected) return false;
       // A relay-announced release (and a current origin JSON) names every
@@ -1553,20 +1578,24 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           ? manifest.url
           : new URL(manifest.path ?? APK_PATH, window.location.origin).toString());
       let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
         try {
-          await signer.current!.signUpdateClause(childId, manifest, url);
+          wraps = (await signer.current!.signUpdateClause(childId, manifest, url)).wraps;
         } catch (err) {
           if (!(err instanceof QueuedForHomeNetworkError)) throw err;
           queued = queuedDelivery(err);
+          wraps = queued.wraps;
         }
         addActivity(
           childId,
           "rule-changed",
           `You sent a Kintrinsic update (${manifest.versionName}) to the devices` +
             (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
         );
-        return true;
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
         if (err instanceof SignerCancelled) return false;
         throw err;
@@ -1887,22 +1916,16 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         resolveChild(childId)?.devices.length ?? 0,
       );
       if (blocked) return blocked;
-      const batch: string[] = [];
-      clauseBatches.current.set(childId, batch);
       try {
-        await signer.current!.signClause(childId, policy);
-        return batch.length > 0 ? { outcome: "sent", wraps: [...batch] } : { outcome: "sent" };
+        const signed = await signer.current!.signClause(childId, policy);
+        return signed.wraps && signed.wraps.length > 0 ? { outcome: "sent", wraps: signed.wraps } : { outcome: "sent" };
       } catch (err) {
         if (err instanceof SignerCancelled) return { outcome: "cancelled" };
         // The relays failed but the carrier is holding the change for a ward
         // that isn't home yet. The rule is saved here and on its way — but it
         // has NOT been sent, and must not read as if it had.
-        if (err instanceof QueuedForHomeNetworkError) {
-          return { ...queuedDelivery(err), wraps: [...batch] };
-        }
+        if (err instanceof QueuedForHomeNetworkError) return queuedDelivery(err);
         throw err;
-      } finally {
-        if (clauseBatches.current.get(childId) === batch) clauseBatches.current.delete(childId);
       }
     },
     [resolveChild, queuedDelivery],
@@ -2498,9 +2521,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       }
       // Held clause and/or held grant: the approval stands, and the log says
       // who it is still waiting for.
-      const waitingDevices = [...(result.holdQueued?.devices ?? []), ...decisionWaiting];
+      const waitingDevices = [...new Set([...(result.holdQueued?.devices ?? []), ...decisionWaiting])];
+      // A hold that did not get to some device says so, as a plain warning.
+      const holdFailed = result.holdQueued?.failed ?? [];
       const waiting =
-        result.holdQueued || decisionWaiting.length > 0 ? waitingAnswerNote([...new Set(waitingDevices)]) : "";
+        (waitingDevices.length > 0 ? waitingAnswerNote(waitingDevices) : "") +
+        (holdFailed.length > 0 ? ` — ${holdFailed.join(" ")}` : "");
       dispatch({ type: "SET_REQUEST_STATUS", id, status: "approved" });
       // Belt and braces (F1 review): resolve through `identityDisplayLabel`
       // rather than trust `req.appLabel`/`req.appId` verbatim.

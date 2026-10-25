@@ -9,6 +9,7 @@ import {
   SectionLabel,
 } from "../components/ui";
 import { useCharter } from "../store/store";
+import type { SendResult } from "../store/clauseDelivery";
 import { goToWard } from "../domain/wardRoute";
 import { updateAvailable } from "../store/updateCheck";
 import {
@@ -426,7 +427,12 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
-  const [updateSent, setUpdateSent] = useState(false);
+  // `true` once the update reached the phone's way; a "queued" object when it
+  // is only held for the home network — which must not read as sent.
+  const [updateSent, setUpdateSent] = useState<SendResult>(false);
+  // The install window the carrier is holding for the home network: signed,
+  // but the phone has not got it, so no "Installs are open" countdown.
+  const [windowHeld, setWindowHeld] = useState<string | null>(null);
   const paired = device.pairing === "paired";
   // Self-update (#44): offer only when the device REPORTS a version that is
   // strictly behind the site's published artifact. Phones only — the Linux
@@ -559,10 +565,20 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
             )}
           </div>
         )}
-        {canUpdate && updateSent && (
+        {canUpdate && updateSent === true && (
           <div className="card-sub">
             Update sent. The phone installs it on its next check-in — the
             version above changes when it lands.
+          </div>
+        )}
+        {canUpdate && typeof updateSent === "object" && (
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            Update not sent yet. {updateSent.message}
+          </div>
+        )}
+        {windowHeld && !openWindow.open && (
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            {windowHeld}
           </div>
         )}
         {updateArrived && <div className="card-sub">Updated ✓</div>}
@@ -639,7 +655,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
               variant="ghost"
               aria-label={`Update Kintrinsic on ${device.label} to ${updateManifest.versionName}`}
               onClick={() => {
-                void sendCharterUpdate(child.id).then((ok) => setUpdateSent(ok));
+                void sendCharterUpdate(child.id).then((sent) => setUpdateSent(sent));
               }}
             >
               Update Kintrinsic
@@ -653,10 +669,17 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
                 // Zero minutes = an expiry at issue: a newer clause the phone
                 // reads as already shut. Nothing to undo if it fails, because
                 // the window closes on its own regardless.
-                void openMaintenanceWindow(child.id, 0).then((ok) => {
-                  if (ok) {
+                void openMaintenanceWindow(child.id, 0).then((sent) => {
+                  if (sent) {
                     writeWindow(child.id, null, Math.floor(Date.now() / 1000));
                     setInstallOpenUntil(undefined);
+                    // A close the carrier is holding: the phone stays open
+                    // until it gets it, or until the window lapses.
+                    setWindowHeld(
+                      typeof sent === "object"
+                        ? `Not closed on the phone yet. ${sent.message} It closes on its own when the window runs out.`
+                        : null,
+                    );
                   }
                 });
               }}
@@ -670,15 +693,21 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
               aria-label={`Allow installs on ${device.label} for ${INSTALL_WINDOW_MINUTES} minutes`}
               onClick={() => {
                 void openMaintenanceWindow(child.id, INSTALL_WINDOW_MINUTES).then(
-                  (ok) => {
+                  (sent) => {
                     // Only start the countdown if the clause was actually signed
                     // and sent — a cancelled signer must not leave this screen
-                    // claiming a window the phone never received.
-                    if (ok) {
+                    // claiming a window the phone never received, and nor must
+                    // a window the carrier is only holding for the home network.
+                    if (sent === true) {
                       const nowUnix = Math.floor(Date.now() / 1000);
                       const until = nowUnix + INSTALL_WINDOW_MINUTES * 60;
                       writeWindow(child.id, until, nowUnix);
                       setInstallOpenUntil(until);
+                      setWindowHeld(null);
+                    } else if (sent) {
+                      setWindowHeld(
+                        `Installs aren’t open yet. ${sent.message} The window still closes ${INSTALL_WINDOW_MINUTES} minutes after you allowed it.`,
+                      );
                     }
                   },
                 );

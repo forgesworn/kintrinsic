@@ -24,10 +24,13 @@ export type ClauseDelivery =
     }
   | { outcome: "undelivered"; why: "no-signer" | "no-device" }
   /**
-   * The relays failed but the carrier is holding the change for a ward device
-   * that is not on the home network right now. Saved here and on its way, but
-   * NOT sent: callers must not treat this as `sent` (an approval stays
-   * pending). `message` is the guardian-facing sentence.
+   * Not everywhere yet: the carrier is holding the change for a ward device
+   * (the relays failed and the ward is not on the home network, or has not
+   * confirmed), and/or a multi-device send did not get to some device, while
+   * at least one device reached it or holds it. Saved here and on its way, but
+   * NOT sent everywhere: callers must not treat this as `sent`, nor as a
+   * failure that invites a second signature (an approval counts as answered).
+   * `message` is the guardian-facing sentence.
    */
   | {
       outcome: "queued";
@@ -37,6 +40,8 @@ export type ClauseDelivery =
       devices?: string[];
       /** Names of devices in the same send that DID get it (a partial batch). */
       reached?: string[];
+      /** One sentence per device the send did not get to (a partial batch). */
+      failed?: string[];
     }
   | { outcome: "cancelled" };
 
@@ -66,9 +71,7 @@ export function clauseDeliveryPrecheck(
  */
 export function undeliveredNote(d: ClauseDelivery): string {
   if (d.outcome === "queued") {
-    if (d.reached && d.reached.length > 0 && d.devices && d.devices.length > 0) {
-      return ` — ${splitSentence(d.reached, d.devices)}`;
-    }
+    if (isSplit(d)) return ` — ${splitSentence(d.reached ?? [], d.devices ?? [], d.failed)}`;
     return ` — saved here. ${d.message.replace(/^Not sent yet — /, "Not sent yet: ")}`;
   }
   if (d.outcome !== "undelivered") return "";
@@ -89,11 +92,24 @@ export function joinNames(names: string[]): string {
  * rest are being held for the home network. Used for the activity line and
  * for what the guardian is told at the time.
  */
-export function splitSentence(reached: string[], waiting: string[]): string {
+export function splitSentence(reached: string[], waiting: string[], failed: string[] = []): string {
+  const parts: string[] = [];
+  if (reached.length > 0) parts.push(`Reached ${joinNames(reached)}.`);
   const w = [...new Set(waiting)];
-  return `Reached ${joinNames(reached)}. ${joinNames(w)} will get it when ${
-    w.length > 1 ? "they're" : "it's"
-  } on the home network.`;
+  if (w.length > 0) {
+    parts.push(`${joinNames(w)} will get it when ${w.length > 1 ? "they're" : "it's"} on the home network.`);
+  }
+  parts.push(...failed);
+  return parts.join(" ");
+}
+
+/** A queued outcome that is a real split (some reached, or some failed), not
+ *  simply "everything is waiting for the home network". */
+function isSplit(d: Extract<ClauseDelivery, { outcome: "queued" }>): boolean {
+  return (
+    (d.failed !== undefined && d.failed.length > 0) ||
+    (d.reached !== undefined && d.reached.length > 0 && d.devices !== undefined && d.devices.length > 0)
+  );
 }
 
 /**
@@ -103,27 +119,31 @@ export function splitSentence(reached: string[], waiting: string[]): string {
  */
 export function queuedSaveWarning(d: ClauseDelivery): string | null {
   if (d.outcome !== "queued") return null;
-  const names = d.devices && d.devices.length > 0 ? d.devices : ["their device"];
-  const n = [...new Set(names)];
-  const who = joinNames(n);
-  const verb = n.length > 1 ? "they're" : "it's";
-  const reached = d.reached && d.reached.length > 0 ? ` ${joinNames(d.reached)} already got it.` : "";
-  return `Saved here. It'll reach ${who} when ${verb} on the home network.${reached}`;
+  const failed = d.failed ?? [];
+  const held = d.devices && d.devices.length > 0 ? d.devices : failed.length > 0 ? [] : ["their device"];
+  const parts = ["Saved here."];
+  const n = [...new Set(held)];
+  if (n.length > 0) {
+    parts.push(`It'll reach ${joinNames(n)} when ${n.length > 1 ? "they're" : "it's"} on the home network.`);
+  }
+  if (d.reached && d.reached.length > 0) parts.push(`${joinNames(d.reached)} already got it.`);
+  parts.push(...failed);
+  return parts.join(" ");
 }
 
 /**
- * What `giveTime` / `standDown` report. `true` = sent; `false` = not signed.
- * A "queued" outcome is truthy-by-shape: the change IS signed and on its way,
- * but at least one device is waiting for the home network, and `message` says
- * exactly who got it and who is still waiting — for the screen to show.
+ * What `giveTime` / `standDown` / the install window / an update push report.
+ * `true` = sent; `false` = not signed. A "queued" outcome is truthy-by-shape:
+ * the change IS signed and on its way, but not everywhere yet — at least one
+ * device is waiting for the home network, or did not get it — and `message`
+ * says exactly who got it, who is still waiting and who it did not reach — for
+ * the screen to show. Never present it as done.
  */
 export type SendResult = boolean | { outcome: "queued"; message: string };
 
-/** The sentence a screen shows after a multi-device send that was held for some devices. */
+/** The sentence a screen shows after a send that is not everywhere yet. */
 export function queuedSendLine(d: Extract<ClauseDelivery, { outcome: "queued" }>): string {
-  return d.reached && d.reached.length > 0 && d.devices && d.devices.length > 0
-    ? splitSentence(d.reached, d.devices)
-    : d.message;
+  return isSplit(d) ? splitSentence(d.reached ?? [], d.devices ?? [], d.failed) : d.message;
 }
 
 /**

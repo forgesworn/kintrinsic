@@ -37,13 +37,17 @@ const DPK2 = getPublicKey(generateSecretKey());
 const SUBJECT = getPublicKey(generateSecretKey());
 const RELAYS = ["wss://relay.one", "wss://relay.two"];
 
-function installBridge(sendFor: (recipient: string) => string) {
+function installBridge(
+  sendFor: (recipient: string) => string,
+  // What the ward makes of a wrap the carrier SENT it (default: its receipt).
+  wardFor: (recipient: string) => string = () => "received",
+) {
   // A faithful little carrier: a wrap it sent is soon received by the ward; one
   // it queued stays queued.
   const stateOf = new Map<string, string>();
   const send = vi.fn((recipient: string, wrapJson: string) => {
     const state = sendFor(recipient);
-    stateOf.set((JSON.parse(wrapJson) as { id: string }).id, state === "sent" ? "received" : state);
+    stateOf.set((JSON.parse(wrapJson) as { id: string }).id, state === "sent" ? wardFor(recipient) : state);
     return JSON.stringify({ state });
   });
   window.CharterCarrier = {
@@ -75,6 +79,7 @@ function makeSigner(target: ChildTarget, relayPublish: (relays: string[], e: Nos
       onRouted: (w) => routed.push({ wrapId: w.wrapId, machine: w.machine, meta: w.meta }),
     }),
     resolveChild: () => target,
+    deviceName: (m) => names[m],
     now: () => 1_700_000_000,
     confirmGate: () => true,
   });
@@ -87,7 +92,8 @@ describe("requireDeliverable with a home-network route", () => {
     const relay = vi.fn(async () => {});
     const { signer } = makeSigner({ subject: SUBJECT, devices: [{ id: "d1", pubkey: DPK1 }], relays: [] }, relay);
     await signer.connect("local");
-    await expect(signer.signGiftClause!("c", 15, "Europe/London")).resolves.toEqual({ ok: true });
+    const r = await signer.signGiftClause!("c", 15, "Europe/London");
+    expect(r).toEqual({ ok: true, wraps: [expect.any(String)] }); // the wrap the carrier took
     expect(relay).not.toHaveBeenCalled(); // nothing to publish to, and none needed
   });
 
@@ -153,7 +159,10 @@ describe("a batch with a device that is not on the home network yet", () => {
     expect(err.reached).toEqual([]);
   });
 
-  it("a genuine relay failure with no local hold still aborts with the relay error", async () => {
+  // Amended rule (step 5 of "Routing and fallback"): one device's failure never
+  // abandons the others, so BOTH devices are attempted before the relay error
+  // is thrown — it used to stop after the first.
+  it("a genuine relay failure with no local hold still throws the relay error, after trying every device", async () => {
     installBridge(() => "rejected");
     const relay = vi.fn(async () => {
       throw new Error("Couldn't reach any relay — check your connection and try again.");
@@ -163,8 +172,140 @@ describe("a batch with a device that is not on the home network yet", () => {
       relay,
     );
     await signer.connect("local");
-    await expect(signer.signGiftClause!("c", 15, "Europe/London")).rejects.toThrow("Couldn't reach any relay");
-    expect(relay).toHaveBeenCalledTimes(1);
+    const err = (await signer.signGiftClause!("c", 15, "Europe/London").catch((e: unknown) => e)) as Error;
+    expect(err).not.toBeInstanceOf(QueuedForHomeNetworkError);
+    expect(err.message).toBe(
+      "Not sent to Robin's laptop and Mia's phone: Couldn't reach any relay — check your connection and try again.",
+    );
+    expect(relay).toHaveBeenCalledTimes(2);
+  });
+
+  it("a lone device's relay failure keeps the relay error word for word", async () => {
+    installBridge(() => "rejected");
+    const failure = new Error("Couldn't reach any relay — check your connection and try again.");
+    const { signer } = makeSigner(
+      { subject: SUBJECT, devices: [{ id: "d1", pubkey: DPK1 }], relays: RELAYS },
+      async () => {
+        throw failure;
+      },
+    );
+    await signer.connect("local");
+    await expect(signer.signGiftClause!("c", 15, "Europe/London")).rejects.toBe(failure);
+  });
+});
+
+const RELAY_DOWN = "Couldn't reach any relay — check your connection and try again.";
+const relayDown = () =>
+  vi.fn(async () => {
+    throw new Error(RELAY_DOWN);
+  });
+const TWO = (): ChildTarget => ({
+  subject: SUBJECT,
+  devices: [
+    { id: "d1", pubkey: DPK1 },
+    { id: "d2", pubkey: DPK2 },
+  ],
+  relays: RELAYS,
+});
+
+describe("H2: one device's failure never abandons the others", () => {
+  it("probe A: a held device and a device the carrier won't take — the hold is reported, not lost", async () => {
+    const send = installBridge((r) => (r === DPK1 ? "queued" : "rejected"));
+    const relay = relayDown();
+    const { signer } = makeSigner(TWO(), relay);
+    await signer.connect("local");
+
+    const err = (await signer.signGiftClause!("c", 15, "Europe/London").catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(err).toBeInstanceOf(QueuedForHomeNetworkError);
+    expect(send.mock.calls.map((c) => c[0])).toEqual([DPK1, DPK2]); // both tried
+    expect(relay).toHaveBeenCalledTimes(2);
+    expect(err.devices).toEqual(["Robin's laptop"]);
+    expect(err.reached).toEqual([]);
+    expect(err.failed).toEqual([{ machine: DPK2, error: RELAY_DOWN }]);
+    expect(err.wraps).toHaveLength(1); // the held wrap, for tracking
+  });
+
+  it("probe A2: a device that got it and a device that didn't — a partial result, never a bare relay error", async () => {
+    installBridge((r) => (r === DPK1 ? "sent" : "rejected"));
+    const { signer } = makeSigner(TWO(), relayDown());
+    await signer.connect("local");
+
+    const err = (await signer.signGiftClause!("c", 15, "Europe/London").catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(err).toBeInstanceOf(QueuedForHomeNetworkError);
+    expect(err.reached).toEqual([DPK1]);
+    expect(err.devices).toEqual([]);
+    expect(err.failed).toEqual([{ machine: DPK2, error: RELAY_DOWN }]);
+  });
+
+  it("the device that failed first does not stop a later one being reached", async () => {
+    const send = installBridge((r) => (r === DPK1 ? "rejected" : "sent"));
+    const { signer } = makeSigner(TWO(), relayDown());
+    await signer.connect("local");
+    const err = (await signer.signStandDownClause!("c").catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(err.reached).toEqual([DPK2]);
+    expect(err.failed.map((f) => f.machine)).toEqual([DPK1]);
+  });
+
+  it("every device reached resolves, with the wraps the carrier took", async () => {
+    installBridge(() => "sent");
+    const { signer } = makeSigner(TWO(), relayDown());
+    await signer.connect("local");
+    const r = await signer.signMaintenanceClause!("c", 10);
+    expect(r.ok).toBe(true);
+    expect(r.wraps).toHaveLength(2);
+  });
+
+  it("names each device's own state when nothing reached anywhere", async () => {
+    installBridge((r) => (r === DPK1 ? "sent" : "rejected"), () => "refused");
+    const { signer } = makeSigner(TWO(), relayDown());
+    await signer.connect("local");
+    await expect(signer.signUpdateClause("c", { versionCode: 9, versionName: "9.0" } as never, "https://x.example/a.apk")).rejects.toThrow(
+      `Robin's laptop didn't accept this change. Not sent to Mia's phone: ${RELAY_DOWN}`,
+    );
+  });
+});
+
+describe("M2: a problem ACK is never 'reached'", () => {
+  it("probe C: a lone ward that refused it within the window is a failure, not success", async () => {
+    installBridge(() => "sent", () => "refused");
+    const { signer } = makeSigner({ subject: SUBJECT, devices: [{ id: "d1", pubkey: DPK1 }], relays: RELAYS }, relayDown());
+    await signer.connect("local");
+    await expect(signer.signGiftClause!("c", 15, "Europe/London")).rejects.toThrow(
+      "Robin's laptop didn't accept this change.",
+    );
+  });
+
+  it.each([
+    ["failed", "Robin's laptop couldn't carry this out. It may need another try."],
+    ["expired", "Robin's laptop didn't act on this: it had already expired there."],
+    ["superseded", "Robin's laptop already had a newer change, so it didn't use this one."],
+  ])("an ACK of '%s' is reported in plain words", async (ack, words) => {
+    installBridge(() => "sent", () => ack);
+    const { signer } = makeSigner({ subject: SUBJECT, devices: [{ id: "d1", pubkey: DPK1 }], relays: RELAYS }, async () => {});
+    await signer.connect("local");
+    await expect(signer.signGiftClause!("c", 15, "Europe/London")).rejects.toThrow(words);
+  });
+
+  it("a refusing device beside a held one is named as failed, not as reached", async () => {
+    installBridge((r) => (r === DPK1 ? "sent" : "queued"), () => "refused");
+    const { signer } = makeSigner(TWO(), relayDown());
+    await signer.connect("local");
+    const err = (await signer.signGiftClause!("c", 15, "Europe/London").catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(err).toBeInstanceOf(QueuedForHomeNetworkError);
+    expect(err.reached).toEqual([]);
+    expect(err.devices).toEqual(["Mia's phone"]);
+    expect(err.failed).toEqual([{ machine: DPK1, ack: "refused" }]);
+  });
+
+  it("a refusing device beside one that applied it is a partial result", async () => {
+    installBridge(() => "sent", (r) => (r === DPK1 ? "applied" : "refused"));
+    const { signer } = makeSigner(TWO(), async () => {});
+    await signer.connect("local");
+    const err = (await signer.signGiftClause!("c", 15, "Europe/London").catch((e: unknown) => e)) as QueuedForHomeNetworkError;
+    expect(err).toBeInstanceOf(QueuedForHomeNetworkError);
+    expect(err.reached).toEqual([DPK1]);
+    expect(err.failed).toEqual([{ machine: DPK2, ack: "refused" }]);
   });
 });
 
@@ -189,7 +330,7 @@ describe("tracking metadata", () => {
     expect(routed[0].meta).toEqual({ kind: "grant", reqId });
   });
 
-  it("a grant held for a ward not at home leaves the ask pending (the error propagates)", async () => {
+  it("a grant held for a ward not at home propagates as 'held' (the store records the ask as answered)", async () => {
     installBridge(() => "queued");
     const { signer } = makeSigner(
       { subject: SUBJECT, devices: [{ id: "d1", pubkey: DPK1 }], relays: RELAYS },

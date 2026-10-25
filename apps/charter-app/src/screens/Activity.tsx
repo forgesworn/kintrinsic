@@ -4,7 +4,7 @@ import { EmptyState, SectionLabel } from "../components/ui";
 import { WardHeading, WardTabs } from "../components/wards";
 import { goToWard, useWardRoute } from "../domain/wardRoute";
 import { useCharter } from "../store/store";
-import { appliedSuffix, recordsOf, ruleAppliedMachines } from "../store/localDelivery";
+import { appliedSuffix, problemNotes, recordsOf, ruleAppliedMachines } from "../store/localDelivery";
 import { WeeklyPicture, type DeviceMeta } from "../insights/WeeklyPicture";
 import { outOfHoursLine, weeklyView } from "../insights/usageHistory";
 import { unrecognisedGuardTz } from "../domain/unrecognisedTime";
@@ -240,13 +240,17 @@ export default function Activity() {
   // change arrives over the home network. Derived at render time from the
   // delivery record, never written into the stored sentence.
   const deliveries = recordsOf(state.localDeliveries);
-  const appliedNote = (ev: ActivityEvent): string => {
-    const names = ruleAppliedMachines(ev.wraps, deliveries).map(
-      (m) =>
-        state.children.flatMap((c) => c.devices).find((d) => d.devicePubkey === m)?.label ??
-        "their device",
-    );
-    return appliedSuffix(names);
+  const deviceLabel = (m: string): string =>
+    state.children.flatMap((c) => c.devices).find((d) => d.devicePubkey === m)?.label ??
+    "their device";
+  const appliedNote = (ev: ActivityEvent): string =>
+    appliedSuffix(ruleAppliedMachines(ev.wraps, deliveries).map(deviceLabel));
+  // ...and the plain warning when a device's ACK says it did NOT take it
+  // (refused, failed, expired, superseded). Said once: a refusal already
+  // reported when the change was sent is not repeated.
+  const problemNote = (ev: ActivityEvent): string => {
+    const notes = problemNotes(ev.wraps, deliveries, deviceLabel).filter((n) => !ev.summary.includes(n));
+    return notes.length > 0 ? ` — ${notes.join(" ")}` : "";
   };
 
   const shownWeeks = (
@@ -310,6 +314,11 @@ export default function Activity() {
                         </span>
                         {ev.summary}
                         {appliedNote(ev)}
+                        {problemNote(ev) && (
+                          <span className="activity-problem" style={{ color: "var(--warn, #8a5a00)" }}>
+                            {problemNote(ev)}
+                          </span>
+                        )}
                       </span>
                       <br />
                       <span className="row-sub">
