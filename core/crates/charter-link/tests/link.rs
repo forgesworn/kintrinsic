@@ -2,8 +2,9 @@
 //! `GuardianLink` and `WardLink`, plus raw-socket fake peers that misbehave
 //! in specific ways. Built only with `--features net`.
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use charter_link::{
 };
 use charter_primitives::{kinds, EventId, NostrEvent, PubKey, Sig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
 
@@ -46,6 +47,11 @@ fn rt() -> Runtime {
 
 /// A validly signed gift wrap addressed to `recipient`.
 fn wrap(recipient: &PubKey, n: u32) -> NostrEvent {
+    wrap_c(recipient, n, format!("opaque-payload-{n}"))
+}
+
+/// [`wrap`] with the given content (for size tests).
+fn wrap_c(recipient: &PubKey, n: u32, content: String) -> NostrEvent {
     let author = secret(&format!("ephemeral-{n}"));
     let mut ev = NostrEvent {
         id: EventId::from_bytes([0; 32]),
@@ -53,7 +59,7 @@ fn wrap(recipient: &PubKey, n: u32) -> NostrEvent {
         created_at: 1_761_400_000 + n as u64,
         kind: kinds::GIFT_WRAP,
         tags: vec![vec!["p".into(), recipient.to_hex()]],
-        content: format!("opaque-payload-{n}"),
+        content,
         sig: Sig::from_bytes([0; 64]),
     };
     ev.id = charter_verify::event::event_id(&ev);
@@ -203,7 +209,12 @@ fn is_closed(r: &Recv) -> bool {
 /// A raw ward: HELLO, verify CHALLENGE, AUTH. Returns the stream, the
 /// guardian key, and what came after AUTH.
 async fn raw_ward(port: u16, machine: &str, tamper: bool) -> (TcpStream, PubKey, Recv) {
-    let mut s = TcpStream::connect(lo(port)).await.unwrap();
+    let s = TcpStream::connect(lo(port)).await.unwrap();
+    raw_ward_on(s, machine, tamper).await
+}
+
+/// [`raw_ward`] over an already connected stream.
+async fn raw_ward_on(mut s: TcpStream, machine: &str, tamper: bool) -> (TcpStream, PubKey, Recv) {
     let cw = [0x11u8; 32];
     send(
         &mut s,
@@ -779,7 +790,7 @@ fn guardian_closes_a_session_over_its_frame_rate() {
     rt.block_on(async {
         let (mut s, _) = raw_ward_ready(port, "m").await;
         let mut burst = Vec::new();
-        for n in 0..130u64 {
+        for n in 0..620u64 {
             burst.extend_from_slice(&encode_frame(&Frame::Unknown(format!("X{n}"))));
         }
         s.write_all(&burst).await.unwrap();
@@ -805,7 +816,7 @@ fn ward_closes_a_session_over_its_frame_rate() {
     rt.block_on(async {
         let mut s = fake_guardian_ready(&l, "g").await;
         let mut burst = Vec::new();
-        for n in 0..130u64 {
+        for n in 0..620u64 {
             burst.extend_from_slice(&encode_frame(&Frame::Ping(n)));
         }
         s.write_all(&burst).await.unwrap();
@@ -817,7 +828,7 @@ fn ward_closes_a_session_over_its_frame_rate() {
                 other => panic!("unexpected {other:?}"),
             }
         }
-        assert!(pongs <= 120, "{pongs} pongs");
+        assert!(pongs <= 600, "{pongs} pongs");
     });
 }
 
@@ -1248,4 +1259,509 @@ fn loopback_peers_are_refused_unless_allowed() {
         // Closed at once: not even a CHALLENGE.
         assert!(is_closed(&recv(&mut s, 3).await));
     });
+}
+
+// ---------------------------------------------------------------------------
+// Review regressions: lifecycle, bounds and persistence
+// ---------------------------------------------------------------------------
+
+/// An ingest that takes `delay`, counting starts and completions.
+struct Slow {
+    started: AtomicUsize,
+    done: Arc<AtomicUsize>,
+    delay: Duration,
+}
+
+impl WardIngest for Slow {
+    fn ingest(
+        &self,
+        _wrap: NostrEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AckResult> + Send>> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        let (delay, done) = (self.delay, self.done.clone());
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            done.fetch_add(1, Ordering::SeqCst);
+            AckResult::Applied
+        })
+    }
+}
+
+fn session_flips(events: &[GuardianEvent]) -> (usize, usize) {
+    let ups = events
+        .iter()
+        .filter(|e| matches!(e, GuardianEvent::Session { up: true, .. }))
+        .count();
+    let downs = events
+        .iter()
+        .filter(|e| matches!(e, GuardianEvent::Session { up: false, .. }))
+        .count();
+    (ups, downs)
+}
+
+/// A TCP connection to the guardian from a chosen loopback source address.
+async fn connect_from(src: Ipv4Addr, port: u16, recv_buf: Option<u32>) -> TcpStream {
+    let sock = TcpSocket::new_v4().unwrap();
+    if let Some(n) = recv_buf {
+        sock.set_recv_buffer_size(n).unwrap();
+    }
+    sock.bind(SocketAddr::V4(SocketAddrV4::new(src, 0)))
+        .unwrap();
+    sock.connect(SocketAddr::V4(lo(port))).await.unwrap()
+}
+
+#[test]
+fn an_ingest_in_flight_finishes_when_the_ward_shuts_down() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let m = pk("m");
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    let slow = Arc::new(Slow {
+        started: AtomicUsize::new(0),
+        done: Arc::new(AtomicUsize::new(0)),
+        delay: Duration::from_millis(1500),
+    });
+    let ward = WardLink::spawn(
+        WardLinkConfig {
+            machine_sk: zsk("m"),
+            guardian: pk("g"),
+            state_dir: wdir.path().to_path_buf(),
+        },
+        slow.clone(),
+        rt.handle(),
+    )
+    .unwrap();
+    ward.set_discovered(vec![lo(guardian.port())]);
+    assert!(wait_until(5, || !guardian.sessions().is_empty()));
+    let w = wrap(&m, 1);
+    assert_eq!(guardian.send(&m, w.clone()), SendState::Sent);
+    assert!(wait_until(5, || slow.started.load(Ordering::SeqCst) == 1));
+    // The session ends while the broker is part way through.
+    ward.shutdown();
+    assert!(
+        wait_until(5, || slow.done.load(Ordering::SeqCst) == 1),
+        "the ingest was dropped mid-way"
+    );
+    assert_eq!(slow.started.load(Ordering::SeqCst), 1);
+    // The session is gone, so its ACK is not sent: receipt only.
+    assert_eq!(
+        delivery_state(&guardian, &w.id),
+        Some(DeliveryState::Received)
+    );
+}
+
+#[test]
+fn an_oversize_outbox_offer_is_refused_and_the_rest_still_flows() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (g, m) = (pk("g"), pk("m"));
+    let ward = spawn_ward(&rt, "m", g, wdir.path(), Recorder::new(AckResult::Applied));
+    let sink = ward.sink();
+    let big = wrap_c(&g, 1, "a".repeat(MAX_FRAME));
+    let small = wrap(&g, 2);
+    sink.offer(offer(kinds::CHARTER_DEVICE_STATUS, Some("s"), big));
+    sink.offer(offer(kinds::CHARTER_DEVICE_REQUEST, None, small.clone()));
+    assert_eq!(ward.snapshot().outbox, 1, "the oversize wrap was held");
+
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    ward.set_discovered(vec![lo(guardian.port())]);
+    let mut ev = events_until(&guardian, 5, |e| {
+        wraps_in(e).iter().any(|(_, id)| *id == small.id)
+    });
+    assert_eq!(wraps_in(&ev), vec![(m, small.id)]);
+    assert!(wait_until(5, || ward.snapshot().outbox == 0));
+    std::thread::sleep(Duration::from_secs(3));
+    ev.extend(guardian.next_events(Duration::from_millis(100)));
+    assert_eq!(session_flips(&ev), (1, 0), "the session churned");
+    assert_eq!(ward.snapshot().last_error, None);
+}
+
+#[test]
+fn a_stored_oversize_outbox_entry_is_dropped_at_start() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (g, m) = (pk("g"), pk("m"));
+    let big = wrap_c(&g, 1, "a".repeat(MAX_FRAME));
+    let small = wrap(&g, 2);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let file = serde_json::json!({
+        "v": 1,
+        "entries": [
+            {"innerKind": kinds::CHARTER_DEVICE_STATUS, "key": "s", "offeredAt": now, "wrap": big},
+            {"innerKind": kinds::CHARTER_DEVICE_REQUEST, "key": null, "offeredAt": now, "wrap": small},
+        ],
+    });
+    std::fs::write(
+        wdir.path().join("link-outbox.json"),
+        serde_json::to_vec(&file).unwrap(),
+    )
+    .unwrap();
+    let ward = spawn_ward(&rt, "m", g, wdir.path(), Recorder::new(AckResult::Applied));
+    assert_eq!(ward.snapshot().outbox, 1);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(wdir.path().join("link-outbox.json")).unwrap())
+            .unwrap();
+    assert_eq!(on_disk["entries"].as_array().unwrap().len(), 1);
+
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    ward.set_discovered(vec![lo(guardian.port())]);
+    let ev = events_until(&guardian, 5, |e| !wraps_in(e).is_empty());
+    assert_eq!(wraps_in(&ev), vec![(m, small.id)]);
+}
+
+#[test]
+fn a_full_backlog_both_ways_flushes_on_one_session() {
+    let rt = rt();
+    let (gdir, wdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (g, m) = (pk("g"), pk("m"));
+    let guardian = start_guardian(&rt, "g", gdir.path(), vec![m]);
+    // A full guardian queue for the ward ...
+    let down: Vec<NostrEvent> = (0..64).map(|n| wrap(&m, n)).collect();
+    for w in &down {
+        assert_eq!(guardian.send(&m, w.clone()), SendState::Queued);
+    }
+    // ... and a full ward outbox in every retention class.
+    let rec = Recorder::new(AckResult::Applied);
+    let ward = spawn_ward(&rt, "m", g, wdir.path(), rec.clone());
+    let sink = ward.sink();
+    let mut up = Vec::new();
+    for i in 0..64u32 {
+        for (c, kind) in [
+            kinds::CHARTER_DEVICE_REQUEST,
+            kinds::CHARTER_DEVICE_AUDIT,
+            kinds::CHARTER_DEVICE_STATUS,
+            kinds::CHARTER_DEVICE_USAGE_SYNC,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let w = wrap(&g, 1000 + i * 4 + c as u32);
+            let key = format!("s{i}");
+            let key = (kind == kinds::CHARTER_DEVICE_STATUS).then_some(key.as_str());
+            sink.offer(offer(kind, key, w.clone()));
+            up.push(w.id);
+        }
+    }
+    assert_eq!(ward.snapshot().outbox, 256);
+    let _ = guardian.next_events(Duration::from_millis(10));
+
+    ward.set_discovered(vec![lo(guardian.port())]);
+    let acked = |e: &[GuardianEvent]| {
+        e.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GuardianEvent::Delivery {
+                        state: DeliveryState::Acked(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let mut ev = events_until(&guardian, 30, |e| {
+        wraps_in(e).len() >= 256 && acked(e) >= 64
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    ev.extend(guardian.next_events(Duration::from_millis(100)));
+
+    assert_eq!(session_flips(&ev), (1, 0), "the session churned");
+    let got: Vec<EventId> = wraps_in(&ev).into_iter().map(|(_, id)| id).collect();
+    assert_eq!(got.len(), 256);
+    let mut sorted_got = got.clone();
+    sorted_got.sort();
+    let mut sorted_up = up.clone();
+    sorted_up.sort();
+    assert_eq!(sorted_got, sorted_up);
+    // Each guardian wrap ingested once, and every one acknowledged.
+    assert_eq!(rec.ids().len(), 64);
+    for w in &down {
+        assert_eq!(
+            delivery_state(&guardian, &w.id),
+            Some(DeliveryState::Acked(AckResult::Applied))
+        );
+    }
+    assert!(wait_until(5, || ward.snapshot().outbox == 0));
+}
+
+#[test]
+fn inbox_and_pending_events_are_bounded_by_bytes() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let (g, m) = (pk("g"), pk("m"));
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![m]);
+    let port = guardian.port();
+    let wraps: Vec<NostrEvent> = (0..40)
+        .map(|n| wrap_c(&g, n, "c".repeat(250_000)))
+        .collect();
+    rt.block_on(async {
+        let (mut s, _) = raw_ward_ready(port, "m").await;
+        for w in &wraps {
+            send(&mut s, &Frame::Event(w.clone())).await;
+            match recv(&mut s, 5).await {
+                Recv::Frame(Frame::Ok { wrap, accepted, .. }) => {
+                    assert_eq!(wrap, w.id);
+                    assert!(accepted);
+                }
+                other => panic!("expected OK, got {other:?}"),
+            }
+        }
+    });
+    const CAP: usize = 8 * 1024 * 1024;
+    let inbox = guardian.inbox();
+    let held: usize = inbox.iter().map(|e| e.wrap.content.len()).sum();
+    assert!(held <= CAP, "inbox holds {held} bytes");
+    assert!(inbox.len() < wraps.len());
+    assert_eq!(inbox.last().map(|e| e.id), Some(wraps[39].id));
+    let on_disk = std::fs::metadata(dir.path().join("link-inbox.json"))
+        .unwrap()
+        .len() as usize;
+    assert!(on_disk <= CAP + 64 * 1024, "inbox file is {on_disk} bytes");
+
+    let ev = guardian.next_events(Duration::from_millis(100));
+    let pending: usize = ev
+        .iter()
+        .filter_map(|e| match e {
+            GuardianEvent::Wrap { wrap, .. } => Some(wrap.content.len()),
+            _ => None,
+        })
+        .sum();
+    assert!(pending <= CAP, "events hold {pending} bytes of wraps");
+    assert!(wraps_in(&ev).contains(&(m, wraps[39].id)));
+}
+
+#[test]
+fn a_sent_wrap_is_resent_after_its_session_dies_unanswered() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let m = pk("m");
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![m]);
+    let port = guardian.port();
+    let w = wrap(&m, 1);
+    rt.block_on(async {
+        let (s, _) = raw_ward_ready(port, "m").await;
+        assert!(wait_until_async(|| guardian.sessions().len() == 1).await);
+        assert_eq!(guardian.send(&m, w.clone()), SendState::Sent);
+        // Gone before reading it or answering OK.
+        drop(s);
+        assert!(wait_until_async(|| guardian.sessions().is_empty()).await);
+
+        let (mut s, _) = raw_ward_ready(port, "m").await;
+        match recv(&mut s, 3).await {
+            Recv::Frame(Frame::Event(e)) => assert_eq!(e.id, w.id),
+            other => panic!("expected the wrap again, got {other:?}"),
+        }
+        send(
+            &mut s,
+            &Frame::Ok {
+                wrap: w.id,
+                accepted: true,
+                reason: String::new(),
+            },
+        )
+        .await;
+        barrier(&mut s, 1).await;
+    });
+    assert_eq!(
+        delivery_state(&guardian, &w.id),
+        Some(DeliveryState::Received)
+    );
+    // Answered: a later session gets nothing.
+    rt.block_on(async {
+        let (mut s, _) = raw_ward_ready(port, "m").await;
+        assert!(barrier(&mut s, 2).await.is_empty());
+    });
+}
+
+#[test]
+fn a_wrap_queued_while_the_session_is_up_is_flushed_on_that_session() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let m = pk("m");
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![m]);
+    let port = guardian.port();
+    let late = wrap(&m, 99);
+    rt.block_on(async {
+        // A small receive buffer, so the guardian's socket fills quickly.
+        let s = connect_from(Ipv4Addr::LOCALHOST, port, Some(4096)).await;
+        let (mut s, _, after) = raw_ward_on(s, "m", false).await;
+        assert!(matches!(after, Recv::Frame(Frame::Ready { v: 1 })));
+        assert!(wait_until_async(|| guardian.sessions().len() == 1).await);
+        // PONGs pile up in the session's channel while large wraps keep its
+        // writer blocked on the socket: send wraps (each normally written
+        // at once) until the channel is full and a send is only queued. The
+        // count needed depends on the kernel's socket buffer sizes.
+        let mut burst = Vec::new();
+        for n in 0..300u64 {
+            burst.extend_from_slice(&encode_frame(&Frame::Ping(n)));
+        }
+        let mut pinged = false;
+        for n in 0..60 {
+            let w = wrap_c(&m, n, "b".repeat(250_000));
+            if guardian.send(&m, w) == SendState::Queued {
+                break;
+            }
+            if n == 15 {
+                s.write_all(&burst).await.unwrap();
+                pinged = true;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        assert!(pinged);
+        assert_eq!(
+            guardian.send(&m, late.clone()),
+            SendState::Queued,
+            "the session channel never filled (socket buffers above ~15 MB?)"
+        );
+        // Reading again lets the session drain: the late wrap follows on
+        // this same session, without a reconnect.
+        loop {
+            match recv(&mut s, 5).await {
+                Recv::Frame(Frame::Event(e)) if e.id == late.id => break,
+                Recv::Frame(Frame::Event(_) | Frame::Pong(_)) => {}
+                other => panic!("expected the late wrap, got {other:?}"),
+            }
+        }
+        // Still the one session it started on.
+        assert_eq!(guardian.sessions().len(), 1);
+    });
+    assert_eq!(
+        delivery_state(&guardian, &late.id),
+        Some(DeliveryState::Sent)
+    );
+}
+
+#[test]
+fn a_corrupt_state_file_is_moved_aside_not_overwritten() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let m = pk("m");
+    let bad = b"{\"v\":1,\"queue\":[TRUNCATED".to_vec();
+    std::fs::write(dir.path().join("link-outbound.json"), &bad).unwrap();
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![m]);
+    assert_eq!(guardian.send(&m, wrap(&m, 1)), SendState::Queued);
+    let aside: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("link-outbound.json.corrupt-")
+        })
+        .collect();
+    assert_eq!(aside.len(), 1);
+    assert_eq!(std::fs::read(&aside[0]).unwrap(), bad);
+    let now: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("link-outbound.json")).unwrap())
+            .unwrap();
+    assert_eq!(now["queue"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn unauthenticated_connections_are_capped_per_source_address() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![pk("m")]);
+    let port = guardian.port();
+    rt.block_on(async {
+        // Two silent connections from one address hold its slots ...
+        let _a = connect_from(Ipv4Addr::LOCALHOST, port, None).await;
+        let _b = connect_from(Ipv4Addr::LOCALHOST, port, None).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // ... so a third from it is closed at once ...
+        let mut c = connect_from(Ipv4Addr::LOCALHOST, port, None).await;
+        send(
+            &mut c,
+            &Frame::Hello {
+                v: 1,
+                challenge: [1; 32],
+            },
+        )
+        .await;
+        assert!(is_closed(&recv(&mut c, 1).await));
+        // ... while a ward at another address still gets in.
+        let s = connect_from(Ipv4Addr::new(127, 0, 0, 2), port, None).await;
+        let (_s, _, after) = raw_ward_on(s, "m", false).await;
+        assert!(matches!(after, Recv::Frame(Frame::Ready { v: 1 })));
+    });
+}
+
+#[test]
+fn a_machine_at_the_global_session_cap_replaces_its_own_oldest_session() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["m1", "m2", "m3", "m4", "m5"];
+    let guardian = start_guardian(&rt, "g", dir.path(), names.iter().map(|n| pk(n)).collect());
+    let port = guardian.port();
+    rt.block_on(async {
+        let mut held = Vec::new();
+        for n in &names[..4] {
+            for _ in 0..4 {
+                held.push(raw_ward_ready(port, n).await.0);
+            }
+        }
+        assert!(wait_until_async(|| guardian.sessions().len() == 16).await);
+        // A fifth session from m1 (its old ones gone stale) is admitted.
+        held.push(raw_ward_ready(port, "m1").await.0);
+        assert!(wait_until_async(|| guardian.sessions().len() == 16).await);
+        // A machine with no session to give up is still refused at the cap.
+        let (_s, _, after) = raw_ward(port, "m5", false).await;
+        assert!(is_closed(&after), "expected a close, got {after:?}");
+    });
+}
+
+#[test]
+fn a_wrap_dropped_from_a_full_queue_is_recorded_rejected() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let m = pk("m");
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![m]);
+    let wraps: Vec<NostrEvent> = (0..65).map(|n| wrap(&m, n)).collect();
+    for w in &wraps {
+        assert_eq!(guardian.send(&m, w.clone()), SendState::Queued);
+    }
+    assert_eq!(
+        delivery_state(&guardian, &wraps[0].id),
+        Some(DeliveryState::Rejected)
+    );
+    for w in &wraps[1..] {
+        assert_eq!(
+            delivery_state(&guardian, &w.id),
+            Some(DeliveryState::Queued)
+        );
+    }
+}
+
+#[test]
+fn one_ward_flooding_the_inbox_does_not_evict_another() {
+    let rt = rt();
+    let dir = tempfile::tempdir().unwrap();
+    let (g, m1, m2) = (pk("g"), pk("m1"), pk("m2"));
+    let guardian = start_guardian(&rt, "g", dir.path(), vec![m1, m2]);
+    let port = guardian.port();
+    let mine: Vec<NostrEvent> = (0..10).map(|n| wrap(&g, n)).collect();
+    rt.block_on(async {
+        let (mut a, _) = raw_ward_ready(port, "m1").await;
+        for w in &mine {
+            send(&mut a, &Frame::Event(w.clone())).await;
+        }
+        barrier(&mut a, 1).await;
+        let (mut b, _) = raw_ward_ready(port, "m2").await;
+        for n in 0..300 {
+            send(&mut b, &Frame::Event(wrap(&g, 1000 + n))).await;
+        }
+        barrier(&mut b, 2).await;
+    });
+    let inbox = guardian.inbox();
+    assert!(inbox.len() <= 256);
+    let kept: Vec<EventId> = inbox
+        .iter()
+        .filter(|e| e.machine == m1)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(kept, mine.iter().map(|w| w.id).collect::<Vec<_>>());
 }

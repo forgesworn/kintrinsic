@@ -31,7 +31,7 @@ use crate::session::{
     challenge, read_frame, send_frame, write_frame, writer, Closer, RateLimit, CONNECT_TIMEOUT,
     HANDSHAKE_TIMEOUT, IDLE_TIMEOUT, PING_INTERVAL,
 };
-use crate::store::{load, lock, now_unix, save_logged};
+use crate::store::{load, lock, now_unix, save_logged, Persist};
 use crate::{AckResult, LocalOffer, LocalSink};
 
 const MAX_CANDIDATES: usize = 8;
@@ -46,6 +46,9 @@ const OUTBOX_FILE: &str = "link-outbox.json";
 const PEER_FILE: &str = "link-peer.json";
 
 /// The broker's entry point for a wrap that arrived over the local link.
+///
+/// The returned future is spawned as its own task, so it runs to completion
+/// even if the session that delivered the wrap closes part way through.
 pub trait WardIngest: Send + Sync + 'static {
     fn ingest(&self, wrap: NostrEvent) -> Pin<Box<dyn Future<Output = AckResult> + Send>>;
 }
@@ -191,8 +194,10 @@ struct Inner {
     machine: PubKey,
     guardian: PubKey,
     dir: PathBuf,
+    rt: tokio::runtime::Handle,
     ingest: Arc<dyn WardIngest>,
     state: Mutex<State>,
+    outbox_file: Arc<Persist<OutboxFile>>,
     wake: Notify,
     outbox_changed: watch::Sender<u64>,
     shutdown: Closer,
@@ -232,16 +237,30 @@ impl WardLink {
         let dir = cfg.state_dir.clone();
         let now = now_unix();
 
-        let mut outbox = load::<OutboxFile>(&dir.join(OUTBOX_FILE))
-            .map(|f| f.entries)
-            .unwrap_or_default();
+        let loaded = load::<OutboxFile>(&dir.join(OUTBOX_FILE));
+        let outbox_file = Persist::new(dir.join(OUTBOX_FILE), loaded.writable);
+        let mut outbox = loaded.value.map(|f| f.entries).unwrap_or_default();
+        // An entry the guardian would refuse (too large for a frame, wrong
+        // recipient) would block the outbox on every session: drop it.
+        let stored = outbox.len();
+        outbox.retain(|e| validate_wrap_for(&e.wrap, &cfg.guardian).is_ok());
+        let mut dirty = outbox.len() != stored;
+        if dirty {
+            eprintln!(
+                "charter-link: dropped {} outbox entries the guardian cannot accept",
+                stored - outbox.len()
+            );
+        }
         outbox.sort_by_key(|e| e.offered_at);
         for (i, e) in outbox.iter_mut().enumerate() {
             e.seq = i as u64 + 1;
         }
         let next_seq = outbox.len() as u64 + 1;
+        let kept = outbox.len();
         prune_outbox(&mut outbox, now);
+        dirty |= outbox.len() != kept;
         let remembered = load::<PeerFile>(&dir.join(PEER_FILE))
+            .value
             .filter(|p| p.guardian == cfg.guardian)
             .and_then(|p| p.addr.parse::<SocketAddrV4>().ok())
             .filter(usable);
@@ -251,7 +270,9 @@ impl WardLink {
             machine,
             guardian: cfg.guardian,
             dir,
+            rt: rt.clone(),
             ingest,
+            outbox_file,
             state: Mutex::new(State {
                 closed: false,
                 discovered: Vec::new(),
@@ -268,6 +289,10 @@ impl WardLink {
             outbox_changed: watch::channel(0).0,
             shutdown: Closer::default(),
         });
+        if dirty {
+            inner.stage_outbox(&lock(&inner.state));
+            inner.outbox_file.flush();
+        }
         rt.spawn(connector(inner.clone()));
         Ok(Arc::new(WardLink { inner }))
     }
@@ -323,7 +348,9 @@ impl WardLink {
     }
 
     /// Stop connecting and close every session. Persisted state is left as
-    /// of this call; a new link may start on the same directory at once.
+    /// of this call (pending writes land before it returns); a new link may
+    /// start on the same directory at once. An ingest already handed to
+    /// [`WardIngest`] still runs to completion.
     pub fn shutdown(&self) {
         {
             let mut st = lock(&self.inner.state);
@@ -335,6 +362,7 @@ impl WardLink {
                 s.closer.close();
             }
         }
+        self.inner.outbox_file.close();
         self.inner.shutdown.close();
         self.inner.wake.notify_one();
     }
@@ -347,19 +375,24 @@ impl Drop for WardLink {
 }
 
 impl Inner {
-    fn persist_outbox(&self, st: &State) {
+    /// Snapshot the outbox (call with the state lock held), to be written
+    /// by a later flush outside the lock.
+    fn stage_outbox(&self, st: &State) {
         if !st.closed {
-            save_logged(
-                &self.dir.join(OUTBOX_FILE),
-                &OutboxFile {
-                    v: 1,
-                    entries: st.outbox.clone(),
-                },
-            );
+            self.outbox_file.stage(OutboxFile {
+                v: 1,
+                entries: st.outbox.clone(),
+            });
         }
     }
 
     fn offer(&self, offer: LocalOffer) {
+        // The guardian closes the session on a frame it cannot take, and the
+        // entry would be pumped first on every session after: refuse it here.
+        if let Err(e) = validate_wrap_for(&offer.wrap, &self.guardian) {
+            eprintln!("charter-link: not holding an outbox offer for the local link: {e}");
+            return;
+        }
         let seq = {
             let mut st = lock(&self.state);
             if st.closed {
@@ -384,9 +417,11 @@ impl Inner {
                 wrap: offer.wrap,
             });
             prune_outbox(&mut st.outbox, now);
-            self.persist_outbox(&st);
+            self.stage_outbox(&st);
             seq
         };
+        // Never wait on the disk here: the write runs on the blocking pool.
+        self.outbox_file.flush_in_background(&self.rt);
         self.outbox_changed.send_replace(seq);
     }
 
@@ -682,13 +717,18 @@ async fn session(
                 {
                     return;
                 }
-                let result = inner.ingest.ingest(wrap).await;
+                // Run the ingest as its own task: if this session ends (the
+                // guardian leaves, a write fails, the link shuts down) the
+                // broker still finishes what it started. Only the ACK is lost.
+                // Awaiting it keeps ingest one at a time per session.
+                let job = tokio::spawn(inner.ingest.ingest(wrap));
+                let result = job.await.unwrap_or(AckResult::Failed);
                 let ack = sign_ack(&inner.sk, &inner.guardian, &id, result, now_unix());
                 if !send_frame(tx, &Frame::Ack(ack)).await {
                     return;
                 }
             }
-            Frame::Ok { wrap, .. } => remove_from_outbox(inner, &wrap),
+            Frame::Ok { wrap, .. } => remove_from_outbox(inner, &wrap).await,
             Frame::Ping(n) => {
                 if !send_frame(tx, &Frame::Pong(n)).await {
                     return;
@@ -704,13 +744,17 @@ async fn session(
 }
 
 /// The guardian has stored (or refused) a wrap: it leaves the outbox.
-fn remove_from_outbox(inner: &Inner, wrap: &EventId) {
-    let mut st = lock(&inner.state);
-    let before = st.outbox.len();
-    st.outbox.retain(|e| e.wrap.id != *wrap);
-    if st.outbox.len() != before {
-        inner.persist_outbox(&st);
+async fn remove_from_outbox(inner: &Inner, wrap: &EventId) {
+    {
+        let mut st = lock(&inner.state);
+        let before = st.outbox.len();
+        st.outbox.retain(|e| e.wrap.id != *wrap);
+        if st.outbox.len() == before {
+            return;
+        }
+        inner.stage_outbox(&st);
     }
+    inner.outbox_file.flush_async().await;
 }
 
 #[cfg(test)]

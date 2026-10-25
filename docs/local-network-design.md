@@ -88,11 +88,11 @@ The normative definition is in the contract. In short:
 
 | Limit | Guardian listener | Ward client |
 | --- | --- | --- |
-| Unauthenticated connections | 8 concurrent | — |
-| Authenticated sessions | 16 total, 4 per machine (a fifth closes the oldest) | 4 guardian sessions |
-| Inbound frames | 120 per minute per session, else close | 120 per minute per session, else close |
-| Inbound wraps held | 256 (inbound store) | 32 queued for ingest per session; reading pauses when full |
-| Outbound held | 64 per ward, 48 h | REQUEST 64 (24 h), AUDIT 64 (48 h), latest STATUS per subject |
+| Unauthenticated connections | 8 concurrent, at most 2 per source address | — |
+| Authenticated sessions | 16 total, 4 per machine (a fifth closes the oldest, also when the total is full) | 4 guardian sessions |
+| Inbound frames | 600 per minute per session, else close | 600 per minute per session, else close |
+| Inbound wraps held | 256 and 8 MiB (inbound store); when full, the oldest entry of the ward holding the most goes | one ingest at a time per session; reading pauses meanwhile, and an ingest finishes even if its session closes |
+| Outbound held | 64 per ward, 48 h, each until the ward's `OK` (a wrap dropped unanswered is recorded `rejected`) | REQUEST 64 (24 h), AUDIT 64 (48 h), latest STATUS per subject; a wrap too large for one frame is not held |
 | Keep-alive | closes after 330 s silence | PING every 120 s, closes after 330 s silence |
 | Accepted peers | IPv4 private and link-local source addresses only | — |
 

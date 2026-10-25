@@ -21,7 +21,7 @@ pub(crate) const PING_INTERVAL: Duration = Duration::from_secs(120);
 /// A session with no inbound frame for this long is closed.
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(330);
 /// Inbound frames allowed per [`RATE_WINDOW`] before the session closes.
-pub(crate) const RATE_MAX: usize = 120;
+pub(crate) const RATE_MAX: usize = 600;
 pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// How long a session waits to queue an outbound frame before giving up on
 /// a peer that has stopped reading.

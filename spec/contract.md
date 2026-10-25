@@ -2197,12 +2197,17 @@ signatures, freshness, nonce and consumed-`reqId` checks and the per-
 every locally received wrap to the same unwrap and seal/machine checks as its
 relay poll. Duplicates across routes collapse on the existing identities
 (inner event, `reqId`, floors), and an older relay copy of a clause cannot
-overwrite a newer local one.
+overwrite a newer local one. The session itself carries no channel
+encryption or per-frame authentication: integrity rests on the per-message
+signatures (inner events and ACKs) and the NIP-59 encryption of every wrap.
 
-**Bounds.** Guardian: 8 unauthenticated connections, 16 sessions, 4 per
-machine; ward: 4 sessions. Either side closes a session that sends more than
-120 frames in 60 s. Held wraps are bounded and time-limited on both sides
-(see the design note).
+**Bounds.** Guardian: 8 unauthenticated connections (at most 2 from one
+source address), 16 sessions, 4 per machine; ward: 4 sessions. Either side
+closes a session that sends more than 600 frames in 60 s, well above a full
+backlog flushed in both directions. Held wraps are bounded by count (the
+guardian's inbound store also by total size, 8 MiB) and time-limited on both
+sides, and a wrap too large for one frame is never held (see the design
+note).
 
 **Compatibility.** Additive. Peers without the link use relays only. A
 carrier without the link methods leaves the console relay-only. Browser
