@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Child, Device } from "../domain/types";
-import { LEGACY_PAIRING_RELAYS } from "./config";
+const MANUAL_RELAYS = ["wss://relay.trotters.cc"];
 import { allPairingRelays, deviceRelays } from "./pairingRelays";
 
 const DEFAULTS = ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"];
@@ -25,7 +25,7 @@ const child = (over: Partial<Child>): Child => ({
 
 describe("deviceRelays", () => {
   it("uses the device's own relays when it has them", () => {
-    expect(deviceRelays(dev({ relays: LEGACY_PAIRING_RELAYS }), DEFAULTS)).toEqual(LEGACY_PAIRING_RELAYS);
+    expect(deviceRelays(dev({ relays: MANUAL_RELAYS }), DEFAULTS)).toEqual(MANUAL_RELAYS);
   });
 
   it("falls back to the defaults when the device has none", () => {
@@ -34,8 +34,8 @@ describe("deviceRelays", () => {
 });
 
 describe("allPairingRelays", () => {
-  it("a legacy pairing (relays = trotters, back-filled) keeps being polled on trotters", () => {
-    const c = child({ devices: [dev({ relays: LEGACY_PAIRING_RELAYS })] });
+  it("an explicit manual addition of Trotters is honoured", () => {
+    const c = child({ devices: [dev({ relays: MANUAL_RELAYS })] });
     const relays = allPairingRelays([c], DEFAULTS);
     expect(relays).toContain("wss://relay.trotters.cc");
     // ...and the current defaults, so it's not the ONLY relay covered.

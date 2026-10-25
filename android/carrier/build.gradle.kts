@@ -38,8 +38,8 @@ android {
         // reach back further than the ward app's minSdk 34.
         minSdk = 29
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.1.16"
+        versionCode = 18
+        versionName = "0.1.17"
     }
 
     signingConfigs {

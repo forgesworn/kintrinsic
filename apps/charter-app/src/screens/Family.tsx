@@ -34,6 +34,7 @@ import { parseDevicePairingCode, parsePairInvite } from "../wire/deviceCode";
 import { shortMachine } from "../store/unclaimedDevices";
 import { QRScanner } from "../components/QRScanner";
 import UnlockDevice from "./UnlockDevice";
+import DeviceRelays from "./DeviceRelays";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
 import { bestLiveness, livenessChip } from "../domain/liveness";
@@ -753,6 +754,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
           onClose={() => setUnlockOpen(false)}
         />
       )}
+      {paired && <DeviceRelays child={child} device={device} />}
     </li>
   );
 }
@@ -1751,8 +1753,11 @@ function SignerCard() {
               Copy pairing link
             </Button>
             <p className="card-sub" style={{ margin: 0, opacity: 0.7 }}>
-              Your guardian ID: {guardianNpub(pk).slice(0, 20)}…
+              Your guardian ID: <span style={{ overflowWrap: "anywhere", userSelect: "all" }}>{guardianNpub(pk)}</span>
             </p>
+            <Button variant="secondary" block disabled={busy} onClick={() => run(() => copyText(guardianNpub(pk)))}>
+              Copy guardian npub
+            </Button>
           </div>
         );
       })()}

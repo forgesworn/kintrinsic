@@ -217,7 +217,10 @@ pub fn real_relay(
     relays: Vec<RelayUrl>,
     base: &std::path::Path,
 ) -> Result<std::sync::Arc<dyn WardenRelay>, String> {
-    let transport = charter_sys::relay::RealRelayTransport::default();
+    let transport =
+        charter_sys::relay::RealRelayTransport::default().with_auth_signer(std::sync::Arc::new(
+            charter_sys::signer::RealMachineSigner::from_secret(machine_sk),
+        ));
     Ok(std::sync::Arc::new(
         BlockingRelay::new(transport, machine_sk, guardian, relays)?.with_outbox(base),
     ))

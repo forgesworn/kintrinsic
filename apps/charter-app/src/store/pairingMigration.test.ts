@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Child, Device } from "../domain/types";
-import { LEGACY_PAIRING_RELAYS } from "../signer/config";
+import { DEFAULT_RELAYS, TROTTERS_RELAY } from "../signer/config";
 import { backfillLegacyRelays } from "./pairingMigration";
 
 const dev = (over: Partial<Device>): Device => ({
@@ -22,11 +22,30 @@ const child = (over: Partial<Child>): Child => ({
 });
 
 describe("backfillLegacyRelays", () => {
-  it("a legacy paired device with no relays field is stamped with LEGACY_PAIRING_RELAYS", () => {
+  it("keeps the configured relay and adds independent routes once", () => {
+    const device = dev({ relays: [TROTTERS_RELAY, "wss://family.example"] });
+    const result = backfillLegacyRelays([child({ devices: [device] })]);
+    expect(result.changed).toBe(true);
+    expect(result.children[0].devices[0]).toEqual({
+      ...device, relays: [TROTTERS_RELAY, "wss://family.example", ...DEFAULT_RELAYS], relaysUpdatedAt: 0,
+    });
+    expect(backfillLegacyRelays(result.children).changed).toBe(false);
+  });
+
+  it("never removes a relay explicitly added after the one-time repair", () => {
+    for (const relaysUpdatedAt of [0, 123]) {
+      const devices = [dev({ relays: [TROTTERS_RELAY, ...DEFAULT_RELAYS], relaysUpdatedAt })];
+      const result = backfillLegacyRelays([child({ devices })]);
+      expect(result.changed).toBe(false);
+      expect(result.children[0].devices).toBe(devices);
+    }
+  });
+
+  it("a legacy paired device with no relays is recovered onto redundant defaults", () => {
     const c = child({ devices: [dev({ id: "d1" })] });
     const { children, changed } = backfillLegacyRelays([c]);
     expect(changed).toBe(true);
-    expect(children[0].devices[0].relays).toEqual(LEGACY_PAIRING_RELAYS);
+    expect(children[0].devices[0].relays).toEqual([TROTTERS_RELAY, ...DEFAULT_RELAYS]);
   });
 
   it("never touches a device that already carries its own relays (new-style pairing)", () => {
@@ -62,7 +81,7 @@ describe("backfillLegacyRelays", () => {
     const b = child({ id: "b", devices: [dev({ id: "d2", relays: ["wss://relay.example"] })] });
     const { children, changed } = backfillLegacyRelays([a, b]);
     expect(changed).toBe(true);
-    expect(children[0].devices[0].relays).toEqual(LEGACY_PAIRING_RELAYS);
+    expect(children[0].devices[0].relays).toEqual([TROTTERS_RELAY, ...DEFAULT_RELAYS]);
     expect(children[1].devices[0].relays).toEqual(["wss://relay.example"]);
   });
 });

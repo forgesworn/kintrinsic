@@ -94,6 +94,14 @@ pub struct RealMachineSigner {
 }
 
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
+impl Drop for RealMachineSigner {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.secret.zeroize();
+    }
+}
+
+#[cfg(any(feature = "real-relay", feature = "real-os"))]
 const DEFAULT_KEY_PATH: &str = "/var/lib/charter/machine.key";
 
 #[cfg(any(feature = "real-relay", feature = "real-os"))]

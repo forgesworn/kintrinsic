@@ -1,0 +1,22 @@
+{
+  "relay": "wss://relay.trotters.cc",
+  "challenge": "kintrinsic-whitelist-challenge",
+  "event": {
+    "id": "0e3f4f5429a25dee08b7768446acc8189f8fac2dc012939a6d3b48f2150610ce",
+    "pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+    "created_at": 1700000000,
+    "kind": 22242,
+    "tags": [
+      [
+        "relay",
+        "wss://relay.trotters.cc"
+      ],
+      [
+        "challenge",
+        "kintrinsic-whitelist-challenge"
+      ]
+    ],
+    "content": "",
+    "sig": "adc5a03b7b4808de43e0ff6cea2545d14bba6659a1b7fa6e06484f8eee368e33fdbf5a7a11cc8318fdaa9715f3dc4ade81f87981227dbe7e7da732eb8425ef38"
+  }
+}

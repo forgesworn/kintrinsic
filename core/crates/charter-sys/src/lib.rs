@@ -22,6 +22,7 @@ pub(crate) mod fsutil;
 pub mod layer;
 pub mod persistence;
 pub mod relay;
+pub mod relay_auth;
 pub mod signer;
 
 pub use clock::Clock;

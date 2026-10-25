@@ -307,6 +307,41 @@ fn headless_pair(args: &[String]) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if parse_flags(&args).has("--relay-code") {
+        // Root/polkit remains the local write boundary; the signature also
+        // proves the guardian approved this exact device and relay list.
+        use std::io::Read;
+        let result: Result<(), String> = (|| {
+            let mut code = String::new();
+            std::io::stdin()
+                .take(16_385)
+                .read_to_string(&mut code)
+                .map_err(|e| e.to_string())?;
+            let json =
+                std::fs::read_to_string(PAIRING).map_err(|e| format!("read pairing: {e}"))?;
+            let mut pairing =
+                serde_json::from_str(&json).map_err(|e| format!("read pairing: {e}"))?;
+            charter_transport::relay_config::apply_signed_config(&mut pairing, code.trim(), now())?;
+            let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
+            write_pairing(&json).map_err(|e| format!("save relay change: {e}"))?;
+            let status = Command::new("systemctl")
+                .args(["try-restart", "charterd.service"])
+                .status()
+                .map_err(|e| format!("Relays saved; restart charterd: {e}"))?;
+            if !status.success() {
+                return Err("Relays saved, but charterd could not restart. Restart the service to apply them.".into());
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => println!("Relays changed; the guardian and charter are unchanged."),
+            Err(e) => {
+                eprintln!("charter-pair: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--link") {
         headless_pair(&args);
     }

@@ -374,13 +374,12 @@ export interface Device {
   /**
    * The relays THIS pairing actually uses — set from the pair offer/accept at
    * pairing time (the defaults, absent any relay the offer itself named).
-   * Never re-read from DEFAULT_RELAYS afterwards: a device already paired
-   * keeps whatever relays it was paired with, even after the app's own
-   * defaults change (see `signer/pairingRelays.ts`). Absent on a pairing made
-   * before this field existed — `loadState`'s migration back-fills those
-   * from `LEGACY_PAIRING_RELAYS`, once, at load.
+   * Stored per device. Updated by explicit guardian action, with a one-time
+   * addition of independent routes for legacy Trotters pairings.
    */
   relays?: string[];
+  /** 0 after recovery/new pairing; otherwise the signed relay change's time. */
+  relaysUpdatedAt?: number;
 }
 
 export interface Child {

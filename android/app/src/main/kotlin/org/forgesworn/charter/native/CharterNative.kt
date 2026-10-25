@@ -41,6 +41,9 @@ object CharterNative {
      */
     external fun charterPair(bunkerUri: String, nowUnix: Long): String
 
+    /** Apply a guardian-signed relay code locally, even during a relay outage. */
+    external fun charterUpdateRelays(code: String, nowUnix: Long): String
+
     /**
      * One slow-tick relay round: pull + authenticate + store CLAUSE wraps,
      * then emit the STATUS heartbeat. BLOCKING network IO (seconds) — slow

@@ -11,6 +11,7 @@ import type { Policy, SignerState } from "../domain/types";
 import { RealSigner, type ChildTarget } from "./realSigner";
 import { loadOrCreateGuardianKey } from "./guardianKey";
 import type { ConfirmGate } from "./mockSigner";
+import { localRelayAuth } from "./relayAuth";
 
 export interface LocalSignerConfig {
   /** Resolve a child id → subject + device pubkeys + relays. */
@@ -58,8 +59,8 @@ export function createLocalSigner(config: LocalSignerConfig): RealSigner {
       // "she has a minute, then done for today" with nothing on any relay.
       // An empty attempt list (no relays configured) is left to
       // requireDeliverable's clearer message.
-      const results = await Promise.allSettled(pool.publish(relays, event));
-      if (results.length > 0 && !results.some((r) => r.status === "fulfilled")) {
+      const results = await Promise.allSettled(pool.publish(relays, event, { onauth: localRelayAuth(loadKey()) }));
+      if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
         throw new Error("Couldn't reach any relay — check your connection and try again.");
       }
     },

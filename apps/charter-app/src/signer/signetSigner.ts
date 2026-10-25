@@ -13,6 +13,7 @@ import { BunkerSigner, parseBunkerInput } from "nostr-tools/nip46";
 import type { GuardianOps } from "../wire/giftwrap";
 import type { Policy } from "../domain/types";
 import { RealSigner, type ChildTarget } from "./realSigner";
+import { relayAuthSigner } from "./relayAuth";
 
 export interface SignetSignerConfig {
   /** The paired guardian `bunker://…` URI (from the pairing flow). */
@@ -34,6 +35,7 @@ export interface SignetSignerConfig {
  */
 export function createSignetSigner(config: SignetSignerConfig): RealSigner {
   const pool = config.pool ?? new SimplePool();
+  let authenticate: ReturnType<typeof relayAuthSigner> | undefined;
 
   const connectGuardian = async (): Promise<GuardianOps> => {
     const uri = await config.getBunkerUri();
@@ -42,6 +44,7 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
     const bunker = BunkerSigner.fromBunker(generateSecretKey(), pointer, { pool });
     await bunker.connect();
     const pubkey = await bunker.getPublicKey();
+    authenticate = relayAuthSigner((template) => bunker.signEvent(template));
     return {
       pubkey,
       signEvent: (t: EventTemplate): Promise<NostrEvent> => bunker.signEvent(t),
@@ -55,8 +58,8 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
     publish: async (relays: string[], event: NostrEvent) => {
       // Fan out, but ONE accepted relay is the bar for "sent" — same honesty
       // rule as localSigner: all-relays-refused must surface, not read as ok.
-      const results = await Promise.allSettled(pool.publish(relays, event));
-      if (results.length > 0 && !results.some((r) => r.status === "fulfilled")) {
+      const results = await Promise.allSettled(pool.publish(relays, event, { onauth: authenticate }));
+      if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
         throw new Error("Couldn't reach any relay — check your connection and try again.");
       }
     },

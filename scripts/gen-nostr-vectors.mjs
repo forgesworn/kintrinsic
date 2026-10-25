@@ -341,4 +341,26 @@ write("keys.json", {
   });
 }
 
+// Offline relay recovery: the same signed event the guardian UI exports.
+{
+  const relays = ["wss://relay.snort.social", "wss://nos.lol", "wss://relay.primal.net"];
+  const event = signWith(GUARDIAN_SK, {
+    kind: 31118,
+    created_at: TS,
+    tags: [MARKER, ["p", MACHINE_PK]],
+    content: JSON.stringify({ machine: MACHINE_PK, relays }),
+  }, "relay_config.sig");
+  write("relay_config.json", { guardian: GUARDIAN_PK, machine: MACHINE_PK, relays, event });
+}
+
+{
+  const relay = "wss://relay.trotters.cc";
+  const challenge = "kintrinsic-whitelist-challenge";
+  const event = signWith(GUARDIAN_SK, {
+    kind: 22242, created_at: TS, content: "",
+    tags: [["relay", relay], ["challenge", challenge]],
+  }, "relay_auth.sig");
+  write("relay_auth.json", { relay, challenge, event });
+}
+
 console.log("done.");

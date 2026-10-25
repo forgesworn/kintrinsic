@@ -22,11 +22,7 @@ pub const POLL_INTERVAL_SECS: u64 = 3;
 /// to (`apps/charter-app/src/signer/config.ts`): public relays, never one run
 /// by the project. `CHARTER_PAIR_RELAYS` (comma-separated) overrides for a
 /// self-hosted relay.
-pub const DEFAULT_PAIR_RELAYS: &[&str] = &[
-    "wss://relay.damus.io",
-    "wss://nos.lol",
-    "wss://relay.primal.net",
-];
+pub const DEFAULT_PAIR_RELAYS: &[&str] = &charter_transport::relay_config::DEFAULT_RELAYS;
 
 /// The relay set to listen on, honouring the override.
 pub fn pair_relays() -> Vec<RelayUrl> {
@@ -187,7 +183,7 @@ mod tests {
         assert_eq!(
             pair_relays(),
             vec![
-                "wss://relay.damus.io".to_string(),
+                "wss://relay.snort.social".to_string(),
                 "wss://nos.lol".to_string(),
                 "wss://relay.primal.net".to_string(),
             ]
@@ -202,7 +198,7 @@ mod tests {
         assert_eq!(
             pair_relays(),
             vec![
-                "wss://relay.damus.io".to_string(),
+                "wss://relay.snort.social".to_string(),
                 "wss://nos.lol".to_string(),
                 "wss://relay.primal.net".to_string(),
             ]

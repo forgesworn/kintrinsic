@@ -169,6 +169,24 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterP
     })
 }
 
+/// Apply an offline relay code authorised by the pinned guardian.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterUpdateRelays(
+    mut env: JNIEnv,
+    _class: JClass,
+    code: JString,
+    now_unix: jlong,
+) -> jstring {
+    let code = match jstr(&mut env, code) {
+        Ok(s) => s,
+        Err(e) => return out(&env, &err_json(&e)),
+    };
+    with_warden_mut(&env, |w| match w.update_relays(&code, now_unix as u64) {
+        Ok(state) => serde_json::to_string(&state).unwrap_or_default(),
+        Err(e) => err_json(&e),
+    })
+}
+
 /// One slow-tick relay round: pull + authenticate + store CLAUSE wraps, then
 /// emit the STATUS heartbeat. Blocking network IO — worker thread only.
 #[no_mangle]

@@ -10,6 +10,7 @@
 import { getPublicKey } from "nostr-tools";
 import { readGuardianKey } from "../signer/guardianKey";
 import { DEFAULT_RELAYS } from "../signer/config";
+import { allPairingRelays } from "../signer/pairingRelays";
 import type { Child } from "../domain/types";
 import { buildCarrierRoster } from "./roster";
 
@@ -18,17 +19,17 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 /**
- * The guardian PUBLIC key last handed across the bridge — how we know whether
+ * The guardian PUBLIC key and relay list last handed across the bridge — whether
  * a provision would say anything new (S4).
  *
- * The pubkey, deliberately, never the secret: this is a module-scope variable
+ * Public routing data, deliberately, never the secret: this is a module-scope variable
  * whose only job is change detection, and there is no version of that job that
  * needs a copy of the secret sitting in it.
  */
-let provisionedPubkey: string | null = null;
+let provisionedIdentity: string | null = null;
 
 /**
- * Hand the native shell the guardian key — ONCE per key, not once per render
+ * Hand the native shell the guardian key — once per key/relay change, not once per render
  * (S4, review 2026-08-07).
  *
  * `App` calls this from an unconditional effect, deliberately, so a
@@ -39,34 +40,36 @@ let provisionedPubkey: string | null = null;
  * value that changes perhaps twice in the life of an install.
  *
  * The effect stays unconditional (it is the honest way to catch a key change);
- * the hand-off is now gated on the key actually being different.
+ * the hand-off is now gated on the key or configured relay list actually being different.
  *
  * Returns true when the carrier holds a current provision — including when
  * this call was a no-op because it already did. Callers use it as "is the
  * carrier provisioned", not as "did work happen".
  */
-export function provisionCarrier(): boolean {
+export function provisionCarrier(children: Child[] = []): boolean {
   const carrier = window.CharterCarrier;
   if (!carrier) return false;
   const loaded = readGuardianKey();
   if (loaded.kind !== "ok") return false;
   const pubkey = getPublicKey(loaded.key);
-  if (pubkey === provisionedPubkey) return true;
+  const relays = allPairingRelays(children, DEFAULT_RELAYS).sort();
+  const identity = JSON.stringify([pubkey, relays]);
+  if (identity === provisionedIdentity) return true;
   carrier.provision(
     JSON.stringify({
       v: 1,
       guardianSkHex: bytesToHex(loaded.key),
       guardianPubkeyHex: pubkey,
-      relays: DEFAULT_RELAYS,
+      relays,
     }),
   );
-  provisionedPubkey = pubkey;
+  provisionedIdentity = identity;
   return true;
 }
 
 /** Test seam — forget which key we last provisioned, as a reload would. */
 export function resetProvisionedForTests(): void {
-  provisionedPubkey = null;
+  provisionedIdentity = null;
 }
 
 /**

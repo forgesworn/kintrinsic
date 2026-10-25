@@ -341,7 +341,13 @@ impl Warden {
             ) {
                 self.relay = crate::relay::real_relay(sk, g, self.relays.clone(), &self.base).ok();
                 self.broker = self
-                    .build_broker(Box::new(charter_sys::relay::RealRelayTransport::default()))
+                    .build_broker(Box::new(
+                        charter_sys::relay::RealRelayTransport::default().with_auth_signer(
+                            std::sync::Arc::new(
+                                charter_sys::signer::RealMachineSigner::from_secret(sk),
+                            ),
+                        ),
+                    ))
                     .ok();
             } else {
                 self.relay = None;
@@ -1716,6 +1722,27 @@ impl Warden {
         }
     }
 
+    /// Apply an offline, guardian-signed relay change without re-pairing.
+    pub fn update_relays(&mut self, code: &str, now: u64) -> Result<dto::PairingState, String> {
+        self.require_readable_pairing()?;
+        let json = self
+            .pairing
+            .load()
+            .map_err(|e| format!("read pairing: {e:?}"))?
+            .ok_or("Pair this device first.")?;
+        let mut pairing: Pairing =
+            serde_json::from_str(&json).map_err(|_| "Pairing cannot be read.")?;
+        charter_transport::relay_config::apply_signed_config(&mut pairing, code, now)?;
+        let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
+        self.pairing
+            .save(&json)
+            .map_err(|e| format!("save relay change: {e:?}"))?;
+        self.relays = pairing.relays;
+        self.last_status = None;
+        self.rebuild_relay();
+        Ok(self.pairing_state())
+    }
+
     /// The REAL pairing: pin the guardian from the `bunker://` link the parent
     /// pastes from MyCharter (pin_from_connect — percent-decode fix included,
     /// §5.1). The sole ward's subject defaults to the machine key itself: the
@@ -1742,6 +1769,9 @@ impl Warden {
             if existing != pairing.guardian_pubkey {
                 return Err("already paired to a different guardian".into());
             }
+            // A guardian pubkey is public. Reusing it in an unsigned link
+            // must not let a ward redirect transport or reset replay floors.
+            return Err("Already paired. Change relays from About this device using a code signed by your guardian.".into());
         }
         let json = serde_json::to_string_pretty(&pairing)
             .map_err(|e| format!("serialize pairing: {e}"))?;
@@ -1787,6 +1817,7 @@ impl Warden {
             subject_pubkey: subject,
             audit_transparency: false,
             paired_at: 0,
+            relays_updated_at: Some(0),
         };
         let json = serde_json::to_string_pretty(&pairing).map_err(|e| format!("serialize: {e}"))?;
         self.pairing
@@ -3347,7 +3378,13 @@ fn load_pairing(store: &RealPairingStore) -> Result<LoadedPairing, String> {
         Err(e) => return Err(format!("pairing unreadable: {e:?}")),
     };
     // The full pinned `Pairing` (what `pair`/`set_pairing` write today).
-    if let Ok(p) = serde_json::from_str::<Pairing>(&json) {
+    if let Ok(mut p) = serde_json::from_str::<Pairing>(&json) {
+        if charter_transport::relay_config::migrate_legacy_relays(&mut p) {
+            let recovered = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
+            if let Err(e) = store.save(&recovered) {
+                eprintln!("charter: could not persist relay recovery: {e:?}");
+            }
+        }
         return Ok((
             Some(p.guardian_pubkey),
             Some(p.subject_pubkey),
@@ -5396,6 +5433,56 @@ mod tests {
     // ---- bunker pairing + relay poll (the §3b increment) -------------------
 
     #[test]
+    fn relay_recovery_and_offline_changes_preserve_the_pinned_ward_on_restart() {
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.trotters.cc&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        w.pair(&uri, 100).unwrap();
+        let json = w.pairing.load().unwrap().unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy.as_object_mut().unwrap().remove("relays_updated_at");
+        w.pairing.save(&legacy.to_string()).unwrap();
+        let machine = w.signer.pubkey();
+        let subject = w.subject;
+        drop(w);
+
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        assert_eq!(
+            w.relays,
+            std::iter::once("wss://relay.trotters.cc".to_string())
+                .chain(charter_transport::relay_config::default_relays())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(w.subject, subject);
+        assert_eq!(w.paired_at, 100);
+        let signed = charter_transport::nip59::sign_event_raw(
+            &guardian_sk(), charter_primitives::kinds::CHARTER_DEVICE_RELAYS, 200,
+            vec![charter_primitives::kinds::marker_tag(), vec!["p".into(), machine.to_hex()]],
+            json!({"machine": machine, "relays": ["wss://family.example", "wss://relay.trotters.cc"]}).to_string(),
+        ).unwrap();
+        let code = serde_json::to_string(&signed).unwrap();
+        w.update_relays(&code, 200).unwrap();
+        let saved = w.pairing.load().unwrap();
+        assert!(w.update_relays(&code, 201).is_err());
+        assert_eq!(w.pairing.load().unwrap(), saved);
+        drop(w);
+
+        let w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        assert_eq!(
+            w.relays,
+            vec!["wss://family.example", "wss://relay.trotters.cc"]
+        );
+        assert_eq!(w.guardian, Some(guardian.pubkey()));
+        assert_eq!(w.subject, subject);
+        assert_eq!(w.paired_at, 100);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn pair_pins_guardian_from_percent_encoded_bunker_uri_and_survives_restart() {
         let base = temp_base(concat!(module_path!(), line!()));
         let guardian = TestGuardian::new();
@@ -5410,6 +5497,17 @@ mod tests {
         let state = w.pair(&uri, 1_000).expect("pairing pins");
         assert!(state.paired);
         assert_eq!(state.relays, vec!["wss://relay.example".to_string()]);
+        let saved = w.pairing.load().unwrap();
+        let redirect = uri.replace("relay.example", "ward-controlled.example");
+        assert!(w
+            .pair(&redirect, 1_001)
+            .unwrap_err()
+            .contains("signed by your guardian"));
+        assert_eq!(
+            w.pairing.load().unwrap(),
+            saved,
+            "a public-key-only link cannot redirect a paired ward"
+        );
         // Sole ward defaults to the machine identity (the deployed PWA emits
         // subject-absent clauses; any stable key works, this needs no setup).
         assert_eq!(

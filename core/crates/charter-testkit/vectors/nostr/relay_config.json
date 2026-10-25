@@ -1,0 +1,27 @@
+{
+  "guardian": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+  "machine": "1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11",
+  "relays": [
+    "wss://relay.snort.social",
+    "wss://nos.lol",
+    "wss://relay.primal.net"
+  ],
+  "event": {
+    "id": "f806771552c8966a48afc6ecf2a3c7bcad8ac9b98d0fed638341beca88f89f14",
+    "pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+    "created_at": 1700000000,
+    "kind": 31118,
+    "tags": [
+      [
+        "t",
+        "charter-device"
+      ],
+      [
+        "p",
+        "1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11"
+      ]
+    ],
+    "content": "{\"machine\":\"1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11\",\"relays\":[\"wss://relay.snort.social\",\"wss://nos.lol\",\"wss://relay.primal.net\"]}",
+    "sig": "4ddc118b2b6f65dcb480c2d375694d36a1c8dc6e71d2fc8fd390c3ffa8cc8e174f005f86e1c6e6105d34670b65b5bdd7213b355ba6093119f88bfe924503e6bd"
+  }
+}

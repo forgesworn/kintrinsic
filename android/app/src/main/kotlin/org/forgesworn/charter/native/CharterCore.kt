@@ -183,6 +183,12 @@ object CharterCore {
     fun pairingState(): PairingState =
         parsePairingState(JSONObject(jni().charterPairingState()))
 
+    fun updateRelays(code: String, nowUnix: Long): PairingState {
+        val o = JSONObject(jni().charterUpdateRelays(code, nowUnix))
+        return if (o.has("error")) pairingState().copy(error = o.optString("error"))
+        else parsePairingState(o)
+    }
+
     fun setPairing(guardianHex: String, subjectHex: String): PairingState =
         parsePairingState(JSONObject(jni().charterSetPairing(guardianHex, subjectHex)))
 

@@ -120,7 +120,7 @@ export default function App() {
   // backup the key changes without a remount, a child/device can be renamed
   // at any time, and both calls are cheap no-ops otherwise.
   useEffect(() => {
-    provisionCarrier();
+    provisionCarrier(state.children);
     pushCarrierRoster(state.children);
   });
 

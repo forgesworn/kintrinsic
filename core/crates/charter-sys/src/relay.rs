@@ -192,7 +192,7 @@ pub use mock::MockRelayTransport;
 mod real {
     use std::time::Duration;
 
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::{future::join_all, SinkExt, StreamExt};
     use serde_json::{json, Value};
     use tokio_tungstenite::connect_async_with_config;
     use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -329,11 +329,22 @@ mod real {
     /// library lets it through. A stream ERROR still ends the read, because
     /// tokio-tungstenite fuses the stream on any error: nothing more can be
     /// read from it.
-    async fn read_events<S, E>(ws: &mut S, filter: &Filter, out: &mut Vec<NostrEvent>)
+    async fn read_events<S, E>(
+        ws: &mut S,
+        filter: &Filter,
+        out: &mut Vec<NostrEvent>,
+        signer: Option<&dyn crate::signer::MachineSigner>,
+        url: &str,
+    ) -> Result<(), String>
     where
-        S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+        S: futures_util::Stream<Item = Result<Message, E>>
+            + futures_util::Sink<Message, Error = E>
+            + Unpin,
     {
         let mut bytes = 0usize;
+        let mut auth_id = None;
+        let mut authenticated = false;
+        let mut completed = false;
         while let Some(item) = ws.next().await {
             let t = match item {
                 Ok(Message::Text(t)) => t,
@@ -358,11 +369,54 @@ mod real {
                         out.push(*ev);
                     }
                 }
-                Some(RelayMsg::Eose(sub)) if sub == SUB_ID => break,
+                Some(RelayMsg::Eose(sub)) if sub == SUB_ID => {
+                    completed = true;
+                    break;
+                }
+                Some(RelayMsg::Auth(challenge)) if auth_id.is_none() && signer.is_some() => {
+                    let proof =
+                        crate::relay_auth::auth_event(signer.unwrap(), url, &challenge, unix_now())
+                            .map_err(|e| format!("relay authentication: {e:?}"))?;
+                    auth_id = Some(proof.id.to_hex());
+                    ws.send(Message::text(json!(["AUTH", proof]).to_string()))
+                        .await
+                        .map_err(|_| "could not send relay authentication")?;
+                }
+                Some(RelayMsg::Ok(id, accepted, reason))
+                    if !authenticated && auth_id.as_deref() == Some(&id) =>
+                {
+                    if !accepted {
+                        return Err(format!("relay authentication rejected: {reason}"));
+                    }
+                    authenticated = true;
+                    ws.send(Message::text(req_message(SUB_ID, filter)))
+                        .await
+                        .map_err(|_| "could not retry authenticated subscription")?;
+                }
+                Some(RelayMsg::Closed(sub, reason)) if sub == SUB_ID => {
+                    if reason.starts_with("auth-required:") && signer.is_some() && !authenticated {
+                        continue;
+                    }
+                    return Err(format!("subscription refused: {reason}"));
+                }
                 // Undecodable, another subscription, NOTICE…: skipped.
                 _ => {}
             }
         }
+        if auth_id.is_some() && !authenticated && !completed && out.is_empty() {
+            return Err("relay authentication did not complete".into());
+        }
+        if !completed && out.is_empty() {
+            return Err("relay closed before completing the subscription".into());
+        }
+        Ok(())
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|t| t.as_secs())
+            .unwrap_or(0)
     }
 
     /// The pure publish verdict, factored out of `publish_one` so the one
@@ -430,7 +484,9 @@ mod real {
         Event(String, Box<NostrEvent>),
         Eose(String),
         /// `["OK", id, accepted, msg]`
-        Ok(String, bool),
+        Ok(String, bool, String),
+        Auth(String),
+        Closed(String, String),
         /// NOTICE / CLOSED / anything else.
         Other,
     }
@@ -450,8 +506,17 @@ mod real {
             "OK" => {
                 let id = arr.get(1)?.as_str()?.to_string();
                 let accepted = arr.get(2)?.as_bool()?;
-                Some(RelayMsg::Ok(id, accepted))
+                Some(RelayMsg::Ok(
+                    id,
+                    accepted,
+                    arr.get(3).and_then(Value::as_str).unwrap_or("").into(),
+                ))
             }
+            "AUTH" => Some(RelayMsg::Auth(arr.get(1)?.as_str()?.into())),
+            "CLOSED" => Some(RelayMsg::Closed(
+                arr.get(1)?.as_str()?.into(),
+                arr.get(2)?.as_str()?.into(),
+            )),
             _ => Some(RelayMsg::Other),
         }
     }
@@ -461,11 +526,13 @@ mod real {
     #[derive(Clone)]
     pub struct RealRelayTransport {
         timeout: Duration,
+        auth_signer: Option<std::sync::Arc<dyn crate::signer::MachineSigner>>,
     }
     impl Default for RealRelayTransport {
         fn default() -> Self {
             Self {
                 timeout: Duration::from_secs(8),
+                auth_signer: None,
             }
         }
     }
@@ -473,7 +540,18 @@ mod real {
     impl RealRelayTransport {
         /// Override the per-relay IO timeout.
         pub fn with_timeout(timeout: Duration) -> Self {
-            Self { timeout }
+            Self {
+                timeout,
+                auth_signer: None,
+            }
+        }
+
+        pub fn with_auth_signer(
+            mut self,
+            signer: std::sync::Arc<dyn crate::signer::MachineSigner>,
+        ) -> Self {
+            self.auth_signer = Some(signer);
+            self
         }
 
         /// Open one socket: refuse the URL outright unless it is `wss://` (or
@@ -503,27 +581,89 @@ mod real {
                 Ok(ws) => ws,
                 Err(e) => return PublishOutcome::Failed(e),
             };
-            if let Err(e) = ws.send(Message::text(event_message(ev))).await {
-                return PublishOutcome::Failed(format!("send: {e}"));
+            let outcome = self.publish_socket(&mut ws, url, ev).await;
+            let _ = ws.close(None).await;
+            outcome
+        }
+
+        async fn publish_socket<S, E>(
+            &self,
+            ws: &mut S,
+            url: &str,
+            ev: &NostrEvent,
+        ) -> PublishOutcome
+        where
+            S: futures_util::Stream<Item = Result<Message, E>>
+                + futures_util::Sink<Message, Error = E>
+                + Unpin,
+        {
+            if ws.send(Message::text(event_message(ev))).await.is_err() {
+                return PublishOutcome::Failed("could not send event".into());
             }
             // Wait for the matching OK. See `publish_outcome` for why a timeout
             // is delivered and a closed socket is not.
             let id_hex = ev.id.to_hex();
+            let mut auth_id = None;
+            let mut auth_required = false;
+            let mut auth_accepted = false;
             let waited = tokio::time::timeout(self.timeout, async {
                 while let Some(Ok(msg)) = ws.next().await {
                     if let Message::Text(t) = msg {
-                        if let Some(RelayMsg::Ok(id, accepted)) = parse_relay_message(t.as_str()) {
-                            if id == id_hex {
+                        match parse_relay_message(t.as_str()) {
+                            Some(RelayMsg::Auth(challenge)) if auth_id.is_none() => {
+                                if let Some(signer) = self.auth_signer.as_deref() {
+                                    let proof = match crate::relay_auth::auth_event(
+                                        signer,
+                                        url,
+                                        &challenge,
+                                        unix_now(),
+                                    ) {
+                                        Ok(proof) => proof,
+                                        Err(_) => return Some(false),
+                                    };
+                                    auth_id = Some(proof.id.to_hex());
+                                    if ws
+                                        .send(Message::text(json!(["AUTH", proof]).to_string()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Some(false);
+                                    }
+                                }
+                            }
+                            Some(RelayMsg::Ok(id, accepted, _))
+                                if !auth_accepted && auth_id.as_deref() == Some(&id) =>
+                            {
+                                auth_accepted = accepted;
+                                if !accepted
+                                    || ws.send(Message::text(event_message(ev))).await.is_err()
+                                {
+                                    return Some(false);
+                                }
+                            }
+                            Some(RelayMsg::Ok(id, accepted, reason)) if id == id_hex => {
+                                if !accepted
+                                    && reason.starts_with("auth-required:")
+                                    && self.auth_signer.is_some()
+                                    && !auth_accepted
+                                {
+                                    auth_required = true;
+                                    continue;
+                                }
                                 return Some(accepted);
                             }
+                            _ => {}
                         }
                     }
                 }
                 None
             })
             .await;
-            let _ = ws.close(None).await;
-            publish_outcome(waited.ok())
+            if waited.is_err() && (auth_required || auth_id.is_some()) {
+                PublishOutcome::Failed("relay authentication/publish did not complete".into())
+            } else {
+                publish_outcome(waited.ok())
+            }
         }
 
         /// Query one relay. `Err(Unreachable)` means we never got as far as a
@@ -544,11 +684,19 @@ mod real {
                 return Err(RelayIoError::Unreachable(format!("{url}: send REQ: {e}")));
             }
             let mut out = Vec::new();
-            let _ =
-                tokio::time::timeout(self.timeout, read_events(&mut ws, filter, &mut out)).await;
+            let result = tokio::time::timeout(
+                self.timeout,
+                read_events(&mut ws, filter, &mut out, self.auth_signer.as_deref(), url),
+            )
+            .await;
             let _ = ws.send(Message::text(close_message(SUB_ID))).await;
             let _ = ws.close(None).await;
-            Ok(out)
+            match result {
+                Ok(Ok(())) => Ok(out),
+                Ok(Err(e)) => Err(RelayIoError::Unreachable(format!("{url}: {e}"))),
+                Err(_) if !out.is_empty() => Ok(out),
+                Err(_) => Err(RelayIoError::Unreachable(format!("{url}: query timed out"))),
+            }
         }
     }
 
@@ -559,11 +707,14 @@ mod real {
             relays: &[RelayUrl],
             ev: NostrEvent,
         ) -> Vec<(RelayUrl, PublishOutcome)> {
-            let mut out = Vec::with_capacity(relays.len());
-            for r in relays {
-                out.push((r.clone(), self.publish_one(r, &ev).await));
-            }
-            out
+            // Start every relay together: a dead first endpoint must not hold
+            // back delivery to healthy ones for its entire timeout.
+            join_all(
+                relays
+                    .iter()
+                    .map(|r| async { (r.clone(), self.publish_one(r, &ev).await) }),
+            )
+            .await
         }
 
         async fn query(
@@ -575,8 +726,9 @@ mod real {
             let mut out = Vec::new();
             let mut reached = 0usize;
             let mut why: Vec<String> = Vec::new();
-            for r in relays {
-                match self.query_one(r, &filter).await {
+            let results = join_all(relays.iter().map(|r| self.query_one(r, &filter))).await;
+            for result in results {
+                match result {
                     Ok(events) => {
                         reached += 1;
                         for ev in events {
@@ -611,6 +763,228 @@ mod real {
     mod tests {
         use super::*;
         use charter_primitives::{EventId, PubKey, Sig};
+
+        struct TestSocket {
+            frames: std::collections::VecDeque<Result<Message, ()>>,
+            sent: Vec<Message>,
+            allow_auth: bool,
+        }
+        impl TestSocket {
+            fn new(frames: Vec<Result<Message, ()>>) -> Self {
+                Self {
+                    frames: frames.into(),
+                    sent: Vec::new(),
+                    allow_auth: true,
+                }
+            }
+        }
+        impl futures_util::Stream for TestSocket {
+            type Item = Result<Message, ()>;
+            fn poll_next(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
+                std::task::Poll::Ready(self.frames.pop_front())
+            }
+        }
+        impl futures_util::Sink<Message> for TestSocket {
+            type Error = ();
+            fn poll_ready(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), ()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn start_send(mut self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), ()> {
+                // Emulate the relay's OK only after receiving the proof.
+                if let Message::Text(text) = &item {
+                    let frame: Value = serde_json::from_str(text).unwrap();
+                    if frame[0] == "AUTH" {
+                        let allowed = self.allow_auth;
+                        self.frames.push_back(Ok(Message::text(
+                            json!([
+                                "OK",
+                                frame[1]["id"],
+                                allowed,
+                                if allowed {
+                                    ""
+                                } else {
+                                    "restricted: key is not allowlisted"
+                                }
+                            ])
+                            .to_string(),
+                        )));
+                        self.frames
+                            .push_back(Ok(Message::text(format!(r#"["EOSE","{SUB_ID}"]"#))));
+                    } else if frame[0] == "EVENT" {
+                        let authenticated = self
+                            .sent
+                            .iter()
+                            .any(|m| m.to_text().is_ok_and(|s| s.starts_with("[\"AUTH\"")));
+                        self.frames.push_back(Ok(Message::text(
+                            json!([
+                                "OK",
+                                frame[1]["id"],
+                                authenticated,
+                                if authenticated {
+                                    ""
+                                } else {
+                                    "auth-required: private"
+                                }
+                            ])
+                            .to_string(),
+                        )));
+                    }
+                }
+                self.sent.push(item);
+                Ok(())
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), ()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_close(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), ()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        #[tokio::test]
+        async fn a_private_relay_authenticates_the_machine_and_retries_the_read() {
+            use crate::signer::{MachineSigner, SeedSigner};
+            let signer = SeedSigner::from_seed(9);
+            let mut ws = TestSocket::new(vec![
+                Ok(Message::text(r#"["AUTH","private-challenge"]"#)),
+                Ok(Message::text(format!(
+                    r#"["CLOSED","{SUB_ID}","auth-required: private"]"#
+                ))),
+            ]);
+            read_events(
+                &mut ws,
+                &Filter::default(),
+                &mut Vec::new(),
+                Some(&signer),
+                "wss://private.example",
+            )
+            .await
+            .unwrap();
+            let auth: Value = serde_json::from_str(ws.sent[0].to_text().unwrap()).unwrap();
+            assert_eq!(auth[0], "AUTH");
+            assert_eq!(auth[1]["pubkey"], signer.pubkey().to_hex());
+            assert_eq!(auth[1]["kind"], 22242);
+            let retried: Value = serde_json::from_str(ws.sent[1].to_text().unwrap()).unwrap();
+            assert_eq!(retried[0], "REQ");
+        }
+
+        #[tokio::test]
+        async fn an_optional_auth_challenge_does_not_make_a_public_empty_read_fail() {
+            let signer = crate::signer::SeedSigner::from_seed(9);
+            let mut ws = TestSocket::new(vec![
+                Ok(Message::text(r#"["AUTH","optional-challenge"]"#)),
+                Ok(Message::text(format!(r#"["EOSE","{SUB_ID}"]"#))),
+            ]);
+            read_events(
+                &mut ws,
+                &Filter::default(),
+                &mut Vec::new(),
+                Some(&signer),
+                "wss://public.example",
+            )
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn authenticated_publish_keeps_the_ephemeral_wrap_author() {
+            use crate::signer::{MachineSigner, SeedSigner};
+            let signer = std::sync::Arc::new(SeedSigner::from_seed(9));
+            let transport = RealRelayTransport::default().with_auth_signer(signer.clone());
+            let mut ws =
+                TestSocket::new(vec![Ok(Message::text(r#"["AUTH","private-challenge"]"#))]);
+            let event = sample_event();
+            assert_eq!(
+                transport
+                    .publish_socket(&mut ws, "wss://private.example", &event)
+                    .await,
+                PublishOutcome::Ok
+            );
+            let sent: Vec<Value> = ws
+                .sent
+                .iter()
+                .map(|m| serde_json::from_str(m.to_text().unwrap()).unwrap())
+                .collect();
+            let auth = sent.iter().find(|m| m[0] == "AUTH").unwrap();
+            assert_eq!(auth[1]["pubkey"], signer.pubkey().to_hex());
+            let wraps: Vec<_> = sent.iter().filter(|m| m[0] == "EVENT").collect();
+            assert_eq!(wraps.len(), 2, "publish is retried after authentication");
+            assert!(wraps
+                .iter()
+                .all(|m| m[1]["pubkey"] == event.pubkey.to_hex()));
+        }
+
+        #[tokio::test]
+        async fn a_closed_subscription_without_eose_is_not_an_empty_success() {
+            let mut ws = TestSocket::new(Vec::new());
+            let error = read_events(
+                &mut ws,
+                &Filter::default(),
+                &mut Vec::new(),
+                None,
+                "wss://relay.example",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("closed before completing"));
+        }
+
+        #[tokio::test]
+        async fn a_rejected_authentication_cannot_look_like_delivery_or_a_quiet_read() {
+            let signer = std::sync::Arc::new(crate::signer::SeedSigner::from_seed(9));
+            let frames = || vec![Ok(Message::text(r#"["AUTH","private-challenge"]"#))];
+            let mut ws = TestSocket::new(frames());
+            ws.allow_auth = false;
+            let error = read_events(
+                &mut ws,
+                &Filter::default(),
+                &mut Vec::new(),
+                Some(signer.as_ref()),
+                "wss://private.example",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("restricted:"));
+
+            let mut ws = TestSocket::new(frames());
+            ws.allow_auth = false;
+            let transport = RealRelayTransport::default().with_auth_signer(signer);
+            assert!(matches!(
+                transport
+                    .publish_socket(&mut ws, "wss://private.example", &sample_event())
+                    .await,
+                PublishOutcome::Failed(_)
+            ));
+        }
+
+        #[tokio::test]
+        async fn an_auth_refusal_is_unreachable_not_a_quiet_guardian() {
+            let mut ws = TestSocket::new(vec![Ok(Message::text(format!(
+                r#"["CLOSED","{SUB_ID}","auth-required: private"]"#
+            )))]);
+            let error = read_events(
+                &mut ws,
+                &Filter::default(),
+                &mut Vec::new(),
+                None,
+                "wss://private.example",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("auth-required"));
+        }
 
         fn sample_event() -> NostrEvent {
             NostrEvent {
@@ -675,11 +1049,15 @@ mod real {
             );
             assert_eq!(
                 parse_relay_message(r#"["OK","abcd",true,""]"#),
-                Some(RelayMsg::Ok("abcd".into(), true))
+                Some(RelayMsg::Ok("abcd".into(), true, "".into()))
             );
             assert_eq!(
                 parse_relay_message(r#"["OK","abcd",false,"invalid: bad sig"]"#),
-                Some(RelayMsg::Ok("abcd".into(), false))
+                Some(RelayMsg::Ok(
+                    "abcd".into(),
+                    false,
+                    "invalid: bad sig".into()
+                ))
             );
             assert_eq!(
                 parse_relay_message(r#"["NOTICE","hi"]"#),
@@ -874,9 +1252,11 @@ mod real {
                 Ok(Message::text(format!(r#"["EOSE","{SUB_ID}"]"#))),
                 Ok(event_frame(&ev)),
             ];
-            let mut stream = futures_util::stream::iter(frames);
+            let mut stream = TestSocket::new(frames);
             let mut out = Vec::new();
-            read_events(&mut stream, &filter, &mut out).await;
+            read_events(&mut stream, &filter, &mut out, None, "wss://relay.example")
+                .await
+                .unwrap();
             assert_eq!(
                 out,
                 vec![ev],
@@ -893,13 +1273,49 @@ mod real {
             };
             let frames: Vec<Result<Message, ()>> =
                 vec![Ok(event_frame(&ev)), Err(()), Ok(event_frame(&ev))];
-            let mut stream = futures_util::stream::iter(frames);
+            let mut stream = TestSocket::new(frames);
             let mut out = Vec::new();
-            read_events(&mut stream, &filter, &mut out).await;
+            read_events(&mut stream, &filter, &mut out, None, "wss://relay.example")
+                .await
+                .unwrap();
             assert_eq!(out.len(), 1);
         }
 
         // ---- G1: unreachable ---------------------------------------------
+
+        #[tokio::test]
+        async fn unreachable_relays_are_attempted_together_for_reads_and_writes() {
+            // Accept TCP but never finish TLS. Each endpoint stalls until its
+            // own timeout; three sequential attempts would exceed the bound.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut sockets = Vec::new();
+                while let Ok((socket, _)) = listener.accept().await {
+                    sockets.push(socket);
+                }
+            });
+            let relays: Vec<String> = (0..3).map(|i| format!("wss://{addr}/{i}")).collect();
+            let transport = RealRelayTransport::with_timeout(Duration::from_millis(200));
+            let query = tokio::time::timeout(
+                Duration::from_millis(450),
+                transport.query(&relays, Filter::default()),
+            )
+            .await
+            .expect("reads must not wait for each previous endpoint");
+            assert!(matches!(query, Err(RelayIoError::Unreachable(_))));
+            let published = tokio::time::timeout(
+                Duration::from_millis(450),
+                transport.publish(&relays, sample_event()),
+            )
+            .await
+            .expect("writes must not wait for each previous endpoint");
+            assert_eq!(published.len(), 3);
+            assert!(published
+                .iter()
+                .all(|(_, outcome)| matches!(outcome, PublishOutcome::Failed(_))));
+            server.abort();
+        }
 
         #[tokio::test]
         async fn a_relay_set_that_cannot_be_reached_is_an_error_not_an_empty_result() {

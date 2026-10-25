@@ -62,6 +62,26 @@ function makeSigner(
   });
 }
 
+describe("RealSigner.signRelayConfig", () => {
+  it("creates an offline code bound to the device without publishing", async () => {
+    const published: { relays: string[]; event: NostrEvent }[] = [];
+    const signer = makeSigner(undefined, published);
+    await signer.connect("local");
+    const event = JSON.parse(await signer.signRelayConfig(DPK1, RELAYS, "Robin’s laptop")) as NostrEvent;
+    expect(event.pubkey).toBe(GUARDIAN);
+    expect(event.kind).toBe(31118);
+    expect(event.tags).toContainEqual(["p", DPK1]);
+    expect(JSON.parse(event.content)).toEqual({ machine: DPK1, relays: RELAYS });
+    expect(published).toEqual([]);
+  });
+
+  it("honours a cancelled guardian authorisation", async () => {
+    const signer = makeSigner(undefined, [], { confirmGate: () => false });
+    await signer.connect("local");
+    await expect(signer.signRelayConfig(DPK1, RELAYS, "Robin’s laptop")).rejects.toThrow("cancelled");
+  });
+});
+
 describe("RealSigner.signClause", () => {
   it("gift-wraps every clause to every device and publishes to the child's relays", async () => {
     const published: { relays: string[]; event: NostrEvent }[] = [];

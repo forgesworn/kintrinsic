@@ -8,6 +8,7 @@ pub mod nip44;
 pub mod nip59;
 pub mod pair_offer;
 pub mod pairing;
+pub mod relay_config;
 pub mod transport;
 
 pub use curator::{list_id, parse_curator_list};

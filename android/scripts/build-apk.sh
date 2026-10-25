@@ -47,7 +47,9 @@ fi
 # line (and anything gradle prints despite -q) would otherwise land in
 # $BUILD_VARS and break `. "$BUILD_VARS"`.
 ./scripts/build-jni.sh release >&2
-./gradlew -q assembleRelease >&2
+# Build only the ward: the guardian carrier has a separate release script and
+# requires a freshly built console, which the ward CI job does not stage.
+./gradlew -q :app:assembleRelease >&2
 APK=app/build/outputs/apk/release/app-release.apk
 [ -f "$APK" ] || { echo "FATAL: $APK missing after build" >&2; exit 1; }
 

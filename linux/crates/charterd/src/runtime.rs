@@ -258,7 +258,8 @@ impl RealTransportFacade {
         relays: Vec<RelayUrl>,
     ) -> Result<Self, TransportError> {
         let inner = CharterTransport::try_new(
-            RealRelayTransport::default(),
+            RealRelayTransport::default()
+                .with_auth_signer(Arc::new(RealMachineSigner::from_secret(machine_sk))),
             RealEntropy,
             machine_sk,
             guardian,
@@ -385,7 +386,14 @@ impl TransportFacade for RealTransportFacade {
 /// Load the pinned pairing (guardian pubkey + relays) from the persisted store.
 fn load_pairing<S: SystemLayer>(sys: &S) -> Option<Pairing> {
     let json = sys.pairing().load().ok().flatten()?;
-    serde_json::from_str::<Pairing>(&json).ok()
+    let mut pairing = serde_json::from_str::<Pairing>(&json).ok()?;
+    if charter_transport::relay_config::migrate_legacy_relays(&mut pairing) {
+        let json = serde_json::to_string_pretty(&pairing).ok()?;
+        if let Err(e) = sys.pairing().save(&json) {
+            eprintln!("charterd: could not persist relay recovery: {e:?}");
+        }
+    }
+    Some(pairing)
 }
 
 /// Build the broker over the real ports. The shared `enforcer` handle is also
@@ -3482,6 +3490,36 @@ fn bucket_view(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(feature = "mock")]
+    fn loading_a_trotters_pairing_repairs_and_persists_only_its_relays() {
+        use charter_sys::{persistence::PairingStore, MockSystem, SystemLayer};
+        let sys = MockSystem::new(100);
+        let json = serde_json::json!({
+            "guardian_pubkey": "ab".repeat(32), "machine": "cd".repeat(32),
+            "subject_pubkey": "ef".repeat(32), "audit_transparency": true,
+            "paired_at": 100, "relays": ["wss://relay.trotters.cc", "wss://family.example"],
+        });
+        sys.pairing().save(&json.to_string()).unwrap();
+        let pairing = super::load_pairing(&sys).unwrap();
+        assert_eq!(pairing.guardian_pubkey.to_hex(), "ab".repeat(32));
+        assert_eq!(pairing.subject_pubkey.to_hex(), "ef".repeat(32));
+        assert!(pairing.audit_transparency);
+        assert_eq!(pairing.paired_at, 100);
+        assert_eq!(pairing.relays_updated_at, Some(0));
+        assert!(pairing
+            .relays
+            .contains(&"wss://relay.trotters.cc".to_string()));
+        assert!(pairing.relays.contains(&"wss://family.example".to_string()));
+        for relay in charter_transport::relay_config::default_relays() {
+            assert!(pairing.relays.contains(&relay));
+        }
+        let saved: charter_transport::Pairing =
+            serde_json::from_str(&sys.pairing().load().unwrap().unwrap()).unwrap();
+        assert_eq!(saved, pairing);
+        assert_eq!(super::load_pairing(&sys), Some(pairing));
+    }
+
     // ---- kill sweep: find_blocked_hit (honest attribution) -----------------
 
     fn minecraft_jvm_cmdline() -> Vec<String> {

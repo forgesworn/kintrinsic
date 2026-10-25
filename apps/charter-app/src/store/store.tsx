@@ -46,6 +46,7 @@ import { decisionTiming } from "./decisionTiming";
 import { devicesToRelease } from "./releaseOnRemove";
 import { runApproveAppOpenFlow } from "./approveAppOpenFlow";
 import { getPublicKey, SimplePool } from "nostr-tools";
+import { localRelayAuth } from "../signer/relayAuth";
 import { fetchAllReleaseManifests } from "../release/fetchReleases";
 import {
   allFollowRedirects,
@@ -159,10 +160,9 @@ function loadState(): CharterState {
   try {
     const revived = reviveState(localStorage.getItem(STORAGE_KEY), makeEmpty() as CharterState);
     if (revived.kind === "ok") {
-      // Back-fill any pairing made before Device.relays existed, ONCE, right
-      // here at load — never on a fresh DEFAULT_RELAYS read later. Persisted
-      // immediately so it survives even if nothing else in this session
-      // changes state.
+      // Recover legacy Trotters pairings once, matching the wardens' upgrade
+      // migration. Persist immediately so a later manual relay choice survives
+      // reloads even if nothing else in the household changes.
       const { children, changed } = backfillLegacyRelays(revived.state.children);
       if (!changed) return revived.state;
       const migrated = { ...revived.state, children };
@@ -250,6 +250,7 @@ type Action =
        *  Omitted preserves whatever the device already had — never reset to
        *  the current defaults just because the pairing state changed. */
       relays?: string[];
+      relaysUpdatedAt?: number;
     }
   | { type: "REMOVE_DEVICE"; childId: string; deviceId: string }
   | { type: "SET_DEVICE_LAST_SEEN"; machine: string; lastSeenAt: number }
@@ -326,6 +327,7 @@ export function reducer(state: CharterState, action: Action): CharterState {
                     ? action.devicePubkey
                     : d.devicePubkey,
                 relays: action.relays !== undefined ? action.relays : d.relays,
+                relaysUpdatedAt: action.relaysUpdatedAt ?? (action.relays ? 0 : d.relaysUpdatedAt),
               }))
             : c,
         ),
@@ -498,6 +500,8 @@ export interface CharterContextValue {
   unpairDevice: (childId: string, deviceId: string) => void;
   /** Scan-to-pair: offer to be pinned by a freshly-scanned ward. */
   sendPairOffer: (machine: string, token: string) => Promise<void>;
+  createRelayCode: (childId: string, deviceId: string, relays: string[]) => Promise<string>;
+  recordDeviceRelays: (childId: string, deviceId: string, relays: string[], issuedAt: number) => void;
   removeDevice: (childId: string, deviceId: string) => void;
 
   // Stage 1 intake — mock a device-originated ask (demo + seed parity)
@@ -945,6 +949,17 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // the laptop's address, never the reverse.
   const sendPairOffer = useCallback(async (machine: string, token: string) => {
     await signer.current?.sendPairOffer(machine, token, DEFAULT_RELAYS);
+  }, []);
+
+  const createRelayCode = useCallback(async (childId: string, deviceId: string, relays: string[]) => {
+    const device = stateRef.current.children.find((c) => c.id === childId)?.devices.find((d) => d.id === deviceId);
+    if (!device?.devicePubkey || device.pairing !== "paired") throw new Error("Pair this device first.");
+    if (!signer.current?.signRelayConfig) throw new Error("Connect your guardian signer first.");
+    return signer.current.signRelayConfig(device.devicePubkey, relays, device.label);
+  }, []);
+
+  const recordDeviceRelays = useCallback((childId: string, deviceId: string, relays: string[], issuedAt: number) => {
+    dispatch({ type: "SET_DEVICE_PAIRING", childId, deviceId, pairing: "paired", relays, relaysUpdatedAt: issuedAt });
   }, []);
 
   const unpairDevice = useCallback(
@@ -1512,11 +1527,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // on its very next poll rather than needing a reload.
     const relays = allPairingRelays(stateRef.current.children, DEFAULT_RELAYS);
     try {
+      // querySync forwards these options to subscribeEose; onauth permits
+      // exactly one authenticated retry after a private relay's CLOSED.
+      const queryOptions = { maxWait: 10_000, onauth: localRelayAuth(guardianSk) };
       const wraps = await pool.querySync(relays, {
         kinds: [1059],
         "#p": [guardianPk],
         since,
-      });
+      }, queryOptions);
       for (const w of wraps) {
         // The one line that saves the battery: everything below this decrypts.
         if (handledWraps.current.has(w.id)) continue;
@@ -2342,6 +2360,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       enrollDevice,
       unpairDevice,
       sendPairOffer,
+      createRelayCode,
+      recordDeviceRelays,
       removeDevice,
       simulateDeviceRequest,
       setSchedule,
@@ -2393,6 +2413,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       enrollDevice,
       unpairDevice,
       sendPairOffer,
+      createRelayCode,
+      recordDeviceRelays,
       removeDevice,
       simulateDeviceRequest,
       setSchedule,

@@ -38,6 +38,9 @@ pub const CHARTER_DEVICE_RELEASE: u16 = 31116;
 /// key named in the payload.
 pub const CHARTER_DEVICE_PAIR_OFFER: u16 = 31117;
 
+/// Guardian-signed relay configuration, transferred locally for outage recovery.
+pub const CHARTER_DEVICE_RELAYS: u16 = 31118;
+
 /// Addressable (NIP-51-style) curator web-list: a curator's signed allow/deny
 /// entries; parents subscribe by pubkey. PROVISIONAL — final value is design
 /// open-question §10.1 (internal design spec 2026-06-28-charter-web-content-control-design).
@@ -93,6 +96,7 @@ mod tests {
         assert_eq!(CHARTER_DEVICE_USAGE_SYNC, 31115);
         assert_eq!(CHARTER_DEVICE_RELEASE, 31116);
         assert_eq!(CHARTER_DEVICE_PAIR_OFFER, 31117);
+        assert_eq!(CHARTER_DEVICE_RELAYS, 31118);
         assert_eq!(CHARTER_CURATOR_WEB_LIST, 30100);
         assert_eq!(SOFTWARE_RELEASE, 30063);
     }

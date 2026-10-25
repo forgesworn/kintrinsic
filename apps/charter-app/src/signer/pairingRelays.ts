@@ -1,5 +1,5 @@
 // Where a PAIRED device's traffic actually goes. A pairing's own `relays`
-// (set at pairing time, never re-read from DEFAULT_RELAYS afterwards) is the
+// (set at pairing time or by an explicit guardian relay change) is the
 // source of truth; DEFAULT_RELAYS is only a fallback for a pairing that
 // somehow carries none, and is always unioned in besides — a stale relay
 // list must never make a device unreachable outright.

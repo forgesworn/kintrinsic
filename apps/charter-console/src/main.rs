@@ -285,6 +285,13 @@ fn handle_command(body: &str, proxy: &tao::event_loop::EventLoopProxy<UserEvent>
             open_recovery();
             None
         }
+        "relays" => {
+            let code = msg.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            Some(
+                run_relay_change(code)
+                    .map(|_| "Relays changed. Save the same list on your guardian's phone."),
+            )
+        }
         _ => None,
     };
 
@@ -623,6 +630,41 @@ fn run_setup(user: &str) -> Result<(), String> {
     pkexec("charter-setup", &[user])
 }
 
+/// The signed code is public, but only an administrator can write the pairing.
+/// Keep it off argv and out of temporary files; the helper verifies it again.
+fn run_relay_change(code: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    if code.len() > 16_384 || serde_json::from_str::<Value>(code).is_err() {
+        return Err("Paste the signed relay code from your guardian's phone.".into());
+    }
+    let mut child = Command::new("pkexec")
+        .arg(format!("{SBIN}/charter-pair"))
+        .arg("--relay-code")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not start relay recovery: {e}"))?;
+    let write = child
+        .stdin
+        .take()
+        .ok_or("Could not open the relay code input.")?
+        .write_all(code.as_bytes());
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.code() == Some(126) || out.status.code() == Some(127) {
+        return Err(denied_message());
+    }
+    write.map_err(|e| format!("Could not send the relay code: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .trim_start_matches("charter-pair: ")
+            .to_string());
+    }
+    Ok(())
+}
+
 fn run_limits(user: &str, wake: &str, bedtime: &str, daily: u64) -> Result<(), String> {
     if user.is_empty() || wake.is_empty() || bedtime.is_empty() || daily == 0 {
         return Err("Some values are missing.".into());
@@ -742,6 +784,9 @@ fn collect_status() -> String {
 
     let me = current_username();
     let viewer_is_ward = me.as_deref().is_some_and(is_managed_user);
+    let pairing = std::fs::read_to_string(PAIRING)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
 
     json!({
         "configured": configured,
@@ -749,6 +794,10 @@ fn collect_status() -> String {
         "children": children,
         "candidates": candidate_accounts(&managed),
         "deviceCode": device_code.as_ref().map(|c| grouped(c)),
+        "deviceNpub": device_code.as_deref().and_then(public_npub),
+        "relays": pairing.as_ref().and_then(|p| p.get("relays")).cloned().unwrap_or(json!([])),
+        "guardian": pairing.as_ref().and_then(|p| p.get("guardian_pubkey")).cloned(),
+        "version": env!("CARGO_PKG_VERSION"),
         "qr": qr,
         "invited": invite.is_some(),
         "secsLeft": secs_left,
@@ -939,6 +988,17 @@ fn read_device_code() -> Option<String> {
         .take(64)
         .collect();
     (token.len() == 64).then_some(token)
+}
+
+fn public_npub(hex: &str) -> Option<String> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..64)
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("npub").ok()?, &bytes?).ok()
 }
 
 fn pairing_exists() -> bool {

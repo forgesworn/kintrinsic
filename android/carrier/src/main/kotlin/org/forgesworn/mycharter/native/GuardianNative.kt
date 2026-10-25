@@ -12,6 +12,9 @@ object GuardianNative {
     /** Surface version; Kotlin refuses to run on a mismatch. */
     external fun guardianAbiVersion(): Int
 
+    /** A NIP-42 connection proof, signed by the existing guardian identity. */
+    external fun guardianRelayAuth(relay: String, challenge: String, guardianSk: ByteArray, nowUnix: Long): String
+
     /**
      * Classify one relay gift-wrap with the guardian secret. Returns JSON:
      * {"type":"request",…} | {"type":"status",…} | {"type":"other",…} |

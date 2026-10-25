@@ -31,6 +31,7 @@ import {
 } from "../wire/grant";
 import type { DecisionContext, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
+import { relayConfigTemplate } from "../wire/relayConfig";
 
 /** One deliverable device: its domain id, and the key its wraps are sealed to. */
 export interface TargetDevice {
@@ -91,6 +92,14 @@ function labelFor(kind: SignerKind): string | undefined {
 }
 
 export class RealSigner implements Signer {
+  async signRelayConfig(machine: string, relays: string[], label: string): Promise<string> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const template = relayConfigTemplate(machine, relays, this.deps.now());
+    await this.authorize("clause", `Change relays for ${label}`);
+    template.created_at = this.deps.now();
+    return JSON.stringify(await guardian.signEvent(template));
+  }
   private state: SignerState;
   private guardian: GuardianOps | null = null;
   /** The last clause `issuedAt` this signer handed out — see `nextIssuedAt`. */

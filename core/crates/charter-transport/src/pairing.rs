@@ -18,6 +18,10 @@ pub struct Pairing {
     pub subject_pubkey: PubKey,
     pub audit_transparency: bool,
     pub paired_at: u64,
+    /// None only on pre-recovery records; Some(0) marks the one-time repair.
+    /// Later values are the last applied guardian-signed relay change.
+    #[serde(default)]
+    pub relays_updated_at: Option<u64>,
 }
 
 /// Why a `bunker://` URI was rejected.
@@ -146,6 +150,7 @@ pub fn pin_from_connect(
         subject_pubkey,
         audit_transparency,
         paired_at: now,
+        relays_updated_at: Some(0),
     })
 }
 

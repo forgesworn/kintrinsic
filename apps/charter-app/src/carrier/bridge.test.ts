@@ -18,6 +18,22 @@ afterEach(() => {
 });
 
 describe("provisionCarrier", () => {
+  it("updates relay routing when a paired device's list changes without provisioning on every render", () => {
+    localStorage.setItem(KEY, nip19.nsecEncode(generateSecretKey()));
+    const provision = vi.fn();
+    window.CharterCarrier = { provision, isCarrier: () => true };
+    const children: Child[] = [{ id: "c", name: "Robin", color: "#abc", dependantPubkey: null, policies: [],
+      devices: [{ id: "d", label: "laptop", platform: "linux", pairing: "paired", relays: ["wss://relay.trotters.cc"] }] }];
+    provisionCarrier(children);
+    provisionCarrier(children);
+    expect(provision).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(provision.mock.calls[0][0]).relays).toContain("wss://relay.trotters.cc");
+    children[0].devices[0].relays = ["wss://family.example"];
+    provisionCarrier(children);
+    expect(provision).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(provision.mock.calls[1][0]).relays).toContain("wss://family.example");
+    expect(JSON.parse(provision.mock.calls[1][0]).relays).not.toContain("wss://relay.trotters.cc");
+  });
   it("is a no-op outside the carrier", () => {
     localStorage.setItem(KEY, nip19.nsecEncode(generateSecretKey()));
     expect(provisionCarrier()).toBe(false);

@@ -37,7 +37,7 @@ RestartSec=2
 #
 # 04-G5 — THE BUDGET, and why this is 180 and not 60. The slow tick's network
 # section is the long pole. Every relay operation (one query or one publish)
-# walks the configured relays in turn, and each relay can take up to 16 s: an
+# now contacts the configured relays concurrently; each can take up to 16 s: an
 # 8 s connect plus an 8 s wait for EOSE/OK — a relay that accepts the socket and
 # then stalls reaches the full 16 s. A 60 s watchdog killed the daemon for that
 # perfectly correct waiting, and the kill is not a harmless restart:
@@ -50,10 +50,9 @@ RestartSec=2
 # facade in `runtime.rs` pings as each query/publish returns, but only from the
 # enforcement loop's own task — a D-Bus ask cannot vouch for a stuck loop). So
 # the window only has to cover the LONGEST SINGLE OPERATION, not the whole poll:
-# worst gap between pings ≈ 16 s × (relays) plus the enforcement pass itself.
-# 180 s covers ten relays with room to spare while still being far short of an
-# afternoon. Raise the per-operation timeouts or allow more relays and this
-# number has to be re-derived.
+# worst gap between pings ≈ 16 s plus the enforcement pass itself. The 180 s
+# budget remains conservative for CPU and IO pressure. Changes to the timeouts
+# or the tick's blocking work require this budget to be re-derived.
 WatchdogSec=180
 # The keep-alive comes from the main process. (Type=simple does not imply this
 # the way Type=notify would, and the unit's Type= is deliberately unchanged.)

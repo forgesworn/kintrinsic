@@ -271,6 +271,7 @@
       <button class="item" data-view="home"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20h14V9.5"/><path d="M9.5 20v-5.5h5V20"/></svg>Home<span class="dot off" id="dot-home"></span></button>
       <button class="item" data-view="time"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="17" cy="18" r="2.4"/></svg>The rules</button>
       <button class="item" data-view="connect"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3M20 14v.01M14 20v.01M20 20v.01M17 20h.01M20 17h.01"/></svg>Connect a phone<span class="dot off" id="dot-connect"></span></button>
+      <button class="item" data-view="about">About this device</button>
       <div class="lbl">Safety</div>
       <button class="item" data-view="recovery"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M21 3v6h-6"/><path d="M12 8v4l3 2"/></svg>Recovery</button>
     </nav>
@@ -295,6 +296,7 @@ let S = { configured:false, children:[], candidates:[], deviceCode:null, qr:null
 const POPUP = !!window.__charterPopup || /[?&]popup=1/.test(location.search);
 let route = "today";
 let draft = {}; // per-child edit drafts keyed by user
+let relayCode = "";
 let adjustMins = 15; // the amount the give/take buttons will move
 let askMins = 20;    // the slider's amount, in 5-minute steps
 // A spent group's own "ask for more" is a single fixed nudge, not a second
@@ -360,7 +362,7 @@ function render(){
   const navigated = render._route !== route;
   render._route = route;
   const keep = navigated ? 0 : main.scrollTop;
-  v.innerHTML = ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery}[route]||vToday)();
+  v.innerHTML = ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery, about:vAbout}[route]||vToday)();
   wire();
   main.scrollTop = keep;
 }
@@ -804,6 +806,29 @@ function vConnect(){
     </details>`;
 }
 
+function vAbout(){
+  const relays = Array.isArray(S.relays) ? S.relays : [];
+  return `
+    <p class="eyebrow">This computer</p>
+    <h2 class="title">About this device</h2>
+    <div class="card pad-lg" style="margin-top:26px">
+      <h3>Kintrinsic console ${esc(S.version || "")}</h3>
+      <p class="muted">Public device key — share this with your relay administrator.</p>
+      <code style="display:block;overflow-wrap:anywhere;user-select:all">${esc(S.deviceCode || "Not available yet")}</code>
+      <p class="muted" style="margin-top:12px">Public key for relay allowlists (npub)</p>
+      <code style="display:block;overflow-wrap:anywhere;user-select:all">${esc(S.deviceNpub || "Not available yet")}</code>
+      <h3 style="margin-top:22px">Guardian</h3>
+      <code style="display:block;overflow-wrap:anywhere;user-select:all">${esc(S.guardian || "Not paired")}</code>
+      <h3 style="margin-top:22px">Relays</h3>
+      ${relays.length ? `<ul>${relays.map(r=>`<li><code>${esc(r)}</code></li>`).join("")}</ul>` : `<p class="muted">No relays configured.</p>`}
+      <p class="muted">Your charter keeps applying during an outage. Relay changes need your guardian's signed code and administrator authorisation.</p>
+      ${isWard() ? `<p class="muted">Ask your guardian to apply a relay change from their administrator account.</p>` : `
+        <label class="muted" for="relay-code">In the guardian app: Family → this device → Relays. Create a code and paste it here within ten minutes.</label>
+        <textarea id="relay-code" class="input" rows="4" style="width:100%;margin-top:10px" placeholder="Signed relay code">${esc(relayCode)}</textarea>
+        <button class="btn btn-soft btn-block" id="do-relays" style="margin-top:12px">${busySpin("Apply relay change")}</button>`}
+    </div>`;
+}
+
 function vRecovery(){
   return `
     <p class="eyebrow">Safety</p>
@@ -834,6 +859,13 @@ function currentChild(){
 
 // ------- interactions -------
 function wire(){
+  const relayInput = document.getElementById("relay-code");
+  if(relayInput) relayInput.oninput=()=>{ relayCode=relayInput.value; };
+  const applyRelays = document.getElementById("do-relays");
+  if(applyRelays) applyRelays.onclick=()=>{
+    if(!relayCode.trim()){ showToast("Paste the signed relay code first.","err"); return; }
+    act(); send({cmd:"relays",code:relayCode.trim()});
+  };
   document.querySelectorAll("[data-goto]").forEach(b=>b.onclick=()=>{ if(b.dataset.user) S._sel=b.dataset.user; route=b.dataset.goto; render(); });
   const setup=document.getElementById("do-setup");
   if(setup) setup.onclick=()=>{ const u=document.getElementById("pick-child").value; act(); send({cmd:"setup",user:u}); };

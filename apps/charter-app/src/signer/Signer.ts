@@ -121,6 +121,8 @@ export interface DecisionContext {
  * in behind this exact same surface later with no screen changes.
  */
 export interface Signer {
+  /** Offline recovery: signed JSON, transferred locally to the ward. */
+  signRelayConfig?(machine: string, relays: string[], label: string): Promise<string>;
   /** Current connection + auto-sign state (synchronous snapshot). */
   status(): SignerState;
 

@@ -17,6 +17,7 @@ import org.forgesworn.mycharter.carrier.CarrierStore
 import org.forgesworn.mycharter.native.GuardianNative
 import org.forgesworn.mycharter.relay.RelayFraming
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.concurrent.TimeUnit
 
 /**
@@ -37,6 +38,7 @@ class CarrierService : Service() {
     private lateinit var worker: HandlerThread
     private lateinit var handler: Handler
     private val sockets = mutableMapOf<String, WebSocket>()
+    private var connectedGuardian: String? = null
     private val backoffs = mutableMapOf<String, Long>()
     /** When each socket opened (monotonic) — how [scheduleReconnect] judges it. */
     private val openedAt = mutableMapOf<String, Long>()
@@ -70,7 +72,10 @@ class CarrierService : Service() {
         handler.post { connectAll() }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        handler.post { connectAll() }
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         running = false
@@ -94,6 +99,13 @@ class CarrierService : Service() {
         }
         val abi = GuardianNative.guardianAbiVersion()
         check(abi == 2) { "guardian JNI ABI $abi != 2" }
+        val keyChanged = connectedGuardian != p.guardianPubkeyHex
+        connectedGuardian = p.guardianPubkeyHex
+        sockets.keys.filter { keyChanged || it !in p.relays }.forEach { relay ->
+            sockets.remove(relay)?.close(1000, "relay configuration changed")
+            openedAt.remove(relay)
+            backoffs.remove(relay)
+        }
         p.relays.forEach { relay -> if (relay !in sockets) connect(relay) }
     }
 
@@ -101,10 +113,13 @@ class CarrierService : Service() {
         reconnecting.remove(relay)
         if (!running) return
         val p = store.provision() ?: return
+        if (relay !in p.relays || relay in sockets) return
         val since = System.currentTimeMillis() / 1000 - RelayFraming.SINCE_WINDOW_SECS
         val ws = client.newWebSocket(
             Request.Builder().url(relay).build(),
             object : WebSocketListener() {
+                private var authId: String? = null
+                private var authenticated = false
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     Log.i(TAG, "open $relay")
                     // Note when it opened, but do NOT call it a success yet:
@@ -114,18 +129,50 @@ class CarrierService : Service() {
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    val eventJson = RelayFraming.parseEvent(text) ?: return
-                    handler.post { classifyAndNotify(eventJson) }
+                    handler.post {
+                        val frame = runCatching { JSONArray(text) }.getOrNull() ?: return@post
+                        when (frame.optString(0)) {
+                            "AUTH" -> {
+                                if (authId != null) return@post
+                                val challenge = frame.optString(1)
+                                if (challenge.isEmpty() || challenge.length > 4096) return@post
+                                val sk = hexToBytes(p.guardianSkHex) ?: return@post
+                                val proof = try {
+                                    JSONObject(GuardianNative.guardianRelayAuth(relay, challenge, sk, System.currentTimeMillis() / 1000))
+                                } catch (_: Throwable) { return@post } finally { sk.fill(0) }
+                                if (proof.has("error")) return@post
+                                authId = proof.optString("id")
+                                webSocket.send(JSONArray().put("AUTH").put(proof).toString())
+                            }
+                            "OK" -> if (!authenticated && authId != null && frame.optString(1) == authId) {
+                                if (frame.optBoolean(2)) {
+                                    authenticated = true
+                                    webSocket.send(RelayFraming.reqMessage("carrier", p.guardianPubkeyHex, since))
+                                } else {
+                                    webSocket.cancel()
+                                    scheduleReconnect(relay, webSocket)
+                                }
+                            }
+                            "CLOSED" -> {
+                                val reason = frame.optString(2)
+                                if (!reason.startsWith("auth-required:") || authenticated) {
+                                    webSocket.cancel()
+                                    scheduleReconnect(relay, webSocket)
+                                }
+                            }
+                            "EVENT" -> RelayFraming.parseEvent(text)?.let { classifyAndNotify(it) }
+                        }
+                    }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.w(TAG, "socket failed $relay: ${t.message}")
-                    scheduleReconnect(relay)
+                    scheduleReconnect(relay, webSocket)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "closed $relay ($code)")
-                    scheduleReconnect(relay)
+                    scheduleReconnect(relay, webSocket)
                 }
             },
         )
@@ -143,12 +190,12 @@ class CarrierService : Service() {
      * day, and it looks healthy in the log because every round logs "open".
      * Only a connection that survived [STABLE_MS] earns a fresh start.
      */
-    private fun scheduleReconnect(relay: String) {
+    private fun scheduleReconnect(relay: String, expectedSocket: WebSocket) {
         if (!running) return
         // These callbacks arrive on OkHttp's threads; every bit of bookkeeping
         // below is plain HashMap state owned by the worker.
         handler.post {
-            if (!running) return@post
+            if (!running || sockets[relay] !== expectedSocket) return@post
             // OkHttp can report a dying socket more than once (failure after
             // close). Without this, each report would start its own reconnect
             // chain and the relay would end up with several live sockets.

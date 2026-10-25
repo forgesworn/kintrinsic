@@ -1,6 +1,7 @@
 package org.forgesworn.charter.ui
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -8,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.TextView
 import org.forgesworn.charter.admin.Provisioning
@@ -18,8 +20,8 @@ import org.forgesworn.charter.native.CharterCore
  * Owner, this device's code (short form to read aloud, full form to copy),
  * and the guardian it is paired with — everything the home screen used to
  * open with, moved here so the child's screen can lead with the child's
- * question (see [HomeCopy]). View only; pairing itself stays on the home
- * screen until a guardian is pinned.
+ * question (see [HomeCopy]). A guardian-signed relay recovery code can be
+ * applied here without an internet connection or changing the pairing.
  *
  * JNI reads run on a private worker thread — never the main thread (every
  * call takes the warden lock), the same discipline as MainActivity.
@@ -74,6 +76,51 @@ class AboutActivity : Activity() {
         guardianCard.addView(guardianLine.apply { setPadding(0, CharterTheme.dp(this@AboutActivity, 4), 0, 0) })
         root.addView(guardianCard, CharterTheme.stackParams(this, 14))
 
+        val relayLine = CharterTheme.text(this, "…", CharterTheme.FS_SMALL).apply {
+            setTextIsSelectable(true)
+        }
+        val relayCard = CharterTheme.card(this)
+        relayCard.addView(CharterTheme.text(this, "Relays", CharterTheme.FS_SECTION, bold = true))
+        relayCard.addView(relayLine)
+        val changeRelays = CharterTheme.primaryButton(this, "Change relays").apply { isEnabled = false }
+        relayCard.addView(changeRelays, CharterTheme.stackParams(this, 10))
+        changeRelays.setOnClickListener {
+            val input = EditText(this).apply {
+                hint = "Paste the signed relay code from your guardian"
+                minLines = 3
+                maxLines = 6
+            }
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("Change relays")
+                .setMessage("In your guardian's Kintrinsic app, open Family → this device → Relays. Create a code and paste it here within ten minutes. This works even when the old relays are down.")
+                .setView(input)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply", null)
+                .create()
+            dialog.setOnShowListener {
+                val apply = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                apply.setOnClickListener {
+                    val code = input.text.toString().trim()
+                    apply.isEnabled = false
+                    worker.post {
+                        val state = runCatching {
+                            CharterCore.updateRelays(code, System.currentTimeMillis() / 1000)
+                        }
+                        runOnUiThread {
+                            apply.isEnabled = true
+                            val error = state.exceptionOrNull()?.message ?: state.getOrNull()?.error
+                            if (state.isSuccess && error == null) {
+                                relayLine.text = state.getOrThrow().relays.joinToString("\n")
+                                dialog.dismiss()
+                            } else input.error = error ?: "Could not apply the relay code."
+                        }
+                    }
+                }
+            }
+            dialog.show()
+        }
+        root.addView(relayCard, CharterTheme.stackParams(this, 14))
+
         val codeShort = CharterTheme.text(this, "…", CharterTheme.FS_SECTION, top = 4).apply {
             typeface = Typeface.MONOSPACE
         }
@@ -81,16 +128,22 @@ class AboutActivity : Activity() {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
+        val publicNpub = CharterTheme.text(this, "", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 10).apply {
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
         val codeCard = CharterTheme.card(this)
         codeCard.addView(CharterTheme.text(this, "This device's code", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2))
         codeCard.addView(codeShort)
         codeCard.addView(codeFull)
+        codeCard.addView(CharterTheme.text(this, "Public key for relay allowlists (npub)", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 10))
+        codeCard.addView(publicNpub)
         root.addView(codeCard, CharterTheme.stackParams(this, 14))
 
         root.addView(
             CharterTheme.text(
                 this,
-                "Your guardian sees the same facts. Nothing here can be changed from this screen.",
+                "Relay changes need a code signed by your guardian. Your charter keeps applying during an outage.",
                 CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 18,
             ),
         )
@@ -110,8 +163,12 @@ class AboutActivity : Activity() {
             val state = runCatching { CharterCore.pairingState() }.getOrNull()
             runOnUiThread {
                 codeFull.text = code
+                publicNpub.text = PairingSas.npub(code.filterNot { it.isWhitespace() }) ?: "Public key unavailable."
                 codeShort.text = if (code.length >= 16) "${code.take(8)} … ${code.takeLast(4)}" else code
                 guardianLine.text = HomeCopy.guardianLine(state)
+                relayLine.text = state?.relays?.joinToString("\n")?.ifEmpty { "No relays configured." }
+                    ?: "Relays could not be read."
+                changeRelays.isEnabled = state?.paired == true && !state.pairingUnreadable
                 guardianLine.setTextColor(
                     Color.parseColor(if (state?.paired == true) CharterTheme.OK else CharterTheme.WARN),
                 )

@@ -70,6 +70,13 @@ describe("createLocalSigner relay honesty", () => {
 
     await expect(signer.signStandDownClause!("child_sam")).resolves.toEqual({ ok: true });
   });
+
+  it("does not count a resolved connection-failure message as delivery", async () => {
+    const pool = { publish: () => [Promise.resolve("connection failure: offline")] } as unknown as SimplePool;
+    const signer = createLocalSigner({ resolveChild: () => target, loadKey: () => GSK, pool });
+    await signer.connect("local");
+    await expect(signer.signStandDownClause!("child_sam")).rejects.toThrow(/relay/i);
+  });
 });
 
 describe("createLocalSigner", () => {

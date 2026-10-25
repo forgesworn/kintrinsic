@@ -42,6 +42,48 @@ fn take_sk(env: &JNIEnv, arr: &JByteArray) -> Option<zeroize::Zeroizing<[u8; 32]
 }
 
 #[no_mangle]
+pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianRelayAuth(
+    mut env: JNIEnv,
+    _class: JClass,
+    relay: JString,
+    challenge: JString,
+    guardian_sk: JByteArray,
+    now_unix: jlong,
+) -> jstring {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<String> {
+        let relay: String = env.get_string(&relay).ok()?.into();
+        let challenge: String = env.get_string(&challenge).ok()?.into();
+        if !relay.starts_with("wss://")
+            || challenge.is_empty()
+            || challenge.len() > 4096
+            || now_unix < 0
+        {
+            return None;
+        }
+        let sk = take_sk(&env, &guardian_sk)?;
+        let proof = charter_transport::nip59::sign_event_raw(
+            &sk,
+            22242,
+            now_unix as u64,
+            vec![
+                vec!["relay".into(), relay],
+                vec!["challenge".into(), challenge],
+            ],
+            String::new(),
+        )
+        .ok()?;
+        serde_json::to_string(&proof).ok()
+    }));
+    out(
+        &env,
+        &result
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "{\"error\":\"Could not authenticate to the relay.\"}".into()),
+    )
+}
+
+#[no_mangle]
 pub extern "system" fn Java_org_forgesworn_mycharter_native_GuardianNative_guardianAbiVersion(
     _env: JNIEnv,
     _class: JClass,
