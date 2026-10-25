@@ -124,11 +124,18 @@ The normative definition is in the contract. In short:
    `OK`; receipt completes the publish without waiting for relays. The relay
    publish continues in the background.
 4. Otherwise the relay result decides, as before. If relays also fail but the
-   carrier has queued the wrap for a ward that is not connected, the console
-   reports **not sent yet, waiting for the home network**, rather than success
-   or a hard failure. The queued wrap goes out when the ward connects. Expired
-   grants are refused by the ward when they arrive.
-5. A later `ACK` updates the delivery state to *applied on the device*.
+   carrier holds the wrap (`queued` for a ward that is not connected, or
+   `sent` without receipt yet), the console reports **not sent yet, waiting
+   for the home network**, rather than success or a hard failure. The carrier
+   keeps every wrap until the ward's `OK`, so a held wrap is delivered when
+   the ward connects, and the console never invites a retry that would sign a
+   second gift or a conflicting answer. Only `rejected` or an unavailable
+   route counts as not held. Expired grants are refused by the ward when they
+   arrive.
+5. A send to several devices reports each device separately: reached (relay
+   accepted or ward receipt), held for the home network, or failed. One
+   device's failure never abandons the others.
+6. A later `ACK` updates the delivery state to *applied on the device*.
 
 **Ward → guardian** (requests, audits, status): the ward offers each wrap to
 its local outbox before the relay publish starts. Connected guardian sessions
