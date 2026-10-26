@@ -1,10 +1,10 @@
 {
-  "versionName": "0.6.14",
-  "versionCode": 45,
-  "url": "https://nostr.download/0d0322e8a816e6da7b939b0fd3de1f183d6d17b12f9e2c5a5c6eba18dce4f83a.apk",
-  "urls": ["https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.14/kintrinsic-ward-0.6.14.apk", "https://nostr.download/0d0322e8a816e6da7b939b0fd3de1f183d6d17b12f9e2c5a5c6eba18dce4f83a.apk"],
-  "apkSha256": "0d0322e8a816e6da7b939b0fd3de1f183d6d17b12f9e2c5a5c6eba18dce4f83a",
+  "versionName": "0.6.15",
+  "versionCode": 46,
+  "url": "https://nostr.download/976da4f34b799f65d17f1cb04e5bf18b78c192ece3b49af20778ea2ab117bf65.apk",
+  "urls": ["https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.15/kintrinsic-ward-0.6.15.apk", "https://nostr.download/976da4f34b799f65d17f1cb04e5bf18b78c192ece3b49af20778ea2ab117bf65.apk"],
+  "apkSha256": "976da4f34b799f65d17f1cb04e5bf18b78c192ece3b49af20778ea2ab117bf65",
   "certSha256": "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc",
-  "sizeBytes": 29632453,
-  "builtAt": "2026-10-26T09:15:19Z"
+  "sizeBytes": 29681605,
+  "builtAt": "2026-10-26T19:52:59Z"
 }
