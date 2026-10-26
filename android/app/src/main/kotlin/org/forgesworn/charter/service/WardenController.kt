@@ -994,6 +994,15 @@ class WardenController(
         /** How often a pinned DNS filter whose tunnel is down is restarted. */
         private const val DNS_REDISPATCH_SECS = 30L
 
+        /**
+         * TESTING WINDOW ONLY. While on, a release ward leaves USB debugging
+         * available (and clears the restriction an earlier build set), so a
+         * charted family phone can still be reached over adb during the
+         * hardware rounds. It is a reduced posture: a ward with adb can
+         * force-stop the warden. Turn it off before any public release.
+         */
+        const val ALLOW_DEBUGGING_IN_RELEASE = true
+
         /** The production wiring: DPM-backed ops + the real lock activity. */
         fun real(context: Context): WardenController {
             val dpm = Provisioning.dpm(context)
@@ -1005,7 +1014,8 @@ class WardenController(
                 dpm = dpm,
                 admin = admin,
                 appGate = DpmAppGateOps(context, dpm, admin),
-                restrictions = DpmRestrictionOps(dpm, admin, allowDebugging = debuggable),
+                restrictions =
+                    DpmRestrictionOps(dpm, admin, allowDebugging = debuggable || ALLOW_DEBUGGING_IN_RELEASE),
                 usage = UsageStatsSource(context),
                 install = DpmApkInstallOps(context),
                 dnsFilter = VpnDnsFilterOps(context, dpm, admin),

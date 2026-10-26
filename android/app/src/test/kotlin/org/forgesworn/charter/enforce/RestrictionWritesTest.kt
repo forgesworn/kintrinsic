@@ -74,4 +74,24 @@ class RestrictionWritesTest {
             restrictionWrites(tetherTargets("blocked")) { it in set },
         )
     }
+
+    @Test
+    fun `allowing debugging clears a restriction an earlier build set`() {
+        val debug = UserManager.DISALLOW_DEBUGGING_FEATURES
+        val safe = UserManager.DISALLOW_SAFE_BOOT
+        val set = setOf(debug, safe)
+        assertEquals(
+            listOf(debug to false),
+            restrictionWrites(postureTargets(listOf(safe, debug), allowDebugging = true)) { it in set },
+        )
+    }
+
+    @Test
+    fun `without the allowance debugging stays restricted`() {
+        val debug = UserManager.DISALLOW_DEBUGGING_FEATURES
+        assertEquals(
+            listOf(debug to true),
+            restrictionWrites(postureTargets(listOf(debug), allowDebugging = false)) { false },
+        )
+    }
 }
