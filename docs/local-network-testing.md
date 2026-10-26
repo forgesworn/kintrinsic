@@ -11,7 +11,7 @@ of each step in the table at the end.
 | Surface | Build | Install |
 | --- | --- | --- |
 | Guardian app | guardian **0.1.18 (19)** from this branch: `cd android && ./scripts/build-carrier-apk.sh` | `adb install -r <path printed in the build vars file>` on the guardian phone (not a Device Owner, so ADB works) |
-| Android ward | ward **0.6.14 (45)**: `cd android && ./scripts/publish-apk.sh` | Paired release builds block local installs; send the update from the guardian app (**Family → the device → Update**) while relays are still reachable |
+| Android ward | ward **0.6.15 (46)**: `cd android && ./scripts/publish-apk.sh` | Paired release builds block local installs; send the update from the guardian app (**Family → the device → Update**) while relays are still reachable |
 | Linux ward | Linux **0.7.11**: `cd linux && cargo run -q -p xtask -- deb` | From the computer's administrator account: `sudo apt install ./linux/target/deb/kintrinsic_0.7.11_amd64.deb` |
 
 Install everything **while the internet is up**, confirm each ward reports to
