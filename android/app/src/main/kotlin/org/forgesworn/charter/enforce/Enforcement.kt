@@ -263,6 +263,18 @@ internal fun restrictionWrites(
     desired.filter { (key, on) -> isSet == null || isSet(key) != on }
 
 /**
+ * The standing posture as restriction targets. With debugging allowed,
+ * `DISALLOW_DEBUGGING_FEATURES` is not merely left out but actively CLEARED:
+ * every ward charted by an earlier build already carries it, and leaving it
+ * alone would keep adb shut on exactly the phones the allowance is for.
+ */
+internal fun postureTargets(keys: List<String>, allowDebugging: Boolean): List<Pair<String, Boolean>> {
+    val debug = UserManager.DISALLOW_DEBUGGING_FEATURES
+    if (!allowDebugging) return keys.map { it to true }
+    return keys.filter { it != debug }.map { it to true } + (debug to false)
+}
+
+/**
  * The tethering posture as ordered restriction targets. "filtered" locks the
  * system Wi-Fi hotspot BEFORE freeing the config, and "blocked" locks config
  * before freeing the hotspot key, so there is never a moment where both are
@@ -631,12 +643,13 @@ class DpmRestrictionOps(
     private val dpm: DevicePolicyManager,
     private val admin: ComponentName,
     /**
-     * True only for a debuggable (debug) build: `DISALLOW_DEBUGGING_FEATURES`
-     * is then left out of the baseline, so the on-metal liveness rounds
-     * (Doze, crash, drift) can keep an adb session on a charted test phone.
-     * A release build is never debuggable, so this is always false there.
+     * True for a debuggable (debug) build, or a release built while
+     * [org.forgesworn.charter.service.WardenController.ALLOW_DEBUGGING_IN_RELEASE]
+     * is on: `DISALLOW_DEBUGGING_FEATURES` is then cleared rather than set, so
+     * the on-metal test rounds (Doze, crash, drift, the home-network link) can
+     * keep an adb session on a charted test phone.
      */
-    allowDebugging: Boolean = false,
+    private val allowDebugging: Boolean = false,
 ) : RestrictionOps {
 
     /**
@@ -704,8 +717,10 @@ class DpmRestrictionOps(
         val done = mutableListOf<String>()
         val failed = mutableListOf<String>()
         // Unknown current state (a read that failed) → apply, never assume.
-        for ((key, _) in restrictionWrites(keys.map { it to true }, isSet)) {
-            runCatching { dpm.addUserRestriction(admin, key) }
+        for ((key, on) in restrictionWrites(postureTargets(keys, allowDebugging), isSet)) {
+            runCatching {
+                if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
+            }
                 .onSuccess { done += key }
                 .onFailure {
                     failed += key
