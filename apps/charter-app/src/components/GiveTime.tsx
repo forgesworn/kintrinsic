@@ -91,7 +91,13 @@ export function GiveTime({ child }: { child: Child }) {
     try {
       const ok = await giveTime(childId, minutes, groupId);
       if (ok) {
-        setNote(`${minutes} minutes sent to ${childName}.`);
+        // Signed and on its way; if some devices are away from the home
+        // network, say exactly who got it and who is still waiting.
+        setNote(
+          typeof ok === "object"
+            ? `${minutes} minutes saved for ${childName}. ${ok.message}`
+            : `${minutes} minutes sent to ${childName}.`,
+        );
         setOpen(false);
         setMinutes(DEFAULT_GIFT_MINUTES);
         setGroupId(undefined);

@@ -30,6 +30,7 @@ pub mod exec_guard;
 #[cfg(feature = "real")]
 pub mod focus;
 pub mod local_adjust;
+pub mod local_link;
 pub mod managed_guard;
 pub mod pair_accept;
 pub mod pair_commit;

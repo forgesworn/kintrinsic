@@ -20,6 +20,10 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 charter-primitives = { path = "../../core/crates/charter-primitives" }
 charter-proto = { path = "../../core/crates/charter-proto" }
 charter-transport = { path = "../../core/crates/charter-transport", default-features = false }
+# The local link (v1): the carrier is the home-network listener wards connect
+# to. Sockets live on a tokio runtime owned by this library.
+charter-link = { path = "../../core/crates/charter-link", features = ["net"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util"] }
 
 [dev-dependencies]
 # Fixture building (TestGuardian, sign_event, SeedSigner) — mock features in

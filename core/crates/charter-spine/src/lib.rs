@@ -30,9 +30,12 @@ pub mod transport_facade;
 pub mod usage_pool;
 
 pub use audit::{AuditOutcome, AuditRecord};
-pub use broker::Broker;
+pub use broker::{Broker, LocalAudits, LocalIngestOptions, LocalIngestOutcome};
 pub use enactor::{EnactOutcome, Enactor, EnactorRegistry};
 pub use error::{BrokerError, EnactError};
 pub use lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
 pub use ports::{EventSink, TimeLeftProvider, TimeLeftSnapshot, TimeLeftState};
-pub use transport_facade::{MockTransport, PollHealth, TransportFacade};
+pub use transport_facade::{
+    classify_inbound, CharterTransportAdapter, LocalInbound, MockTransport, PollHealth,
+    TransportFacade,
+};

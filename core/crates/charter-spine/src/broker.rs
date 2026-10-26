@@ -5,23 +5,31 @@
 //! internally synchronized so the headless tests drive it directly.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 
-use charter_primitives::{Nonce, PubKey, ReqId};
+use charter_link::AckResult;
+use charter_primitives::{EventId, Nonce, NostrEvent, PubKey, ReqId};
 use charter_proto::{
     ClauseKind, ClausePayload, GrantPayload, OpType, RequestPayload, UsageSyncPayload,
     USAGE_SYNC_STORE_KEY,
 };
-use charter_sys::persistence::{ChildClauseStore, ClauseStore, PairingStore, PendingStore};
+use charter_sys::error::SysResult;
+use charter_sys::persistence::{
+    ChildClauseStore, ClauseStore, PairingStore, PendingStore, ReplayFloor,
+};
 use charter_sys::{Clock, SystemLayer};
 use charter_transport::{Entropy, ReceivedClause, ReceivedGrant};
-use charter_verify::{verify_clause, verify_grant, verify_usage_sync, VerifyParams};
+use charter_verify::{
+    verify_clause, verify_grant, verify_usage_sync, ClauseError, UsageSyncError, VerifyError,
+    VerifyParams,
+};
 
 use crate::enactor::{EnactContext, EnactorRegistry};
 use crate::error::BrokerError;
 use crate::lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
 use crate::ports::EventSink;
-use crate::transport_facade::TransportFacade;
+use crate::transport_facade::{LocalInbound, TransportFacade};
 
 struct State {
     requests: BTreeMap<String, RequestRecord>,
@@ -215,10 +223,10 @@ fn unreadable_floor_outcome(
     pinned: &PubKey,
     kind: ClauseKind,
     now: u64,
-) -> ClauseOutcome {
+) -> ClauseDisposition {
     match verify_clause(&received.clause, pinned, kind, None, now) {
-        Ok(_) => ClauseOutcome::WriteFailed,
-        Err(_) => ClauseOutcome::Refused,
+        Ok(_) => ClauseDisposition::WriteFailed,
+        Err(_) => ClauseDisposition::Refused,
     }
 }
 
@@ -255,6 +263,191 @@ pub enum ClauseOutcome {
     /// Authenticated — this WAS the guardian's clause, past the replay floor
     /// — but the store write failed. Must never be reported as accepted.
     WriteFailed,
+}
+
+/// What became of a delivered clause, in the detail a signed local-link ACK
+/// needs. [`ClauseOutcome`] is its projection for every existing caller:
+/// `Unchanged` and `Superseded` were, and still are, `Refused` there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClauseDisposition {
+    /// Authenticated and durably stored as the slot's clause.
+    Stored,
+    /// Authenticated, and the slot already holds this clause: the stored
+    /// record is at this `issuedAt` (a record floor, not a sidecar) with the
+    /// same body.
+    Unchanged,
+    /// Authenticated, but at or below the slot's floor and not the clause it
+    /// holds: the newer (or tied, different) clause stays in effect.
+    Superseded,
+    /// Not authenticated (unparseable, wrong kind or shape, bad id or
+    /// signature, not the pinned guardian), or its floor could not be read
+    /// and it does not authenticate either.
+    Refused,
+    /// Authenticated, but the store write (or the floor read gating it)
+    /// failed.
+    WriteFailed,
+}
+
+impl ClauseDisposition {
+    fn outcome(self) -> ClauseOutcome {
+        match self {
+            ClauseDisposition::Stored => ClauseOutcome::Stored,
+            ClauseDisposition::WriteFailed => ClauseOutcome::WriteFailed,
+            ClauseDisposition::Unchanged
+            | ClauseDisposition::Superseded
+            | ClauseDisposition::Refused => ClauseOutcome::Refused,
+        }
+    }
+
+    fn ack(self) -> AckResult {
+        match self {
+            ClauseDisposition::Stored => AckResult::Applied,
+            ClauseDisposition::Unchanged => AckResult::Unchanged,
+            ClauseDisposition::Superseded => AckResult::Superseded,
+            ClauseDisposition::Refused => AckResult::Refused,
+            ClauseDisposition::WriteFailed => AckResult::Failed,
+        }
+    }
+}
+
+/// Which store a clause lives in: a child's per-(subject, kind) slot, or the
+/// machine-wide one (`content`).
+enum ClauseSlot {
+    Child(String),
+    Machine,
+}
+
+impl ClauseSlot {
+    /// The slot's name in log lines (unchanged from before the split).
+    fn describe(&self, store_key: u16) -> String {
+        match self {
+            ClauseSlot::Child(subject_hex) => format!("child clause {subject_hex}/{store_key}"),
+            ClauseSlot::Machine => format!("clause {store_key}"),
+        }
+    }
+}
+
+/// Why a grant routed to a Pending record did not verify, reduced to what an
+/// ACK can say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantRejection {
+    /// Authentic and bound to the request, but past its `exp`.
+    Expired,
+    /// Authentic and bound, but its reqId was already consumed while the
+    /// request is still Pending: an earlier copy was verified but the
+    /// request's progress was never recorded (a failed persist and a crash).
+    /// The device cannot show it enacted, so this is reported as `Failed`,
+    /// never as an answer already held.
+    Replayed,
+    /// The consumed-id store failed: authentic, but not recordable now.
+    StoreFailed,
+    /// Anything else: forged, wrong guardian, malformed, binding mismatch,
+    /// not yet valid.
+    Invalid,
+}
+
+impl GrantRejection {
+    fn of(e: &VerifyError) -> Self {
+        match e {
+            VerifyError::Expired => GrantRejection::Expired,
+            VerifyError::Replayed => GrantRejection::Replayed,
+            VerifyError::Store(_) => GrantRejection::StoreFailed,
+            _ => GrantRejection::Invalid,
+        }
+    }
+}
+
+/// What became of a delivered grant. `on_grant` returns nothing, as it always
+/// has; this is for the local link's ACK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantDisposition {
+    /// The payload did not parse, so it routes to no request.
+    Malformed,
+    /// No request record for its reqId.
+    NoRecord,
+    /// The request was no longer Pending when this copy arrived.
+    AlreadyResolved(RequestState),
+    /// Routed to a Pending request, and verification refused it.
+    Rejected(GrantRejection),
+    /// Routed, verified, and the request moved to this state.
+    Resolved(RequestState),
+    /// A release has already applied on this broker; nothing was done.
+    AfterRelease,
+}
+
+impl GrantDisposition {
+    fn ack(self) -> AckResult {
+        use RequestState as S;
+        match self {
+            GrantDisposition::Malformed
+            | GrantDisposition::NoRecord
+            | GrantDisposition::AfterRelease => AckResult::Refused,
+            GrantDisposition::AlreadyResolved(state) => match state {
+                // Answered by an earlier copy (Enacting is only visible to a
+                // caller outside the handler turn).
+                S::Enacted | S::Denied | S::Enacting => AckResult::Unchanged,
+                // The ask aged out or was withdrawn before this copy came.
+                S::Expired | S::Cancelled => AckResult::Expired,
+                S::Failed => AckResult::Failed,
+                S::Rejected | S::Pending => AckResult::Refused,
+            },
+            GrantDisposition::Rejected(r) => match r {
+                GrantRejection::Expired => AckResult::Expired,
+                GrantRejection::Replayed => AckResult::Failed,
+                GrantRejection::StoreFailed => AckResult::Failed,
+                GrantRejection::Invalid => AckResult::Refused,
+            },
+            GrantDisposition::Resolved(state) => match state {
+                S::Enacted | S::Denied => AckResult::Applied,
+                S::Failed => AckResult::Failed,
+                S::Expired | S::Cancelled => AckResult::Expired,
+                S::Pending | S::Enacting | S::Rejected => AckResult::Refused,
+            },
+        }
+    }
+}
+
+/// How [`Broker::ingest_local`] treats what it cannot finish by itself.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LocalIngestOptions {
+    /// `true`: a RELEASE is verified and applied here, exactly as on the
+    /// poll path (Linux). `false`: it is handed back untouched in
+    /// [`LocalIngestOutcome::release`] for the platform's own release path
+    /// (Android's `try_apply_releases`), and reported `Ignored`.
+    pub handle_release: bool,
+}
+
+/// What [`Broker::ingest_local`] did with one wrap — the content of the
+/// ward's signed ACK, plus what the caller needs to act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalIngestOutcome {
+    pub result: AckResult,
+    /// The inner event's kind, when the wrap opened.
+    pub inner_kind: Option<u16>,
+    /// The inner event's id, when the wrap opened into a signed event.
+    pub inner_id: Option<EventId>,
+    /// The (unverified) reqId a GRANT names, when it parsed.
+    pub req_id: Option<ReqId>,
+    /// A RELEASE authenticated and was applied: the pairing and every stored
+    /// clause are gone, and the caller restarts, as for
+    /// [`PollCounts::released`].
+    pub released: bool,
+    /// With `handle_release: false`, the unwrapped RELEASE `(event,
+    /// seal_author)`, unverified, for the platform's release path.
+    pub release: Option<(NostrEvent, PubKey)>,
+}
+
+impl LocalIngestOutcome {
+    fn refused() -> Self {
+        LocalIngestOutcome {
+            result: AckResult::Refused,
+            inner_kind: None,
+            inner_id: None,
+            req_id: None,
+            released: false,
+            release: None,
+        }
+    }
 }
 
 /// What one brokered poll actually took in.
@@ -302,6 +495,52 @@ pub struct PollCounts {
     pub publish_failed: u32,
 }
 
+/// Audit events a handler decided on while holding the handler turn, in the
+/// order it decided them, each with the timestamp it would have been emitted
+/// at. Emitted by [`DeferredAudits::emit`] once the turn is released — see
+/// `Broker::handlers`.
+#[must_use = "deferred audits must be emitted"]
+#[derive(Default)]
+struct DeferredAudits(Vec<(Vec<Vec<String>>, u64)>);
+
+impl DeferredAudits {
+    fn push(&mut self, tags: Vec<Vec<String>>, now: u64) {
+        self.0.push((tags, now));
+    }
+
+    /// Publish every recorded audit, in order. Must be called WITHOUT the
+    /// handler turn held: this is relay IO.
+    async fn emit<T: TransportFacade>(self, transport: &T) {
+        for (tags, now) in self.0 {
+            transport.emit_audit(tags, now).await;
+        }
+    }
+}
+
+/// The audits a local ingest decided on, handed back by
+/// [`Broker::ingest_local_deferred`] so the ward can send its ACK first and
+/// publish these after (relay IO that may take seconds when the relays are
+/// unreachable, which is when the local link matters most). Must be passed to
+/// [`Broker::emit_local_audits`]; dropping them loses the audit.
+#[must_use = "local audits must be emitted with Broker::emit_local_audits"]
+#[derive(Default)]
+pub struct LocalAudits(DeferredAudits);
+
+impl LocalAudits {
+    /// Nothing to publish.
+    pub fn is_empty(&self) -> bool {
+        self.0 .0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for LocalAudits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LocalAudits")
+            .field(&self.0 .0.len())
+            .finish()
+    }
+}
+
 /// The privileged broker spine, generic over the system layer + transport.
 pub struct Broker<S: SystemLayer, T: TransportFacade, E: Entropy> {
     sys: S,
@@ -311,6 +550,30 @@ pub struct Broker<S: SystemLayer, T: TransportFacade, E: Entropy> {
     events: Box<dyn EventSink>,
     subject: PubKey,
     state: Mutex<State>,
+    /// One handler at a time: every `on_*` call, and every handler run from
+    /// [`Broker::poll_once`] and [`Broker::ingest_local`], holds this turn,
+    /// so a wrap arriving over the local link and its relay copy can never
+    /// interleave inside the same handler.
+    ///
+    /// Invariants:
+    /// - **Never held across relay IO** — no relay query and no publish
+    ///   (`emit_audit`, `publish_request`). A handler records the audits it
+    ///   decides on in [`DeferredAudits`]; they are emitted after the turn is
+    ///   released, so a local exchange never waits behind a hanging relay.
+    /// - **Not re-entrant.** Only the public entry points take it; the
+    ///   handler bodies (`grant_disposition`, `clause_disposition`,
+    ///   `usage_sync_result`, `on_release`) never call an `on_*` method, and
+    ///   enactors are handed a grant and an [`EnactContext`], never the
+    ///   broker. A body taking the turn again would deadlock.
+    handlers: tokio::sync::Mutex<()>,
+    /// Set, under the handler turn, the moment a RELEASE applies — before the
+    /// turn drops and before its audit goes out. Every handler checks it
+    /// under the turn and refuses once it is set: a clause or grant that
+    /// still verifies against the released guardian (the facade keeps its
+    /// key) must never be written into the stores the release just cleared,
+    /// or it would survive into a later pairing. Never cleared; the caller
+    /// restarts after a release.
+    released: AtomicBool,
 }
 
 impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
@@ -356,6 +619,8 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 cursor: 0,
                 submits: BTreeMap::new(),
             }),
+            handlers: tokio::sync::Mutex::new(()),
+            released: AtomicBool::new(false),
         };
         // A daemon that was off for a week comes up with a week-old Pending set.
         // Age it out HERE, before anything can poll: otherwise the first poll
@@ -410,7 +675,8 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// `Event::Expire`, then bound the terminal history it just added to.
     ///
     /// Run at construction and at the **top** of every [`Broker::poll_once`] —
-    /// before the transport is asked for anything. The ordering is the point:
+    /// before the transport is asked for anything, and (after construction)
+    /// always under the handler turn, so it cannot race a grant mid-enact. The ordering is the point:
     /// `on_grant` only routes to a record that is still `Pending`, so sweeping
     /// first is what guarantees a grant delivered late (or redelivered inside
     /// the cursor lookback) cannot land on an ask that has already aged out.
@@ -592,17 +858,37 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// Handle a delivered (unverified) grant: verify (consume-before-enact),
     /// reduce, enact. A rejected grant never enacts.
     pub async fn on_grant(&self, received: ReceivedGrant) {
+        let (_, audits) = {
+            let _turn = self.handlers.lock().await;
+            self.grant_disposition(received).await
+        };
+        audits.emit(&self.transport).await;
+    }
+
+    /// [`Broker::on_grant`]'s body, reporting what became of the grant and
+    /// the audits to emit once the caller has released the handler turn
+    /// (which it holds for this call).
+    async fn grant_disposition(
+        &self,
+        received: ReceivedGrant,
+    ) -> (GrantDisposition, DeferredAudits) {
+        let mut audits = DeferredAudits::default();
+        if self.is_released() {
+            return (GrantDisposition::AfterRelease, audits);
+        }
         // Route by the (unverified) reqId to find the pending record.
         let payload = match GrantPayload::from_json(&received.grant.content) {
             Ok(p) => p,
-            Err(_) => return,
+            Err(_) => return (GrantDisposition::Malformed, audits),
         };
         let key = payload.req_id.to_hex();
         let mut rec = {
             let st = self.state.lock().expect("state lock");
             match st.requests.get(&key) {
                 Some(r) if r.state == RequestState::Pending => r.clone(),
-                _ => return, // unknown or already resolved
+                // Already resolved.
+                Some(r) => return (GrantDisposition::AlreadyResolved(r.state), audits),
+                None => return (GrantDisposition::NoRecord, audits),
             }
         };
 
@@ -619,9 +905,13 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             expected_op: rec.op,
             now,
         };
+        let mut rejection = None;
         let ev = match verify_grant(&received.grant, &vp, self.sys.consumed_ids()) {
             Ok(vg) => Event::GrantVerified(vg),
-            Err(e) => Event::GrantRejected(e),
+            Err(e) => {
+                rejection = Some(GrantRejection::of(&e));
+                Event::GrantRejected(e)
+            }
         };
 
         let (state1, effects1) = transition(&rec, ev);
@@ -630,7 +920,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         for eff in effects1 {
             match eff {
                 Effect::Enact(vg) => to_enact = Some(vg),
-                Effect::Audit(a) => self.transport.emit_audit(a.tags(), now).await,
+                Effect::Audit(a) => audits.push(a.tags(), now),
                 Effect::Notify => self.events.request_updated(&key, rec.state),
                 Effect::Persist => {
                     // Best-effort in the receive pipeline; the durable guarantee
@@ -681,7 +971,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             for eff in effects2 {
                 match eff {
                     Effect::Enact(_) => {}
-                    Effect::Audit(a) => self.transport.emit_audit(a.tags(), now).await,
+                    Effect::Audit(a) => audits.push(a.tags(), now),
                     Effect::Notify => self.events.request_updated(&key, rec.state),
                     Effect::Persist => {
                         // Best-effort in the receive pipeline; the durable guarantee
@@ -693,6 +983,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             }
         }
 
+        let resolved = rec.state;
         {
             let mut st = self.state.lock().expect("state lock");
             // `rec` was cloned from the LIVE map before any `.await` in this
@@ -714,6 +1005,11 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // A grant resolves the request to a terminal state (Enacted / Denied /
         // Failed); bound the retained terminal history.
         self.prune_terminal();
+        let disposition = match rejection {
+            Some(r) => GrantDisposition::Rejected(r),
+            None => GrantDisposition::Resolved(resolved),
+        };
+        (disposition, audits)
     }
 
     /// Handle a delivered (unverified) clause: authenticate + rollback-protect,
@@ -737,9 +1033,19 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// fault from nothing arriving at all; `WriteFailed` means it WAS the
     /// guardian's clause and must not be reported as accepted.
     pub async fn on_clause(&self, received: ReceivedClause) -> ClauseOutcome {
+        let _turn = self.handlers.lock().await;
+        self.clause_disposition(&received).outcome()
+    }
+
+    /// [`Broker::on_clause`]'s body, in the detail an ACK needs. The caller
+    /// holds the handler turn.
+    fn clause_disposition(&self, received: &ReceivedClause) -> ClauseDisposition {
+        if self.is_released() {
+            return ClauseDisposition::Refused;
+        }
         let payload = match ClausePayload::from_json(&received.clause.content) {
             Ok(p) => p,
-            Err(_) => return ClauseOutcome::Refused,
+            Err(_) => return ClauseDisposition::Refused,
         };
         let store_key = payload.kind.store_key();
         let pinned = self.transport.pinned_guardian();
@@ -770,76 +1076,109 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 ClauseKind::Content => None,
             },
         };
+        // Per-child: rollback bound + cache are scoped to (subject, kind), so a
+        // hostile relay cannot revert one child's clause or replay another
+        // child's into theirs.
+        let slot = match per_child_subject {
+            Some(subject) => ClauseSlot::Child(subject.to_hex()),
+            None => ClauseSlot::Machine,
+        };
 
-        match per_child_subject {
-            Some(subject) => {
-                // Per-child: rollback bound + cache are scoped to (subject, kind),
-                // so a hostile relay cannot revert one child's clause or replay
-                // another child's into theirs.
-                let subject_hex = subject.to_hex();
-                // A sidecar floor (the record torn, or left below the
-                // sidecar by a crash) takes the pinned guardian's re-send at
-                // the floor itself (R2-7): `verify_bound` is one below it.
-                let prev = match self
-                    .sys
+        // A sidecar floor (the record torn, or left below the sidecar by a
+        // crash) takes the pinned guardian's re-send at the floor itself
+        // (R2-7): `verify_bound` is one below it.
+        let floor = match self.slot_floor(&slot, store_key) {
+            Ok(floor) => floor,
+            Err(e) => {
+                warn_unreadable_floor(&slot.describe(store_key), e);
+                return unreadable_floor_outcome(received, &pinned, payload.kind, now);
+            }
+        };
+        let prev = floor.and_then(|f| f.verify_bound());
+        match verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
+            Ok(vc) => {
+                let body = serde_json::to_string(vc.body()).unwrap_or_default();
+                match self.slot_put(&slot, store_key, vc.issued_at(), &body) {
+                    Ok(true) => ClauseDisposition::Stored,
+                    // The store's own floor refused it: authentic, but
+                    // something at or above it is already there.
+                    Ok(false) => ClauseDisposition::Superseded,
+                    Err(e) => {
+                        warn_write_failed(&slot.describe(store_key), e);
+                        ClauseDisposition::WriteFailed
+                    }
+                }
+            }
+            // `verify_clause` checks the floor LAST, so a stale clause has
+            // already authenticated as the pinned guardian's.
+            Err(ClauseError::StaleIssuedAt) => {
+                self.stale_clause_disposition(&slot, store_key, floor, &payload)
+            }
+            Err(_) => ClauseDisposition::Refused,
+        }
+    }
+
+    /// An authentic clause at or below its slot's floor is `Unchanged` only
+    /// when the slot holds exactly it: the stored record is at its `issuedAt`
+    /// (a record floor — a sidecar floor means the record may never have
+    /// landed) with an equal body. Anything else, including an unreadable
+    /// record, is `Superseded`. The store keeps the body, not the event id, so
+    /// equality is on what the device enforces (slot, `issuedAt`, body).
+    fn stale_clause_disposition(
+        &self,
+        slot: &ClauseSlot,
+        store_key: u16,
+        floor: Option<ReplayFloor>,
+        payload: &ClausePayload,
+    ) -> ClauseDisposition {
+        if floor != Some(ReplayFloor::Record(payload.issued_at)) {
+            return ClauseDisposition::Superseded;
+        }
+        let held = match self.slot_get(slot, store_key) {
+            Ok(Some(json)) => serde_json::from_str::<serde_json::Value>(&json).ok(),
+            _ => None,
+        };
+        if held.as_ref() == Some(&payload.body) {
+            ClauseDisposition::Unchanged
+        } else {
+            ClauseDisposition::Superseded
+        }
+    }
+
+    fn slot_floor(&self, slot: &ClauseSlot, store_key: u16) -> SysResult<Option<ReplayFloor>> {
+        match slot {
+            ClauseSlot::Child(subject_hex) => self
+                .sys
+                .child_clauses()
+                .replay_floor(subject_hex, store_key),
+            ClauseSlot::Machine => self.sys.clauses().replay_floor(store_key),
+        }
+    }
+
+    fn slot_get(&self, slot: &ClauseSlot, store_key: u16) -> SysResult<Option<String>> {
+        match slot {
+            ClauseSlot::Child(subject_hex) => self
+                .sys
+                .child_clauses()
+                .get_child_clause(subject_hex, store_key),
+            ClauseSlot::Machine => self.sys.clauses().get_clause(store_key),
+        }
+    }
+
+    fn slot_put(
+        &self,
+        slot: &ClauseSlot,
+        store_key: u16,
+        issued_at: u64,
+        body: &str,
+    ) -> SysResult<bool> {
+        match slot {
+            ClauseSlot::Child(subject_hex) => {
+                self.sys
                     .child_clauses()
-                    .replay_floor(&subject_hex, store_key)
-                {
-                    Ok(floor) => floor.and_then(|f| f.verify_bound()),
-                    Err(e) => {
-                        warn_unreadable_floor(
-                            &format!("child clause {subject_hex}/{store_key}"),
-                            e,
-                        );
-                        return unreadable_floor_outcome(&received, &pinned, payload.kind, now);
-                    }
-                };
-                if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
-                    let body = serde_json::to_string(vc.body()).unwrap_or_default();
-                    return match self.sys.child_clauses().put_child_clause(
-                        &subject_hex,
-                        store_key,
-                        vc.issued_at(),
-                        &body,
-                    ) {
-                        Ok(true) => ClauseOutcome::Stored,
-                        Ok(false) => ClauseOutcome::Refused,
-                        Err(e) => {
-                            warn_write_failed(
-                                &format!("child clause {subject_hex}/{store_key}"),
-                                e,
-                            );
-                            ClauseOutcome::WriteFailed
-                        }
-                    };
-                }
-                ClauseOutcome::Refused
+                    .put_child_clause(subject_hex, store_key, issued_at, body)
             }
-            None => {
-                let prev = match self.sys.clauses().replay_floor(store_key) {
-                    Ok(floor) => floor.and_then(|f| f.verify_bound()),
-                    Err(e) => {
-                        warn_unreadable_floor(&format!("clause {store_key}"), e);
-                        return unreadable_floor_outcome(&received, &pinned, payload.kind, now);
-                    }
-                };
-                if let Ok(vc) = verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
-                    let body = serde_json::to_string(vc.body()).unwrap_or_default();
-                    return match self
-                        .sys
-                        .clauses()
-                        .put_clause(store_key, vc.issued_at(), &body)
-                    {
-                        Ok(true) => ClauseOutcome::Stored,
-                        Ok(false) => ClauseOutcome::Refused,
-                        Err(e) => {
-                            warn_write_failed(&format!("clause {store_key}"), e);
-                            ClauseOutcome::WriteFailed
-                        }
-                    };
-                }
-                ClauseOutcome::Refused
-            }
+            ClauseSlot::Machine => self.sys.clauses().put_clause(store_key, issued_at, body),
         }
     }
 
@@ -850,10 +1189,22 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// protection, and `clear_for` on release wipes the view with the clauses.
     /// Staleness only under-counts the pool, so rejecting is always safe.
     pub async fn on_usage_sync(&self, event: charter_primitives::NostrEvent) {
+        let _turn = self.handlers.lock().await;
+        self.usage_sync_result(&event);
+    }
+
+    /// [`Broker::on_usage_sync`]'s body, reporting what became of the sync.
+    /// The caller holds the handler turn.
+    fn usage_sync_result(&self, event: &NostrEvent) -> AckResult {
+        if self.is_released() {
+            return AckResult::Refused;
+        }
         let Ok(payload) = UsageSyncPayload::from_json(&event.content) else {
-            return;
+            return AckResult::Refused;
         };
         let subject_hex = payload.subject.to_hex();
+        let pinned = self.transport.pinned_guardian();
+        let now = self.now();
         let prev = match self
             .sys
             .child_clauses()
@@ -862,25 +1213,39 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             Ok(prev) => prev,
             Err(e) => {
                 warn_unreadable_floor(&format!("usage sync {subject_hex}"), e);
-                return;
+                // Never stored. Whether it was the guardian's decides only
+                // what the ACK says (as for a clause over an unreadable floor).
+                return match verify_usage_sync(event, &pinned, None, now) {
+                    Ok(_) => AckResult::Failed,
+                    Err(_) => AckResult::Refused,
+                };
             }
         };
-        let pinned = self.transport.pinned_guardian();
-        let now = self.now();
-        if let Ok(vs) = verify_usage_sync(&event, &pinned, prev, now) {
-            // Same failure shape as an authenticated clause whose store write
-            // fails (see `warn_write_failed`): this WAS the guardian's sync,
-            // past the replay floor, but the write itself didn't land. Log it
-            // rather than discard it — control flow is unchanged either way,
-            // this is diagnostics only.
-            if let Err(e) = self.sys.child_clauses().put_child_clause(
-                &subject_hex,
-                USAGE_SYNC_STORE_KEY,
-                vs.ts(),
-                &vs.payload().to_json(),
-            ) {
-                warn_write_failed(&format!("usage sync {subject_hex}"), e);
+        match verify_usage_sync(event, &pinned, prev, now) {
+            Ok(vs) => {
+                // Same failure shape as an authenticated clause whose store write
+                // fails (see `warn_write_failed`): this WAS the guardian's sync,
+                // past the replay floor, but the write itself didn't land. Log it
+                // rather than discard it — control flow is unchanged either way,
+                // this is diagnostics only.
+                match self.sys.child_clauses().put_child_clause(
+                    &subject_hex,
+                    USAGE_SYNC_STORE_KEY,
+                    vs.ts(),
+                    &vs.payload().to_json(),
+                ) {
+                    Ok(true) => AckResult::Applied,
+                    Ok(false) => AckResult::Unchanged,
+                    Err(e) => {
+                        warn_write_failed(&format!("usage sync {subject_hex}"), e);
+                        AckResult::Failed
+                    }
+                }
             }
+            // Checked last, so an authentic sync: the device already holds
+            // this view or a newer one.
+            Err(UsageSyncError::StaleTs) => AckResult::Unchanged,
+            Err(_) => AckResult::Refused,
         }
     }
 
@@ -921,20 +1286,33 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     ///   sibling).
     ///
     /// Returns true when a release was applied. Everything on disk that made
-    /// this a managed device is gone by then; the caller restarts.
-    async fn on_release(&self, event: &charter_primitives::NostrEvent, now: u64) -> bool {
+    /// this a managed device is gone by then; the caller restarts. The caller
+    /// holds the handler turn for this call, and emits the returned audit
+    /// after releasing it.
+    fn on_release(
+        &self,
+        event: &charter_primitives::NostrEvent,
+        now: u64,
+    ) -> (bool, DeferredAudits) {
+        let mut audits = DeferredAudits::default();
+        if self.is_released() {
+            return (false, audits);
+        }
         let guardian = self.transport.pinned_guardian();
         let machine = self.transport.machine_pubkey();
         if charter_verify::verify_release(event, &guardian, &machine, now).is_err() {
-            return false;
+            return (false, audits);
         }
         let Ok(payload) = charter_proto::ReleasePayload::from_json(&event.content) else {
-            return false;
+            return (false, audits);
         };
         let paired_at = self.paired_at();
         if payload.issued_at < paired_at {
-            return false;
+            return (false, audits);
         }
+        // Still under the handler turn: from here on every handler refuses
+        // (see `released`), so nothing can land in the stores cleared below.
+        self.released.store(true, AtomicOrdering::SeqCst);
         // Order matters: the clauses first, so a crash between the two leaves a
         // still-pinned device with no rules rather than an unpinned device
         // still enforcing rules nobody can lift.
@@ -943,54 +1321,127 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // Say it on the audit feed BEFORE the caller tears the daemon down —
         // this is the last thing this process will ever have a guardian to
         // tell, and "your laptop stopped being managed" is worth a line.
-        self.transport
-            .emit_audit(
-                vec![
-                    vec!["event".into(), "release-applied".into()],
-                    vec!["issued_at".into(), payload.issued_at.to_string()],
-                ],
-                now,
-            )
-            .await;
-        true
+        // (Emitted by the caller, before it reports the release.)
+        audits.push(
+            vec![
+                vec!["event".into(), "release-applied".into()],
+                vec!["issued_at".into(), payload.issued_at.to_string()],
+            ],
+            now,
+        );
+        (true, audits)
+    }
+
+    /// A release has applied outside this broker (Android's own release
+    /// path, `try_apply_releases`): from now on every handler refuses, as
+    /// after [`Broker::on_release`]. Takes the handler turn, so it returns
+    /// only once a handler already running (a relay round's clause, a local
+    /// grant being enacted) has finished; whatever that handler wrote is then
+    /// on disk before the caller wipes the stores, and nothing can write after.
+    ///
+    /// Blocking: call it from a plain thread or a `spawn_blocking` thread,
+    /// never from inside an async task (`tokio::sync::Mutex::blocking_lock`
+    /// panics there). No handler body takes the caller's own locks, so
+    /// waiting for the turn under them cannot deadlock.
+    pub fn mark_released(&self) {
+        let _turn = self.handlers.blocking_lock();
+        self.released.store(true, AtomicOrdering::SeqCst);
+    }
+
+    /// Whether a release has applied on this broker (see `released`).
+    fn is_released(&self) -> bool {
+        self.released.load(AtomicOrdering::SeqCst)
     }
 
     /// Poll the transport once and process all delivered grants + clauses.
+    ///
+    /// Once a release has applied on this broker — this poll's or a local
+    /// one's — it stops processing and reports `released`.
     pub async fn poll_once(&self) -> PollCounts {
         // Age out stale Pending records BEFORE fetching anything: a grant
         // delivered (or redelivered) this round must not be able to land on an
         // ask that is already past its TTL. See `expire_stale_pending`.
-        self.expire_stale_pending();
+        //
+        // Under the handler turn, and never across relay IO: a local-link
+        // grant being enacted holds the turn while its record still reads
+        // `Pending` (the write-back comes at the end), so a sweep outside the
+        // turn could expire that record underneath it — memory `Expired`,
+        // disk `Enacted`, an ACK saying `applied`.
+        {
+            let _turn = self.handlers.lock().await;
+            self.expire_stale_pending();
+        }
         let now = self.now();
         let cursor = {
             let st = self.state.lock().expect("state lock");
             st.cursor
         };
         let mut counts = PollCounts::default();
+        let stopped = PollCounts {
+            released: true,
+            ..PollCounts::default()
+        };
+        if self.is_released() {
+            return stopped;
+        }
         // RELEASE first, and RETURN on it (S7). A release means this device is
         // no longer managed by anyone; ingesting the same round's clauses
         // afterwards would write rules straight back into the store we just
         // emptied, and the caller is about to tear the daemon down regardless.
+        //
+        // Each handler call below holds the handler turn (see `handlers`) for
+        // that call only; the `poll_*` relay queries and audit publishes run
+        // outside it, so a local-link ingest is never stuck behind relay IO.
         for (event, _seal_author) in self.transport.poll_releases(cursor, now).await {
-            if self.on_release(&event, now).await {
+            let (applied, audits) = {
+                let _turn = self.handlers.lock().await;
+                self.on_release(&event, now)
+            };
+            audits.emit(&self.transport).await;
+            if applied {
                 counts.released = true;
                 return counts;
             }
         }
         for clause in self.transport.poll_clauses(cursor, now).await {
             counts.clauses_seen += 1;
-            match self.on_clause(clause).await {
+            let outcome = {
+                let _turn = self.handlers.lock().await;
+                self.clause_disposition(&clause).outcome()
+            };
+            match outcome {
                 ClauseOutcome::Stored => counts.clauses_accepted += 1,
                 ClauseOutcome::WriteFailed => counts.clauses_write_failed += 1,
                 ClauseOutcome::Refused => {}
             }
+            if self.is_released() {
+                return stopped;
+            }
         }
         for (event, _seal_author) in self.transport.poll_usage_syncs(cursor, now).await {
-            self.on_usage_sync(event).await;
+            {
+                let _turn = self.handlers.lock().await;
+                self.usage_sync_result(&event);
+            }
+            if self.is_released() {
+                return stopped;
+            }
+        }
+        if self.is_released() {
+            return stopped;
         }
         crate::curator_sync::refresh_curator_lists(&self.sys, &self.transport).await;
         for grant in self.transport.poll_grants(cursor, now).await {
-            self.on_grant(grant).await;
+            let (_, audits) = {
+                let _turn = self.handlers.lock().await;
+                self.grant_disposition(grant).await
+            };
+            // Before `poll_health` below, so a failed audit publish counts in
+            // this round's `publish_failed`.
+            audits.emit(&self.transport).await;
+            if self.is_released() {
+                return stopped;
+            }
         }
         let health = self.transport.poll_health();
         counts.relays_unreachable = health.relays_unreachable;
@@ -1001,6 +1452,104 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // permanently filtered out by the relay's `since` bound.
         st.cursor = now.saturating_sub(POLL_LOOKBACK_SECS);
         counts
+    }
+
+    /// Ingest one guardian gift wrap that arrived over the local link.
+    ///
+    /// The wrap is opened by the facade's [`TransportFacade::unwrap_local`]
+    /// — the same NIP-59 unwrap as relay polling — and its inner event runs
+    /// through the same handler as its relay copy would, holding the same
+    /// handler turn: verification, pinning, freshness, nonce, consumed-id
+    /// and floor rules are exactly the poll path's. Duplicates (the relay
+    /// copy, a re-sent wrap) are absorbed by that same state, so whichever
+    /// copy lands second changes nothing.
+    ///
+    /// The result says what this delivery did on the device, for the ward's
+    /// signed ACK: see `docs/local-network-design.md`, "ACK".
+    pub async fn ingest_local(
+        &self,
+        wrap: &NostrEvent,
+        opts: LocalIngestOptions,
+    ) -> LocalIngestOutcome {
+        let (out, audits) = self.ingest_local_deferred(wrap, opts).await;
+        self.emit_local_audits(audits).await;
+        out
+    }
+
+    /// [`Broker::ingest_local`] without the audit publish: the outcome comes
+    /// back as soon as the handler has finished, and the audits it decided on
+    /// come back with it for the caller to publish with
+    /// [`Broker::emit_local_audits`] once the ACK is on its way. The ward's
+    /// ACK for a grant then never waits for relay IO.
+    pub async fn ingest_local_deferred(
+        &self,
+        wrap: &NostrEvent,
+        opts: LocalIngestOptions,
+    ) -> (LocalIngestOutcome, LocalAudits) {
+        let mut out = LocalIngestOutcome::refused();
+        let mut deferred = DeferredAudits::default();
+        let Some(inbound) = self.transport.unwrap_local(wrap, self.now()) else {
+            return (out, LocalAudits(deferred));
+        };
+        match inbound {
+            LocalInbound::Clause(clause) => {
+                out.inner_kind = Some(clause.clause.kind);
+                out.inner_id = Some(clause.clause.id);
+                let _turn = self.handlers.lock().await;
+                out.result = self.clause_disposition(&clause).ack();
+            }
+            LocalInbound::Grant(grant) => {
+                out.inner_kind = Some(grant.grant.kind);
+                out.inner_id = Some(grant.grant.id);
+                out.req_id = GrantPayload::from_json(&grant.grant.content)
+                    .ok()
+                    .map(|p| p.req_id);
+                let (disposition, audits) = {
+                    let _turn = self.handlers.lock().await;
+                    // As at the top of `poll_once`: a grant must not land on an
+                    // ask that has already aged out.
+                    self.expire_stale_pending();
+                    self.grant_disposition(grant).await
+                };
+                deferred = audits;
+                out.result = disposition.ack();
+            }
+            LocalInbound::Release(event, seal_author) => {
+                out.inner_kind = Some(event.kind);
+                out.inner_id = Some(event.id);
+                if opts.handle_release {
+                    let (applied, audits) = {
+                        let _turn = self.handlers.lock().await;
+                        self.on_release(&event, self.now())
+                    };
+                    deferred = audits;
+                    if applied {
+                        out.result = AckResult::Applied;
+                        out.released = true;
+                    }
+                } else {
+                    out.result = AckResult::Ignored;
+                    out.release = Some((event, seal_author));
+                }
+            }
+            LocalInbound::UsageSync(event) => {
+                out.inner_kind = Some(event.kind);
+                out.inner_id = Some(event.id);
+                let _turn = self.handlers.lock().await;
+                out.result = self.usage_sync_result(&event);
+            }
+            LocalInbound::Other { inner_kind } => {
+                out.inner_kind = Some(inner_kind);
+                out.result = AckResult::Ignored;
+            }
+        }
+        (out, LocalAudits(deferred))
+    }
+
+    /// Publish the audits [`Broker::ingest_local_deferred`] handed back, in
+    /// order. Relay IO, outside the handler turn.
+    pub async fn emit_local_audits(&self, audits: LocalAudits) {
+        audits.0.emit(&self.transport).await;
     }
 
     /// The current subscription cursor (the `since` used by the next poll).
@@ -1332,6 +1881,36 @@ mod ttl_and_caps_tests {
             ),
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    /// L1: the poll's TTL sweep waits for the handler turn. A local-link
+    /// grant mid-enact holds the turn while its record still reads Pending;
+    /// the sweep must not expire it underneath.
+    #[tokio::test]
+    async fn the_poll_sweep_waits_for_a_handler_turn_in_progress() {
+        let g = TestGuardian::new();
+        let (b, _) = broker(&g);
+        let hex = ask(&b, MIA).await.expect("submitted").to_hex();
+        b.sys().mock_clock().advance_secs(PENDING_TTL_SECS);
+
+        // Someone (a link ingest) holds the turn.
+        let turn = b.handlers.lock().await;
+        let poll = b.poll_once();
+        tokio::pin!(poll);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut poll)
+                .await
+                .is_err(),
+            "the poll must wait for the turn"
+        );
+        assert_eq!(
+            state_of(&b, &hex),
+            RequestState::Pending,
+            "nothing may be expired while another handler holds the turn"
+        );
+        drop(turn);
+        poll.await;
+        assert_eq!(state_of(&b, &hex), RequestState::Expired);
     }
 
     #[tokio::test]

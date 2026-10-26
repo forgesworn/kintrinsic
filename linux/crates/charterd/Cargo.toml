@@ -37,6 +37,10 @@ charter-verify = { workspace = true, default-features = false }
 charter-transport = { workspace = true, default-features = false }
 charter-sys = { workspace = true, default-features = false }
 charter-ipc = { workspace = true, default-features = false }
+# The local link (v1): the ward client that connects out to the guardian
+# carrier on the home network. `net` in every build — the mock integration
+# tests run a real WardLink against a real GuardianLink on loopback.
+charter-link = { workspace = true, features = ["net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -65,8 +65,11 @@ import {
 import { resolveChildTarget } from "../signer/resolveChild";
 import {
   clauseDeliveryPrecheck,
+  queuedSendLine,
   undeliveredNote,
+  waitingAnswerNote,
   type ClauseDelivery,
+  type SendResult,
 } from "./clauseDelivery";
 import { admitStatus } from "./statusAdmission";
 import { reviveState } from "./reviveState";
@@ -81,8 +84,26 @@ import { selectSigner } from "../signer/selectSigner";
 import { mintPairToken } from "../signer/guardianPairing";
 import { parseDevicePairingCode } from "../wire/deviceCode";
 import type { AppOpenWindow } from "../wire/grant";
-import { unwrapRequest, type DeviceRequest } from "../wire/request";
-import { unwrapStatus, type DeviceStatus } from "../wire/status";
+import type { DeviceRequest } from "../wire/request";
+import type { DeviceStatus } from "../wire/status";
+import { ingestWrap } from "./ingestWrap";
+import { ConsumeQueue, drainLocalInbox } from "./localDrain";
+import {
+  addRecord,
+  applyStates,
+  idsToPoll,
+  linkRecords,
+  recordsOf,
+  type LocalWrapRecord,
+} from "./localDelivery";
+import { localConsume, localDelivery, localInbox } from "../carrier/localLink";
+import { readLocalRoute, sameLocalRoute, type LocalRouteView } from "../carrier/localRoute";
+import {
+  QueuedForHomeNetworkError,
+  failedDeviceText,
+  type LocalRouteHooks,
+  type RoutedWrap,
+} from "../signer/routePublish";
 import type { UpdateManifest } from "../wire/types";
 import { fetchManifest, fetchDebManifest, APK_PATH, type DebManifest } from "./updateCheck";
 import { makeEmpty, makeSeed } from "../data/seed";
@@ -114,6 +135,9 @@ export interface CharterState {
   requests: ChildRequest[];
   activity: ActivityEvent[];
   signer: SignerState;
+  /** Wraps handed to the carrier for home-network delivery, with what the
+   *  ward's ACK said (see ./localDelivery). Bounded; absent in older saves. */
+  localDeliveries?: LocalWrapRecord[];
 }
 
 // v2: the production default is now an empty (clean) state, so bump the key —
@@ -221,12 +245,16 @@ export function importPersistedState(json: string): void {
   localStorage.setItem(STORAGE_KEY, json);
 }
 
-function persist(state: CharterState): void {
-  if (persistenceFrozen) return; // a restored household is on disk — reload owns the truth
+/** True when the state really reached storage. The home-network inbox is only
+ *  told it may forget a wrap once the state that holds its result is written. */
+function persist(state: CharterState): boolean {
+  if (persistenceFrozen) return false; // a restored household is on disk — reload owns the truth
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
   } catch {
     // Storage full / private mode — non-fatal for the demo.
+    return false;
   }
 }
 
@@ -261,6 +289,9 @@ type Action =
   | { type: "SET_REQUEST_STATUS"; id: string; status: ChildRequest["status"] }
   | { type: "SET_REQUEST_CHOSEN_MINUTES"; id: string; minutes: number }
   | { type: "ADD_ACTIVITY"; event: ActivityEvent }
+  | { type: "RECORD_LOCAL_WRAP"; record: LocalWrapRecord }
+  | { type: "APPLY_LOCAL_DELIVERY"; states: Parameters<typeof applyStates>[1] }
+  | { type: "LINK_LOCAL_WRAPS"; wraps: string[]; reqId: string }
   | { type: "SET_SIGNER"; signer: SignerState };
 
 function mapDevice(
@@ -407,6 +438,21 @@ export function reducer(state: CharterState, action: Action): CharterState {
       };
     case "ADD_ACTIVITY":
       return { ...state, activity: [action.event, ...state.activity] };
+    case "RECORD_LOCAL_WRAP":
+      return {
+        ...state,
+        localDeliveries: addRecord(recordsOf(state.localDeliveries), action.record, Date.now()),
+      };
+    case "APPLY_LOCAL_DELIVERY": {
+      const cur = recordsOf(state.localDeliveries);
+      const next = applyStates(cur, action.states);
+      return next === cur ? state : { ...state, localDeliveries: next };
+    }
+    case "LINK_LOCAL_WRAPS": {
+      const cur = recordsOf(state.localDeliveries);
+      const next = linkRecords(cur, action.wraps, action.reqId);
+      return next === cur ? state : { ...state, localDeliveries: next };
+    }
     case "SET_SIGNER":
       return { ...state, signer: action.signer };
     default:
@@ -430,8 +476,18 @@ export interface PendingSignature {
   detail: string;
 }
 
+/** What became of a signed decision: sent, cancelled at the confirm, or held
+ *  by the carrier for devices that aren't on the home network yet. */
+type DecisionSent =
+  | { status: "sent" }
+  | { status: "cancelled" }
+  | { status: "queued"; devices: string[] };
+
 export interface CharterContextValue {
   state: CharterState;
+  /** The carrier's home-network route, read ONCE per poll here and shared by
+   *  every screen (see `useLocalRoute`) — rows never poll the bridge. */
+  localRoute: LocalRouteView;
 
   // Family
   addChild: (name: string, color?: string) => Child;
@@ -483,13 +539,13 @@ export interface CharterContextValue {
   /** Give a child minutes with no ask outstanding (and after a deny). Today
    *  only. `groupId` tops up that named-times group's own pool instead of
    *  the whole-device one. */
-  giveTime: (childId: string, minutes: number, groupId?: string) => Promise<boolean>;
+  giveTime: (childId: string, minutes: number, groupId?: string) => Promise<SendResult>;
   /** Ask a ward to finish up now (or, with `lift`, allow them back on). */
-  standDown: (childId: string, lift?: boolean) => Promise<boolean>;
+  standDown: (childId: string, lift?: boolean) => Promise<SendResult>;
   /** Open a short, signed window during which the ward drops its install lock. */
-  openMaintenanceWindow: (childId: string, minutes: number) => Promise<boolean>;
+  openMaintenanceWindow: (childId: string, minutes: number) => Promise<SendResult>;
   /** Publish the `update` clause to every governed device the child uses. */
-  sendCharterUpdate: (childId: string) => Promise<boolean>;
+  sendCharterUpdate: (childId: string) => Promise<SendResult>;
   /** QR onboarding: the outstanding pairing wait, if a QR is on screen. */
   phonePairing: { childId: string; token: string; foundMachine: string | null } | null;
   /** Mint a one-time token and start watching for its STATUS echo. */
@@ -546,7 +602,7 @@ export interface CharterContextValue {
       freeGroups?: FreeGroupRecord[];
     },
   ) => Promise<ClauseDelivery>;
-  setBlocked: (childId: string, policyId: string, blocked: boolean) => Promise<void>;
+  setBlocked: (childId: string, policyId: string, blocked: boolean) => Promise<ClauseDelivery | void>;
   /** App-scope: save an app's block + allowed-hours as ONE signed change. The
    *  whole per-app rule is replace-the-set (aggregated into the child's single
    *  `appRules` clause), so both dimensions travel together. `schedule`
@@ -555,7 +611,7 @@ export interface CharterContextValue {
     childId: string,
     policyId: string,
     next: { blocked: boolean; schedule?: Schedule },
-  ) => Promise<void>;
+  ) => Promise<ClauseDelivery | void>;
   addAppLimit: (childId: string, app: { appId: string; label: string }) => Policy;
   removePolicy: (childId: string, policyId: string) => void;
 
@@ -623,10 +679,28 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     stateRef.current = state;
   }, [state]);
 
+  // Wrap ids the carrier's home-network inbox may forget — but only once the
+  // state holding what they produced has reached storage (see ./localDrain).
+  const consumeQueue = useRef(new ConsumeQueue()).current;
+  const persistedOk = useRef(true);
+  const flushLocalConsume = useCallback(
+    (s: CharterState) => {
+      consumeQueue.flush({
+        persistedOk: persistedOk.current,
+        hasRequest: (reqId) => s.requests.some((r) => r.reqId === reqId),
+        consume: (ids) => {
+          localConsume(ids);
+        },
+      });
+    },
+    [consumeQueue],
+  );
+
   // Persist on every change.
   useEffect(() => {
-    persist(state);
-  }, [state]);
+    persistedOk.current = persist(state);
+    flushLocalConsume(state);
+  }, [state, flushLocalConsume]);
 
   // The confirm gate drives the "Approve in Signet" sheet when auto-sign is off
   // (the mock signer). Stable so the signer can be rebuilt on (un)pair.
@@ -659,13 +733,70 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  // Home-network delivery bookkeeping, handed to whichever real signer is
+  // built. Each send reports the wraps the carrier took for IT (the signer's
+  // own result), so its activity line (and an app-open approval) is tied to
+  // exactly its own ACKs — never to a concurrent send to the same child.
+  const localRoute = useRef<LocalRouteHooks>({
+    deviceName: (machine) => {
+      for (const c of stateRef.current.children) {
+        const d = c.devices.find((dev) => dev.devicePubkey === machine);
+        if (d) return d.label;
+      }
+      return undefined;
+    },
+    onRouted: (w: RoutedWrap) => {
+      if (w.meta.kind === "other") return;
+      let found: { childId: string; deviceId: string } | undefined;
+      for (const c of stateRef.current.children) {
+        const d = c.devices.find((dev) => dev.devicePubkey === w.machine);
+        if (d) {
+          found = { childId: c.id, deviceId: d.id };
+          break;
+        }
+      }
+      dispatch({
+        type: "RECORD_LOCAL_WRAP",
+        record: {
+          wrap: w.wrapId,
+          machine: w.machine,
+          deviceId: found?.deviceId,
+          childId: found?.childId,
+          kind: w.meta.kind,
+          reqId: w.meta.reqId,
+          at: Date.now(),
+          state: w.state,
+        },
+      });
+    },
+  }).current;
+
+  /** A queued (or partial) send, with machine keys turned into the names the
+   *  guardian knows. */
+  const queuedDelivery = useCallback(
+    (err: QueuedForHomeNetworkError): Extract<ClauseDelivery, { outcome: "queued" }> => {
+      const name = (m: string) => localRoute.deviceName?.(m) ?? "their device";
+      return {
+        outcome: "queued",
+        message: err.message,
+        devices: err.devices,
+        reached: err.reached.map(name),
+        ...(err.failed.length > 0
+          ? { failed: err.failed.map((f) => failedDeviceText(name(f.machine), f, { partial: true })) }
+          : {}),
+        ...(err.wraps.length > 0 ? { wraps: err.wraps } : {}),
+      };
+    },
+    [localRoute],
+  );
+
   // Pick the signer from persisted state: kind "local" → the local-key
   // self-signer; a paired `bunkerUri` → the REAL Signet signer; otherwise the
   // local mock (the demo default). Rebuilt on (un)pair.
   const buildSigner = useCallback(
     (signerState: SignerState): Signer =>
-      selectSigner(signerState, { resolveChild, childPolicies, confirmGate }),
-    [resolveChild, childPolicies, confirmGate],
+      selectSigner(signerState, { resolveChild, childPolicies, confirmGate, localRoute }),
+    [resolveChild, childPolicies, confirmGate, localRoute],
   );
 
   // Created once for the provider lifetime; reassigned by pair/disconnect.
@@ -709,6 +840,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // keep the Today card's displayed cap honest about what the guardian
       // themself granted, rather than parsing it back out of `summary`.
       grant?: { bucketId?: string; minutesGranted?: number },
+      // Clause wraps the carrier took for home-network delivery, so this line
+      // can later say "applied on {device}" (see ./localDelivery).
+      wraps?: string[],
     ) => {
       dispatch({
         type: "ADD_ACTIVITY",
@@ -720,6 +854,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           summary,
           bucketId: grant?.bucketId,
           minutesGranted: grant?.minutesGranted,
+          ...(wraps && wraps.length > 0 ? { wraps } : {}),
         },
       });
     },
@@ -1288,7 +1423,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * the schedule, which rewrites a standing rule to solve a one-off.
    */
   const giveTime = useCallback(
-    async (childId: string, minutes: number, groupId?: string): Promise<boolean> => {
+    async (childId: string, minutes: number, groupId?: string): Promise<SendResult> => {
       const s = signer.current;
       if (!s?.signGiftClause || !s.status().connected) return false;
       const child = stateRef.current.children.find((c) => c.id === childId);
@@ -1296,8 +1431,19 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // The child's own day boundary, never the guardian phone's — schedule,
       // then budget, then (a named-times-only ward's only tz) buckets (C-1).
       const tz = resolveChildTz(devicePolicy);
+      // Some devices may be away from the home network: the carrier holds the
+      // change for them. The gift IS signed either way, so it is logged — with
+      // the real split of who got it and who is still waiting.
+      let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
-        await s.signGiftClause(childId, minutes, tz, groupId);
+        try {
+          wraps = (await s.signGiftClause(childId, minutes, tz, groupId)).wraps;
+        } catch (err) {
+          if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+          queued = queuedDelivery(err);
+          wraps = queued.wraps;
+        }
         // Record the standing alongside the gift. "You gave 5 more minutes"
         // reads the same whether the ward was on target or two hours over;
         // saying which makes the pattern visible across a week instead of
@@ -1316,16 +1462,17 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         addActivity(
           childId,
           "rule-changed",
-          note ? `${what} (${note})` : what,
+          (note ? `${what} (${note})` : what) + (queued ? undeliveredNote(queued) : ""),
           groupId ? { bucketId: groupId, minutesGranted: minutes } : undefined,
+          wraps,
         );
-        return true;
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
         if (err instanceof SignerCancelled) return false;
         throw err;
       }
     },
-    [addActivity],
+    [addActivity, queuedDelivery],
   );
 
   /**
@@ -1334,7 +1481,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * signed.
    */
   const standDown = useCallback(
-    async (childId: string, lift = false): Promise<boolean> => {
+    async (childId: string, lift = false): Promise<SendResult> => {
       const s = signer.current;
       if (!s?.signStandDownClause || !s.status().connected) return false;
       const child = stateRef.current.children.find((c) => c.id === childId);
@@ -1342,46 +1489,69 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // The ward's own day boundary decides when it lapses, never the
       // guardian phone's — the same rule a gift's expiry follows (C-1).
       const tz = resolveChildTz(devicePolicy);
+      let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
-        await s.signStandDownClause(childId, { lift, tz });
+        try {
+          wraps = (await s.signStandDownClause(childId, { lift, tz })).wraps;
+        } catch (err) {
+          if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+          queued = queuedDelivery(err);
+          wraps = queued.wraps;
+        }
         addActivity(
           childId,
           "rule-changed",
-          lift ? "You allowed them back on" : "You asked them to finish up now",
+          (lift ? "You allowed them back on" : "You asked them to finish up now") +
+            (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
         );
-        return true;
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
         if (err instanceof SignerCancelled) return false;
         throw err;
       }
     },
-    [addActivity],
+    [addActivity, queuedDelivery],
   );
 
   const openMaintenanceWindow = useCallback(
-    async (childId: string, minutes: number): Promise<boolean> => {
+    async (childId: string, minutes: number): Promise<SendResult> => {
       const s = signer.current;
       if (!s?.signMaintenanceClause || !s.status().connected) return false;
+      let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
-        await s.signMaintenanceClause(childId, minutes);
+        try {
+          wraps = (await s.signMaintenanceClause(childId, minutes)).wraps;
+        } catch (err) {
+          if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+          queued = queuedDelivery(err);
+          wraps = queued.wraps;
+        }
         addActivity(
           childId,
           "rule-changed",
-          minutes <= 0
+          (minutes <= 0
             ? "You closed the install window"
-            : `You allowed installs for ${minutes} minutes`,
+            : `You allowed installs for ${minutes} minutes`) + (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
         );
-        return true;
+        // Held for the home network is NOT an open window: the screen must
+        // say it is waiting, not count down one the phone never received.
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
         if (err instanceof SignerCancelled) return false;
         throw err;
       }
     },
-    [addActivity],
+    [addActivity, queuedDelivery],
   );
 
   const sendCharterUpdate = useCallback(
-    async (childId: string): Promise<boolean> => {
+    async (childId: string): Promise<SendResult> => {
       const manifest = updateManifest;
       if (!manifest || !signer.current!.status().connected) return false;
       // A relay-announced release (and a current origin JSON) names every
@@ -1407,20 +1577,31 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         (manifest.url
           ? manifest.url
           : new URL(manifest.path ?? APK_PATH, window.location.origin).toString());
+      let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
       try {
-        await signer.current!.signUpdateClause(childId, manifest, url);
+        try {
+          wraps = (await signer.current!.signUpdateClause(childId, manifest, url)).wraps;
+        } catch (err) {
+          if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+          queued = queuedDelivery(err);
+          wraps = queued.wraps;
+        }
         addActivity(
           childId,
           "rule-changed",
-          `You sent a Kintrinsic update (${manifest.versionName}) to the devices`,
+          `You sent a Kintrinsic update (${manifest.versionName}) to the devices` +
+            (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
         );
-        return true;
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
       } catch (err) {
         if (err instanceof SignerCancelled) return false;
         throw err;
       }
     },
-    [updateManifest, addActivity],
+    [updateManifest, addActivity, queuedDelivery],
   );
 
   const ingestDeviceStatus = useCallback((status: DeviceStatus) => {
@@ -1497,6 +1678,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const pollCursor = useRef<number | null>(null);
   const handledWraps = useRef<Set<string>>(new Set());
 
+  /** The intake's view of this provider — shared by the relay poll and the
+   *  home-network drain, so a wrap arriving by both is handled once. */
+  const wrapContext = useCallback(
+    (guardianSk: Uint8Array) => ({
+      guardianSk,
+      handledWraps: handledWraps.current,
+      seenReqIds: seenReqIds.current,
+      hasRequest: (reqId: string) => stateRef.current.requests.some((r) => r.reqId === reqId),
+      ingestStatus: ingestDeviceStatus,
+      ingestRequest: ingestDeviceRequest,
+    }),
+    [ingestDeviceStatus, ingestDeviceRequest],
+  );
+
   /** One relay read: STATUS heartbeats + the children's asks. Hoisted out of
    *  the interval so a focus event and a pull-to-refresh can run exactly the
    *  same fetch the timer does. */
@@ -1535,44 +1730,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         "#p": [guardianPk],
         since,
       }, queryOptions);
+      const ctx = wrapContext(guardianSk);
       for (const w of wraps) {
-        // The one line that saves the battery: everything below this decrypts.
-        if (handledWraps.current.has(w.id)) continue;
-        const s = unwrapStatus(w, guardianSk);
-        if (s) {
-          ingestDeviceStatus(s);
-          handledWraps.current.add(w.id);
-          continue;
-        }
-        const req = unwrapRequest(w, guardianSk);
-        if (!req) {
-          // Not ours, or not readable. Neither will change with time.
-          handledWraps.current.add(w.id);
-          continue;
-        }
-        if (
-          seenReqIds.current.has(req.reqId) ||
-          stateRef.current.requests.some((r) => r.reqId === req.reqId)
-        ) {
-          handledWraps.current.add(w.id);
-          continue;
-        }
-        // Mark seen only once it LANDED. This used to consume the id first, so
-        // an ask that arrived while the ward's phone was missing from the
-        // guardian's records was dropped by ingest and then skipped forever —
-        // even though the relay keeps it for 24h and every poll re-reads that
-        // window. A ward asking for time and getting permanent silence is the
-        // worst version of this bug: she waits, and nobody was ever told.
-        // Failing to consume it means the next poll heals it by itself the
-        // moment her phone is set up — which is why an unlanded ask must also
-        // hold the cursor open, or the narrowed window would take away the
-        // second chance the wide one exists to give.
-        if (ingestDeviceRequest(req)) {
-          seenReqIds.current.add(req.reqId);
-          handledWraps.current.add(w.id);
-        } else {
-          unfinished = true;
-        }
+        // The same intake the home-network drain uses (./ingestWrap).
+        // An "unlanded" ask holds the cursor open so the wide window keeps
+        // coming back until it lands or ages out.
+        if (ingestWrap(w, ctx).kind === "unlanded") unfinished = true;
       }
       pollCursor.current = nextCursor(pollCursor.current, startedAt, unfinished);
       trimHandled(handledWraps.current);
@@ -1582,7 +1745,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     } finally {
       pool.close(relays);
     }
-  }, [ingestDeviceStatus, ingestDeviceRequest]);
+  }, [wrapContext]);
 
   useEffect(() => {
     if (state.signer.kind !== "local") return;
@@ -1604,6 +1767,85 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       clearInterval(id);
     };
   }, [state.signer.kind, pollRelayOnce, phonePairingWaiting]);
+
+  /**
+   * One drain of the carrier's home-network inbox: wraps wards sent over their
+   * direct link. They go through exactly the intake the relay poll uses, so a
+   * wrap that also arrives by relay (same id) collapses to one entry. The
+   * carrier is told it may forget a wrap only after the state that holds its
+   * result has been persisted (the consume queue, flushed by the persist
+   * effect) — rejected, unreadable and duplicate wraps are consumed too.
+   */
+  const drainLocalOnce = useCallback(() => {
+    if (stateRef.current.signer.kind !== "local") return;
+    // Feature-detect before doing any work: a browser or older shell has no inbox.
+    if (typeof window.CharterCarrier?.localInbox !== "function") return;
+    let guardianSk: Uint8Array;
+    try {
+      guardianSk = loadOrCreateGuardianKey();
+    } catch {
+      return;
+    }
+    drainLocalInbox({
+      inbox: localInbox,
+      ingest: (w) => ingestWrap(w, wrapContext(guardianSk)),
+      queue: consumeQueue,
+    });
+    trimHandled(handledWraps.current);
+    // Anything that needs no new state (statuses, duplicates, rejects) can go
+    // now; a new ask waits for the persist effect to see it written.
+    flushLocalConsume(stateRef.current);
+  }, [wrapContext, consumeQueue, flushLocalConsume]);
+
+  useEffect(() => {
+    if (state.signer.kind !== "local") return;
+    const run = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      drainLocalOnce();
+    };
+    run(); // on startup
+    const onVisible = () => {
+      if (document.visibilityState === "visible") drainLocalOnce();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(run, 2_000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(id);
+    };
+  }, [state.signer.kind, drainLocalOnce]);
+
+  // The home-network route (live sessions, or why there is none), read ONCE
+  // per poll below and shared with every screen through the context — device
+  // rows used to poll the bridge themselves, a `localInfo()` call per row.
+  const [localRouteView, setLocalRouteView] = useState<LocalRouteView>(() => readLocalRoute());
+
+  // While the app is on screen, ask the carrier how each home-network wrap is
+  // getting on (queued, sent, received, then the ward's ACK) until it is final,
+  // and refresh the shared route view. This is the ONLY local poll the screens
+  // depend on.
+  useEffect(() => {
+    const poll = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const next = readLocalRoute();
+      setLocalRouteView((cur) => (sameLocalRoute(cur, next) ? cur : next));
+      if (typeof window.CharterCarrier?.localDelivery !== "function") return;
+      const ids = idsToPoll(recordsOf(stateRef.current.localDeliveries), Date.now());
+      if (ids.length === 0) return;
+      const states = localDelivery(ids);
+      if (states) dispatch({ type: "APPLY_LOCAL_DELIVERY", states });
+    };
+    poll();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(poll, 3_000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(id);
+    };
+  }, []);
 
   /** Everything a guardian expects a "refresh" to cover: what the devices have
    *  reported, and what versions the site is publishing. */
@@ -1675,14 +1917,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       );
       if (blocked) return blocked;
       try {
-        await signer.current!.signClause(childId, policy);
-        return { outcome: "sent" };
+        const signed = await signer.current!.signClause(childId, policy);
+        return signed.wraps && signed.wraps.length > 0 ? { outcome: "sent", wraps: signed.wraps } : { outcome: "sent" };
       } catch (err) {
         if (err instanceof SignerCancelled) return { outcome: "cancelled" };
+        // The relays failed but the carrier is holding the change for a ward
+        // that isn't home yet. The rule is saved here and on its way — but it
+        // has NOT been sent, and must not read as if it had.
+        if (err instanceof QueuedForHomeNetworkError) return queuedDelivery(err);
         throw err;
       }
     },
-    [resolveChild],
+    [resolveChild, queuedDelivery],
   );
 
   // Close the claim loop: a just-claimed phone has never been a target of any
@@ -1735,6 +1981,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         childId,
         "rule-changed",
         "You updated the daily schedule" + undeliveredNote(delivery),
+        undefined,
+        delivery.outcome === "sent" || delivery.outcome === "queued" ? delivery.wraps : undefined,
       );
     },
     [signClauseIfConnected, addActivity],
@@ -1757,6 +2005,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         childId,
         "rule-changed",
         "You updated the daily time limit" + undeliveredNote(delivery),
+        undefined,
+        delivery.outcome === "sent" || delivery.outcome === "queued" ? delivery.wraps : undefined,
       );
     },
     [signClauseIfConnected, addActivity],
@@ -1865,6 +2115,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
             : onlyLearning
               ? "You updated the learning apps"
               : "You updated the screen-time limits") + undeliveredNote(delivery),
+        undefined,
+        delivery.outcome === "sent" || delivery.outcome === "queued" ? delivery.wraps : undefined,
       );
       return delivery;
     },
@@ -1889,7 +2141,10 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         "rule-changed",
         (blocked ? `You blocked ${label}` : `You unblocked ${label}`) +
           undeliveredNote(delivery),
+        undefined,
+        delivery.outcome === "sent" || delivery.outcome === "queued" ? delivery.wraps : undefined,
       );
+      return delivery;
     },
     [signClauseIfConnected, addActivity],
   );
@@ -1921,7 +2176,10 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         childId,
         "rule-changed",
         `You updated the rules for ${existing.scope.label}` + undeliveredNote(delivery),
+        undefined,
+        delivery.outcome === "sent" || delivery.outcome === "queued" ? delivery.wraps : undefined,
       );
+      return delivery;
     },
     [signClauseIfConnected, addActivity],
   );
@@ -2021,25 +2279,33 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [updateManifest],
   );
 
+  /**
+   * Sign and send a decision. "queued" is NOT a failure: the relays were out of
+   * reach, but the carrier is holding the signed answer for the ward's device
+   * and will deliver it when it joins the home network. The decision exists, so
+   * the caller records the ask as answered — leaving it pending would invite a
+   * second, conflicting signature.
+   */
   const signDecisionIfConnected = useCallback(
     async (
       requestId: string,
       decision: "approved" | "denied",
       ctx: DecisionContext,
-    ): Promise<boolean> => {
+    ): Promise<DecisionSent> => {
       // Offline drafts are for local-only (simulated) asks; a wire-correlated
       // ask throws here instead of faking success with no GRANT published.
       if (
         decisionPath(signer.current!.status().connected, ctx.wire ?? ctx.install ?? ctx.appOpen) ===
         "record-locally"
       ) {
-        return true;
+        return { status: "sent" };
       }
       try {
         await signer.current!.signDecision(requestId, decision, ctx);
-        return true;
+        return { status: "sent" };
       } catch (err) {
-        if (err instanceof SignerCancelled) return false;
+        if (err instanceof SignerCancelled) return { status: "cancelled" };
+        if (err instanceof QueuedForHomeNetworkError) return { status: "queued", devices: err.devices };
         throw err;
       }
     },
@@ -2050,6 +2316,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (id: string, minutesGranted?: number) => {
       const req = stateRef.current.requests.find((r) => r.id === id);
       if (!req) return;
+      // Already answered (including an answer the carrier is still holding for
+      // the home network): never sign a second, possibly conflicting decision.
+      if (req.status === "approved" || req.status === "denied") return;
       // G-3 (review 2026-09-27, F3): the buttons disable once an ask is past
       // the ward's own 24h TTL, but that was the ONLY guard — a caller that
       // reaches this function any other way (or a UI bug) could still sign
@@ -2069,12 +2338,13 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           `${req.appLabel ?? req.appId} isn't in your trusted app list yet, so it can't be verified. Add it to the catalog first.`,
         );
       }
-      const ok = await signDecisionIfConnected(
+      const sent = await signDecisionIfConnected(
         id,
         "approved",
         decisionContext(req, minutesGranted),
       );
-      if (!ok) return;
+      if (sent.status === "cancelled") return;
+      const waiting = sent.status === "queued" ? waitingAnswerNote(sent.devices) : "";
       dispatch({ type: "SET_REQUEST_STATUS", id, status: "approved" });
       // install.app / run.program are PER-ARTIFACT and SINGLE-USE: approving
       // grants this one app, just this once — it never creates or mutates a
@@ -2085,7 +2355,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         addActivity(
           req.childId,
           "enacted",
-          `You approved ${label} to ${verb} — just this once`,
+          `You approved ${label} to ${verb} — just this once${waiting}`,
         );
         return;
       }
@@ -2097,7 +2367,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       addActivity(
         req.childId,
         "enacted",
-        `You approved: ${req.title}${detail}`,
+        `You approved: ${req.title}${detail}${waiting}`,
         req.limitHit === "bucket" && req.bucketId && mins
           ? { bucketId: req.bucketId, minutesGranted: mins }
           : undefined,
@@ -2110,12 +2380,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (id: string) => {
       const req = stateRef.current.requests.find((r) => r.id === id);
       if (!req) return;
+      if (req.status === "approved" || req.status === "denied") return; // see approveRequest
       // A deny still travels as a signed GRANT (decision "deny", 0 minutes) —
       // the device tells the child "not now" instead of leaving them hanging.
       // For app.open this is the WHOLE answer (no clause change at all — the
       // app is already blocked, and stays that way).
-      const ok = await signDecisionIfConnected(id, "denied", decisionContext(req, 0));
-      if (!ok) return;
+      const sent = await signDecisionIfConnected(id, "denied", decisionContext(req, 0));
+      if (sent.status === "cancelled") return;
+      const waiting = sent.status === "queued" ? waitingAnswerNote(sent.devices) : "";
       dispatch({ type: "SET_REQUEST_STATUS", id, status: "denied" });
       // `req.title` is built once at ingestion (`requestCards.ts`) and could
       // in principle carry an already-saved app.open card's raw pkg mid-
@@ -2127,8 +2399,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         req.childId,
         "denied",
         req.kind === "app.open"
-          ? `You said not now: Open ${identityDisplayLabel(req.appLabel, req.appId) ?? "this app"}?`
-          : `You said not now: ${req.title}`,
+          ? `You said not now: Open ${identityDisplayLabel(req.appLabel, req.appId) ?? "this app"}?${waiting}`
+          : `You said not now: ${req.title}${waiting}`,
       );
     },
     [signDecisionIfConnected, decisionContext, addActivity],
@@ -2191,6 +2463,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     async (id: string, untilUnix: number, window: AppOpenWindow) => {
       const req = stateRef.current.requests.find((r) => r.id === id);
       if (!req || req.kind !== "app.open" || !req.appId) return;
+      if (req.status === "approved" || req.status === "denied") return; // see approveRequest
       // G-3 (review 2026-09-27, F3) — see the matching guard in
       // `approveRequest` above; this is the second (and only other) path
       // that signs an approval for an ask.
@@ -2221,9 +2494,19 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // The ordering itself is the load-bearing part (N2) — run it through
       // the separately-tested orchestrator rather than reimplementing the
       // sequencing inline here.
+      let holdWraps: string[] = [];
+      let decisionWaiting: string[] = [];
       const result = await runApproveAppOpenFlow({
-        saveHold: () => savePolicy(req.childId, devicePolicy.id, composed),
-        sendDecision: () => signDecisionIfConnected(id, "approved", decisionContext(req, minutesGranted)),
+        saveHold: async () => {
+          const delivery = await savePolicy(req.childId, devicePolicy.id, composed);
+          if (delivery.outcome === "sent" || delivery.outcome === "queued") holdWraps = delivery.wraps ?? [];
+          return delivery;
+        },
+        sendDecision: async () => {
+          const sent = await signDecisionIfConnected(id, "approved", decisionContext(req, minutesGranted));
+          if (sent.status === "queued") decisionWaiting = sent.devices;
+          return sent.status !== "cancelled";
+        },
       });
       if (result.outcome === "refused") throw new Error(result.message);
       // The clause landed (the app can open); only the courtesy echo's own
@@ -2231,13 +2514,26 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // just don't mark this ask "answered" when the loop didn't fully close.
       if (result.outcome === "decision-cancelled") return;
 
+      // Tie the apps clause to this ask: "applied" is only claimed once the
+      // grant AND this device's clause both are (see ./localDelivery).
+      if (req.reqId && holdWraps.length > 0) {
+        dispatch({ type: "LINK_LOCAL_WRAPS", wraps: holdWraps, reqId: req.reqId });
+      }
+      // Held clause and/or held grant: the approval stands, and the log says
+      // who it is still waiting for.
+      const waitingDevices = [...new Set([...(result.holdQueued?.devices ?? []), ...decisionWaiting])];
+      // A hold that did not get to some device says so, as a plain warning.
+      const holdFailed = result.holdQueued?.failed ?? [];
+      const waiting =
+        (waitingDevices.length > 0 ? waitingAnswerNote(waitingDevices) : "") +
+        (holdFailed.length > 0 ? ` — ${holdFailed.join(" ")}` : "");
       dispatch({ type: "SET_REQUEST_STATUS", id, status: "approved" });
       // Belt and braces (F1 review): resolve through `identityDisplayLabel`
       // rather than trust `req.appLabel`/`req.appId` verbatim.
       addActivity(
         req.childId,
         "enacted",
-        `You let them open ${identityDisplayLabel(req.appLabel, req.appId) ?? "that app"} ${APP_OPEN_WINDOW_PHRASE[window]}`,
+        `You let them open ${identityDisplayLabel(req.appLabel, req.appId) ?? "that app"} ${APP_OPEN_WINDOW_PHRASE[window]}${waiting}`,
       );
     },
     [savePolicy, signDecisionIfConnected, decisionContext, addActivity],
@@ -2334,6 +2630,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const value = useMemo<CharterContextValue>(
     () => ({
       state,
+      localRoute: localRouteView,
       addChild,
       editChild,
       removeChild,
@@ -2387,6 +2684,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     }),
     [
       state,
+      localRouteView,
       addChild,
       editChild,
       removeChild,

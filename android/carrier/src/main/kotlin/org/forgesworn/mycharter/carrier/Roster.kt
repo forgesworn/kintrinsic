@@ -9,7 +9,22 @@ import org.json.JSONObject
  * part 1). The PWA already knows every child's devices; the carrier does not
  * — it only ever sees a device's pubkey.
  */
-data class RosterEntry(val machine: String, val childName: String, val deviceLabel: String)
+data class RosterEntry(
+    val machine: String,
+    val childName: String,
+    val deviceLabel: String,
+    /** Only paired devices are admitted to the local link's handshake.
+     *  Absent on the wire (an older console) means paired; see [pairedField]. */
+    val paired: Boolean = true,
+)
+
+/**
+ * The roster's `paired` flag. Absent means paired (consoles older than the
+ * local link never sent it); anything present that is not the JSON boolean
+ * `true` means NOT paired. This feeds the local link's admission list, so a
+ * malformed value must deny, never admit.
+ */
+fun pairedField(o: JSONObject): Boolean = !o.has("paired") || o.opt("paired") == true
 
 /** What a resolved roster hit gives [org.forgesworn.mycharter.service.Notifier]
  *  to compose text with. */
@@ -33,7 +48,7 @@ data class RosterPayload(val entries: List<RosterEntry>) {
                 val childName = e.optString("childName", "")
                 val deviceLabel = e.optString("deviceLabel", "")
                 if (machine.isEmpty() || childName.isEmpty() || deviceLabel.isEmpty()) return null
-                RosterEntry(machine, childName, deviceLabel)
+                RosterEntry(machine, childName, deviceLabel, pairedField(e))
             }
             return RosterPayload(entries)
         }

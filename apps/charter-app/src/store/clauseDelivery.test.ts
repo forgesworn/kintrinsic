@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   clauseDeliveryPrecheck,
+  queuedSaveWarning,
+  queuedSendLine,
+  splitSentence,
   undeliveredNote,
+  waitingAnswerNote,
   type ClauseDelivery,
 } from "./clauseDelivery";
 
@@ -74,5 +78,90 @@ describe("undeliveredNote", () => {
       { outcome: "undelivered", why: "no-device" },
     ];
     for (const d of all) expect(typeof undeliveredNote(d)).toBe("string");
+  });
+});
+
+describe("a change held for a device that is not on the home network yet", () => {
+  const queued: ClauseDelivery = {
+    outcome: "queued",
+    message: "Not sent yet — it'll reach Robin's laptop when it's on the home network.",
+  };
+
+  it("is saved but plainly not sent, in the activity line", () => {
+    expect(undeliveredNote(queued)).toBe(
+      " — saved here. Not sent yet: it'll reach Robin's laptop when it's on the home network.",
+    );
+  });
+
+  it("a sent change, with or without tracked wraps, adds no note", () => {
+    expect(undeliveredNote({ outcome: "sent" })).toBe("");
+    expect(undeliveredNote({ outcome: "sent", wraps: ["w1"] })).toBe("");
+  });
+});
+
+describe("the words for a held change", () => {
+  const all: ClauseDelivery = {
+    outcome: "queued",
+    message: "Not sent yet — it'll reach Robin's laptop when it's on the home network.",
+    devices: ["Robin's laptop"],
+  };
+  const partial: ClauseDelivery = { ...all, reached: ["Mia's phone"] } as ClauseDelivery;
+
+  it("a held rule save warns plainly, naming who it is waiting for", () => {
+    expect(queuedSaveWarning(all)).toBe("Saved here. It'll reach Robin's laptop when it's on the home network.");
+    expect(queuedSaveWarning({ ...all, devices: ["A", "B"] } as ClauseDelivery)).toBe(
+      "Saved here. It'll reach A and B when they're on the home network.",
+    );
+    expect(queuedSaveWarning(partial)).toBe(
+      "Saved here. It'll reach Robin's laptop when it's on the home network. Mia's phone already got it.",
+    );
+  });
+
+  it("is silent for every outcome that is not a held change", () => {
+    expect(queuedSaveWarning({ outcome: "sent" })).toBeNull();
+    expect(queuedSaveWarning({ outcome: "cancelled" })).toBeNull();
+    expect(queuedSaveWarning({ outcome: "undelivered", why: "no-signer" })).toBeNull();
+  });
+
+  it("a partial batch is written up as who got it and who is waiting", () => {
+    expect(splitSentence(["Mia's phone"], ["Robin's laptop"])).toBe(
+      "Reached Mia's phone. Robin's laptop will get it when it's on the home network.",
+    );
+    expect(splitSentence(["A", "B"], ["C", "D"])).toBe("Reached A and B. C and D will get it when they're on the home network.");
+    expect(undeliveredNote(partial)).toBe(" — Reached Mia's phone. Robin's laptop will get it when it's on the home network.");
+    expect(queuedSendLine(partial as Extract<ClauseDelivery, { outcome: "queued" }>)).toBe(
+      "Reached Mia's phone. Robin's laptop will get it when it's on the home network.",
+    );
+  });
+
+  it("a device the send did not get to is named in every sentence, beside who got it and who is waiting (H2)", () => {
+    const failed = "Not sent to Robin's laptop: Couldn't reach any relay.";
+    const reachedAndFailed = {
+      outcome: "queued",
+      message: "Not sent to every device.",
+      devices: [],
+      reached: ["Mia's phone"],
+      failed: [failed],
+    } as Extract<ClauseDelivery, { outcome: "queued" }>;
+    expect(queuedSendLine(reachedAndFailed)).toBe(`Reached Mia's phone. ${failed}`);
+    expect(undeliveredNote(reachedAndFailed)).toBe(` — Reached Mia's phone. ${failed}`);
+    expect(queuedSaveWarning(reachedAndFailed)).toBe(`Saved here. Mia's phone already got it. ${failed}`);
+
+    const refused = "Mia's phone didn't accept this change.";
+    const heldAndFailed = { ...all, failed: [refused] } as Extract<ClauseDelivery, { outcome: "queued" }>;
+    expect(queuedSendLine(heldAndFailed)).toBe(`Robin's laptop will get it when it's on the home network. ${refused}`);
+    expect(queuedSaveWarning(heldAndFailed)).toBe(
+      `Saved here. It'll reach Robin's laptop when it's on the home network. ${refused}`,
+    );
+  });
+
+  it("an all-queued change keeps the plain 'not sent yet' sentence", () => {
+    expect(queuedSendLine(all as Extract<ClauseDelivery, { outcome: "queued" }>)).toBe(
+      "Not sent yet — it'll reach Robin's laptop when it's on the home network.",
+    );
+  });
+
+  it("an answer the carrier is holding says it is waiting, not that it was sent", () => {
+    expect(waitingAnswerNote(["Robin's laptop"])).toBe(" — waiting for Robin's laptop to join the home network");
   });
 });

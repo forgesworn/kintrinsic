@@ -120,6 +120,17 @@ export interface DecisionContext {
  * fulfills it locally; a real NIP-46 / Signet / Heartwood remote signer plugs
  * in behind this exact same surface later with no screen changes.
  */
+/**
+ * What a clause send resolves with. `wraps` are the ids of the wraps the
+ * Android carrier took for home-network delivery, so the activity line can
+ * follow their ACKs ("applied on …" or a warning); absent when none went that
+ * way (relays only, or a signer with no home-network route).
+ */
+export interface SignOutcome {
+  ok: true;
+  wraps?: string[];
+}
+
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
   signRelayConfig?(machine: string, relays: string[], label: string): Promise<string>;
@@ -136,7 +147,7 @@ export interface Signer {
   setAutoSign(on: boolean): Promise<void>;
 
   /** Sign a rule change (a new/updated policy) for a child. */
-  signClause(childId: string, policy: Policy): Promise<{ ok: true }>;
+  signClause(childId: string, policy: Policy): Promise<SignOutcome>;
 
   /**
    * Publish each device its consolidated cross-device usage view
@@ -155,7 +166,7 @@ export interface Signer {
    * it (level-triggered convergence).
    */
   /** Open a short, signed maintenance window (see RealSigner). */
-  signMaintenanceClause?(childId: string, minutes: number): Promise<{ ok: true }>;
+  signMaintenanceClause?(childId: string, minutes: number): Promise<SignOutcome>;
   /** Give minutes with no ask outstanding (and after a "no"). Today only.
    *  `groupId` tops up that named-times group's own pool instead of the
    *  whole-device one; absent = today's plain behaviour, unchanged. */
@@ -164,7 +175,7 @@ export interface Signer {
     minutes: number,
     tz?: string,
     groupId?: string,
-  ): Promise<{ ok: true }>;
+  ): Promise<SignOutcome>;
   /**
    * Call a stand-down: "finish up now", then locked for the rest of the ward's
    * day. Pass `lift: true` to allow them back on — that publishes a stand-down
@@ -173,12 +184,12 @@ export interface Signer {
   signStandDownClause?(
     childId: string,
     opts?: { lift?: boolean; graceSecs?: number; tz?: string },
-  ): Promise<{ ok: true }>;
+  ): Promise<SignOutcome>;
   signUpdateClause(
     childId: string,
     manifest: UpdateManifest,
     url: string,
-  ): Promise<{ ok: true }>;
+  ): Promise<SignOutcome>;
 
   /**
    * Sign + publish a parent-gated RELEASE to a device's machine pubkey — the

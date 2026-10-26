@@ -12,6 +12,7 @@ import { RealSigner, type ChildTarget } from "./realSigner";
 import { loadOrCreateGuardianKey } from "./guardianKey";
 import type { ConfirmGate } from "./mockSigner";
 import { localRelayAuth } from "./relayAuth";
+import { withLocalRoute, type LocalRouteHooks } from "./routePublish";
 
 export interface LocalSignerConfig {
   /** Resolve a child id → subject + device pubkeys + relays. */
@@ -27,6 +28,8 @@ export interface LocalSignerConfig {
   confirmGate?: ConfirmGate;
   /** Seed persisted signer state (e.g. autoSign) so a reload rebuild honors it. */
   initial?: SignerState;
+  /** Home-network delivery bookkeeping (device names, delivery tracking). */
+  localRoute?: LocalRouteHooks;
 }
 
 /**
@@ -51,19 +54,22 @@ export function createLocalSigner(config: LocalSignerConfig): RealSigner {
     };
   };
 
+  const relayPublish = async (relays: string[], event: NostrEvent): Promise<void> => {
+    // Fan out, but ONE accepted relay is the bar for "sent": settling every
+    // promise and ignoring them all meant airplane mode read as success —
+    // "she has a minute, then done for today" with nothing on any relay.
+    // An empty attempt list (no relays configured) is left to
+    // requireDeliverable's clearer message.
+    const results = await Promise.allSettled(pool.publish(relays, event, { onauth: localRelayAuth(loadKey()) }));
+    if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
+      throw new Error("Couldn't reach any relay — check your connection and try again.");
+    }
+  };
+
   return new RealSigner({
     connectGuardian,
-    publish: async (relays: string[], event: NostrEvent) => {
-      // Fan out, but ONE accepted relay is the bar for "sent": settling every
-      // promise and ignoring them all meant airplane mode read as success —
-      // "she has a minute, then done for today" with nothing on any relay.
-      // An empty attempt list (no relays configured) is left to
-      // requireDeliverable's clearer message.
-      const results = await Promise.allSettled(pool.publish(relays, event, { onauth: localRelayAuth(loadKey()) }));
-      if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
-        throw new Error("Couldn't reach any relay — check your connection and try again.");
-      }
-    },
+    publish: withLocalRoute(relayPublish, config.localRoute),
+    deviceName: config.localRoute?.deviceName,
     resolveChild: config.resolveChild,
     childPolicies: config.childPolicies,
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),

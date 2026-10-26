@@ -17,6 +17,15 @@
          raise the system install confirm (this app is not a Device Owner —
          the one-tap dialog is the expected UX). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Local network delivery (docs/local-network-design.md): watch for a
+         Wi-Fi/Ethernet network to advertise _kintrinsic._tcp on, and hold a
+         MulticastLock while advertising on Wi-Fi so a pocketed phone still
+         answers discovery. The listener's sockets are native, so no cleartext
+         network-security config is needed. Targeting API 37 will also need
+         ACCESS_LOCAL_NETWORK. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:label="@string/app_name"

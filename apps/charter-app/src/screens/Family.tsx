@@ -9,6 +9,7 @@ import {
   SectionLabel,
 } from "../components/ui";
 import { useCharter } from "../store/store";
+import type { SendResult } from "../store/clauseDelivery";
 import { goToWard } from "../domain/wardRoute";
 import { updateAvailable } from "../store/updateCheck";
 import {
@@ -37,7 +38,8 @@ import UnlockDevice from "./UnlockDevice";
 import DeviceRelays from "./DeviceRelays";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
-import { bestLiveness, livenessChip } from "../domain/liveness";
+import { anyOnHomeNetwork, bestLiveness, livenessChip } from "../domain/liveness";
+import { useLocalRoute } from "../carrier/useLocalRoute";
 import { appLockNote, deviceHealthNotes } from "../domain/deviceHealth";
 
 // Accent colors a parent can pick for a child's avatar/chips.
@@ -116,7 +118,12 @@ function ChildCard({ child }: { child: Child }) {
   const connectedCount = child.devices.filter((d) => d.pairing === "paired").length;
   // "Connected" now means reachable NOW, not merely set up — the reading a
   // guardian would take from the word anyway.
-  const childChip = livenessChip(bestLiveness(child.devices, Date.now()), Date.now());
+  const { sessions } = useLocalRoute();
+  const childChip = livenessChip(
+    bestLiveness(child.devices, Date.now()),
+    Date.now(),
+    anyOnHomeNetwork(child.devices, sessions),
+  );
 
   function saveName() {
     const next = draftName.trim();
@@ -420,7 +427,12 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
-  const [updateSent, setUpdateSent] = useState(false);
+  // `true` once the update reached the phone's way; a "queued" object when it
+  // is only held for the home network — which must not read as sent.
+  const [updateSent, setUpdateSent] = useState<SendResult>(false);
+  // The install window the carrier is holding for the home network: signed,
+  // but the phone has not got it, so no "Installs are open" countdown.
+  const [windowHeld, setWindowHeld] = useState<string | null>(null);
   const paired = device.pairing === "paired";
   // Self-update (#44): offer only when the device REPORTS a version that is
   // strictly behind the site's published artifact. Phones only — the Linux
@@ -461,6 +473,8 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   // moment the child is locked out, not only after some "locked" signal.
   const canUnlock = paired && isValidDevicePubkey(device.devicePubkey);
   const seen = lastSeenLabel(device.lastSeenAt, Date.now());
+  const { sessions: homeSessions } = useLocalRoute();
+  const onHomeNetwork = paired && !!device.devicePubkey && homeSessions.has(device.devicePubkey);
   // Kintrinsic's install lock is closed on every chartered phone, which is why a
   // ward could not update an app from their store at all. A guardian-opened,
   // signed, self-closing window is the stand-down — the same clause a stuck
@@ -528,7 +542,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
             first while sounding like both. */}
         <div className="card-sub">
           {paired ? "Managed by Kintrinsic" : "Disconnected"}
-          {paired ? ` · ${seen ?? "waiting to hear from it"}` : ""}
+          {paired ? ` · ${onHomeNetwork ? "On home network" : (seen ?? "waiting to hear from it")}` : ""}
         </div>
         {reportedName && (
           <div className="card-sub">Kintrinsic {reportedName}</div>
@@ -551,10 +565,20 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
             )}
           </div>
         )}
-        {canUpdate && updateSent && (
+        {canUpdate && updateSent === true && (
           <div className="card-sub">
             Update sent. The phone installs it on its next check-in — the
             version above changes when it lands.
+          </div>
+        )}
+        {canUpdate && typeof updateSent === "object" && (
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            Update not sent yet. {updateSent.message}
+          </div>
+        )}
+        {windowHeld && !openWindow.open && (
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            {windowHeld}
           </div>
         )}
         {updateArrived && <div className="card-sub">Updated ✓</div>}
@@ -631,7 +655,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
               variant="ghost"
               aria-label={`Update Kintrinsic on ${device.label} to ${updateManifest.versionName}`}
               onClick={() => {
-                void sendCharterUpdate(child.id).then((ok) => setUpdateSent(ok));
+                void sendCharterUpdate(child.id).then((sent) => setUpdateSent(sent));
               }}
             >
               Update Kintrinsic
@@ -645,10 +669,17 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
                 // Zero minutes = an expiry at issue: a newer clause the phone
                 // reads as already shut. Nothing to undo if it fails, because
                 // the window closes on its own regardless.
-                void openMaintenanceWindow(child.id, 0).then((ok) => {
-                  if (ok) {
+                void openMaintenanceWindow(child.id, 0).then((sent) => {
+                  if (sent) {
                     writeWindow(child.id, null, Math.floor(Date.now() / 1000));
                     setInstallOpenUntil(undefined);
+                    // A close the carrier is holding: the phone stays open
+                    // until it gets it, or until the window lapses.
+                    setWindowHeld(
+                      typeof sent === "object"
+                        ? `Not closed on the phone yet. ${sent.message} It closes on its own when the window runs out.`
+                        : null,
+                    );
                   }
                 });
               }}
@@ -662,15 +693,21 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
               aria-label={`Allow installs on ${device.label} for ${INSTALL_WINDOW_MINUTES} minutes`}
               onClick={() => {
                 void openMaintenanceWindow(child.id, INSTALL_WINDOW_MINUTES).then(
-                  (ok) => {
+                  (sent) => {
                     // Only start the countdown if the clause was actually signed
                     // and sent — a cancelled signer must not leave this screen
-                    // claiming a window the phone never received.
-                    if (ok) {
+                    // claiming a window the phone never received, and nor must
+                    // a window the carrier is only holding for the home network.
+                    if (sent === true) {
                       const nowUnix = Math.floor(Date.now() / 1000);
                       const until = nowUnix + INSTALL_WINDOW_MINUTES * 60;
                       writeWindow(child.id, until, nowUnix);
                       setInstallOpenUntil(until);
+                      setWindowHeld(null);
+                    } else if (sent) {
+                      setWindowHeld(
+                        `Installs aren’t open yet. ${sent.message} The window still closes ${INSTALL_WINDOW_MINUTES} minutes after you allowed it.`,
+                      );
                     }
                   },
                 );

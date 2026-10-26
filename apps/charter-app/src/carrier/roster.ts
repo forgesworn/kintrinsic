@@ -18,6 +18,13 @@ export interface CarrierRosterEntry {
   machine: string;
   childName: string;
   deviceLabel: string;
+  /**
+   * True only for `pairing === "paired"`. The carrier's local-network listener
+   * admits only paired machines at the handshake (an entry with no `paired`
+   * field, from an older console, means paired). Naming still covers devices
+   * mid-pairing, so they stay in the list with `paired: false`.
+   */
+  paired: boolean;
 }
 
 /**
@@ -36,6 +43,7 @@ export function buildCarrierRoster(children: Child[]): CarrierRosterEntry[] {
         machine: device.devicePubkey,
         childName: child.name,
         deviceLabel: device.label,
+        paired: device.pairing === "paired",
       });
     }
   }

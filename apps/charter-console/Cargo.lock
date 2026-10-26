@@ -219,6 +219,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "charter-link"
+version = "0.1.0"
+dependencies = [
+ "charter-crypto",
+ "charter-primitives",
+ "charter-verify",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
 name = "charter-primitives"
 version = "0.1.0"
 dependencies = [
@@ -269,6 +282,7 @@ dependencies = [
  "chacha20",
  "charter-content",
  "charter-crypto",
+ "charter-link",
  "charter-primitives",
  "charter-proto",
  "charter-sys",

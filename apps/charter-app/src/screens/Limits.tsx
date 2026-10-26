@@ -63,6 +63,7 @@ import { Section, SectionList, SubTabs } from "../components/Section";
 import { WardHeading, WardTabs } from "../components/wards";
 import { useWardRoute } from "../domain/wardRoute";
 import { freshestStatusFor, liveStatusFor, useCharter } from "../store/store";
+import { queuedSaveWarning } from "../store/clauseDelivery";
 import {
   applyToEveryDay,
   collapseSourceDay,
@@ -2834,6 +2835,9 @@ function DeviceLimits({
   );
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // A save that was kept here and handed to the carrier for the home network:
+  // not an error, not done yet — a warning that says who it is waiting for.
+  const [queuedNote, setQueuedNote] = useState<string | null>(null);
 
   // ── Per-device rules (Half A) ────────────────────────────────────────────
   // One charter, split where it fits the child. None of this exists for a
@@ -3233,6 +3237,7 @@ function DeviceLimits({
       return;
     }
     setSaveError(null);
+    setQueuedNote(null);
     setSaving(true);
     try {
       // One signed change carrying every changed dimension (shared issuedAt), so
@@ -3242,7 +3247,7 @@ function DeviceLimits({
       // each device's effective value is base + its override, so leaving the
       // dimension out would sign nothing and the parent's edit would silently
       // never reach the phone.
-      await savePolicy(child.id, policy.id, {
+      const delivery = await savePolicy(child.id, policy.id, {
         schedule: scheduleDirty || overrideDirty("schedule") ? draftSchedule : undefined,
         budget: budgetDirty || overrideDirty("budget") ? draftBudget : undefined,
         web: webDirty || overrideDirty("web") ? draftWeb : undefined,
@@ -3280,6 +3285,7 @@ function DeviceLimits({
       // `scheduleAuthored` carries the toggle from here and the card can settle
       // (this is what lets Save grey out again).
       setDormantIntent(false);
+      setQueuedNote(queuedSaveWarning(delivery));
     } catch (e) {
       // A signer failure (bunker timeout, rejected sign, wire validation) must
       // NOT vanish — the parent would think the change applied when it didn't.
@@ -3319,6 +3325,7 @@ function DeviceLimits({
     // number the guardian had thought better of reached the phone anyway.
     setDraftLifeline(buildLifeline(policy.lifeline));
     setSaveError(null);
+    setQueuedNote(null);
   }
 
   const willConfirm =
@@ -3720,6 +3727,12 @@ function DeviceLimits({
         </div>
       )}
 
+      {queuedNote && !saveError && !scheduleError && (
+        <div style={{ marginTop: 14 }}>
+          <Banner tone="warn">{queuedNote}</Banner>
+        </div>
+      )}
+
       {willConfirm && !scheduleError && (
         <div style={{ marginTop: 14 }}>
           <Banner tone="info">
@@ -3781,6 +3794,9 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
   const [draftSchedule, setDraftSchedule] = useState<Schedule>(savedSchedule);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // A save that was kept here and handed to the carrier for the home network:
+  // not an error, not done yet — a warning that says who it is waiting for.
+  const [queuedNote, setQueuedNote] = useState<string | null>(null);
 
   // Re-sync the drafts if the saved policy changes underneath us.
   useEffect(() => {
@@ -3805,13 +3821,15 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
       return;
     }
     setSaveError(null);
+    setQueuedNote(null);
     setSaving(true);
     try {
       // Block + allowed-hours travel together as ONE signed appRules change.
-      await saveAppRule(child.id, policy.id, {
+      const delivery = await saveAppRule(child.id, policy.id, {
         blocked: draftBlocked,
         schedule: scheduleOn ? draftSchedule : undefined,
       });
+      if (delivery) setQueuedNote(queuedSaveWarning(delivery));
     } catch (e) {
       // A signer failure (bunker timeout, rejected sign, wire validation) must
       // NOT vanish — the parent would think the change applied when it didn't.
@@ -3898,6 +3916,12 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
       {saveError && !scheduleError && (
         <div style={{ marginTop: 14 }}>
           <Banner tone="warn">{saveError}</Banner>
+        </div>
+      )}
+
+      {queuedNote && !saveError && !scheduleError && (
+        <div style={{ marginTop: 14 }}>
+          <Banner tone="warn">{queuedNote}</Banner>
         </div>
       )}
 

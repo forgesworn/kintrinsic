@@ -74,11 +74,22 @@ export function bestLiveness(
   return { kind: "not-set-up" };
 }
 
-/** The short status chip: what it says, and how alarmed to look. */
-export function livenessChip(l: Liveness, now: number): {
+/**
+ * The short status chip: what it says, and how alarmed to look.
+ *
+ * `onHomeNetwork` is true when the carrier holds a live session with the
+ * device. It wins over the relay-heartbeat reading either way: a device we are
+ * talking to directly is not "not seen for 3 h" just because its last relay
+ * STATUS is old, and a working local session is never presented as
+ * disconnected. The last-seen text stays available on the device row.
+ */
+export function livenessChip(l: Liveness, now: number, onHomeNetwork = false): {
   text: string;
   tone: "ok" | "neutral" | "warn";
 } {
+  if (onHomeNetwork && l.kind !== "not-set-up") {
+    return { text: "On home network", tone: "ok" };
+  }
   switch (l.kind) {
     case "not-set-up":
       return { text: "Not set up", tone: "neutral" };
@@ -92,4 +103,12 @@ export function livenessChip(l: Liveness, now: number): {
       // ago and one last seen in March are very different problems.
       return { text: seenLabel(l.lastSeenAt, now), tone: "warn" };
   }
+}
+
+/** Whether any of these devices has a live home-network session. */
+export function anyOnHomeNetwork(
+  devices: { pairing?: string; devicePubkey?: string | null }[],
+  sessions: ReadonlySet<string>,
+): boolean {
+  return devices.some((d) => d.pairing === "paired" && !!d.devicePubkey && sessions.has(d.devicePubkey));
 }

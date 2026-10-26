@@ -9,6 +9,9 @@
 //! `RealRelayTransport` (rustls + compiled-in webpki roots, feature
 //! `real-relay`); host tests inject `MockRelayTransport`.
 
+use std::sync::Arc;
+
+use charter_link::LocalSink;
 use charter_primitives::PubKey;
 use charter_sys::relay::{PublishOutcome, RelayTransport, RelayUrl};
 use charter_transport::transport::{CharterTransport, Entropy, ReceivedClause};
@@ -44,10 +47,23 @@ pub trait WardenRelay: Send + Sync {
     fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String>;
     /// Retry parked offline wraps (the §2.2 spool); returns (sent, remaining).
     fn drain_outbox(&self, now: u64) -> (usize, usize);
-    /// Gift-wrap + publish a device AUDIT (kind 31000) to the guardian —
-    /// tags only, content always empty. Used by the break-glass override so
-    /// an emergency unlock is LOUD (contract §Break-glass override event).
-    fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) -> Result<usize, String>;
+    /// Gift-wrap (without publishing) a device AUDIT (kind 31000) to the
+    /// guardian — tags only, content always empty. Used by the break-glass
+    /// override so an emergency unlock is LOUD (contract §Break-glass
+    /// override event). NOT offered to the local link: the caller journals
+    /// it first and then offers it with [`Self::offer_audit_local`], and
+    /// retries it with [`Self::publish_wrap`].
+    fn build_audit_wrap(
+        &self,
+        tags: Vec<Vec<String>>,
+        now: u64,
+    ) -> Option<charter_primitives::NostrEvent>;
+    /// Offer an AUDIT wrap from [`Self::build_audit_wrap`] to the local link,
+    /// once it is journaled.
+    fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent);
+    /// Publish an already-built wrap verbatim (not offered to the local link
+    /// again). Returns how many relays accepted; none is an Err.
+    fn publish_wrap(&self, wrap: charter_primitives::NostrEvent) -> Result<usize, String>;
     /// Bring-up diagnostic: how many RAW gift-wraps the relay holds for this
     /// machine since `since` — distinguishes "nothing arrives" from "wraps
     /// arrive but fail to unwrap" without exposing their contents.
@@ -60,6 +76,10 @@ pub trait WardenRelay: Send + Sync {
 /// current-thread tokio runtime and `block_on`s each operation.
 pub struct BlockingRelay<R: RelayTransport + Send + Sync + Clone> {
     transport: CharterTransport<R, OsEntropy>,
+    /// The same identity with no local sink: builds the break-glass AUDIT
+    /// wraps, which are offered to the link only once journaled
+    /// ([`WardenRelay::offer_audit_local`]).
+    audit_builder: CharterTransport<R, OsEntropy>,
     /// A second handle to the same transport for raw-wrap probing (the
     /// orchestration layer hides raw counts by design).
     probe: R,
@@ -86,6 +106,13 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
         );
         Ok(BlockingRelay {
             probe: relay.clone(),
+            audit_builder: CharterTransport::new(
+                relay.clone(),
+                OsEntropy,
+                machine_sk,
+                guardian,
+                relays.clone(),
+            ),
             machine_pk,
             transport: CharterTransport::new(
                 relay,
@@ -103,6 +130,16 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
     /// Attach the durable offline spool rooted under `base`.
     pub fn with_outbox(mut self, base: &std::path::Path) -> Self {
         self.outbox = Some(crate::outbox::Outbox::new(base));
+        self
+    }
+
+    /// Attach the local link's outbox: every STATUS and AUDIT wrap this
+    /// facade builds is offered to it before relay IO starts (the identical
+    /// wrap, so both copies share one event id).
+    pub fn with_local_sink(mut self, sink: Option<Arc<dyn LocalSink>>) -> Self {
+        if let Some(sink) = sink {
+            self.transport.set_local_sink(sink);
+        }
         self
     }
 }
@@ -159,8 +196,21 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         Ok(accepted)
     }
 
-    fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64) -> Result<usize, String> {
-        let outcomes = self.rt.block_on(self.transport.emit_audit(tags, now));
+    fn build_audit_wrap(
+        &self,
+        tags: Vec<Vec<String>>,
+        now: u64,
+    ) -> Option<charter_primitives::NostrEvent> {
+        self.audit_builder.build_audit_wrap(tags, now)
+    }
+
+    fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent) {
+        self.transport
+            .offer_local(charter_primitives::kinds::CHARTER_DEVICE_AUDIT, None, wrap);
+    }
+
+    fn publish_wrap(&self, wrap: charter_primitives::NostrEvent) -> Result<usize, String> {
+        let outcomes = self.rt.block_on(self.transport.publish_prebuilt(wrap));
         let accepted = outcomes
             .iter()
             .filter(|(_, o)| matches!(o, PublishOutcome::Ok))
@@ -216,13 +266,16 @@ pub fn real_relay(
     guardian: PubKey,
     relays: Vec<RelayUrl>,
     base: &std::path::Path,
+    local_sink: Option<Arc<dyn LocalSink>>,
 ) -> Result<std::sync::Arc<dyn WardenRelay>, String> {
     let transport =
         charter_sys::relay::RealRelayTransport::default().with_auth_signer(std::sync::Arc::new(
             charter_sys::signer::RealMachineSigner::from_secret(machine_sk),
         ));
     Ok(std::sync::Arc::new(
-        BlockingRelay::new(transport, machine_sk, guardian, relays)?.with_outbox(base),
+        BlockingRelay::new(transport, machine_sk, guardian, relays)?
+            .with_outbox(base)
+            .with_local_sink(local_sink),
     ))
 }
 
@@ -305,6 +358,15 @@ impl AndroidTransportFacade {
     /// Attach the durable offline spool rooted under `base`.
     pub fn with_outbox(mut self, base: &std::path::Path) -> Self {
         self.outbox = Some(crate::outbox::Outbox::new(base));
+        self
+    }
+
+    /// Attach the local link's outbox: every REQUEST and AUDIT wrap the
+    /// broker publishes is offered to it before relay IO starts.
+    pub fn with_local_sink(mut self, sink: Option<Arc<dyn LocalSink>>) -> Self {
+        if let Some(sink) = sink {
+            self.transport.set_local_sink(sink);
+        }
         self
     }
 
@@ -401,6 +463,20 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
     }
     fn machine_pubkey(&self) -> PubKey {
         self.machine
+    }
+    /// A wrap from the local link, opened by the same NIP-59 code as a polled
+    /// one and sorted by kind. A RELEASE is handed back here like any other
+    /// kind; the warden asks the broker NOT to apply it
+    /// (`handle_release: false`) and runs its own `try_apply_releases`, so
+    /// there is still exactly one place that unpairs an Android device.
+    fn unwrap_local(
+        &self,
+        wrap: &charter_primitives::NostrEvent,
+        now: u64,
+    ) -> Option<charter_spine::LocalInbound> {
+        self.transport
+            .unwrap_inbound(wrap, now)
+            .map(|(ev, author)| charter_spine::classify_inbound(ev, author))
     }
     /// Read-and-reset, once per broker `poll_once` round.
     fn poll_health(&self) -> charter_spine::transport_facade::PollHealth {

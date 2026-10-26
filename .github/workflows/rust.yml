@@ -76,7 +76,7 @@ jobs:
   # features). Cover them explicitly so relay regressions are caught headlessly
   # — these are unit/parse tests; no live relay is contacted.
   real-relay:
-    name: charter-sys (real-relay)
+    name: charter-sys (real-relay) · charter-link (net)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -93,6 +93,13 @@ jobs:
         run: cargo test -p charter-sys --features real-relay
       - name: cargo clippy -p charter-sys --features real-relay --all-targets -- -D warnings
         run: cargo clippy -p charter-sys --features real-relay --all-targets -- -D warnings
+      # The local link's ward client and guardian listener (real loopback
+      # sockets: handshake, bounds, persistence, ACKs) sit behind `net`, so the
+      # default workspace leg compiles only its protocol half.
+      - name: cargo test -p charter-link --features net
+        run: cargo test -p charter-link --features net
+      - name: cargo clippy -p charter-link --features net --all-targets -- -D warnings
+        run: cargo clippy -p charter-link --features net --all-targets -- -D warnings
 
   # charterd real lane. runtime.rs — the enforcement loop, the on-display lock
   # and its VT/black-screen healing — is `#[cfg(feature = "real")]`, so the

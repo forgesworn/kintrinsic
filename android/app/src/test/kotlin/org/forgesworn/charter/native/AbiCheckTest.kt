@@ -15,6 +15,13 @@ import org.junit.Test
  */
 class AbiCheckTest {
 
+    /** ABI 3: the local link entry points (`charterLink*`). Moves together
+     *  with `ABI_VERSION` in android/jni/src/lib.rs. */
+    @Test
+    fun thisBuildExpectsAbiThree() {
+        assertEquals(3, CharterCore.EXPECTED_ABI_VERSION)
+    }
+
     @Test
     fun theExpectedAbiIsAccepted() {
         assertNull(CharterCore.abiRefusal(Result.success(CharterCore.EXPECTED_ABI_VERSION)))
@@ -22,7 +29,7 @@ class AbiCheckTest {
 
     @Test
     fun anyOtherAbiIsRefused() {
-        for (v in listOf(0, 1, CharterCore.EXPECTED_ABI_VERSION + 1, -1)) {
+        for (v in listOf(0, 1, 2, CharterCore.EXPECTED_ABI_VERSION + 1, -1)) {
             assertNotNull("abi $v", CharterCore.abiRefusal(Result.success(v)))
         }
     }

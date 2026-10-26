@@ -32,4 +32,46 @@ object GuardianNative {
         guardianSk: ByteArray,
         nowUnix: Long,
     ): String
+
+    // ---- local link (ABI 3; docs/local-network-design.md) ------------------
+    // The home-network listener lives in Rust on its own runtime thread, one
+    // per process. Every call returns JSON and never throws for bad input;
+    // all are quick lock-and-copy calls except [guardianLinkNext], which
+    // blocks and belongs to the dedicated event thread in LocalLink.
+
+    /** Start (or keep, for the same key + directory) the listener.
+     *  `{"ok":true,"port":N}` | `{"ok":false,"error":…}`. The caller wipes
+     *  [guardianSk]. [allowedJson] is a JSON array of 64-hex machine keys. */
+    external fun guardianLinkStart(stateDir: String, guardianSk: ByteArray, allowedJson: String, preferredPort: Int): String
+
+    external fun guardianLinkStop(): String
+
+    /** Accept ward connections only while on a home network. A started link
+     *  begins NOT accepting; `false` closes sessions, keeps queue and inbox. */
+    external fun guardianLinkAccepting(on: Boolean): String
+
+    /** Accept wards only on these local IPv4 addresses (the Wi-Fi/Ethernet
+     *  interfaces): a JSON array of address strings, or `null` for any. A
+     *  connection on any other address (mobile data) closes at once. */
+    external fun guardianLinkAcceptAddresses(addrsJson: String): String
+
+    /** Replace the admitted machine keys; sessions no longer allowed close. */
+    external fun guardianLinkAllow(allowedJson: String): String
+
+    /** `{"state":"sent"|"queued"|"rejected"|"unavailable","reason"?:…}` */
+    external fun guardianLinkSend(recipientHex: String, wrapJson: String): String
+
+    /** Blocks up to [timeoutMs]; a JSON array of `{"type":"wrap"|"delivery"|"session",…}`. */
+    external fun guardianLinkNext(timeoutMs: Int): String
+
+    /** `[{"id","machine","wrap","receivedAt"}]` */
+    external fun guardianLinkInbox(): String
+
+    external fun guardianLinkConsume(idsJson: String): String
+
+    /** `{"<wrapId>":{"state","at","machine"}}` */
+    external fun guardianLinkDelivery(idsJson: String): String
+
+    /** `[{"machine","since"}]` */
+    external fun guardianLinkSessions(): String
 }

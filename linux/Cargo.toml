@@ -24,7 +24,7 @@ exclude = ["apps/charter-gui/src-tauri", "apps/charter-gui/ui"]
 
 [workspace.package]
 edition = "2021"
-version = "0.7.10"
+version = "0.7.11"
 license = "MIT"
 rust-version = "1.94"
 publish = false
@@ -60,5 +60,6 @@ charter-transport = { path = "../core/crates/charter-transport", default-feature
 charter-schedule = { path = "../core/crates/charter-schedule" }
 charter-content = { path = "../core/crates/charter-content" }
 charter-spine = { path = "../core/crates/charter-spine", default-features = false }
+charter-link = { path = "../core/crates/charter-link" }
 charter-webpolicy = { path = "../core/crates/charter-webpolicy" }
 charterd = { path = "crates/charterd" }

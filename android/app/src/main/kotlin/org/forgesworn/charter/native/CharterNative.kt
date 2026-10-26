@@ -211,4 +211,21 @@ object CharterNative {
 
     /** `{"open":bool}` — is a guardian's maintenance window open right now? */
     external fun charterMaintenanceOpen(nowUnix: Long): String
+
+    // ---- local link (ABI 3) -------------------------------------------------
+
+    /**
+     * The FULL current set of guardian carrier addresses found by NsdManager:
+     * `{"addrs":["192.168.1.5:47615"]}` → `{"ok":true}`. Never blocks on the
+     * network; the native link connects out on its own thread.
+     */
+    external fun charterLinkDiscovered(addrsJson: String): String
+
+    /** Network change, screen-on, liveness alarm: retry the link now (its
+     *  timers stop in deep sleep). `{"ok":true}`. */
+    external fun charterLinkKick(): String
+
+    /** `{running, connected, sessions, candidates, remembered, outbox,
+     *  lastError, appliedSeq}`; `{"running":false,…}` while there is no link. */
+    external fun charterLinkState(): String
 }

@@ -65,3 +65,34 @@ describe("runApproveAppOpenFlow", () => {
     expect(result).toEqual({ outcome: "decision-cancelled" });
   });
 });
+
+describe("runApproveAppOpenFlow: a hold queued for a device that isn't home", () => {
+  it("still goes on to the Decision echo, because a signed, held hold WILL open the app — refusing would be untrue", async () => {
+    const calls: string[] = [];
+    const queued = {
+      outcome: "queued" as const,
+      message: "Not sent yet — it'll reach Robin's laptop when it's on the home network.",
+      devices: ["Robin's laptop"],
+    };
+    const result = await runApproveAppOpenFlow({
+      saveHold: async () => {
+        calls.push("saveHold");
+        return queued;
+      },
+      sendDecision: async () => {
+        calls.push("sendDecision");
+        return true;
+      },
+    });
+    expect(result).toEqual({ outcome: "approved", holdQueued: queued });
+    expect(calls).toEqual(["saveHold", "sendDecision"]);
+  });
+
+  it("a held hold whose Decision echo is then declined is still reported as the echo being declined", async () => {
+    const result = await runApproveAppOpenFlow({
+      saveHold: async () => ({ outcome: "queued" as const, message: "m" }),
+      sendDecision: async () => false,
+    });
+    expect(result).toEqual({ outcome: "decision-cancelled" });
+  });
+});

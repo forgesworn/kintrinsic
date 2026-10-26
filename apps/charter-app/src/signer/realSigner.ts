@@ -29,9 +29,19 @@ import {
   endOfDayUnix,
   DEFAULT_STANDDOWN_GRACE_SECS,
 } from "../wire/grant";
-import type { DecisionContext, Signer } from "./Signer";
+import type { DecisionContext, SignOutcome, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
+import { localRouteAvailable } from "../carrier/localLink";
+import {
+  QueuedForHomeNetworkError,
+  failedDeviceText,
+  isProblemAck,
+  singleRecipient,
+  type FailedDevice,
+  type PublishMeta,
+  type PublishOutcome,
+} from "./routePublish";
 
 /** One deliverable device: its domain id, and the key its wraps are sealed to. */
 export interface TargetDevice {
@@ -61,8 +71,13 @@ export interface ChildTarget {
 export interface RealSignerDeps {
   /** Establish a guardian session (prod: NIP-46 bunker connect). */
   connectGuardian: (kind: SignerKind) => Promise<GuardianOps>;
-  /** Publish a finalized event to the given relays. */
-  publish: (relays: string[], event: NostrEvent) => Promise<void>;
+  /** Publish a finalized event to the given relays. Resolves with what the
+   *  home network saw (`withLocalRoute`); a plain relay publisher resolves
+   *  with nothing, which counts as the relays having taken it. */
+  publish: (relays: string[], event: NostrEvent, meta?: PublishMeta) => Promise<PublishOutcome | void>;
+  /** A guardian-facing name for a ward device, from its machine key — so an
+   *  error can say which device a send did not get to. */
+  deviceName?: (machine: string) => string | undefined;
   /** Resolve a child id to its subject + device pubkeys + relays. */
   resolveChild: (childId: string) => ChildTarget | undefined;
   /**
@@ -82,6 +97,24 @@ export interface RealSignerDeps {
    * whose bunker approves out-of-band).
    */
   confirmGate?: ConfirmGate;
+}
+
+const CLAUSE_META: PublishMeta = { kind: "clause" };
+
+/**
+ * What happened to each wrap of a multi-device send: which recipients took it,
+ * which the carrier is holding for the home network, and which it never got
+ * to. Lets `settle` tell the guardian the real split instead of one
+ * all-or-nothing sentence (docs/local-network-design.md, "Routing and
+ * fallback" step 5).
+ */
+class SendBatch {
+  readonly held: QueuedForHomeNetworkError[] = [];
+  readonly reached = new Set<string>();
+  readonly waiting = new Set<string>();
+  readonly failed: (FailedDevice & { cause?: unknown })[] = [];
+  /** Wrap ids the carrier took, so their delivery records can be shown. */
+  readonly wraps: string[] = [];
 }
 
 function labelFor(kind: SignerKind): string | undefined {
@@ -224,18 +257,109 @@ export class RealSigner implements Signer {
         `No paired device to send this to yet — pair ${who}'s phone first, then try again.`,
       );
     }
-    if (target.relays.length === 0) {
+    // A ward reachable over the home network needs no relay to receive this.
+    if (target.relays.length === 0 && !localRouteAvailable()) {
       throw new Error(
         `No relay is set up to reach ${who}'s device, so this couldn't be sent.`,
       );
     }
   }
 
-  async signClause(childId: string, policy: Policy): Promise<{ ok: true }> {
+  /**
+   * Publish one wrap and record what became of it. Nothing here aborts the
+   * batch: a ward that is not on the home network yet (the carrier is holding
+   * the wrap), a ward that refused it, or a relay failure for one device must
+   * never stop the REST of the batch going out (step 5 of "Routing and
+   * fallback"). `settle` turns the record into the outcome once every device
+   * has been tried.
+   */
+  private async send(
+    relays: string[],
+    wrap: NostrEvent,
+    meta: PublishMeta,
+    batch: SendBatch,
+  ): Promise<void> {
+    const recipient = singleRecipient(wrap) ?? wrap.tags.find((t) => t[0] === "p")?.[1] ?? "";
+    try {
+      const outcome = await this.deps.publish(relays, wrap, meta);
+      if (outcome?.routed) batch.wraps.push(wrap.id);
+      // A ward's problem ACK ends the wait, but it means the ward did NOT take
+      // the change: never "reached".
+      if (isProblemAck(outcome?.local)) {
+        batch.failed.push({ machine: recipient, ack: outcome.local });
+      } else {
+        batch.reached.add(recipient);
+      }
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) {
+        batch.held.push(err);
+        batch.waiting.add(recipient);
+        return;
+      }
+      batch.failed.push({
+        machine: recipient,
+        error: err instanceof Error ? err.message : String(err),
+        cause: err,
+      });
+    }
+  }
+
+  private nameOf(machine: string): string {
+    return this.deps.deviceName?.(machine) ?? "their device";
+  }
+
+  /**
+   * Turn a batch into its outcome, once every device was tried:
+   *   - every device reached → success, with the wraps the carrier took;
+   *   - nothing reached and nothing held → throw, naming each device's state
+   *     (a lone relay failure keeps its own error, word for word);
+   *   - otherwise a partial `QueuedForHomeNetworkError`: who got it, who it
+   *     is held for, and who it did not get to.
+   */
+  private settle(batch: SendBatch): SignOutcome {
+    // One state per device. A device with several wraps (one per clause) is
+    // reached only if every one of them was; held wins over failed, because
+    // the carrier will still deliver what it holds.
+    const failed = batch.failed.filter(
+      (f, i) => !batch.waiting.has(f.machine) && batch.failed.findIndex((g) => g.machine === f.machine) === i,
+    );
+    const reached = [...batch.reached].filter(
+      (m) => !batch.waiting.has(m) && !failed.some((f) => f.machine === m),
+    );
+    if (batch.held.length === 0 && failed.length === 0) {
+      return batch.wraps.length > 0 ? { ok: true, wraps: [...batch.wraps] } : { ok: true };
+    }
+    if (batch.held.length === 0 && reached.length === 0) {
+      // A lone device's error is thrown as it was: same words, same type.
+      if (failed.length === 1 && failed[0].cause !== undefined) throw failed[0].cause;
+      const first = failed[0];
+      const sameError = failed.every((f) => !f.ack && f.error === first.error);
+      throw new Error(
+        sameError
+          ? failedDeviceText(this.joinNames(failed.map((f) => f.machine)), first)
+          : failed.map((f) => failedDeviceText(this.nameOf(f.machine), f)).join(" "),
+      );
+    }
+    throw QueuedForHomeNetworkError.merge(
+      batch.held,
+      reached,
+      failed.map(({ machine, ack, error }) => (ack ? { machine, ack } : { machine, error })),
+      batch.wraps,
+    );
+  }
+
+  private joinNames(machines: string[]): string {
+    const n = [...new Set(machines.map((m) => this.nameOf(m)))];
+    if (n.length <= 1) return n[0] ?? "their device";
+    return `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`;
+  }
+
+  async signClause(childId: string, policy: Policy): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held = new SendBatch();
 
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
@@ -247,10 +371,10 @@ export class RealSigner implements Signer {
       for (const clause of clauses) {
         for (const device of target.devices) {
           const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-          await this.deps.publish(target.relays, wrap);
+          await this.send(target.relays, wrap, CLAUSE_META, held);
         }
       }
-      return { ok: true };
+      return this.settle(held);
     }
 
     // Device scope: each device gets the charter as it applies to IT — the base
@@ -263,10 +387,10 @@ export class RealSigner implements Signer {
       const clauses = policyToClauses(target.subject, effective, issuedAt);
       for (const clause of clauses) {
         const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-        await this.deps.publish(target.relays, wrap);
+        await this.send(target.relays, wrap, CLAUSE_META, held);
       }
     }
-    return { ok: true };
+    return this.settle(held);
   }
 
   /**
@@ -300,11 +424,12 @@ export class RealSigner implements Signer {
    * with no remote recovery at all — the rescue must not depend on the thing
    * that broke.
    */
-  async signMaintenanceClause(childId: string, minutes: number): Promise<{ ok: true }> {
+  async signMaintenanceClause(childId: string, minutes: number): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
     await this.authorize(
       "clause",
@@ -328,9 +453,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return { ok: true };
+    return this.settle(held);
   }
 
   /**
@@ -345,11 +470,12 @@ export class RealSigner implements Signer {
     minutes: number,
     tz?: string,
     groupId?: string,
-  ): Promise<{ ok: true }> {
+  ): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
     await this.authorize("clause", `Give ${minutes} more minutes to ${target.name ?? childId}`);
     const issuedAt = this.nextIssuedAt();
@@ -377,9 +503,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return { ok: true };
+    return this.settle(held);
   }
 
   /**
@@ -399,11 +525,12 @@ export class RealSigner implements Signer {
   async signStandDownClause(
     childId: string,
     opts?: { lift?: boolean; graceSecs?: number; tz?: string },
-  ): Promise<{ ok: true }> {
+  ): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
     const lift = opts?.lift === true;
     const who = target.name ?? childId;
@@ -435,20 +562,21 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return { ok: true };
+    return this.settle(held);
   }
 
   async signUpdateClause(
     childId: string,
     manifest: UpdateManifest,
     url: string,
-  ): Promise<{ ok: true }> {
+  ): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
+    const held = new SendBatch();
     this.requireDeliverable(target, childId);
 
     await this.authorize(
@@ -462,9 +590,9 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
-      await this.deps.publish(target.relays, wrap);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return { ok: true };
+    return this.settle(held);
   }
 
   /**
@@ -572,7 +700,7 @@ export class RealSigner implements Signer {
         ts,
       });
       const wrap = await giftWrapGrant(payload, install.machine, guardian, ts);
-      await this.deps.publish(target.relays, wrap);
+      await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: install.reqId });
       return { ok: true };
     }
 
@@ -596,7 +724,7 @@ export class RealSigner implements Signer {
         ts,
       });
       const wrap = await giftWrapGrant(payload, appOpen.machine, guardian, ts);
-      await this.deps.publish(target.relays, wrap);
+      await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: appOpen.reqId });
       return { ok: true };
     }
 
@@ -645,7 +773,7 @@ export class RealSigner implements Signer {
     });
     // The GRANT answers exactly ONE device — the machine that brokered the ask.
     const wrap = await giftWrapGrant(payload, wire.machine, guardian, ts);
-    await this.deps.publish(target.relays, wrap);
+    await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: wire.reqId });
     return { ok: true };
   }
 }

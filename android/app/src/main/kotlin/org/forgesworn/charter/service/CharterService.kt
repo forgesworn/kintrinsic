@@ -59,6 +59,16 @@ class CharterService : Service() {
     private lateinit var slowWorker: HandlerThread
     private lateinit var slowHandler: Handler
     private lateinit var controller: WardenController
+    /** The local link's own thread: NsdManager callbacks, the link monitor
+     *  and the link's JNI calls, off the tick and poll threads. Those JNI calls
+     *  take the native warden lock briefly, so one can still wait while a
+     *  request is being sent (`charterSubmitRequest` holds it across its
+     *  relay publish); nothing on this thread is UI-critical. */
+    private lateinit var linkWorker: HandlerThread
+    private lateinit var linkHandler: Handler
+    private lateinit var linkDiscovery: LinkDiscovery
+    /** The last `appliedSeq` the link monitor saw (link thread only). */
+    private var lastAppliedSeq: Long? = null
     @Volatile private var running = false
     /** The screen's state as the LOOP understands it — see [screenReceiver]. */
     @Volatile private var interactive = true
@@ -112,6 +122,44 @@ class CharterService : Service() {
         }
     }
 
+    /**
+     * The local link monitor: discovery follows the link (browse only while
+     * no guardian session is up), and a wrap the link applied posts an
+     * enforcement tick at once, so a change made on the home network shows
+     * within seconds even while the dark tick is a minute apart. Link thread.
+     */
+    private val linkMonitor = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val st = runCatching { org.forgesworn.charter.native.CharterCore.linkState() }.getOrNull()
+            if (st != null) {
+                linkDiscovery.onLinkState(st)
+                if (LinkPolicy.appliedMoved(lastAppliedSeq, st.appliedSeq)) {
+                    Log.i(TAG, "local link applied a change: ticking now")
+                    handler.post { runTick() }
+                }
+                lastAppliedSeq = st.appliedSeq
+            }
+            linkHandler.postDelayed(this, if (interactive) LINK_MONITOR_MS else DARK_LINK_MONITOR_MS)
+        }
+    }
+
+    /** Retry the local link now (network change, screen-on, liveness alarm):
+     *  its native timers stop while the phone sleeps. Any thread.
+     *  [rediscover] also ends a resting discovery window; the liveness alarm
+     *  passes false, since it fires about every minute and would otherwise keep
+     *  discovery (and its MulticastLock) running all the time. */
+    private fun kickLink(rediscover: Boolean = true) {
+        if (!::linkHandler.isInitialized) return
+        linkHandler.post {
+            runCatching { org.forgesworn.charter.native.CharterCore.linkKick() }
+            // A resting discovery browses again at once.
+            if (rediscover) linkDiscovery.wake()
+        }
+        linkHandler.removeCallbacks(linkMonitor)
+        linkHandler.post(linkMonitor)
+    }
+
     private val tick = object : Runnable {
         override fun run() {
             if (!running) return
@@ -163,6 +211,7 @@ class CharterService : Service() {
         handler.post(tick)
         slowHandler.removeCallbacks(slowTick)
         if (nowInteractive) {
+            kickLink()
             // Waking up is exactly when a guardian's answer, gift or lock is
             // worth having: poll at once rather than up to two minutes late.
             slowHandler.post(slowTick)
@@ -190,6 +239,9 @@ class CharterService : Service() {
         handler = Handler(worker.looper)
         slowWorker = HandlerThread("charter-slow-worker").apply { start() }
         slowHandler = Handler(slowWorker.looper)
+        linkWorker = HandlerThread("charter-link-worker").apply { start() }
+        linkHandler = Handler(linkWorker.looper)
+        linkDiscovery = LinkDiscovery(this, linkHandler) { kickLink() }
         controller = WardenController.real(this)
         // Seed from the real screen rather than assuming lit: a service started
         // by BootReceiver or restarted by START_STICKY overnight would
@@ -238,6 +290,8 @@ class CharterService : Service() {
             armed = true
             handler.post(tick)
             slowHandler.post(slowTick)
+            linkHandler.post { linkDiscovery.start() }
+            linkHandler.post(linkMonitor)
         }
     }
 
@@ -281,6 +335,7 @@ class CharterService : Service() {
             val tickDue = LivenessPolicy.tickDue(now, lastTickAt, interactive, TICK_MS)
             val pollDue = LivenessPolicy.pollDue(now, lastPollAt, interactive, SLOW_TICK_MS, DARK_SLOW_TICK_MS)
             Log.i(TAG, "liveness kick: tick due=$tickDue poll due=$pollDue screen=${if (interactive) "on" else "off"}")
+            kickLink(rediscover = false)
             if (tickDue) {
                 val wl = tickWake
                 runCatching { wl?.acquire(TICK_WAKE_MS) }
@@ -322,6 +377,12 @@ class CharterService : Service() {
         runCatching { pollWake?.takeIf { it.isHeld }?.release() }
         if (::worker.isInitialized) worker.quitSafely()
         if (::slowWorker.isInitialized) slowWorker.quitSafely()
+        if (::linkWorker.isInitialized) {
+            linkHandler.removeCallbacks(linkMonitor)
+            // quitSafely runs what is already queued, so the stop goes first.
+            linkHandler.post { linkDiscovery.stop() }
+            linkWorker.quitSafely()
+        }
         super.onDestroy()
     }
 
@@ -382,6 +443,12 @@ class CharterService : Service() {
          * the moment the screen lights, which [repace] guarantees.
          */
         internal const val DARK_SLOW_TICK_MS = 120_000L
+
+        /** How often the local link monitor reads the link's state: lit, a
+         *  locally applied change is ticked within this; dark, it only keeps
+         *  discovery in step (the screen-on kick runs it at once). */
+        internal const val LINK_MONITOR_MS = 3_000L
+        internal const val DARK_LINK_MONITOR_MS = 30_000L
 
         fun start(context: Context) {
             val intent = Intent(context, CharterService::class.java)

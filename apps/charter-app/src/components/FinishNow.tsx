@@ -59,6 +59,15 @@ export function FinishNow({ child }: { child: Child }) {
       const ok = await standDown(child.id, lift);
       if (ok) {
         setConfirming(false);
+        if (typeof ok === "object") {
+          // Signed, but some devices are away from the home network: say who
+          // got it and who is still waiting rather than the usual "sent" line.
+          setNote(
+            (lift ? `Saved — ${child.name}'s devices lift the lock when they hear this.` : `Saved — ${child.name} is asked to finish up.`) +
+              ` ${ok.message}`,
+          );
+          return;
+        }
         const waiting =
           quiet.length > 0
             ? ` ${quiet.map((d) => d.label).join(" and ")} ${

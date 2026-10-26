@@ -49,7 +49,7 @@ use crate::enforcer_runtime::{lock_message, managed_freeze_target, EnforcerRunti
 use crate::managed_guard::ManagedRoster;
 use crate::multi_child::{ChildDecision, ExtensionInbox, MultiChildEnforcer};
 use crate::ports::EventSink;
-use crate::transport_facade::TransportFacade;
+use crate::transport_facade::{classify_inbound, LocalInbound, TransportFacade};
 use crate::web_content::WebContentEnforcer;
 
 /// STATUS-feed heartbeat: re-publish an unchanged child's state at least this
@@ -275,6 +275,15 @@ impl RealTransportFacade {
         })
     }
 
+    /// Attach the local link's outbox (a [`crate::local_link::LateSink`]):
+    /// every machine→guardian wrap this facade builds — REQUEST, AUDIT,
+    /// STATUS — is offered to it before relay IO starts, the identical wrap
+    /// the relays receive. Offering never blocks on the network.
+    pub fn with_local_sink(mut self, sink: Arc<dyn charter_link::LocalSink>) -> Self {
+        self.inner.set_local_sink(sink);
+        self
+    }
+
     /// Record a poll's per-relay `Result`, folding `Unreachable` into the
     /// health accumulator instead of throwing it away — the shape every
     /// `poll_*` wrapper below shares.
@@ -370,6 +379,14 @@ impl TransportFacade for RealTransportFacade {
     }
     fn machine_pubkey(&self) -> PubKey {
         self.machine
+    }
+    /// A guardian wrap that arrived over the local link: the same NIP-59
+    /// unwrap as every `poll_*` above (`CharterTransport::unwrap_inbound`),
+    /// sorted by inner kind the same way. CPU only, no IO.
+    fn unwrap_local(&self, wrap: &NostrEvent, now: u64) -> Option<LocalInbound> {
+        self.inner
+            .unwrap_inbound(wrap, now)
+            .map(|(event, seal_author)| classify_inbound(event, seal_author))
     }
     fn poll_health(&self) -> PollHealth {
         PollHealth {
@@ -1830,13 +1847,25 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // A dedicated transport handle for the STATUS feed (paired only) — a second
     // stateless relay handle, so publishing status never contends with the
     // broker's own transport. `status_last` throttles per-child re-publishes.
-    let (status_tx, status_machine): (Option<RealTransportFacade>, Option<PubKey>) =
+    //
+    // Local link (v1): both this facade and the broker's carry the link's
+    // outbox, bound below once the link exists over the broker, so every
+    // machine→guardian wrap (STATUS here; REQUEST and AUDIT through the
+    // broker) is offered locally before its relay publish starts. The release
+    // signal is shared by the relay poll task and the link's ingest.
+    let link_sink = crate::local_link::LateSink::new();
+    let link_control = crate::local_link::LinkControl::new();
+    let link_guardian: Option<PubKey> = pairing_opt.as_ref().map(|p| p.guardian_pubkey);
+    let (status_tx, status_machine): (Option<Arc<RealTransportFacade>>, Option<PubKey>) =
         match (pairing_opt.as_ref(), secret) {
             (Some(p), Some(secret)) => {
                 match RealTransportFacade::try_new(secret, p.guardian_pubkey, p.relays.clone()) {
                     Ok(tx) => {
                         let m = tx.machine;
-                        (Some(tx), Some(m))
+                        (
+                            Some(Arc::new(tx.with_local_sink(link_sink.as_sink()))),
+                            Some(m),
+                        )
                     }
                     Err(e) => {
                         eprintln!(
@@ -1915,7 +1944,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     let events: Box<dyn EventSink> = Box::new(ChannelEventSink::new(tx));
                     let broker = Arc::new(build_broker(
                         RealSystem::default(),
-                        transport,
+                        transport.with_local_sink(link_sink.as_sink()),
                         enforcer.clone(),
                         events,
                         pairing.subject_pubkey,
@@ -1942,6 +1971,46 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             spawn_pair_listener(secret, config.child_limits_dir.clone());
             (None, None)
         }
+    };
+
+    // Local link (v1): spawned over the broker in the one arm that has one
+    // (paired, keyed, transport up). Built once per run, like every transport
+    // above: a pairing, guardian or machine-key change always comes back
+    // through a daemon restart (scan-to-pair, RELEASE, a re-pair), which
+    // rebuilds it. Held for the daemon's lifetime — dropping the `WardLink`
+    // shuts it down. Detached: the loop never awaits it.
+    let ward_link: Option<Arc<charter_link::WardLink>> = match (&broker, link_guardian, secret) {
+        (Some(b), Some(guardian), Some(secret)) => {
+            let ingest = crate::local_link::BrokerIngest::new(b.clone(), link_control.clone());
+            match charter_link::WardLink::spawn(
+                charter_link::WardLinkConfig {
+                    machine_sk: zeroize::Zeroizing::new(secret),
+                    guardian,
+                    state_dir: link_state_dir(&config.key_path),
+                    // The carrier is the guardian's phone, never this
+                    // machine: a loopback "guardian" is a local process.
+                    allow_loopback: false,
+                    prepare_socket: None,
+                },
+                ingest,
+                &tokio::runtime::Handle::current(),
+            ) {
+                Ok(link) => {
+                    link_sink.bind(link.sink());
+                    crate::local_link::avahi::spawn(link.clone());
+                    eprintln!(
+                        "charterd: local link on — looking for the guardian's phone on the \
+                         home network (outbound only)"
+                    );
+                    Some(link)
+                }
+                Err(e) => {
+                    eprintln!("charterd: local link unavailable ({e}) — relays only this run");
+                    None
+                }
+            }
+        }
+        _ => None,
     };
 
     // D2: watch the release relays for a newer deb (signed by the pinned
@@ -2045,6 +2114,27 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // L5: the last-enforced stamp, written at most once a minute off the async
     // worker (two fsyncs and a directory scan per write).
     let mut stamp = crate::watchdog::Stamp::default();
+    // The guardian relay poll runs on its own task (one round at a time,
+    // every `interval`), not inline in this loop: a relay round can take
+    // minutes against dead relays, and the fast tick must keep re-reading
+    // the store so a change that arrived over the local link takes effect
+    // within one tick. See `local_link::BrokerPoller` for why this cannot
+    // fail open. Finished rounds are drained at the top of every iteration.
+    let mut poller: Option<crate::local_link::BrokerPoller> = broker
+        .as_ref()
+        .map(|b| crate::local_link::BrokerPoller::spawn(b.clone(), link_control.clone(), interval));
+    // Whether the in-flight poll's overrun has been reported (once per overrun).
+    let mut poll_overdue_logged = false;
+    // STATUS publishes run off the loop too (same reason): at most one batch
+    // in flight; its per-child outcomes are applied when it has finished.
+    let mut status_inflight: Option<(
+        std::time::Instant,
+        tokio::task::JoinHandle<Vec<StatusOutcome>>,
+    )> = None;
+    let mut status_overdue_logged = false;
+    // The suspended-time counter at the previous iteration: a jump means the
+    // machine slept, so the local link retries at once on the new network.
+    let mut last_suspended = sys.clock().suspended_secs();
     // Tell systemd we are up before the first tick, so `WatchdogSec` starts
     // counting from a daemon that is actually looping.
     crate::watchdog::ping();
@@ -2055,7 +2145,61 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         // Awake seconds since the previous loop iteration (saturating, clamped).
         // Computed every iteration (incl. skips below) so a paused stretch never
         // accumulates into the next real tick's charge.
-        let elapsed = charge.observe(now, sys.clock().suspended_secs() as i64);
+        let suspended_now = sys.clock().suspended_secs();
+        let elapsed = charge.observe(now, suspended_now as i64);
+        if crate::local_link::resumed_from_suspend(last_suspended, suspended_now) {
+            if let Some(link) = &ward_link {
+                link.kick();
+            }
+        }
+        last_suspended = suspended_now;
+
+        // Relay poll rounds finished since the last iteration. The relay-
+        // health counter (02b-G1/02b-B5) counts poll ROUNDS that reached no
+        // relay, as it always has; it is just read here now.
+        if let Some(p) = poller.as_mut() {
+            for round in p.drain() {
+                consecutive_unreachable = if round.relays_unreachable {
+                    consecutive_unreachable.saturating_add(1)
+                } else {
+                    0
+                };
+            }
+        }
+        // A guardian RELEASE authenticated on either route — the relay poll
+        // or the local link (S7). Checked every fast tick, so it is acted on
+        // within one tick whichever way it came.
+        if link_control.released() {
+            restart_after_release(poller.as_ref(), ward_link.as_deref());
+            return Ok(());
+        }
+        // M1: a poll task that died (a panicking enactor, a poisoned lock)
+        // is respawned; one that keeps dying ends the daemon non-zero, so
+        // systemd restarts it — the recovery a panic inline in the loop used
+        // to get. Enforcement below runs on cached clauses either way.
+        if let Some(p) = poller.as_mut() {
+            match p.check(std::time::Instant::now()).await {
+                crate::local_link::PollerCheck::Running => {}
+                crate::local_link::PollerCheck::Respawned(why) => {
+                    poll_overdue_logged = false;
+                    eprintln!(
+                        "charterd: ERROR — the guardian relay poll task stopped ({why}); \
+                         restarted it. Enforcement carried on from cached clauses"
+                    );
+                }
+                crate::local_link::PollerCheck::GaveUp(why) => {
+                    if let Some(l) = ward_link.as_deref() {
+                        l.shutdown();
+                    }
+                    return Err(format!(
+                        "the guardian relay poll task stopped again ({why}) after {} restarts \
+                         in {} minutes",
+                        crate::local_link::POLL_MAX_RESPAWNS,
+                        crate::local_link::POLL_RESPAWN_WINDOW.as_secs() / 60
+                    ));
+                }
+            }
+        }
         // N1: the usage ledgers may drop a far-future day key back only while
         // the kernel reports the clock NTP-synchronised. Read every tick: a
         // read-only `adjtimex` is one cheap syscall.
@@ -2167,23 +2311,17 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             // the watchdog must not kill a deliberately idle daemon.
             crate::watchdog::ping();
             stamp.record(now);
-            if slow_tick {
-                if let Some(b) = &broker {
-                    b.poll_once().await;
-                    // 04-G5: relays can take minutes to time out, and a paused
-                    // daemon killed by the watchdog is thawed by ExecStopPost
-                    // exactly like a running one.
-                    crate::watchdog::ping();
-                }
-            }
+            // The broker keeps polling during a pause: on its own task now
+            // (`poller`), so there is nothing to await here.
             tokio::time::sleep(fast).await;
             continue;
         }
 
         // 1) Load each child's config and resolve their EFFECTIVE policy
         //    (Signet-first): a paired guardian's per-child clauses (cached in the
-        //    ChildClauseStore by `b.poll_once()` below, shared on-disk with this
-        //    `sys`) are authoritative; the local device-only limits are the
+        //    ChildClauseStore by the broker — its relay poll task or a local-
+        //    link ingest — shared on-disk with this `sys`, and re-read here
+        //    every fast tick) are authoritative; the local device-only limits are the
         //    fallback for a child the guardian hasn't set. Filtered to lockable
         //    children so a stray limits.d file can never enroll an admin/root.
         let mut configs = load_child_configs(&config.child_limits_dir);
@@ -3086,32 +3224,29 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         crate::watchdog::ping();
 
         // 5) If paired: subscribe -> verify -> enact guardian grants (install/exec).
-        if let Some(b) = &broker {
-            let poll = b.poll_once().await;
-            crate::watchdog::ping();
-            if poll.relays_unreachable {
+        //    The poll itself runs on its own task (`poller`, above); its
+        //    rounds are drained and a RELEASE acted on at the top of every
+        //    iteration. What is left here is noticing a round that never
+        //    ends. Inline, such a round stopped the watchdog keep-alive and
+        //    systemd killed (and `--thaw-all`ed) the daemon; off the loop it
+        //    stalls only relay delivery, so say so — once per overrun — and
+        //    count each slow tick of it as a round that reached no relay, so
+        //    the guardian's STATUS shows it too.
+        if let Some(p) = &poller {
+            let age = p.in_flight_for();
+            if crate::local_link::poll_overdue(age) {
                 consecutive_unreachable = consecutive_unreachable.saturating_add(1);
-            } else {
-                consecutive_unreachable = 0;
-            }
-            if poll.released {
-                // The guardian pressed Disconnect and the release authenticated
-                // (S7). The pairing and every clause are already off disk; what
-                // is left is a running daemon holding stale in-memory authority.
-                //
-                // Restart rather than unwind in place, the same way scan-to-pair
-                // does in the other direction: charterd comes back up through its
-                // UNPAIRED arm, `ExecStopPost=charter-recovery --thaw-all` lifts
-                // the freeze on the way out, and there is no half-released state
-                // for anyone to reason about.
-                eprintln!(
-                    "charterd: guardian RELEASE applied — this device is no longer managed; \
-                     restarting unpaired"
-                );
-                let _ = std::process::Command::new("systemctl")
-                    .args(["try-restart", "charterd.service"])
-                    .status();
-                return Ok(());
+                if !poll_overdue_logged {
+                    poll_overdue_logged = true;
+                    eprintln!(
+                        "charterd: ERROR — the guardian relay poll has been running for {}s; \
+                         enforcement and the local link carry on, relay delivery is stalled",
+                        age.unwrap_or_default().as_secs()
+                    );
+                }
+            } else if poll_overdue_logged && age.is_none() {
+                poll_overdue_logged = false;
+                eprintln!("charterd: the guardian relay poll is finishing rounds again");
             }
         }
 
@@ -3119,10 +3254,39 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         //     guardian (paired only), so the Kintrinsic PWA can show time-left +
         //     lock state. Numbers/enums only (no PII); throttled to displayable
         //     state-changes + a heartbeat so it isn't a per-tick relay flood.
-        if let (Some(stx), Some(machine)) = (&status_tx, status_machine) {
-            // L2: every child's STATUS this tick carries the gap; it is
-            // retired after the tick in which one of them was accepted.
-            let mut gap_delivered = false;
+        //
+        //     The relay publishes run on a spawned task, one batch at a time,
+        //     so a slow relay set never holds up the fast tick (the local
+        //     link's copy of each STATUS is offered when its wrap is built,
+        //     before any relay IO). While a batch is still publishing this
+        //     tick builds nothing; a finished batch's outcomes (L2 gap
+        //     retirement, undelivered clock-step stamps) are applied first.
+        let status_batch_due = match status_inflight.take() {
+            None => true,
+            Some((_, handle)) if handle.is_finished() => {
+                status_overdue_logged = false;
+                let outcomes = handle.await.unwrap_or_default();
+                if apply_status_outcomes(&outcomes, &mut status_step_undelivered) {
+                    // L2: retired after the batch in which one was accepted.
+                    enforcement_gap_secs = None;
+                }
+                true
+            }
+            Some((started, handle)) => {
+                if started.elapsed() >= crate::local_link::POLL_OVERDUE && !status_overdue_logged {
+                    status_overdue_logged = true;
+                    eprintln!(
+                        "charterd: ERROR — a STATUS publish has been running for {}s; \
+                         enforcement carries on, the guardian's view is stale",
+                        started.elapsed().as_secs()
+                    );
+                }
+                status_inflight = Some((started, handle));
+                false
+            }
+        };
+        if let (true, Some(stx), Some(machine)) = (status_batch_due, &status_tx, status_machine) {
+            let mut batch: Vec<(u32, String, bool, Option<u64>)> = Vec::new();
             for (uid, pol) in &policies {
                 // Only a guardian-bound child (has a `subject`) gets STATUS —
                 // there is a guardian to address it to.
@@ -3258,28 +3422,35 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     STATUS_HEARTBEAT_SECS,
                 ) {
                     status.seq = Some(crate::status_seq::next_durable(&mut status_seq));
-                    let delivered = stx.emit_status(&status.to_json(), now as u64).await;
-                    if delivered && status.enforcement_gap_secs.is_some() {
-                        gap_delivered = true;
-                    }
-                    match (delivered, status.clock_stepped_back_from) {
-                        (false, Some(from)) => {
-                            status_step_undelivered.insert(*uid, from);
-                        }
-                        (true, _) => {
-                            status_step_undelivered.remove(uid);
-                        }
-                        (false, None) => {}
-                    }
-                    // 04-G5: one relay round trip per child, each with its own
-                    // timeout — a family of four on four dead relays is minutes
-                    // of correct waiting, so vouch between them.
-                    crate::watchdog::ping();
+                    batch.push((
+                        *uid,
+                        status.to_json(),
+                        status.enforcement_gap_secs.is_some(),
+                        status.clock_stepped_back_from,
+                    ));
                     status_last.insert(*uid, status);
                 }
             }
-            if gap_delivered {
-                enforcement_gap_secs = None;
+            if !batch.is_empty() {
+                // One relay round trip per child, each with its own timeout —
+                // a family of four on four dead relays is minutes of correct
+                // waiting (04-G5), which is why it is not awaited here.
+                let stx = stx.clone();
+                let at = now as u64;
+                let handle = tokio::spawn(async move {
+                    let mut outcomes = Vec::with_capacity(batch.len());
+                    for (uid, json, carried_gap, stepped_from) in batch {
+                        let delivered = stx.emit_status(&json, at).await;
+                        outcomes.push(StatusOutcome {
+                            uid,
+                            delivered,
+                            carried_gap,
+                            stepped_from,
+                        });
+                    }
+                    outcomes
+                });
+                status_inflight = Some((std::time::Instant::now(), handle));
             }
         }
 
@@ -3317,6 +3488,82 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         crate::watchdog::ping();
         tokio::time::sleep(fast).await;
     }
+}
+
+/// What one child's STATUS publish in an off-loop batch came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusOutcome {
+    uid: u32,
+    /// At least one relay accepted it.
+    delivered: bool,
+    /// It carried the startup enforcement-gap figure (L2).
+    carried_gap: bool,
+    /// Its `clockSteppedBackFrom` stamp, if any.
+    stepped_from: Option<u64>,
+}
+
+/// Apply a finished STATUS batch: an undelivered clock-step stamp is carried
+/// until one lands, a delivered one clears it. Returns whether a STATUS that
+/// carried the enforcement gap was accepted (the gap is then retired, L2).
+fn apply_status_outcomes(
+    outcomes: &[StatusOutcome],
+    step_undelivered: &mut std::collections::HashMap<u32, u64>,
+) -> bool {
+    let mut gap_delivered = false;
+    for o in outcomes {
+        if o.delivered && o.carried_gap {
+            gap_delivered = true;
+        }
+        match (o.delivered, o.stepped_from) {
+            (false, Some(from)) => {
+                step_undelivered.insert(o.uid, from);
+            }
+            (true, _) => {
+                step_undelivered.remove(&o.uid);
+            }
+            (false, None) => {}
+        }
+    }
+    gap_delivered
+}
+
+/// Where the local link keeps its outbox and last good guardian address: the
+/// daemon's state dir, the one that holds the machine key
+/// (`/var/lib/charter`).
+fn link_state_dir(key_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(key_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/charter"))
+}
+
+/// The guardian pressed Disconnect and the release authenticated (S7), on the
+/// relay poll or the local link. The pairing and every clause are already off
+/// disk (and the broker refuses anything further, on either route); what is
+/// left is a running daemon holding stale in-memory authority.
+///
+/// Restart rather than unwind in place, the same way scan-to-pair does in the
+/// other direction: charterd comes back up through its UNPAIRED arm,
+/// `ExecStopPost=charter-recovery --thaw-all` lifts the freeze on the way
+/// out, and there is no half-released state for anyone to reason about.
+fn restart_after_release(
+    poller: Option<&crate::local_link::BrokerPoller>,
+    link: Option<&charter_link::WardLink>,
+) {
+    eprintln!(
+        "charterd: guardian RELEASE applied — this device is no longer managed; \
+         restarting unpaired"
+    );
+    if let Some(p) = poller {
+        p.abort();
+    }
+    if let Some(l) = link {
+        l.shutdown();
+    }
+    let _ = std::process::Command::new("systemctl")
+        .args(["try-restart", "charterd.service"])
+        .status();
 }
 
 /// Meters the AWAKE seconds between enforcement-loop iterations.
@@ -3490,6 +3737,45 @@ fn bucket_view(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_finished_status_batch_retires_the_gap_and_settles_clock_step_stamps() {
+        use super::{apply_status_outcomes, StatusOutcome};
+        let o = |uid, delivered, carried_gap, stepped_from| StatusOutcome {
+            uid,
+            delivered,
+            carried_gap,
+            stepped_from,
+        };
+        let mut undelivered = std::collections::HashMap::from([(2u32, 900u64)]);
+        // Nothing carried the gap and got through: the gap stays.
+        assert!(!apply_status_outcomes(
+            &[o(1, false, true, Some(500)), o(3, true, false, None)],
+            &mut undelivered
+        ));
+        assert_eq!(undelivered.get(&1), Some(&500), "carried until one lands");
+        assert_eq!(undelivered.get(&2), Some(&900), "untouched");
+        // A delivered STATUS clears its child's stamp; a delivered one that
+        // carried the gap retires it.
+        assert!(apply_status_outcomes(
+            &[o(1, true, true, Some(500)), o(2, true, false, None)],
+            &mut undelivered
+        ));
+        assert!(undelivered.is_empty());
+    }
+
+    #[test]
+    fn the_link_keeps_its_state_beside_the_machine_key() {
+        use super::link_state_dir;
+        assert_eq!(
+            link_state_dir("/var/lib/charter/machine.key"),
+            std::path::PathBuf::from("/var/lib/charter")
+        );
+        assert_eq!(
+            link_state_dir("machine.key"),
+            std::path::PathBuf::from("/var/lib/charter")
+        );
+    }
+
     #[test]
     #[cfg(feature = "mock")]
     fn loading_a_trotters_pairing_repairs_and_persists_only_its_relays() {

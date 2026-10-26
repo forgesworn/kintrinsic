@@ -109,7 +109,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 2
+    const val EXPECTED_ABI_VERSION = 3
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -179,6 +179,58 @@ object CharterCore {
     }
 
     fun deviceCode(): String = jni().charterDeviceCode()
+
+    /** What the native local link reports (`charterLinkState`). */
+    data class LinkState(
+        /** A link exists (paired, with a transport). */
+        val running: Boolean,
+        /** At least one authenticated guardian session is up. */
+        val connected: Boolean,
+        /** Wraps the link has applied since this process started. */
+        val appliedSeq: Long,
+        val lastError: String?,
+        /** Which link this is: it moves when a new link starts (re-pair,
+         *  relay change, key retry), which knows no discovered address yet.
+         *  Null when not running (or an older library). */
+        val gen: Long? = null,
+        /** Addresses the link is trying (discovered plus remembered). */
+        val candidates: Int = 0,
+    )
+
+    /** Parse a `charterLinkState` body; anything unreadable is "not running". */
+    fun parseLinkState(raw: String): LinkState = runCatching {
+        val o = JSONObject(raw)
+        LinkState(
+            running = o.optBoolean("running", false),
+            connected = o.optBoolean("connected", false),
+            appliedSeq = o.optLong("appliedSeq", 0L),
+            lastError = if (o.isNull("lastError")) null else o.optString("lastError"),
+            gen = if (o.has("gen") && !o.isNull("gen")) o.optLong("gen") else null,
+            candidates = o.optInt("candidates", 0),
+        )
+    }.getOrDefault(LinkState(false, false, 0L, null))
+
+    fun linkState(): LinkState = parseLinkState(jni().charterLinkState())
+
+    /**
+     * Hand the full current set of `ip:port` carrier addresses to the link,
+     * with the `Network.getNetworkHandle()` of the Wi-Fi/Ethernet network
+     * they were found on (0: none). The link binds its sockets to that
+     * network: Wi-Fi without internet is not the default network while
+     * mobile data is up.
+     */
+    fun linkDiscovered(addrs: List<String>, netHandle: Long): Boolean {
+        val body = linkDiscoveredBody(addrs, netHandle)
+        return JSONObject(jni().charterLinkDiscovered(body)).optBoolean("ok", false)
+    }
+
+    /** `{"addrs":[…],"netHandle":<long>}` (pure, for the unit suite). */
+    fun linkDiscoveredBody(addrs: List<String>, netHandle: Long): String =
+        JSONObject().put("addrs", JSONArray(addrs)).put("netHandle", netHandle).toString()
+
+    fun linkKick() {
+        jni().charterLinkKick()
+    }
 
     fun pairingState(): PairingState =
         parsePairingState(JSONObject(jni().charterPairingState()))

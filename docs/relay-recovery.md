@@ -6,6 +6,18 @@ the configured list. A failed endpoint does not prevent another endpoint
 from carrying traffic; relay attempts run concurrently. Cached clauses keep
 applying when every relay is unavailable.
 
+## Home-network delivery during an outage
+
+When the guardian's Android app and a ward are on the same home network, they
+also exchange requests, answers and rule changes directly, without any relay
+(see [local network delivery](local-network-design.md)). An outage of every
+relay, or of the internet connection itself, then does not stop the ordinary
+permission loop at home. Devices on other networks, a browser guardian and
+older installations still depend on relays, and changes waiting for a device
+that is away are shown as not yet sent rather than delivered.
+
+## Allowlisted relays
+
 `relay.trotters.cc` now requires an allowlisted identity. Existing family
 pairings keep that configured relay and gain the three public defaults when
 updated, without unpairing or clearing clauses. Other custom relays are

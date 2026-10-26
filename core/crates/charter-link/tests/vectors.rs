@@ -1,0 +1,130 @@
+//! Golden vectors for the local link (v1) digests and signatures.
+//!
+//! `tests/vectors/local-link-v1.json` is generated, never hand-edited. To
+//! regenerate it after a deliberate protocol change:
+//!
+//! ```text
+//! cd core && cargo test -p charter-link --test vectors -- --ignored regenerate_vectors
+//! ```
+
+use std::path::PathBuf;
+
+use charter_link::{
+    ack_digest, ack_preimage, guardian_proof_digest, guardian_proof_preimage, guardian_proof_sign,
+    guardian_proof_verify, public_key, sign_ack, verify_ack, ward_proof_digest,
+    ward_proof_preimage, ward_proof_sign, ward_proof_verify, AckResult,
+};
+use charter_primitives::{EventId, PubKey, Sig};
+use serde_json::{json, Value};
+
+fn path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/local-link-v1.json")
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn b32(s: &str) -> [u8; 32] {
+    *EventId::from_hex(s).expect("32-byte hex").as_bytes()
+}
+
+/// Fixed inputs. Secrets are arbitrary valid scalars; nothing here is a real key.
+fn inputs() -> Value {
+    json!({
+        "guardianSecret": "7f3c9e1a5b2d4f6081a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5f7",
+        "machineSecret": "1d2c3b4a59687766554433221100ffeeddccbbaa99887766554433221100aa55",
+        "wardChallenge": "0101010101010101010101010101010101010101010101010101010101010101",
+        "guardianChallenge": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "wrap": "5c0ffee05c0ffee05c0ffee05c0ffee05c0ffee05c0ffee05c0ffee05c0ffee0",
+        "result": "applied",
+        "ts": 1_761_400_000u64,
+    })
+}
+
+fn compute(inp: &Value) -> Value {
+    let s = |k: &str| inp[k].as_str().unwrap().to_owned();
+    let gsk = b32(&s("guardianSecret"));
+    let msk = b32(&s("machineSecret"));
+    let cw = b32(&s("wardChallenge"));
+    let cg = b32(&s("guardianChallenge"));
+    let wrap = EventId::from_hex(&s("wrap")).unwrap();
+    let result = AckResult::parse(&s("result")).unwrap();
+    let ts = inp["ts"].as_u64().unwrap();
+    let g = public_key(&gsk).unwrap();
+    let m = public_key(&msk).unwrap();
+    let sg = guardian_proof_sign(&gsk, &cw, &cg).unwrap();
+    let sw = ward_proof_sign(&msk, &cw, &cg, &g).unwrap();
+    let ack = sign_ack(&msk, &g, &wrap, result, ts);
+    json!({
+        "guardian": g.to_hex(),
+        "machine": m.to_hex(),
+        "guardianProof": {
+            "preimage": guardian_proof_preimage(&cw, &cg, &g),
+            "digest": hex(&guardian_proof_digest(&cw, &cg, &g)),
+            "sig": sg.to_hex(),
+        },
+        "wardProof": {
+            "preimage": ward_proof_preimage(&cw, &cg, &g, &m),
+            "digest": hex(&ward_proof_digest(&cw, &cg, &g, &m)),
+            "sig": sw.to_hex(),
+        },
+        "ack": {
+            "preimage": ack_preimage(&g, &m, &wrap, result, ts),
+            "digest": hex(&ack_digest(&g, &m, &wrap, result, ts)),
+            "sig": ack.sig.to_hex(),
+        },
+    })
+}
+
+#[test]
+fn vectors_recompute_and_verify() {
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(path()).expect("vector file")).unwrap();
+    let inp = &file["inputs"];
+    assert_eq!(compute(inp), file["expected"], "vectors drifted");
+
+    let e = &file["expected"];
+    let g = PubKey::from_hex(e["guardian"].as_str().unwrap()).unwrap();
+    let m = PubKey::from_hex(e["machine"].as_str().unwrap()).unwrap();
+    let cw = b32(inp["wardChallenge"].as_str().unwrap());
+    let cg = b32(inp["guardianChallenge"].as_str().unwrap());
+    let sig = |k: &str| Sig::from_hex(e[k]["sig"].as_str().unwrap()).unwrap();
+    assert!(guardian_proof_verify(&cw, &cg, &g, &sig("guardianProof")));
+    assert!(ward_proof_verify(&cw, &cg, &g, &m, &sig("wardProof")));
+    let ack = charter_link::Ack {
+        wrap: EventId::from_hex(inp["wrap"].as_str().unwrap()).unwrap(),
+        result: AckResult::parse(inp["result"].as_str().unwrap()).unwrap(),
+        ts: inp["ts"].as_u64().unwrap(),
+        sig: sig("ack"),
+    };
+    assert!(verify_ack(&ack, &g, &m));
+
+    // The preimages are spelled out so another implementation can check its
+    // formatting without this crate: SHA-256 of each preimage is its digest.
+    for k in ["guardianProof", "wardProof", "ack"] {
+        let pre = e[k]["preimage"].as_str().unwrap();
+        assert_eq!(
+            hex(&charter_crypto::sha256(pre.as_bytes())),
+            e[k]["digest"].as_str().unwrap()
+        );
+    }
+    assert!(e["ack"]["preimage"]
+        .as_str()
+        .unwrap()
+        .ends_with("\napplied\n1761400000"));
+}
+
+#[test]
+#[ignore = "regenerates tests/vectors/local-link-v1.json"]
+fn regenerate_vectors() {
+    let inp = inputs();
+    let file = json!({
+        "description": "Kintrinsic local link v1: handshake proof and ACK digests (SHA-256 of the UTF-8 preimage) and deterministic BIP-340 signatures (no aux randomness). Generated by `cargo test -p charter-link --test vectors -- --ignored regenerate_vectors`; do not hand-edit.",
+        "inputs": inp,
+        "expected": compute(&inp),
+    });
+    let mut text = serde_json::to_string_pretty(&file).unwrap();
+    text.push('\n');
+    std::fs::write(path(), text).unwrap();
+}

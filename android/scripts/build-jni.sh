@@ -17,18 +17,40 @@ OUT=../app/src/main/jniLibs
 # size, which is not a control we should rely on.
 rm -rf "$OUT"
 
+# API 23+ for android_setsocknetwork (libandroid), which binds the local
+# link's sockets to the Wi-Fi network; the ward app's minSdk is 34.
+PLATFORM=34
+
+# Whether a build enables `mock` on any crate in its graph: every package is
+# listed with the features it is built with (`name vX (path) [a,b]`), for
+# every target platform, without dev-dependencies (the tests' own mock never
+# reaches the .so). Grepping the `-e features` tree instead misses it: a
+# forward tree never shows the root's own features, so `feature "mock"`
+# appears there only through a dev-dependency.
+mock_in_graph() {
+  cargo tree --locked --target all -e normal,build --prefix none --format '{p} [{f}]' "$@" |
+    grep -qE '\[([^]]*,)?mock(,[^]]*)?\]'
+}
+
 case "$PROFILE" in
   release)
-    cargo ndk -t arm64-v8a -t x86_64 -o "$OUT" \
+    cargo ndk -t arm64-v8a -t x86_64 -P "$PLATFORM" -o "$OUT" \
       build --locked --release --no-default-features --features real-relay
-    # Gate: the shipped graph must carry no `mock`.
-    if cargo tree -e features --no-default-features --features real-relay | grep -q ' mock'; then
+    # Gate: the shipped graph must carry no `mock`. The gate proves itself
+    # first: on a graph that does enable mock it must fire (the earlier
+    # `grep ' mock'` over the feature tree could never fire, and passed
+    # everything).
+    if ! mock_in_graph --no-default-features --features real-relay,mock; then
+      echo "FATAL: the mock gate does not detect mock in a mock graph" >&2
+      exit 1
+    fi
+    if mock_in_graph --no-default-features --features real-relay; then
       echo "FATAL: mock feature leaked into the release graph" >&2
       exit 1
     fi
     ;;
   debug)
-    cargo ndk -t arm64-v8a -t x86_64 -o "$OUT" \
+    cargo ndk -t arm64-v8a -t x86_64 -P "$PLATFORM" -o "$OUT" \
       build --locked --no-default-features --features real-relay,mock
     ;;
   *)

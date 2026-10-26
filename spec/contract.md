@@ -2113,6 +2113,109 @@ precise daily/weekly period-key derivation; and for the union-rule extension, th
 bitmap encoding (base64url of 180 bytes proposed) + whether a weekly bitmap set
 is carried or the weekly figure is derived guardian-side (**recommend derive**).
 
+### Local link (v1) — direct guardian ↔ ward delivery on a home network
+
+A second route for the **same** NIP-59 gift wraps, between a guardian carrier
+(the Android guardian app) and its paired wards on one local network. It adds
+no Nostr kind and changes no envelope, clause or grant shape: a wrap sent over
+the local link is byte-identical to its relay copy (same event id), and the
+receiver unwraps and verifies it exactly as it would a relay event. The link
+never carries authority of its own. Relays remain the durable route; both
+sides publish every wrap to relays in parallel with the local send. Design
+rationale and the support matrix: `docs/local-network-design.md`.
+
+**Roles and discovery.** The guardian carrier listens and advertises; wards
+connect out and never advertise. Service type `_kintrinsic._tcp` (domain
+`local`), instance name `Kintrinsic <4 random hex>` chosen once per install,
+TXT `v=1` and nothing else. Discovery is a hint: identity is established only
+by the handshake. The carrier listens on IPv4, preferring port 47615, and
+accepts only private (10/8, 172.16/12, 192.168/16) and link-local (169.254/16)
+peer addresses. A ward also retries the last address that completed a
+handshake.
+
+**Framing.** TCP. Each frame is a 4-byte big-endian length `N`,
+`1 ≤ N ≤ 262144`, then `N` bytes of UTF-8 JSON: an array whose first element
+is the frame type. A zero, oversized or unparsable frame closes the
+connection. Unknown frame types are ignored (forward compatibility) but count
+towards rate limits.
+
+**Handshake** (5 s deadline). All values are lowercase hex; `cw`, `cg` are 32
+fresh random bytes; `G` is the guardian key, `M` the ward's machine key;
+signatures are BIP-340 over the SHA-256 of the UTF-8 string shown.
+
+| # | Direction | Frame | Signature input |
+|---|---|---|---|
+| 1 | ward → guardian | `["HELLO",{"v":1,"challenge":cw}]` | — |
+| 2 | guardian → ward | `["CHALLENGE",{"v":1,"guardian":G,"challenge":cg,"sig":sg}]` | `"kintrinsic-local-v1/guardian\n"+cw+"\n"+cg+"\n"+G` |
+| 3 | ward → guardian | `["AUTH",{"machine":M,"sig":sw}]` | `"kintrinsic-local-v1/ward\n"+cw+"\n"+cg+"\n"+G+"\n"+M` |
+| 4 | guardian → ward | `["READY",{"v":1}]` | — |
+
+The ward sends step 3 only if `G` is its **pinned guardian** and `sg`
+verifies, so a stranger never learns the machine key. The guardian sends
+step 4 only if `M` is one of its **paired** devices and `sw` verifies. Any
+failure closes the connection without a reason. The guardian answers HELLO
+with CHALLENGE even to strangers; that reveals only `G`, which relays already
+carry as a `p` tag.
+
+**Session frames** (after READY):
+
+- `["EVENT", wrap]` — guardian → ward: a kind-1059 wrap whose single `p` tag
+  is `M`; ward → guardian: a kind-1059 wrap whose single `p` tag is `G`. The
+  receiver checks the id and outer signature before accepting it.
+- `["OK", wrapId, accepted, reason]` — receipt only: the wrap was accepted
+  for processing (ward) or stored (guardian). Not proof of application.
+- `["ACK", {"wrap":wrapId,"result":R,"ts":t,"sig":s}]` — ward → guardian, for
+  each guardian wrap received over this link, after the broker has processed
+  it. `s` signs `"kintrinsic-local-v1/ack\n"+G+"\n"+M+"\n"+wrapId+"\n"+R+"\n"+t`
+  (`t` decimal unix seconds). The guardian accepts an ACK only from the
+  session authenticated as `M`, for a wrap it sent to `M`.
+- `["PING", n]` / `["PONG", n]` — the ward pings every 120 s; either side
+  closes after 330 s without a frame.
+
+`R` reports what the device's broker did, judged from its own state:
+
+| `R` | Meaning |
+|---|---|
+| `applied` | Verified, and this delivery made it the device's state: the clause is now the stored clause for its `(subject, kind)`; the grant moved its request to Enacted or Denied; the release applied. |
+| `unchanged` | Verified, and already held: the same inner event is the stored clause, or the request was already answered. |
+| `superseded` | An authentic clause not newer than the stored one; the stored clause stays in effect. |
+| `expired` | A grant outside its validity window, or for an ask already expired or closed. |
+| `refused` | Failed verification or validation, or no matching pending ask. |
+| `failed` | Authentic, but could not be recorded or enacted. |
+| `ignored` | A kind the device does not act on over the link. |
+
+`applied` for `install.*` records the approval; it is not proof that the
+operating system completed an installation. An `app.open` allow is applied
+on a device only when both its GRANT and that device's `apps` CLAUSE report
+`applied` or `unchanged`.
+
+**Verification is unchanged.** A ward passes every locally received wrap to
+the same unwrap and broker handlers as relay polling (`Broker::ingest_local`
+→ `on_clause` / `on_grant` / release / usage-sync), so pinning, inner
+signatures, freshness, nonce and consumed-`reqId` checks and the per-
+`(subject, kind)` `issuedAt` floor all apply. The guardian console passes
+every locally received wrap to the same unwrap and seal/machine checks as its
+relay poll. Duplicates across routes collapse on the existing identities
+(inner event, `reqId`, floors), and an older relay copy of a clause cannot
+overwrite a newer local one. The session itself carries no channel
+encryption or per-frame authentication: integrity rests on the per-message
+signatures (inner events and ACKs) and the NIP-59 encryption of every wrap.
+
+**Bounds.** Guardian: 8 unauthenticated connections (at most 2 from one
+source address), 16 sessions, 4 per machine; ward: 4 sessions. Either side
+closes a session that sends more than 600 frames in 60 s, well above a full
+backlog flushed in both directions. Held wraps are bounded by count (the
+guardian's inbound store also by total size, 8 MiB) and time-limited on both
+sides, and a wrap too large for one frame is never held (see the design
+note).
+
+**Compatibility.** Additive. Peers without the link use relays only. A
+carrier without the link methods leaves the console relay-only. Browser
+guardians are relay-only. A future `v` increment is negotiated by HELLO and
+CHALLENGE carrying `v`; a peer that does not recognise `v` closes. Golden
+vectors for the three signature inputs live in
+`core/crates/charter-link/tests/vectors/local-link-v1.json`.
+
 ### Authority + identity model (per-child, multi-device)
 
 - **One pinned guardian** signs **every** CLAUSE and every USAGE_SYNC. Per-child
@@ -2531,6 +2634,7 @@ the audit section above unchanged; `summary` MAY appear in audit content,
 | Guardian surface (MyCharter + carrier APK) | **Live (2026-07-22).** Request intake, Approvals inbox, local-key signing/GRANTs, clause authoring incl. `tethering`/`update`/`lifeline`; the carrier APK holds the relay socket for reliable wake. Signet-bunker vault mode: designed, not yet built. |
 | `lifeline` clause (store_key 9) | **Shipped device+surface (2026-07-22).** Guardian numbers callable from the ward's lock screen (spec D9); fail-closed body validation both ends. |
 | `standdown` clause (store_key 13) | **Android PROVEN on hardware 2026-07-27** (warning + lockout on a real ward's phone); **Linux code-complete** in charterd 0.4.0, not yet run on a laptop.|
+| Local link (v1) | **Code-complete, hardware verification pending.** Guardian carrier listener, Linux and Android ward clients, console routing and signed ACKs. No new kind; vectors unchanged. |
 
 ## References
 

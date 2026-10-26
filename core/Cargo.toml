@@ -12,6 +12,7 @@ members = [
     "crates/charter-content",
     "crates/charter-webpolicy",
     "crates/charter-spine",
+    "crates/charter-link",
 ]
 
 [workspace.package]
@@ -50,3 +51,4 @@ charter-schedule = { path = "crates/charter-schedule" }
 charter-content = { path = "crates/charter-content" }
 charter-webpolicy = { path = "crates/charter-webpolicy" }
 charter-spine = { path = "crates/charter-spine", default-features = false }
+charter-link = { path = "crates/charter-link" }

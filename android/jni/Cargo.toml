@@ -32,8 +32,9 @@ getrandom = "0.2"
 # optimiser is not allowed to elide, unlike a hand-rolled loop over a buffer
 # nothing reads afterwards.
 zeroize = { version = "1", features = ["zeroize_derive"] }
-# One current-thread runtime drives the blocking relay facade (§2.3).
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# One current-thread runtime drives the blocking relay facade (§2.3); the
+# local link runs on its own one-worker multi-thread runtime.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
 
 # The shared decide/verify/crypto core (hoisted to ../../core — port-spec §1).
 # default-features = false everywhere: the shipped .so must never carry `mock`.
@@ -47,6 +48,9 @@ charter-transport = { path = "../../core/crates/charter-transport", default-feat
 charter-sys = { path = "../../core/crates/charter-sys", default-features = false }
 charter-content = { path = "../../core/crates/charter-content" }
 charter-webpolicy = { path = "../../core/crates/charter-webpolicy" }
+# The local link (v1): the ward client that connects out to the guardian
+# carrier on the home network (docs/local-network-design.md).
+charter-link = { path = "../../core/crates/charter-link", features = ["net"] }
 
 [dev-dependencies]
 charter-testkit = { path = "../../core/crates/charter-testkit" }

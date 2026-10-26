@@ -14,6 +14,7 @@ import {
 } from "../store/store";
 import type { Child, ChildRequest, RequestKind } from "../domain/types";
 import { liveness, livenessChip } from "../domain/liveness";
+import { useLocalRoute } from "../carrier/useLocalRoute";
 import {
   groupExtrasToday,
   groupProgressBuckets,
@@ -128,6 +129,9 @@ function TimeBar({ fraction, color }: { fraction: number; color: string }) {
  *  question confidently. */
 function DeviceLines({ child }: { child: Child }) {
   const now = Date.now();
+  // A device the carrier is talking to directly is on the home network,
+  // whatever its last relay heartbeat says.
+  const { sessions } = useLocalRoute();
 
   if (child.devices.length === 0) {
     return (
@@ -157,6 +161,7 @@ function DeviceLines({ child }: { child: Child }) {
         const chip = livenessChip(
           liveness({ paired: d.pairing === "paired", lastSeenAt: d.lastSeenAt }, now),
           now,
+          d.pairing === "paired" && !!d.devicePubkey && sessions.has(d.devicePubkey),
         );
         return (
           <div className="row-between" key={d.id} style={{ gap: 10 }}>
