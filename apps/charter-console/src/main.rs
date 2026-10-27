@@ -797,7 +797,9 @@ fn collect_status() -> String {
         "deviceNpub": device_code.as_deref().and_then(public_npub),
         "relays": pairing.as_ref().and_then(|p| p.get("relays")).cloned().unwrap_or(json!([])),
         "guardian": pairing.as_ref().and_then(|p| p.get("guardian_pubkey")).cloned(),
-        "version": env!("CARGO_PKG_VERSION"),
+        // The .deb's version, set by `xtask deb`; a bare cargo build falls
+        // back to this crate's own.
+        "version": option_env!("KINTRINSIC_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
         "qr": qr,
         "invited": invite.is_some(),
         "secsLeft": secs_left,

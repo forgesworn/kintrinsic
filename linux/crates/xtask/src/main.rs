@@ -138,6 +138,9 @@ fn build_deb() -> Result<(), String> {
     eprintln!("xtask deb: building charter-console (the unified app)…");
     let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .current_dir(&console_dir)
+        // The console is its own crate with its own (unbumped) version; its
+        // About page shows the package it shipped in instead.
+        .env("KINTRINSIC_VERSION", VERSION)
         .args(["build", "--release"])
         .status()
         .map_err(|e| format!("spawn cargo (charter-console): {e}"))?;
