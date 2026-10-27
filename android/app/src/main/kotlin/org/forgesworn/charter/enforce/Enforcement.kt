@@ -235,6 +235,14 @@ interface RestrictionOps {
      * local-only AP legal. Anything unrecognized is treated as "blocked".
      */
     fun applyTetherMode(mode: String)
+
+    /**
+     * Level-triggered adb posture (the `debugging` clause), re-asserted each
+     * tick. `false` sets `DISALLOW_DEBUGGING_FEATURES`, which makes the
+     * platform turn adb off; `true` clears it, which does NOT turn adb back
+     * on (the ward device's user does that in Developer options).
+     */
+    fun applyDebugging(allowed: Boolean)
 }
 
 /**
@@ -261,18 +269,6 @@ internal fun restrictionWrites(
     isSet: ((String) -> Boolean)?,
 ): List<Pair<String, Boolean>> =
     desired.filter { (key, on) -> isSet == null || isSet(key) != on }
-
-/**
- * The standing posture as restriction targets. With debugging allowed,
- * `DISALLOW_DEBUGGING_FEATURES` is not merely left out but actively CLEARED:
- * every ward charted by an earlier build already carries it, and leaving it
- * alone would keep adb shut on exactly the phones the allowance is for.
- */
-internal fun postureTargets(keys: List<String>, allowDebugging: Boolean): List<Pair<String, Boolean>> {
-    val debug = UserManager.DISALLOW_DEBUGGING_FEATURES
-    if (!allowDebugging) return keys.map { it to true }
-    return keys.filter { it != debug }.map { it to true } + (debug to false)
-}
 
 /**
  * The tethering posture as ordered restriction targets. "filtered" locks the
@@ -643,13 +639,12 @@ class DpmRestrictionOps(
     private val dpm: DevicePolicyManager,
     private val admin: ComponentName,
     /**
-     * True for a debuggable (debug) build, or a release built while
-     * [org.forgesworn.charter.service.WardenController.ALLOW_DEBUGGING_IN_RELEASE]
-     * is on: `DISALLOW_DEBUGGING_FEATURES` is then cleared rather than set, so
-     * the on-metal test rounds (Doze, crash, drift, the home-network link) can
-     * keep an adb session on a charted test phone.
+     * True only for a debuggable (debug) build: [applyDebugging] then keeps
+     * `DISALLOW_DEBUGGING_FEATURES` cleared whatever the `debugging` clause
+     * says, so a developer's adb session survives being charted. A release
+     * build follows the clause alone.
      */
-    private val allowDebugging: Boolean = false,
+    private val forceAllowDebugging: Boolean = false,
 ) : RestrictionOps {
 
     /**
@@ -691,11 +686,23 @@ class DpmRestrictionOps(
         // Settings), and USB debugging from there is adb: force-stop the
         // warden, flip the usage-stats app-op, and the day's accrual stops
         // without anything appearing to be off.
+        //
+        // Listed here only so [clearBaseline] removes it on un-chartering.
+        // It is NOT in [baseline] or [postureKeys]: the `debugging` clause
+        // owns it through [applyDebugging] (see below).
         UserManager.DISALLOW_DEBUGGING_FEATURES,
     )
 
-    private val baseline =
-        if (allowDebugging) fullBaseline - UserManager.DISALLOW_DEBUGGING_FEATURES else fullBaseline
+    /**
+     * What [applyBaseline] sets. `DISALLOW_DEBUGGING_FEATURES` is excluded,
+     * always: applying that restriction makes the platform turn ADB_ENABLED
+     * off, and clearing it does not turn it back on. A baseline (or the 30 s
+     * [reassertPosture]) that set it, followed by a tick that cleared it for
+     * an allowed window, would switch adb off again on every service restart.
+     * A newly charted device is therefore blocked from its first tick, not
+     * its first instant.
+     */
+    private val baseline = fullBaseline - UserManager.DISALLOW_DEBUGGING_FEATURES
 
     /**
      * Only ACTS on a difference. Blindly re-adding restrictions that are
@@ -717,7 +724,7 @@ class DpmRestrictionOps(
         val done = mutableListOf<String>()
         val failed = mutableListOf<String>()
         // Unknown current state (a read that failed) → apply, never assume.
-        for ((key, on) in restrictionWrites(postureTargets(keys, allowDebugging), isSet)) {
+        for ((key, on) in restrictionWrites(keys.map { it to true }, isSet)) {
             runCatching {
                 if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
             }
@@ -803,6 +810,22 @@ class DpmRestrictionOps(
         val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
         val isSet: ((String) -> Boolean)? = current?.let { b -> { k: String -> b.getBoolean(k, false) } }
         for ((key, on) in restrictionWrites(tetherTargets(mode), isSet)) {
+            if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
+        }
+    }
+
+    /**
+     * Level-triggered like [applyTetherMode]: read the real restrictions and
+     * write only the difference. Blocked unless the clause allows it or this
+     * is a debuggable build. An unreadable state writes the desired value
+     * rather than assuming it is already right.
+     */
+    override fun applyDebugging(allowed: Boolean) {
+        val blocked = !(allowed || forceAllowDebugging)
+        val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
+        val isSet: ((String) -> Boolean)? = current?.let { b -> { k: String -> b.getBoolean(k, false) } }
+        val target = listOf(UserManager.DISALLOW_DEBUGGING_FEATURES to blocked)
+        for ((key, on) in restrictionWrites(target, isSet)) {
             if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
         }
     }

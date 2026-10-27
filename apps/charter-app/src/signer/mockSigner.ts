@@ -120,6 +120,18 @@ export class MockSigner implements Signer {
     return { ok: true };
   }
 
+  async signDebuggingClause(
+    childId: string,
+    _devicePubkey: string,
+    grant: { allow: boolean; until?: number },
+  ): Promise<{ ok: true }> {
+    await this.authorize(
+      "clause",
+      grant.allow ? `Turn on USB debugging for ${childId}` : `Turn off USB debugging for ${childId}`,
+    );
+    return { ok: true };
+  }
+
   async sendPairOffer(): Promise<{ ok: true }> {
     return { ok: true };
   }

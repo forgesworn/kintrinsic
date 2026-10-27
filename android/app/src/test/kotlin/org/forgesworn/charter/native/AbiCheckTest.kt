@@ -19,7 +19,7 @@ class AbiCheckTest {
      *  with `ABI_VERSION` in android/jni/src/lib.rs. */
     @Test
     fun thisBuildExpectsAbiThree() {
-        assertEquals(3, CharterCore.EXPECTED_ABI_VERSION)
+        assertEquals(4, CharterCore.EXPECTED_ABI_VERSION)
     }
 
     @Test

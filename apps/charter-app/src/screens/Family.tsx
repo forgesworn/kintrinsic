@@ -36,6 +36,7 @@ import { shortMachine } from "../store/unclaimedDevices";
 import { QRScanner } from "../components/QRScanner";
 import UnlockDevice from "./UnlockDevice";
 import DeviceRelays from "./DeviceRelays";
+import DeviceDebugging from "./DeviceDebugging";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
 import { anyOnHomeNetwork, bestLiveness, livenessChip } from "../domain/liveness";
@@ -791,6 +792,7 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
           onClose={() => setUnlockOpen(false)}
         />
       )}
+      {paired && <DeviceDebugging child={child} device={device} />}
       {paired && <DeviceRelays child={child} device={device} />}
     </li>
   );

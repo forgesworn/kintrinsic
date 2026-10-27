@@ -23,6 +23,7 @@ import type {
   GrantContent,
   GrantSchedule,
   GrantTethering,
+  GrantDebugging,
   GrantBuckets,
   GrantListening,
   GrantLifeline,
@@ -298,6 +299,23 @@ export function tetheringToGrant(tethering: Tethering, issuedAt: number): GrantT
   // Only carry an expiry for an active allowance — a blocked posture is
   // permanent, so an `until` on it would be meaningless (and drift the bytes).
   if (tethering.allow !== "none" && tethering.until != null) g.until = tethering.until;
+  return g;
+}
+
+/**
+ * The `debugging` grant for ONE device. Deliberately not part of
+ * `policyToClauses`: debugging is per-device state, not a Policy field, so it
+ * is signed on its own and sealed to a single device (see
+ * `Signer.signDebuggingClause`).
+ */
+export function debuggingToGrant(
+  debugging: { allow: boolean; until?: number },
+  issuedAt: number,
+): GrantDebugging {
+  const g: GrantDebugging = { v: 1, issuedAt, allow: debugging.allow };
+  // A blocked posture is permanent, so an `until` on it would be meaningless
+  // (and drift the bytes).
+  if (debugging.allow && debugging.until != null) g.until = debugging.until;
   return g;
 }
 

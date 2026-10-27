@@ -109,7 +109,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 3
+    const val EXPECTED_ABI_VERSION = 4
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -467,6 +467,12 @@ object CharterCore {
             "raw", "filtered" -> m
             else -> "blocked"
         }
+
+    /** Whether debugging (adb) is allowed right now: -1 blocked, 0 allowed with
+     *  no end, >0 allowed until that unix second. Any throw (a stale `.so`
+     *  without the export, an uninitialised core) reads as blocked: fail-closed. */
+    fun debuggingUntil(nowUnix: Long): Long =
+        runCatching { jni().charterDebuggingUntil(nowUnix) }.getOrDefault(-1L)
 
     /** One forced-resolution rewrite (host -> answer) for SafeSearch / YouTube. */
     data class DnsRewrite(val host: String, val answer: String)

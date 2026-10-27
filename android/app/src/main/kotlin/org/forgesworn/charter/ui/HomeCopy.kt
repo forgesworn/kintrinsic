@@ -35,6 +35,26 @@ object HomeCopy {
         else -> Headline(TimeText.timeLeft(view.secondsLeft), "left today")
     }
 
+    /**
+     * The ward's own line when the guardian has opened USB debugging (the
+     * `debugging` clause): a ward can always see what is being enforced.
+     * [until] is the core's `debuggingUntil`: -1 blocked (null, no line), 0 no
+     * end, >0 the unix second it ends. Local time; the day is named only when
+     * the window ends on another day than [now].
+     */
+    fun debuggingLine(until: Long, now: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String? = when {
+        until < 0 -> null
+        until == 0L -> "USB debugging is on until your guardian turns it off"
+        else -> {
+            val end = java.time.Instant.ofEpochSecond(until).atZone(zone)
+            val sameDay = end.toLocalDate() == java.time.Instant.ofEpochSecond(now).atZone(zone).toLocalDate()
+            val clock = "%02d:%02d".format(end.hour, end.minute)
+            val day = if (sameDay) "" else
+                end.dayOfWeek.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.UK) + " "
+            "USB debugging is on until $day$clock"
+        }
+    }
+
     /** "Kintrinsic 0.6.11 (42)" — the line a tester wants without a long-press. */
     fun versionLine(versionName: String?, versionCode: Long): String {
         val name = versionName?.takeIf { it.isNotBlank() } ?: "?"

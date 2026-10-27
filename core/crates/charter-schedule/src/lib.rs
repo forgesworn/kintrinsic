@@ -6,6 +6,7 @@
 pub mod buckets;
 pub mod budget;
 pub mod clause;
+pub mod debugging;
 pub mod enforcer;
 pub mod extension;
 pub mod minutes;
@@ -25,6 +26,7 @@ pub use clause::{
     BUCKETS_VERSION_WEEKLY, BUDGET_VERSION, CMDLINE_ID_PREFIX, MAX_BUCKET_WEEK_MINUTES,
     MIN_CMDLINE_NEEDLE, SCHEDULE_VERSION, SITE_ID_PREFIX,
 };
+pub use debugging::{evaluate_debugging, GrantDebugging, DEBUGGING_VERSION};
 pub use enforcer::{
     burn_schedule_extension, compute_remaining, end_of_day_unix, enforcement_eod_unix,
     enforcement_tz_of, is_valid_freeze_target, reconcile_freeze, AuditKind, EnforcerCore,

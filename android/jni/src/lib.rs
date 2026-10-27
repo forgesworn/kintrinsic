@@ -24,7 +24,8 @@ use warden::{Warden, WARDEN};
 /// 2: `charterInit` takes the app's versionName (STATUS `appVersionName`).
 /// 3: the local link — `charterLinkDiscovered`, `charterLinkKick`,
 ///    `charterLinkState`.
-pub const ABI_VERSION: jint = 3;
+/// 4: the `debugging` clause — `charterDebuggingUntil`.
+pub const ABI_VERSION: jint = 4;
 
 // ---- helpers --------------------------------------------------------------
 
@@ -412,6 +413,26 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterT
     now_unix: jlong,
 ) -> jstring {
     with_warden(&env, |w| w.tethering_mode(now_unix).to_string())
+}
+
+/// The sole ward's debugging posture at `now_unix` (the `debugging` clause):
+/// `-1` blocked, `0` allowed with no end, `>0` allowed until that unix second.
+/// Recomputed per tick — a window ends AT its `until`. Fail-closed: no ward,
+/// no clause or a malformed one ⇒ `-1`. Kotlin applies it level-triggered to
+/// DISALLOW_DEBUGGING_FEATURES.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterDebuggingUntil(
+    _env: JNIEnv,
+    _class: JClass,
+    now_unix: jlong,
+) -> jlong {
+    let guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
+    // An uninitialised warden or a panic is "blocked", never "allowed", and a
+    // panic must not unwind across the FFI boundary.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guard.as_ref().map_or(-1, |w| w.debugging_until(now_unix))
+    }))
+    .unwrap_or(-1)
 }
 
 /// The ward-facing "your charter" mirror (spec D8): `{"locked","minutesLeft",

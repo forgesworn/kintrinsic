@@ -63,6 +63,7 @@ class MainActivity : Activity() {
     private var charterStatusCard: LinearLayout? = null
     private lateinit var hotspotButton: Button
     private lateinit var hotspotNote: TextView
+    private lateinit var debuggingNote: TextView
     private var groupsCard: LinearLayout? = null
     private var askOpenCard: LinearLayout? = null
     private lateinit var title: TextView
@@ -334,8 +335,11 @@ class MainActivity : Activity() {
                 refresh()
             }
         }
+        // Shown only while the guardian's `debugging` clause has adb open.
+        debuggingNote = line("", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 24).apply { visibility = View.GONE }
         root.addView(hotspotNote)
         root.addView(hotspotButton)
+        root.addView(debuggingNote)
         (hotspotButton.layoutParams as? LinearLayout.LayoutParams)?.topMargin = 12
 
         // The quiet footer: everything a grown-up (or a tester) wants that a
@@ -482,6 +486,7 @@ class MainActivity : Activity() {
             val state = runCatching { CharterCore.pairingState() }.getOrNull()
             val view = runCatching { CharterCore.scheduleView(now) }.getOrNull()
             val tether = runCatching { CharterCore.tetheringMode(now) }.getOrNull()
+            val debugging = CharterCore.debuggingUntil(now)
             // The named-times mirror (Task 9): every group's day/week picture
             // plus the labelled `askFirst` list, one JNI round trip — and the
             // outstanding asks' CURRENT state, read fresh every tick so a
@@ -495,7 +500,7 @@ class MainActivity : Activity() {
             // it now!" forever just because the ask was once answered yes
             // (round-2 review minor, 2026-08-03; see GroupMirror.kt).
             val holds = runCatching { CharterCore.appHolds(now) }.getOrDefault(emptyList())
-            runOnUiThread { render(state, view, tether, groups, askFirst, requests, holds, now) }
+            runOnUiThread { render(state, view, tether, groups, askFirst, requests, holds, now, debugging) }
         }
     }
 
@@ -508,6 +513,7 @@ class MainActivity : Activity() {
         requests: List<CharterCore.RequestRecord> = emptyList(),
         holds: List<CharterCore.AppHold> = emptyList(),
         nowUnix: Long = System.currentTimeMillis() / 1000,
+        debuggingUntil: Long = -1,
     ) {
         val paired = state?.paired == true
         // Two voices, one screen. Paired: the child's ("Your charter", the
@@ -570,6 +576,10 @@ class MainActivity : Activity() {
         // The guest hotspot: only offered while the charter permits one. The
         // credentials live here now (they used to be appended to the mirror
         // above — one place, next to the switch that controls it).
+        val debuggingLine = if (paired) org.forgesworn.charter.ui.HomeCopy.debuggingLine(debuggingUntil, nowUnix) else null
+        debuggingNote.text = debuggingLine.orEmpty()
+        debuggingNote.visibility = if (debuggingLine == null) View.GONE else View.VISIBLE
+
         val mayHotspot = paired && tetherMode == "filtered"
         hotspotButton.visibility = if (mayHotspot) View.VISIBLE else View.GONE
         hotspotNote.visibility = hotspotButton.visibility

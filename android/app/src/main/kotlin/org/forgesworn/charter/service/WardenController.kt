@@ -728,6 +728,16 @@ class WardenController(
             // before pushing it and never try again).
             guard.run("tether", ward) { restrictions.applyTetherMode(tetherMode) }
         }
+        // Debugging (adb): the `debugging` clause alone owns
+        // DISALLOW_DEBUGGING_FEATURES, level-triggered per tick so a window
+        // ends the moment its `until` passes. Not the baseline: setting it
+        // there would turn adb off again on every service restart. Blocked
+        // (-1) on any native failure.
+        if (applyRestrictions && Provisioning.isDeviceOwner(context)) {
+            guard.run("debugging", ward) {
+                restrictions.applyDebugging(CharterCore.debuggingUntil(nowUnix) >= 0)
+            }
+        }
         // A filtered clause is PERMISSION, not an instruction to hold an AP up
         // all day: the ward's own switch decides (see HotspotWish — the battery
         // reason is written up there). Drop the wish whenever the permission
@@ -994,15 +1004,6 @@ class WardenController(
         /** How often a pinned DNS filter whose tunnel is down is restarted. */
         private const val DNS_REDISPATCH_SECS = 30L
 
-        /**
-         * TESTING WINDOW ONLY. While on, a release ward leaves USB debugging
-         * available (and clears the restriction an earlier build set), so a
-         * charted family phone can still be reached over adb during the
-         * hardware rounds. It is a reduced posture: a ward with adb can
-         * force-stop the warden. Turn it off before any public release.
-         */
-        const val ALLOW_DEBUGGING_IN_RELEASE = true
-
         /** The production wiring: DPM-backed ops + the real lock activity. */
         fun real(context: Context): WardenController {
             val dpm = Provisioning.dpm(context)
@@ -1014,8 +1015,7 @@ class WardenController(
                 dpm = dpm,
                 admin = admin,
                 appGate = DpmAppGateOps(context, dpm, admin),
-                restrictions =
-                    DpmRestrictionOps(dpm, admin, allowDebugging = debuggable || ALLOW_DEBUGGING_IN_RELEASE),
+                restrictions = DpmRestrictionOps(dpm, admin, forceAllowDebugging = debuggable),
                 usage = UsageStatsSource(context),
                 install = DpmApkInstallOps(context),
                 dnsFilter = VpnDnsFilterOps(context, dpm, admin),

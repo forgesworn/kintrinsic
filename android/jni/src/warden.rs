@@ -1174,6 +1174,38 @@ impl Warden {
         }
     }
 
+    /// The sole ward's debugging posture at `now_unix` (the `debugging` clause,
+    /// store_key 16): `-1` = blocked, `0` = allowed with no end, `>0` = allowed
+    /// until that unix second. Recomputed per tick so a window ends AT its
+    /// `until`. Fail-closed in every direction: no ward / no clause / an
+    /// unreadable store / a malformed clause ⇒ `-1`. The clause is cached
+    /// per device (it is addressed to one device), so a device that was never
+    /// sent one stays blocked.
+    pub fn debugging_until(&self, now_unix: i64) -> i64 {
+        let Some(subject) = self.subject else {
+            return -1;
+        };
+        let stored = self.child_clauses.get_child_clause(
+            &subject.to_hex(),
+            charter_proto::ClauseKind::Debugging.store_key(),
+        );
+        let Ok(Some(body)) = stored else {
+            return -1;
+        };
+        let Ok(grant) = serde_json::from_str::<charter_schedule::GrantDebugging>(&body) else {
+            return -1;
+        };
+        if !charter_schedule::evaluate_debugging(Some(&grant), now_unix.max(0) as u64) {
+            return -1;
+        }
+        // Allowed. An `until` that cannot be a positive i64 is not a window
+        // we can report; an overlong one is clamped rather than wrapped.
+        match grant.until {
+            Some(u) => i64::try_from(u).unwrap_or(i64::MAX).max(1),
+            None => 0,
+        }
+    }
+
     /// The ward-facing "your charter" mirror (spec D8): live lock state,
     /// minutes left, and the weekly schedule lines — rendered by the SHARED
     /// spine composer (`charter_spine::lock_info`), so the ward's phone and
@@ -4900,6 +4932,78 @@ mod tests {
                 .accepted
         );
         assert_eq!(w.tethering_mode(5_000), "blocked");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The debugging clause (store_key 16): default-blocked; an open-ended
+    /// allowance reports 0, a time-boxed one reports its `until` and ends AT
+    /// it; a revoking clause blocks again.
+    #[test]
+    fn debugging_clause_drives_until_and_expires() {
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x45);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+
+        // No ward yet ⇒ blocked.
+        assert_eq!(w.debugging_until(1_000), -1);
+
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+
+        // Default-closed: no clause ⇒ blocked.
+        assert_eq!(w.debugging_until(1_000), -1);
+
+        let send = |w: &mut Warden, issued_at: u64, body: serde_json::Value, now: u64| {
+            let ev = ClauseBuilder {
+                kind: charter_proto::ClauseKind::Debugging,
+                issued_at,
+                body: json!({}),
+                created_at: issued_at,
+                subject: None,
+            }
+            .subject(ward.pubkey())
+            .body(body)
+            .build(&guardian);
+            w.ingest_clause(&serde_json::to_string(&ev).unwrap(), now)
+        };
+
+        // Allowed until t=2000: reports the end, and is dead AT the boundary.
+        let res = send(
+            &mut w,
+            1,
+            json!({"v": 1, "issuedAt": 1, "allow": true, "until": 2_000}),
+            1_000,
+        );
+        assert!(res.accepted, "debugging clause rejected: {}", res.reason);
+        assert_eq!(w.debugging_until(1_000), 2_000);
+        assert_eq!(w.debugging_until(1_999), 2_000);
+        assert_eq!(w.debugging_until(2_000), -1, "grant ends AT until");
+
+        // Superseding open-ended allowance — until revoked.
+        assert!(
+            send(
+                &mut w,
+                2,
+                json!({"v": 1, "issuedAt": 2, "allow": true}),
+                3_000
+            )
+            .accepted
+        );
+        assert_eq!(w.debugging_until(1_000_000), 0);
+
+        // Revocation: allow false ⇒ blocked again.
+        assert!(
+            send(
+                &mut w,
+                3,
+                json!({"v": 1, "issuedAt": 3, "allow": false}),
+                4_000
+            )
+            .accepted
+        );
+        assert_eq!(w.debugging_until(5_000), -1);
 
         let _ = std::fs::remove_dir_all(&base);
     }

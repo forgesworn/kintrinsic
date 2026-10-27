@@ -100,6 +100,13 @@ object CharterNative {
      */
     external fun charterTetheringMode(nowUnix: Long): String
 
+    /**
+     * The ward's debugging posture at [nowUnix] (the `debugging` clause): -1
+     * blocked, 0 allowed with no end, >0 allowed until that unix second.
+     * Recomputed each tick; takes the warden lock, so worker thread only.
+     */
+    external fun charterDebuggingUntil(nowUnix: Long): Long
+
     /** The ward's effective web-content policy as a DNS plan (`{"revision","plan":{…}}` JSON), or "" when unpaired. */
     external fun charterDnsPlan(): String
 

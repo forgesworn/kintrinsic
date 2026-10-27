@@ -192,6 +192,18 @@ export interface Signer {
   ): Promise<SignOutcome>;
 
   /**
+   * Sign + publish the `debugging` clause (USB / wireless debugging) to ONE
+   * device: gift-wrapped only to `devicePubkey`, still carrying the child's
+   * `subject`. `until` (unix seconds) is dropped when `allow` is false. Throws
+   * when `devicePubkey` is not one of the child's paired devices.
+   */
+  signDebuggingClause(
+    childId: string,
+    devicePubkey: string,
+    grant: { allow: boolean; until?: number },
+  ): Promise<SignOutcome>;
+
+  /**
    * Sign + publish a parent-gated RELEASE to a device's machine pubkey — the
    * unpair. The device drops its pairing and all enforcement. A no-op for a
    * device with no real key (nothing to release).

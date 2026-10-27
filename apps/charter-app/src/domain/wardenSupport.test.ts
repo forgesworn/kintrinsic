@@ -118,6 +118,15 @@ describe("wardenSupport — platforms that never enforce a clause", () => {
     }
   });
 
+  it("debugging: a laptop never, a phone only from versionCode 47", () => {
+    const fresh = { [laptop.devicePubkey as string]: status({ appVersionCode: 99999 }) };
+    expect(wardenSupport([laptop], fresh, "debugging").unsupported.map((d) => d.id)).toEqual(["l1"]);
+    const at = (v: number) => ({ [phone.devicePubkey as string]: status({ appVersionCode: v }) });
+    expect(wardenSupport([phone], at(46), "debugging").tooOld.map((d) => d.id)).toEqual(["p1"]);
+    expect(wardenSupport([phone], at(47), "debugging").tooOld).toEqual([]);
+    expect(wardenSupport([phone], {}, "debugging").canSend).toBe(true);
+  });
+
   it("names a phone for laptop-only clauses", () => {
     for (const feature of ["learning"] as const) {
       const s = wardenSupport([phone], {}, feature);
