@@ -118,6 +118,7 @@ pub fn build_status(
         // Stamped by the warden loop from the evaluated time (§Times); absent
         // in Free time and when locked.
         active_time: None,
+        guardians: None,
     }
 }
 
