@@ -6,20 +6,20 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use charter_link::AckResult;
-use charter_primitives::{EventId, Nonce, NostrEvent, PubKey, ReqId};
+use charter_primitives::{EventId, Nonce, NostrEvent, PubKey, ReqId, SignerSet, SinglePinned};
 use charter_proto::{
     ClauseKind, ClausePayload, GrantPayload, OpType, RequestPayload, UsageSyncPayload,
     USAGE_SYNC_STORE_KEY,
 };
 use charter_sys::error::SysResult;
 use charter_sys::persistence::{
-    ChildClauseStore, ClauseStore, PairingStore, PendingStore, ReplayFloor,
+    ChildClauseStore, ClauseStore, HeldSigner, PairingStore, PendingStore, ReplayFloor,
 };
 use charter_sys::{Clock, SystemLayer};
-use charter_transport::{Entropy, ReceivedClause, ReceivedGrant};
+use charter_transport::{Entropy, GuardianSealed, ReceivedClause, ReceivedGrant};
 use charter_verify::{
     verify_clause, verify_grant, verify_usage_sync, ClauseError, UsageSyncError, VerifyError,
     VerifyParams,
@@ -28,7 +28,7 @@ use charter_verify::{
 use crate::enactor::{EnactContext, EnactorRegistry};
 use crate::error::BrokerError;
 use crate::lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
-use crate::ports::EventSink;
+use crate::ports::{EventSink, GuardianStatements};
 use crate::transport_facade::{LocalInbound, TransportFacade};
 
 struct State {
@@ -213,18 +213,18 @@ fn warn_unreadable_floor(slot: &str, e: charter_sys::error::SysError) {
 
 /// What a clause whose replay floor cannot be read comes to. It is never
 /// stored — with no floor there is no replay protection — but if it
-/// authenticates as the pinned guardian's it is counted as `WriteFailed`, so
+/// authenticates as a signer's it is counted as `WriteFailed`, so
 /// `clausesWriteFailed` tells the guardian their clause did not land (M3: a
 /// torn record with no floor sidecar used to refuse every correction
 /// silently, forever). A clause that does not authenticate stays `Refused`, so
 /// nobody else can move the counter.
 fn unreadable_floor_outcome(
     received: &ReceivedClause,
-    pinned: &PubKey,
+    signers: &dyn SignerSet,
     kind: ClauseKind,
     now: u64,
 ) -> ClauseDisposition {
-    match verify_clause(&received.clause, pinned, kind, None, now) {
+    match verify_clause(&received.clause, signers, kind, None, now) {
         Ok(_) => ClauseDisposition::WriteFailed,
         Err(_) => ClauseDisposition::Refused,
     }
@@ -435,6 +435,10 @@ pub struct LocalIngestOutcome {
     /// With `handle_release: false`, the unwrapped RELEASE `(event,
     /// seal_author)`, unverified, for the platform's release path.
     pub release: Option<(NostrEvent, PubKey)>,
+    /// A gift-wrapped RELAYS change applied to the stored pairing: the caller
+    /// rebuilds its transport on the new list, as for
+    /// [`PollCounts::relays_changed`].
+    pub relays_changed: bool,
 }
 
 impl LocalIngestOutcome {
@@ -446,6 +450,7 @@ impl LocalIngestOutcome {
             req_id: None,
             released: false,
             release: None,
+            relays_changed: false,
         }
     }
 }
@@ -493,6 +498,10 @@ pub struct PollCounts {
     /// Per-relay publish failures this round (each failed relay on a single
     /// publish counts once).
     pub publish_failed: u32,
+    /// A gift-wrapped RELAYS change from a signer was applied to the stored
+    /// pairing this round (rule 11). The live transport still uses the old
+    /// list: the caller rebuilds it from the pairing, as it does at start-up.
+    pub relays_changed: bool,
 }
 
 /// Audit events a handler decided on while holding the handler turn, in the
@@ -574,6 +583,10 @@ pub struct Broker<S: SystemLayer, T: TransportFacade, E: Entropy> {
     /// or it would survive into a later pairing. Never cleared; the caller
     /// restarts after a release.
     released: AtomicBool,
+    /// The guardian-keys port: the signer set every author check uses, and
+    /// where statements and presence confirmations go. `None`: the pinned
+    /// guardian alone ([`crate::ports::SinglePinnedGuardians`] behaviour).
+    guardians: Option<Arc<dyn GuardianStatements>>,
 }
 
 impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
@@ -621,6 +634,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             }),
             handlers: tokio::sync::Mutex::new(()),
             released: AtomicBool::new(false),
+            guardians: None,
         };
         // A daemon that was off for a week comes up with a week-old Pending set.
         // Age it out HERE, before anything can poll: otherwise the first poll
@@ -633,6 +647,52 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // is new; a device upgraded into it may hold an unbounded backlog).
         broker.prune_terminal();
         broker
+    }
+
+    /// Plug in the guardian-keys port (contract, *Guardian roots and working
+    /// keys*). Without one the broker behaves as for
+    /// [`crate::ports::SinglePinnedGuardians`] over the transport's pinned
+    /// guardian.
+    pub fn with_guardians(mut self, port: Arc<dyn GuardianStatements>) -> Self {
+        self.guardians = Some(port);
+        self
+    }
+
+    /// The signer set every author check uses right now.
+    pub fn signer_set(&self) -> Arc<dyn SignerSet> {
+        match &self.guardians {
+            Some(port) => port.signers(),
+            None => Arc::new(SinglePinned(self.transport.pinned_guardian())),
+        }
+    }
+
+    /// The port, if it processes statements.
+    fn statement_port(&self) -> Option<&Arc<dyn GuardianStatements>> {
+        self.guardians
+            .as_ref()
+            .filter(|port| port.accepts_statements())
+    }
+
+    /// Record the departure floors for signers that just left the set (rule
+    /// 4). The caller holds the handler turn. A failed write is logged: with
+    /// no departure floor the slot keeps its replay floor, which is the
+    /// fail-closed reading (the departed clause can then only be replaced by
+    /// a newer one).
+    fn record_departures(&self, departures: &[(PubKey, u64)]) {
+        if departures.is_empty() {
+            return;
+        }
+        let legacy = self.transport.pinned_guardian();
+        if let Err(e) = self
+            .sys
+            .child_clauses()
+            .record_departures(departures, &legacy)
+        {
+            eprintln!(
+                "charter: could not record departure floors ({e}) — a departed signer's \
+                 clauses keep their replay floor until replaced by a newer clause"
+            );
+        }
     }
 
     /// Access the system layer (tests).
@@ -892,10 +952,17 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             }
         };
 
+        // The seal author must be the grant's author (the strict binding the
+        // unwrap already enforces on the relay path; a facade's scripted
+        // delivery may not). A genuine grant re-sealed by someone else
+        // changes nothing here, so the genuine copy can still land.
+        if received.seal_author != received.grant.pubkey {
+            return (GrantDisposition::Rejected(GrantRejection::Invalid), audits);
+        }
         let now = self.now();
-        let pinned = self.transport.pinned_guardian();
+        let signers = self.signer_set();
         let vp = VerifyParams {
-            pinned_guardian: &pinned,
+            signers: &*signers,
             expected_req_id: &rec.req_id,
             expected_nonce: &rec.nonce,
             // Bind the grant to THIS pending record's op: the record is looked up
@@ -1047,8 +1114,17 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             Ok(p) => p,
             Err(_) => return ClauseDisposition::Refused,
         };
+        if received.seal_author != received.clause.pubkey {
+            return ClauseDisposition::Refused;
+        }
         let store_key = payload.kind.store_key();
-        let pinned = self.transport.pinned_guardian();
+        let signers = self.signer_set();
+        let legacy = self.transport.pinned_guardian();
+        // Rule 4: a held clause counts against a new one only while its
+        // signer is current. A record with no signer recorded is the pinned
+        // root's (rule 5).
+        let held_is_current =
+            |held: HeldSigner| held.resolve(&legacy).is_some_and(|k| signers.is_signer(&k));
         let now = self.now();
 
         // Which child's per-(subject, kind) slot this clause targets, if any. An
@@ -1086,20 +1162,29 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         };
 
         // A sidecar floor (the record torn, or left below the sidecar by a
-        // crash) takes the pinned guardian's re-send at the floor itself
-        // (R2-7): `verify_bound` is one below it.
-        let floor = match self.slot_floor(&slot, store_key) {
+        // crash) takes the signer's re-send at the floor itself (R2-7):
+        // `verify_bound` is one below it. A per-child slot whose clause was
+        // signed by a departed key is bounded by its departure floor instead
+        // (rule 4, `SlotState::effective_floor`).
+        let floor = match self.slot_floor(&slot, store_key, &held_is_current) {
             Ok(floor) => floor,
             Err(e) => {
                 warn_unreadable_floor(&slot.describe(store_key), e);
-                return unreadable_floor_outcome(received, &pinned, payload.kind, now);
+                return unreadable_floor_outcome(received, &*signers, payload.kind, now);
             }
         };
         let prev = floor.and_then(|f| f.verify_bound());
-        match verify_clause(&received.clause, &pinned, payload.kind, prev, now) {
+        match verify_clause(&received.clause, &*signers, payload.kind, prev, now) {
             Ok(vc) => {
                 let body = serde_json::to_string(vc.body()).unwrap_or_default();
-                match self.slot_put(&slot, store_key, vc.issued_at(), &body) {
+                match self.slot_put(
+                    &slot,
+                    store_key,
+                    vc.issued_at(),
+                    &vc.signer(),
+                    &body,
+                    &held_is_current,
+                ) {
                     Ok(true) => ClauseDisposition::Stored,
                     // The store's own floor refused it: authentic, but
                     // something at or above it is already there.
@@ -1111,7 +1196,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 }
             }
             // `verify_clause` checks the floor LAST, so a stale clause has
-            // already authenticated as the pinned guardian's.
+            // already authenticated as a signer's.
             Err(ClauseError::StaleIssuedAt) => {
                 self.stale_clause_disposition(&slot, store_key, floor, &payload)
             }
@@ -1146,12 +1231,21 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         }
     }
 
-    fn slot_floor(&self, slot: &ClauseSlot, store_key: u16) -> SysResult<Option<ReplayFloor>> {
+    /// The floor a new clause for this slot must clear: the replay floor, or
+    /// for a per-child slot holding a departed signer's clause, its departure
+    /// floor (rule 4).
+    fn slot_floor(
+        &self,
+        slot: &ClauseSlot,
+        store_key: u16,
+        held_is_current: &dyn Fn(HeldSigner) -> bool,
+    ) -> SysResult<Option<ReplayFloor>> {
         match slot {
-            ClauseSlot::Child(subject_hex) => self
+            ClauseSlot::Child(subject_hex) => Ok(self
                 .sys
                 .child_clauses()
-                .replay_floor(subject_hex, store_key),
+                .slot_state(subject_hex, store_key)?
+                .effective_floor(held_is_current)),
             ClauseSlot::Machine => self.sys.clauses().replay_floor(store_key),
         }
     }
@@ -1166,19 +1260,28 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         }
     }
 
+    /// Store an authenticated clause. A per-child clause records its signer
+    /// (rule 5) and is re-checked against the signer-aware floor under the
+    /// store's lock. The machine-wide slot (`content`) keeps the replay floor
+    /// alone and records no signer.
     fn slot_put(
         &self,
         slot: &ClauseSlot,
         store_key: u16,
         issued_at: u64,
+        signer: &PubKey,
         body: &str,
+        held_is_current: &dyn Fn(HeldSigner) -> bool,
     ) -> SysResult<bool> {
         match slot {
-            ClauseSlot::Child(subject_hex) => {
-                self.sys
-                    .child_clauses()
-                    .put_child_clause(subject_hex, store_key, issued_at, body)
-            }
+            ClauseSlot::Child(subject_hex) => self.sys.child_clauses().put_child_clause_signed(
+                subject_hex,
+                store_key,
+                issued_at,
+                signer,
+                body,
+                held_is_current,
+            ),
             ClauseSlot::Machine => self.sys.clauses().put_clause(store_key, issued_at, body),
         }
     }
@@ -1189,22 +1292,29 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// [`USAGE_SYNC_STORE_KEY`]. The store's monotonic floor IS the replay
     /// protection, and `clear_for` on release wipes the view with the clauses.
     /// Staleness only under-counts the pool, so rejecting is always safe.
+    ///
+    /// The caller vouches for the delivery: the event is treated as sealed by
+    /// its own author. The poll and local paths pass the real seal author.
     pub async fn on_usage_sync(&self, event: charter_primitives::NostrEvent) {
         let _turn = self.handlers.lock().await;
-        self.usage_sync_result(&event);
+        let seal_author = event.pubkey;
+        self.usage_sync_result(&event, &seal_author);
     }
 
     /// [`Broker::on_usage_sync`]'s body, reporting what became of the sync.
     /// The caller holds the handler turn.
-    fn usage_sync_result(&self, event: &NostrEvent) -> AckResult {
+    fn usage_sync_result(&self, event: &NostrEvent, seal_author: &PubKey) -> AckResult {
         if self.is_released() {
+            return AckResult::Refused;
+        }
+        if *seal_author != event.pubkey {
             return AckResult::Refused;
         }
         let Ok(payload) = UsageSyncPayload::from_json(&event.content) else {
             return AckResult::Refused;
         };
         let subject_hex = payload.subject.to_hex();
-        let pinned = self.transport.pinned_guardian();
+        let signers = self.signer_set();
         let now = self.now();
         let prev = match self
             .sys
@@ -1216,13 +1326,13 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 warn_unreadable_floor(&format!("usage sync {subject_hex}"), e);
                 // Never stored. Whether it was the guardian's decides only
                 // what the ACK says (as for a clause over an unreadable floor).
-                return match verify_usage_sync(event, &pinned, None, now) {
+                return match verify_usage_sync(event, &*signers, None, now) {
                     Ok(_) => AckResult::Failed,
                     Err(_) => AckResult::Refused,
                 };
             }
         };
-        match verify_usage_sync(event, &pinned, prev, now) {
+        match verify_usage_sync(event, &*signers, prev, now) {
             Ok(vs) => {
                 // Same failure shape as an authenticated clause whose store write
                 // fails (see `warn_write_failed`): this WAS the guardian's sync,
@@ -1293,15 +1403,27 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     fn on_release(
         &self,
         event: &charter_primitives::NostrEvent,
+        seal_author: &PubKey,
         now: u64,
     ) -> (bool, DeferredAudits) {
         let mut audits = DeferredAudits::default();
         if self.is_released() {
             return (false, audits);
         }
-        let guardian = self.transport.pinned_guardian();
+        if *seal_author != event.pubkey {
+            return (false, audits);
+        }
+        let signers = self.signer_set();
+        // With more than one root pinned, one parent's remote unpair would
+        // remove the other parent's control too, which rule 7 forbids against
+        // their objection. Refused until the contract says otherwise (open
+        // question "A remote unpair with more than one root"); a local unpair
+        // by an administrator still works.
+        if signers.roots().len() > 1 {
+            return (false, audits);
+        }
         let machine = self.transport.machine_pubkey();
-        if charter_verify::verify_release(event, &guardian, &machine, now).is_err() {
+        if charter_verify::verify_release(event, &*signers, &machine, now).is_err() {
             return (false, audits);
         }
         let Ok(payload) = charter_proto::ReleasePayload::from_json(&event.content) else {
@@ -1371,6 +1493,13 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         {
             let _turn = self.handlers.lock().await;
             self.expire_stale_pending();
+            // Time-driven guardian transitions (a removal's notice period
+            // ending): their departures' floors land before this round's
+            // clauses are judged.
+            if let Some(port) = &self.guardians {
+                let departures = port.advance(self.now());
+                self.record_departures(&departures);
+            }
         }
         let now = self.now();
         let cursor = {
@@ -1393,15 +1522,39 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         // Each handler call below holds the handler turn (see `handlers`) for
         // that call only; the `poll_*` relay queries and audit publishes run
         // outside it, so a local-link ingest is never stuck behind relay IO.
-        for (event, _seal_author) in self.transport.poll_releases(cursor, now).await {
+        for (event, seal_author) in self.transport.poll_releases(cursor, now).await {
             let (applied, audits) = {
                 let _turn = self.handlers.lock().await;
-                self.on_release(&event, now)
+                self.on_release(&event, &seal_author, now)
             };
             audits.emit(&self.transport).await;
             if applied {
                 counts.released = true;
                 return counts;
+            }
+        }
+        // Statements before anything they can change the verdict on: an
+        // approval must land ahead of its working key's first clause in the
+        // same round (contract: a W sends its approval first).
+        if self.statement_port().is_some() {
+            for sealed in self.transport.poll_guardian_events(cursor, now).await {
+                {
+                    let _turn = self.handlers.lock().await;
+                    self.guardian_result(sealed, now);
+                }
+                if self.is_released() {
+                    return stopped;
+                }
+            }
+        }
+        for (event, seal_author) in self.transport.poll_relays(cursor, now).await {
+            let changed = {
+                let _turn = self.handlers.lock().await;
+                self.relays_result(&event, &seal_author, now) == AckResult::Applied
+            };
+            counts.relays_changed |= changed;
+            if self.is_released() {
+                return stopped;
             }
         }
         for clause in self.transport.poll_clauses(cursor, now).await {
@@ -1419,10 +1572,10 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 return stopped;
             }
         }
-        for (event, _seal_author) in self.transport.poll_usage_syncs(cursor, now).await {
+        for (event, seal_author) in self.transport.poll_usage_syncs(cursor, now).await {
             {
                 let _turn = self.handlers.lock().await;
-                self.usage_sync_result(&event);
+                self.usage_sync_result(&event, &seal_author);
             }
             if self.is_released() {
                 return stopped;
@@ -1521,7 +1674,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 if opts.handle_release {
                     let (applied, audits) = {
                         let _turn = self.handlers.lock().await;
-                        self.on_release(&event, self.now())
+                        self.on_release(&event, &seal_author, self.now())
                     };
                     deferred = audits;
                     if applied {
@@ -1533,11 +1686,24 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                     out.release = Some((event, seal_author));
                 }
             }
-            LocalInbound::UsageSync(event) => {
+            LocalInbound::UsageSync(event, seal_author) => {
                 out.inner_kind = Some(event.kind);
                 out.inner_id = Some(event.id);
                 let _turn = self.handlers.lock().await;
-                out.result = self.usage_sync_result(&event);
+                out.result = self.usage_sync_result(&event, &seal_author);
+            }
+            LocalInbound::Relays(event, seal_author) => {
+                out.inner_kind = Some(event.kind);
+                out.inner_id = Some(event.id);
+                let _turn = self.handlers.lock().await;
+                out.result = self.relays_result(&event, &seal_author, self.now());
+                out.relays_changed = out.result == AckResult::Applied;
+            }
+            LocalInbound::Guardian(sealed) => {
+                out.inner_kind = Some(sealed.kind());
+                out.inner_id = Some(sealed.event().id);
+                let _turn = self.handlers.lock().await;
+                out.result = self.guardian_result(sealed, self.now());
             }
             LocalInbound::Other { inner_kind } => {
                 out.inner_kind = Some(inner_kind);
@@ -1545,6 +1711,89 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             }
         }
         (out, LocalAudits(deferred))
+    }
+
+    /// Hand a guardian statement or presence confirmation to the port:
+    /// persist, then apply (rule 10), then record the departure floors it
+    /// caused (rule 4). The caller holds the handler turn. Without a port that
+    /// accepts statements it is dropped as an unknown kind is (`Ignored`).
+    fn guardian_result(&self, sealed: GuardianSealed, now: u64) -> AckResult {
+        if self.is_released() {
+            return AckResult::Refused;
+        }
+        let Some(port) = self.statement_port() else {
+            return AckResult::Ignored;
+        };
+        if let Err(e) = port.persist(&sealed, now) {
+            eprintln!(
+                "charter: could not persist a guardian statement ({e}) — not applying it; \
+                 the next delivery retries"
+            );
+            return AckResult::Failed;
+        }
+        let applied = port.apply(sealed, now);
+        self.record_departures(&applied.departures);
+        applied.result
+    }
+
+    /// Apply a gift-wrapped RELAYS change (rule 11) to the stored pairing:
+    /// sealed by its author, signed by a key in the signer set, and passing
+    /// every check a pasted relay code passes (`apply_signed_relays`). The
+    /// pairing record's other fields, including ones this build does not
+    /// know, are kept as they are. The caller holds the handler turn.
+    fn relays_result(&self, event: &NostrEvent, seal_author: &PubKey, now: u64) -> AckResult {
+        if self.is_released() || *seal_author != event.pubkey {
+            return AckResult::Refused;
+        }
+        let Ok(Some(json)) = self.sys.pairing().load() else {
+            return AckResult::Refused;
+        };
+        let Ok(serde_json::Value::Object(mut record)) =
+            serde_json::from_str::<serde_json::Value>(&json)
+        else {
+            return AckResult::Refused;
+        };
+        let Ok(mut pairing) = serde_json::from_value::<charter_transport::Pairing>(
+            serde_json::Value::Object(record.clone()),
+        ) else {
+            return AckResult::Refused;
+        };
+        let signers = self.signer_set();
+        let applied = match charter_transport::relay_config::apply_signed_relays(
+            &mut pairing,
+            event,
+            &*signers,
+            now,
+        ) {
+            Ok(applied) => applied,
+            // Already applied (or superseded): an authentic change from a
+            // signer, at or below the last one.
+            Err(_)
+                if signers.is_signer(&event.pubkey)
+                    && charter_verify::signature_is_valid(event)
+                    && Some(event.created_at) <= pairing.relays_updated_at =>
+            {
+                return AckResult::Unchanged;
+            }
+            Err(_) => return AckResult::Refused,
+        };
+        let Ok(serde_json::Value::Object(updated)) = serde_json::to_value(&pairing) else {
+            return AckResult::Failed;
+        };
+        for (k, v) in updated {
+            record.insert(k, v);
+        }
+        let Ok(out) = serde_json::to_string(&serde_json::Value::Object(record)) else {
+            return AckResult::Failed;
+        };
+        if let Err(e) = self.sys.pairing().save(&out) {
+            eprintln!("charter: a guardian relay change verified but could not be saved ({e})");
+            return AckResult::Failed;
+        }
+        if let Some(port) = &self.guardians {
+            port.relays_changed(applied.previous, now);
+        }
+        AckResult::Applied
     }
 
     /// Publish the audits [`Broker::ingest_local_deferred`] handed back, in

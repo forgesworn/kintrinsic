@@ -34,8 +34,11 @@ pub use broker::{Broker, LocalAudits, LocalIngestOptions, LocalIngestOutcome};
 pub use enactor::{EnactOutcome, Enactor, EnactorRegistry};
 pub use error::{BrokerError, EnactError};
 pub use lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
-pub use ports::{EventSink, TimeLeftProvider, TimeLeftSnapshot, TimeLeftState};
+pub use ports::{
+    EventSink, GuardianApplied, GuardianStatements, SinglePinnedGuardians, TimeLeftProvider,
+    TimeLeftSnapshot, TimeLeftState,
+};
 pub use transport_facade::{
-    classify_inbound, CharterTransportAdapter, LocalInbound, MockTransport, PollHealth,
-    TransportFacade,
+    classify_inbound, classify_opened, CharterTransportAdapter, LocalInbound, MockTransport,
+    PollHealth, TransportFacade,
 };

@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use charter_primitives::{kinds, NostrEvent, PubKey};
 use charter_sys::relay::{PublishOutcome, RelayIoError, RelayTransport, RelayUrl};
 use charter_transport::{
-    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant,
+    CharterTransport, Entropy, FetchedCuratorList, GuardianSealed, InboundEvent, ReceivedClause,
+    ReceivedGrant,
 };
 
 /// A guardian wrap that arrived over the local link, unwrapped by the same
@@ -23,8 +24,15 @@ pub enum LocalInbound {
     Grant(ReceivedGrant),
     /// A RELEASE `(event, seal_author)`, as `poll_releases` returns it.
     Release(NostrEvent, PubKey),
-    /// A USAGE_SYNC event (its seal author is unused, as on the poll path).
-    UsageSync(NostrEvent),
+    /// A USAGE_SYNC `(event, seal_author)`, as `poll_usage_syncs` returns it.
+    UsageSync(NostrEvent, PubKey),
+    /// A RELAYS `(event, seal_author)` delivered gift-wrapped (rule 11).
+    /// Only [`classify_opened`] produces it; [`classify_inbound`] keeps
+    /// reporting RELAYS as `Other`.
+    Relays(NostrEvent, PubKey),
+    /// A guardian statement or presence confirmation, with both authors, for
+    /// the guardian-keys port. Only [`classify_opened`] produces it.
+    Guardian(GuardianSealed),
     /// Anything else that unwrapped: not acted on over the local link.
     Other {
         inner_kind: u16,
@@ -47,8 +55,23 @@ pub fn classify_inbound(event: NostrEvent, seal_author: PubKey) -> LocalInbound 
             seal_author,
         }),
         kinds::CHARTER_DEVICE_RELEASE => LocalInbound::Release(event, seal_author),
-        kinds::CHARTER_DEVICE_USAGE_SYNC => LocalInbound::UsageSync(event),
+        kinds::CHARTER_DEVICE_USAGE_SYNC => LocalInbound::UsageSync(event, seal_author),
         inner_kind => LocalInbound::Other { inner_kind },
+    }
+}
+
+/// [`classify_inbound`] for a wrap opened by
+/// `CharterTransport::unwrap_inbound_opened`: also sorts out a gift-wrapped
+/// RELAYS and a guardian statement or presence confirmation. A facade
+/// implements [`TransportFacade::unwrap_local`] as
+/// `t.unwrap_inbound_opened(wrap, now).map(classify_opened)` to route them.
+pub fn classify_opened(inbound: InboundEvent) -> LocalInbound {
+    match inbound {
+        InboundEvent::Guardian(sealed) => LocalInbound::Guardian(sealed),
+        InboundEvent::Signed(event, seal_author) if event.kind == kinds::CHARTER_DEVICE_RELAYS => {
+            LocalInbound::Relays(event, seal_author)
+        }
+        InboundEvent::Signed(event, seal_author) => classify_inbound(event, seal_author),
     }
 }
 
@@ -87,6 +110,22 @@ pub trait TransportFacade: Send + Sync {
     async fn poll_releases(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)>;
     async fn poll_curator_lists(&self, curators: &[PubKey], since: u64) -> Vec<FetchedCuratorList>;
     async fn emit_audit(&self, tags: Vec<Vec<String>>, now: u64);
+    /// Delivered guardian statements (31120) and presence confirmations
+    /// (31121), opened with the seal-exempt unwrap. Polled only when the
+    /// broker's guardian-keys port accepts statements. Default: none, the
+    /// shape of every facade that predates the guardian-keys section.
+    async fn poll_guardian_events(&self, _since: u64, _now: u64) -> Vec<GuardianSealed> {
+        Vec::new()
+    }
+    /// Delivered gift-wrapped RELAYS events (31118), `(event, seal_author)`,
+    /// unverified (rule 11). Default: none — RELAYS then reaches the ward
+    /// only as a pasted code, as before.
+    async fn poll_relays(&self, _since: u64, _now: u64) -> Vec<(NostrEvent, PubKey)> {
+        Vec::new()
+    }
+    /// The guardian pinned at pairing: the whole signer set when the broker
+    /// has no guardian-keys port, and the signer a clause record with none
+    /// recorded is read as (rule 5).
     fn pinned_guardian(&self) -> PubKey;
     fn machine_pubkey(&self) -> PubKey;
 
@@ -206,10 +245,18 @@ impl<R: RelayTransport, E: Entropy> TransportFacade for CharterTransportAdapter<
         }
     }
 
+    async fn poll_guardian_events(&self, since: u64, now: u64) -> Vec<GuardianSealed> {
+        self.record_poll(self.inner.poll_guardian_events(since, now).await)
+    }
+
+    async fn poll_relays(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
+        self.record_poll(self.inner.poll_relays(since, now).await)
+    }
+
     fn unwrap_local(&self, wrap: &NostrEvent, now: u64) -> Option<LocalInbound> {
         self.inner
-            .unwrap_inbound(wrap, now)
-            .map(|(ev, author)| classify_inbound(ev, author))
+            .unwrap_inbound_opened(wrap, now)
+            .map(classify_opened)
     }
 }
 
@@ -226,6 +273,8 @@ struct Inner {
     clauses: Vec<ReceivedClause>,
     usage_syncs: Vec<(NostrEvent, PubKey)>,
     releases: Vec<(NostrEvent, PubKey)>,
+    guardian_events: Vec<GuardianSealed>,
+    relays: Vec<(NostrEvent, PubKey)>,
     curator_lists: Vec<FetchedCuratorList>,
     published: Vec<String>,
     audits: Vec<Vec<Vec<String>>>,
@@ -279,6 +328,24 @@ impl MockTransport {
             .lock()
             .expect("lock")
             .releases
+            .push((event, seal_author));
+    }
+
+    /// Queue a guardian statement or presence confirmation for delivery.
+    pub fn deliver_guardian_event(&self, sealed: GuardianSealed) {
+        self.inner
+            .lock()
+            .expect("lock")
+            .guardian_events
+            .push(sealed);
+    }
+
+    /// Queue a gift-wrapped RELAYS event for delivery, sealed by `seal_author`.
+    pub fn deliver_relays(&self, event: NostrEvent, seal_author: PubKey) {
+        self.inner
+            .lock()
+            .expect("lock")
+            .relays
             .push((event, seal_author));
     }
 
@@ -348,6 +415,14 @@ impl TransportFacade for MockTransport {
 
     async fn emit_audit(&self, tags: Vec<Vec<String>>, _now: u64) {
         self.inner.lock().expect("lock").audits.push(tags);
+    }
+
+    async fn poll_guardian_events(&self, _since: u64, _now: u64) -> Vec<GuardianSealed> {
+        std::mem::take(&mut self.inner.lock().expect("lock").guardian_events)
+    }
+
+    async fn poll_relays(&self, _since: u64, _now: u64) -> Vec<(NostrEvent, PubKey)> {
+        std::mem::take(&mut self.inner.lock().expect("lock").relays)
     }
 
     fn pinned_guardian(&self) -> PubKey {
