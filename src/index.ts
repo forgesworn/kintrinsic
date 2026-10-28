@@ -1,12 +1,13 @@
 /**
  * charter — Consumer SDK for Charter Phase 1α.
  *
- * Three modules, each with its own subpath import for bundle-size-sensitive
+ * Four modules, each with its own subpath import for bundle-size-sensitive
  * consumers, plus a top-level barrel for ergonomic use.
  *
  *   import { evaluateSchedule } from 'charter/schedule'
  *   import { createPairingStore } from 'charter/pairing'
  *   import { createCharterEvaluator } from 'charter/evaluator'
+ *   import { applyInbound } from 'charter/guardians'
  *
  * Or:
  *
@@ -35,3 +36,19 @@ export {
   type ChartedSession,
   type CharterCheckResult,
 } from './evaluator/index.js'
+
+export {
+  applyInbound,
+  applyPresenceConfirm,
+  registerPresenceToken,
+  acceptClause,
+  acceptSignedEvent,
+  pairFromOffer,
+  parseStatement,
+  projectState,
+  statusGuardians,
+  recipients as guardianRecipients,
+  signerSet as guardianSignerSet,
+  type GuardianState,
+  type Statement as GuardianStatement,
+} from './guardians/index.js'
