@@ -44,6 +44,9 @@ fn event_kinds() {
     assert_eq!(kinds::CHARTER_DEVICE_AUDIT, 31000);
     assert_eq!(kinds::CHARTER_DEVICE_RELEASE, 31116);
     assert_eq!(kinds::CHARTER_DEVICE_RELAYS, 31118);
+    assert_eq!(kinds::CHARTER_FAMILY_ROSTER, 31119);
+    assert_eq!(kinds::CHARTER_GUARDIAN_STATEMENT, 31120);
+    assert_eq!(kinds::CHARTER_PRESENCE_CONFIRM, 31121);
     assert_eq!(kinds::CHARTER_CURATOR_WEB_LIST, 30100);
 }
 

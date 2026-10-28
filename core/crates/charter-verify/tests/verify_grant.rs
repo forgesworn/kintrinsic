@@ -29,7 +29,7 @@ fn golden_allow_grant_verifies() {
     let ev = GrantBuilder::install_allow(rid(), non()).build(&g);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -46,7 +46,7 @@ fn reject_untrusted_signer() {
     let ev = GrantBuilder::install_allow(rid(), non()).build(&attacker); // signed by attacker
     let pk = pinned.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -65,7 +65,7 @@ fn reject_event_id_mismatch() {
     ev.id = charter_primitives::EventId::from_bytes([0; 32]); // tamper the claimed id
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -86,7 +86,7 @@ fn reject_bad_signature() {
     ev.sig = charter_primitives::Sig::from_bytes(sig);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -105,7 +105,7 @@ fn reject_reqid_mismatch() {
     let other = ReqId::from_bytes([0xCC; 32]);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &other,
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -124,7 +124,7 @@ fn reject_nonce_mismatch() {
     let other = Nonce::from_bytes([0xDD; 32]);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &other,
         expected_op: OpType::InstallFlatpak,
@@ -149,7 +149,7 @@ fn reject_op_mismatch() {
     let pk = g.pubkey();
     let s = store();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::TimeExtend, // the pending record's op differs
@@ -170,7 +170,7 @@ fn reject_expired_grant() {
     let pk = g.pubkey();
     // now is far past exp + skew
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -188,7 +188,7 @@ fn reject_future_skew() {
         .build(&g);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -209,7 +209,7 @@ fn reject_bad_expiry() {
         .build(&g);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -225,7 +225,7 @@ fn reject_replayed_reqid() {
     let pk = g.pubkey();
     let s = store();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -250,7 +250,7 @@ fn replay_within_skew_window_after_purge_still_rejected() {
     let s = store();
     let now = exp + 100; // exp < now <= exp + SKEW(300): still fresh
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -275,7 +275,7 @@ fn consume_happens_before_grant_returned() {
     let pk = g.pubkey();
     let s = store();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -303,7 +303,7 @@ fn fail_closed_when_consumed_store_insert_fails() {
     let ev = GrantBuilder::install_allow(rid(), non()).build(&g);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -326,7 +326,7 @@ fn enact_from_grant_uses_grant_params_not_request() {
         .build(&g);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -347,7 +347,7 @@ fn deny_grant_verifies_as_deny() {
     let ev = GrantBuilder::install_allow(rid(), non()).deny().build(&g);
     let pk = g.pubkey();
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,

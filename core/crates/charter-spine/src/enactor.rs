@@ -89,7 +89,7 @@ mod tests {
         let pk = g.pubkey();
         let store = MockConsumedIdStore::new(MockDisk::new());
         let p = VerifyParams {
-            pinned_guardian: &pk,
+            signers: &pk,
             expected_req_id: &rid,
             expected_nonce: &non,
             expected_op: OpType::InstallFlatpak,

@@ -70,7 +70,7 @@ fn try_build_extend_grant(
         charter_sys::persistence::MockDisk::new(),
     );
     let p = VerifyParams {
-        pinned_guardian: &pk,
+        signers: &pk,
         expected_req_id: &req,
         expected_nonce: &non(),
         expected_op: OpType::TimeExtend,

@@ -6,7 +6,7 @@
 //! guardian to match and is dropped; the freshness bound stops a long-delayed
 //! replay from unpairing a device that has since re-paired to the SAME guardian.
 
-use charter_primitives::{NostrEvent, PubKey};
+use charter_primitives::{NostrEvent, PubKey, SignerSet};
 use charter_proto::ReleasePayload;
 
 use crate::event::{event_id, signature_is_valid};
@@ -18,7 +18,7 @@ pub enum ReleaseError {
     Malformed,
     /// Event-id integrity or schnorr signature failed.
     BadSignature,
-    /// The author is not the pinned guardian.
+    /// The author is not in the signer set.
     UntrustedSigner,
     /// The release targets a different machine.
     WrongMachine,
@@ -31,12 +31,13 @@ pub enum ReleaseError {
 /// replayed release can't unpair a since-re-paired device.
 pub const RELEASE_FRESHNESS_SECS: u64 = 2 * 24 * 60 * 60;
 
-/// Authenticate a RELEASE event for `machine`, signed by `pinned_guardian`.
-/// Order: kind/shape → id integrity → signature → pinned author → target
+/// Authenticate a RELEASE event for `machine`, signed by a key in `signers`
+/// (the re-pairing authority is any key in the signer set). Order:
+/// kind/shape → id integrity → signature → author in the signer set → target
 /// machine → freshness.
 pub fn verify_release(
     event: &NostrEvent,
-    pinned_guardian: &PubKey,
+    signers: &dyn SignerSet,
     machine: &PubKey,
     now: u64,
 ) -> Result<(), ReleaseError> {
@@ -51,7 +52,7 @@ pub fn verify_release(
     if !signature_is_valid(event) {
         return Err(ReleaseError::BadSignature);
     }
-    if &event.pubkey != pinned_guardian {
+    if !signers.is_signer(&event.pubkey) {
         return Err(ReleaseError::UntrustedSigner);
     }
     if &payload.machine != machine {
