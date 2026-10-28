@@ -1,0 +1,161 @@
+# Guardian keys: a family root and working keys
+
+Status: **proposed**, for review. Nothing here is built. Once agreed, the wire
+parts move into `spec/contract.md` and this note is cut down to the reasoning.
+
+## Why
+
+Today a family has one guardian key. It is generated and kept in the guardian
+app on one phone, and every ward pins it at pairing. That gives us four
+problems:
+
+- **A lost phone means setting every device up again.** The key backup exists
+  because of this, and most families will never make one.
+- **A second parent can only be the same key copied,** which cannot be taken
+  away from one parent without the other.
+- **The best custody we can offer, a key generated on a Heartwood through My
+  Signet, can't carry the load.** A Heartwood must be powered and on Wi-Fi,
+  answers over a relay, and decrypts at roughly one item a second. Every
+  ward's STATUS, usage and request is encrypted to the guardian key, so a
+  hardware-held guardian key would be decrypting all day, and nothing would
+  work while it was switched off.
+- **Kintrinsic is the only Kindred app with its own guardian identity.**
+  Kindependence requires My Signet and Kinterest is built around it.
+
+The fix is the usual one for hardware-held keys: the strong key signs rarely,
+and day-to-day work is done by keys it has vouched for.
+
+## The model
+
+- **Family root key (R).** The family's guardian identity: the key wards pin.
+  - Best: generated on a Heartwood through My Signet, and never leaves it.
+  - Also supported: held in My Signet as a software key, or held in the
+    guardian app on the phone (today's set-up, and the zero-friction start).
+- **Working key (W).** One per guardian install: each parent's phone and each
+  guardian browser. Generated on that install, encrypted at rest as the
+  guardian key is today, and never copied anywhere.
+  - Signs clauses, seals, GRANTs and pair offers.
+  - Receives ward traffic.
+- **Approval (A).** R signs one event per working key: "W speaks for me as a
+  guardian, labelled 'Sam's phone'". Withdrawing it is a newer event from R
+  for the same W.
+
+R signs only approvals, withdrawals and a root move. That is a handful of
+signatures in a family's lifetime, so a Heartwood button press for each is
+fine. It is even a feature: adding a parent needs a physical press.
+
+## What changes for wards
+
+- A ward still pins **R** at pairing, and the pairing link is unchanged.
+- A ward accepts an approval only if R signed it. It keeps the newest approval
+  per working key.
+- A clause, GRANT or pair offer is accepted if it is signed by R itself, or by
+  a W whose newest approval is active. Everything else about clause checking
+  stays as it is.
+- **Withdrawing a working key drops every clause that key signed,**
+  whatever its `issuedAt`. A stolen phone can backdate `issuedAt`, so time
+  cannot be trusted here. To avoid a gap, the guardian app re-signs the
+  family's current clause set with a live working key **before** it publishes
+  the withdrawal. The pairing floor and replay rules apply to the re-signed
+  set as usual.
+- Wards encrypt STATUS, usage and requests to **every active working key**,
+  not to R. R is never asked to decrypt anything.
+- Approvals reach wards the same way clauses do: gift-wrapped to each ward,
+  over relays and the home network. A ward also fetches R's approvals from its
+  relays on start.
+
+## Two parents
+
+- **Equal authority.** Either parent's working key can set any clause. For one
+  clause kind, the newer `issuedAt` wins, exactly as with one guardian today.
+  This matches Signet's joint-custody draft ("either parent approves").
+- **Requests:** a ward's request goes to every active working key. The first
+  GRANT the ward accepts settles it. The other parent sees it answered from
+  the ward's next STATUS.
+- **Who did what:** every clause carries its signer. The guardian app and the
+  ward's own screen show "set by Sam's phone" using the approval's label.
+- **Removing a parent:** the other parent's app re-signs the current clauses,
+  then R withdraws that parent's working key. This needs R, so with a
+  Heartwood it needs the Heartwood.
+
+## Journeys
+
+**Heartwood first (the ideal).**
+1. The parent sets up My Signet and a Heartwood, and creates the family
+   identity on the Heartwood.
+2. In Kintrinsic, they choose "Connect My Signet". Kintrinsic connects to that
+   identity's slot over NIP-46 and generates its working key.
+3. Kintrinsic asks R to sign the approval. The parent presses the Heartwood
+   button.
+4. Kintrinsic shows pairing codes that carry R. Wards pair as today.
+
+**Phone first (today's families, and the quick start).**
+- R stays on the phone, in the guardian app. Kintrinsic can sign with R
+  directly, so nothing changes for the family until they want it to.
+- Adding a second parent, or moving the root somewhere safer, is offered from
+  Family.
+
+**Moving the root.** A key can't be moved onto a Heartwood: only seeds can be
+restored to one, and that passes through the host. So moving the root means a
+new root R2 and a **root move** event. The old R signs "the family root is now
+R2", and every ward that pinned R switches its pin to R2. The old R is then
+deleted from the phone.
+- If the old root is already lost, there is nothing to sign the move. Those
+  wards have to be paired again.
+- That is why the guardian app should offer the move early, as part of
+  backing up.
+
+**Lost phone** (with the root elsewhere): from the other parent's app, or from
+My Signet, withdraw the lost phone's working key. Then set the phone up again
+with a new working key. No ward needs touching.
+
+## Wire sketch (kinds to be confirmed)
+
+| Kind | Name | Signed by | Shape |
+|---|---|---|---|
+| 31119 | guardian approval | R | addressable; `d` = W hex. Body `{v:1, issuedAt, status: "active" \| "withdrawn", label}` |
+| 31120 | root move | old R | addressable; `d` = `"root"`. Body `{v:1, issuedAt, newRoot}` |
+
+- Both are fail-safe: a malformed or unknown version is ignored, and an
+  unparseable approval leaves that working key unapproved.
+- 31119 and 31120 are the next free kinds after 31118.
+- For a Heartwood-held R, Kintrinsic's slot policy needs `sign_event` for
+  31119 and 31120 only. Neither is on Signet's never-listed list (24133,
+  31000). The slot can be set to ask every time.
+- Old wards understand neither kind. The guardian app keeps signing with R
+  directly for any child that has a ward below the version that supports this
+  model, and says so ("update Robin's phone to add a second parent").
+
+## Decisions needed
+
+1. **Equal authority** for both parents, newest wins. Or does one parent hold
+   the root and the other only a working key? The design supports both,
+   because only whoever controls R can withdraw. Equal authority is the
+   default here.
+2. Is **R the parent's main My Signet identity,** shared with Kindependence
+   and Kinterest (keys once across the suite), or a derived "Kintrinsic
+   guardian" persona? A shared identity is the Kindred goal, but it means
+   Kintrinsic's slot can sign approvals with the parent's main identity.
+3. **Kind numbers 31119 and 31120,** or numbers agreed with the Signet side.
+4. Does the **child's identity** (a dependant key shared across Kindred apps)
+   come into scope now, or later? This design leaves the ward's own identity
+   as it is.
+
+## Build order (once agreed)
+
+1. Contract and vectors: the two kinds, ward acceptance, withdrawal drops
+   clauses, root move.
+2. Wards (core, Linux, Android): approval store, signer check, multi-recipient
+   STATUS, root move. Old wards keep working.
+3. Guardian app:
+   - working keys, and signing with W;
+   - "Connect My Signet" as R;
+   - add and remove a parent;
+   - move the root;
+   - Signet path parity (GRANTs, Approvals inbox, reconnect after reload);
+   - Heartwood listed as "through My Signet", replacing the mock.
+4. Hardware gates:
+   - a Heartwood-first family from scratch;
+   - adding and removing a second parent;
+   - moving a phone root to a Heartwood with wards already paired;
+   - a lost phone.
