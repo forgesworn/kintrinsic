@@ -405,3 +405,59 @@ objection's receipt, however old its `issuedAt`. No code change. Design
 session only.
 
 **Raised by:** batch 1 re-review.
+
+## Offline unlock with more than one guardian key
+
+**Where:** *Who may sign what*, *Other places that name the guardian*;
+`charter-crypto/src/unlock.rs` (the code is derived from the NIP-44
+conversation key between the machine and the pinned guardian).
+
+**Question:** the contract doesn't say which keys can answer an offline
+unlock challenge once a ward has working keys. A root held on a Heartwood
+cannot do ECDH over NIP-46, so a root-only answer would leave such a family
+with no offline unlock.
+
+**Build's interim reading:** a code is accepted if it matches the
+conversation key with any key currently in the signer set
+(`code_matches_any`). This is not fail-open: every key in the set can already
+sign a CLAUSE or GRANT that lifts the lock, and a departed key is no longer
+in the set. Linux still checks the pinned guardian's code only until the
+platform batch wires the set through.
+
+**Raised by:** batch 2a.
+
+## A remote unpair with more than one root
+
+**Where:** *Other places that name the guardian* ("the re-pairing authority
+[is] any key in the signer set"), rule 7 ("Neither parent can remove the
+other against their objection", "The last root leaves only by unpairing"),
+rule 11; `charter-spine` `Broker::on_release`.
+
+**Question:** a RELEASE unpairs the ward, dropping every root. With two roots
+pinned, one parent's RELEASE would remove the other parent's control without
+notice or objection. Is a remote RELEASE meant to be allowed then?
+
+**Build's interim reading:** a RELEASE from any key in the signer set applies
+only while the ward has exactly one root (today's behaviour). With more than
+one root it is refused; a parent first removes the other root (rule 7), or an
+administrator unpairs locally.
+
+**Raised by:** batch 2a.
+
+## Rule 4 for the machine-wide content clause
+
+**Where:** rules 4 and 5 ("clauses of the same `(subject, kind)`");
+`charter-spine` broker `ClauseSlot::Machine`, `charter-sys` `ClauseStore`.
+
+**Question:** a `content` clause with no `subject` is machine-wide: it has no
+`(subject, kind)` slot. Does the departure rule (and recording the signer)
+apply to it?
+
+**Build's interim reading:** not yet. The machine-wide slot keeps its replay
+floor only and records no signer, so a departed key's `content` clause is
+replaced only by a newer one from a current signer. That is fail-closed for
+rollback; the far-future case it leaves open is bounded by the 300-second
+future refusal. Per-child `content` clauses (with a `subject`) follow rules 4
+and 5.
+
+**Raised by:** batch 2a.
