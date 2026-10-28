@@ -656,6 +656,16 @@ scenario("removal_expires_before_effect", ["7", "pending"], "A removal whose exp
   c.tick(T0 + 100 + H72);
 });
 
+scenario("removal_effect_equals_expiry", ["7", "pending"], "A confirmed removal whose takesEffectAt equals its expiresAt expires: it takes effect only if strictly before.", (c) => {
+  twoRoots(c);
+  const rm = st.removal(R1, R2, { issuedAt: T0 + 100, expiresAt: T0 + 100 + H72 });
+  c.inbound(W1, rm, T0 + 100, A("removal_pending"));
+  c.token(tokenHex("eq"), dU(R2), T0 + 120);
+  c.confirm(W1, confirmEv(W1, rm.id, tokenHex("eq"), T0 + 130), T0 + 130, A("removal_confirmed"));
+  c.tick(T0 + 100 + H72 - 1);
+  c.tick(T0 + 100 + H72);
+});
+
 scenario("cancel_lifecycle", ["pending", "2"], "A cancel drops pending with its d at or below its issuedAt (a same-second tie included); a later statement is unaffected; only the signer may cancel; a cancel that arrives first is held and binds only its own signer.", (c) => {
   twoRoots(c);
   c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 50 }), T0 + 60, A("coguardian_pending"));
