@@ -84,8 +84,8 @@ internal object LivenessPolicy {
  *
  * A force-stop cancels every alarm and nothing an app does survives it; on a
  * release ward, Settings disables Force stop for an active Device Owner and
- * adb is off (DISALLOW_DEBUGGING_FEATURES, unless
- * WardenController.ALLOW_DEBUGGING_IN_RELEASE is on for a testing window), and
+ * adb is off (DISALLOW_DEBUGGING_FEATURES, unless the guardian's `debugging`
+ * clause has opened a window), and
  * the boot receiver re-arms on the next boot.
  */
 object LivenessAlarm {

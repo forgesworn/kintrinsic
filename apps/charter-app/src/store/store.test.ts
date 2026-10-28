@@ -229,3 +229,51 @@ describe("reducer — SET_DEVICE_PAIRING relays (per-pairing, not a re-read defa
     expect(s1.children[0].devices[0].relays).toEqual(["wss://relay.trotters.cc"]);
   });
 });
+
+describe("reducer — SET_DEVICE_DEBUGGING (last-sent USB debugging, per device)", () => {
+  const dev = (id: string): Device => ({ id, label: id, platform: "android", pairing: "paired", devicePubkey: id.repeat(64).slice(0, 64) });
+  const child: Child = { id: "c", name: "Robin", color: "#abc", dependantPubkey: null, devices: [dev("a"), dev("b")], policies: [] };
+  const state = (): CharterState => ({ ...emptyState(), children: [child] });
+  const on = { allow: true, until: 2000, issuedAt: 1000 };
+
+  it("records on ONE device only, leaving the child's other devices alone", () => {
+    const next = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: on });
+    expect(next.children[0].devices[0].debugging).toEqual(on);
+    expect(next.children[0].devices[1].debugging).toBeUndefined();
+  });
+
+  it("an older send never replaces a newer record", () => {
+    const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: on });
+    const stale = reducer(first, { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: { allow: false, issuedAt: 999 } });
+    expect(stale.children[0].devices[0].debugging).toEqual(on);
+  });
+
+  it("disconnecting the device clears the record, so a re-pairing starts Off", () => {
+    const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: on });
+    const unpaired = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "unpaired", devicePubkey: null });
+    expect(unpaired.children[0].devices[0].debugging).toBeUndefined();
+    const kept = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", relays: ["wss://x"], relaysUpdatedAt: 5 });
+    expect(kept.children[0].devices[0].debugging).toEqual(on);
+  });
+
+  it("re-pairing with a different key drops the record; the same key keeps it", () => {
+    const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: on });
+    const oldKey = first.children[0].devices[0].devicePubkey;
+    const same = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", devicePubkey: oldKey });
+    expect(same.children[0].devices[0].debugging).toEqual(on);
+    const rekeyed = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", devicePubkey: "e".repeat(64) });
+    expect(rekeyed.children[0].devices[0].devicePubkey).toBe("e".repeat(64));
+    expect(rekeyed.children[0].devices[0].debugging).toBeUndefined();
+    expect(rekeyed.children[0].devices[1].debugging).toBeUndefined();
+  });
+
+  it("keeps the held flag across reads, and the next non-held send clears it", () => {
+    const held = { allow: true, issuedAt: 1000, held: true };
+    const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: held });
+    expect(first.children[0].devices[0].debugging?.held).toBe(true);
+    const sent = { allow: false, issuedAt: 1001 };
+    const next = reducer(first, { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: sent });
+    expect(next.children[0].devices[0].debugging).toEqual(sent);
+    expect(next.children[0].devices[0].debugging).not.toHaveProperty("held");
+  });
+});

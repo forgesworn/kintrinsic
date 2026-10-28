@@ -16,6 +16,7 @@ import type {
   Child,
   ChildRequest,
   Device,
+  DeviceDebugging,
   PairingState,
   Policy,
   RequestKind,
@@ -282,6 +283,7 @@ type Action =
     }
   | { type: "REMOVE_DEVICE"; childId: string; deviceId: string }
   | { type: "SET_DEVICE_LAST_SEEN"; machine: string; lastSeenAt: number }
+  | { type: "SET_DEVICE_DEBUGGING"; childId: string; deviceId: string; debugging: DeviceDebugging }
   | { type: "SET_POLICY"; childId: string; policy: Policy }
   | { type: "ADD_POLICY"; childId: string; policy: Policy }
   | { type: "REMOVE_POLICY"; childId: string; policyId: string }
@@ -349,17 +351,40 @@ export function reducer(state: CharterState, action: Action): CharterState {
         ...state,
         children: state.children.map((c) =>
           c.id === action.childId
-            ? mapDevice(c, action.deviceId, (d) => ({
+            ? mapDevice(c, action.deviceId, (d) => {
+              const devicePubkey =
+                action.devicePubkey !== undefined ? action.devicePubkey : d.devicePubkey;
+              return {
                 ...d,
                 pairing: action.pairing,
                 pairedAt: action.pairedAt ?? d.pairedAt,
-                devicePubkey:
-                  action.devicePubkey !== undefined
-                    ? action.devicePubkey
-                    : d.devicePubkey,
+                devicePubkey,
                 relays: action.relays !== undefined ? action.relays : d.relays,
                 relaysUpdatedAt: action.relaysUpdatedAt ?? (action.relays ? 0 : d.relaysUpdatedAt),
-              }))
+                // A disconnected or re-pairing device is no longer the one we
+                // opened debugging on; never carry that record across. Nor
+                // across a new key: a clause sent to the old key can never
+                // reach the new one, so the record would wait for ever.
+                debugging:
+                  action.pairing === "paired" && devicePubkey === d.devicePubkey
+                    ? d.debugging
+                    : undefined,
+              };
+            })
+            : c,
+        ),
+      };
+    case "SET_DEVICE_DEBUGGING":
+      // Monotonic like the ward's own rule: an older send never replaces a newer record.
+      return {
+        ...state,
+        children: state.children.map((c) =>
+          c.id === action.childId
+            ? mapDevice(c, action.deviceId, (d) =>
+                action.debugging.issuedAt >= (d.debugging?.issuedAt ?? 0)
+                  ? { ...d, debugging: action.debugging }
+                  : d,
+              )
             : c,
         ),
       };
@@ -546,6 +571,18 @@ export interface CharterContextValue {
   openMaintenanceWindow: (childId: string, minutes: number) => Promise<SendResult>;
   /** Publish the `update` clause to every governed device the child uses. */
   sendCharterUpdate: (childId: string) => Promise<SendResult>;
+  /**
+   * Turn USB / wireless debugging on (optionally until `until`, unix seconds) or
+   * off for ONE ward device: signs the `debugging` clause to that device's key
+   * alone and records what was sent on the device (`Device.debugging`). Resolves
+   * `false` when nothing was sent (cancelled, no signer, not a paired device) and
+   * `{ outcome: "queued" }` when the carrier is only holding it for the home network.
+   */
+  setDeviceDebugging: (
+    childId: string,
+    deviceId: string,
+    grant: { allow: boolean; until?: number },
+  ) => Promise<SendResult>;
   /** QR onboarding: the outstanding pairing wait, if a QR is on screen. */
   phonePairing: { childId: string; token: string; foundMachine: string | null } | null;
   /** Mint a one-time token and start watching for its STATUS echo. */
@@ -1604,6 +1641,68 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [updateManifest, addActivity, queuedDelivery],
   );
 
+  const setDeviceDebugging = useCallback(
+    async (
+      childId: string,
+      deviceId: string,
+      grant: { allow: boolean; until?: number },
+    ): Promise<SendResult> => {
+      const s = signer.current;
+      const device = stateRef.current.children
+        .find((c) => c.id === childId)
+        ?.devices.find((d) => d.id === deviceId);
+      if (!s || !s.status().connected || !device?.devicePubkey || device.pairing !== "paired") {
+        return false;
+      }
+      let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
+      // The value the signer put in the clause, so the record matches what the
+      // device sees (the signer may bump it past the clock to stay monotonic).
+      let issuedAt: number | undefined;
+      try {
+        try {
+          const out = await s.signDebuggingClause(childId, device.devicePubkey, grant);
+          wraps = out.wraps;
+          issuedAt = out.issuedAt;
+        } catch (err) {
+          if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+          queued = queuedDelivery(err);
+          wraps = queued.wraps;
+          issuedAt = err.issuedAt;
+        }
+        // Recorded either way: it WAS signed, and a held wrap still goes out on
+        // the home network. The screen words a held one as waiting, not as sent.
+        dispatch({
+          type: "SET_DEVICE_DEBUGGING",
+          childId,
+          deviceId,
+          debugging: {
+            allow: grant.allow,
+            ...(grant.allow && grant.until != null ? { until: grant.until } : {}),
+            issuedAt: issuedAt ?? Math.floor(Date.now() / 1000),
+            // Replaces the whole record, so a later non-held send clears this.
+            ...(queued ? { held: true } : {}),
+          },
+        });
+        addActivity(
+          childId,
+          "rule-changed",
+          (grant.allow
+            ? `You turned on USB debugging on ${device.label}`
+            : `You turned off USB debugging on ${device.label}`) +
+            (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
+        );
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
+      } catch (err) {
+        if (err instanceof SignerCancelled) return false;
+        throw err;
+      }
+    },
+    [addActivity, queuedDelivery],
+  );
+
   const ingestDeviceStatus = useCallback((status: DeviceStatus) => {
     // Gate BEFORE anything is recorded: an authentic wrap is not proof of
     // pairing (see ./statusAdmission), and everything below is persisted.
@@ -2651,6 +2750,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       standDown,
       openMaintenanceWindow,
       sendCharterUpdate,
+      setDeviceDebugging,
       phonePairing,
       beginPhonePairing,
       cancelPhonePairing,
@@ -2705,6 +2805,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       standDown,
       openMaintenanceWindow,
       sendCharterUpdate,
+      setDeviceDebugging,
       phonePairing,
       beginPhonePairing,
       cancelPhonePairing,

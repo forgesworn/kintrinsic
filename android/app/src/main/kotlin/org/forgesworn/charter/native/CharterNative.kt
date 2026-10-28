@@ -100,6 +100,22 @@ object CharterNative {
      */
     external fun charterTetheringMode(nowUnix: Long): String
 
+    /**
+     * The ward's debugging posture at [nowUnix] (the `debugging` clause): 0
+     * allowed with no end, >0 allowed until that unix second, -1 blocked, -2
+     * hold (the clause store would not read; write nothing). The values are
+     * defined once, by `DEBUGGING_BLOCKED` in `android/jni/src/lib.rs`.
+     * Recomputed each tick; takes the warden lock, so worker thread only.
+     */
+    external fun charterDebuggingUntil(nowUnix: Long): Long
+
+    /**
+     * Report what the platform actually did with DISALLOW_DEBUGGING_FEATURES:
+     * 1 not set (adb allowed), 0 set, -1 could not be read. Rides STATUS as
+     * `debuggingOpen` (absent while unknown).
+     */
+    external fun charterSetDebuggingOpen(state: Int): String
+
     /** The ward's effective web-content policy as a DNS plan (`{"revision","plan":{…}}` JSON), or "" when unpaired. */
     external fun charterDnsPlan(): String
 

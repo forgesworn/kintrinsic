@@ -34,7 +34,7 @@ import org.forgesworn.charter.service.FaultInjection
  * tunnel check must notice:
  *
  *   adb shell am broadcast -a org.forgesworn.charter.debug.FAULT \
- *     --es steps baseline,appGate,tether,hotspot,dns org.forgesworn.charter
+ *     --es steps baseline,appGate,tether,debugging,hotspot,dns org.forgesworn.charter
  *   adb shell am broadcast -a org.forgesworn.charter.debug.DROP_RESTRICTION \
  *     --es key no_safe_boot org.forgesworn.charter
  *   adb shell am broadcast -a org.forgesworn.charter.debug.STOP_DNS org.forgesworn.charter

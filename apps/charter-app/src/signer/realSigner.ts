@@ -9,7 +9,7 @@
 
 import type { NostrEvent } from "nostr-tools";
 import type { Policy, SignerKind, SignerState } from "../domain/types";
-import { appRulesToGrant, policyToClauses, updateToGrant } from "../wire/clause";
+import { appRulesToGrant, debuggingToGrant, policyToClauses, updateToGrant } from "../wire/clause";
 import { effectivePolicyForDevice } from "../domain/effectivePolicy";
 import type { ClausePayload, GrantGift, GrantStandDown, UpdateManifest } from "../wire/types";
 import {
@@ -29,7 +29,7 @@ import {
   endOfDayUnix,
   DEFAULT_STANDDOWN_GRACE_SECS,
 } from "../wire/grant";
-import type { DecisionContext, SignOutcome, Signer } from "./Signer";
+import type { DecisionContext, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
 import { localRouteAvailable } from "../carrier/localLink";
@@ -593,6 +593,54 @@ export class RealSigner implements Signer {
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
+  }
+
+  /**
+   * USB / wireless debugging for ONE device. Unlike every other clause this is
+   * not sent to all of the child's devices: it is wrapped to the one device
+   * whose key is `devicePubkey` (the ward's other devices keep their own,
+   * blocked, state), while the clause still carries the child `subject`.
+   */
+  async signDebuggingClause(
+    childId: string,
+    devicePubkey: string,
+    grant: { allow: boolean; until?: number },
+  ): Promise<SignOutcomeAt> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const target = this.deps.resolveChild(childId);
+    if (!target) throw new Error(`unknown child: ${childId}`);
+    const device = target.devices.find((d) => d.pubkey === devicePubkey);
+    if (!device) {
+      throw new Error(
+        `That device isn't paired to ${target.name ?? childId}, so USB debugging couldn't be changed on it.`,
+      );
+    }
+    const held = new SendBatch();
+    // Only THIS device is a recipient, so only it needs to be reachable.
+    this.requireDeliverable({ ...target, devices: [device] }, childId);
+    const label = this.nameOf(devicePubkey);
+    await this.authorize(
+      "clause",
+      !grant.allow
+        ? `Turn off USB debugging on ${label}`
+        : grant.until != null
+          ? `Turn on USB debugging on ${label} until ${new Date(grant.until * 1000).toLocaleString()}`
+          : `Turn on USB debugging on ${label} until you turn it off`,
+    );
+    const issuedAt = this.nextIssuedAt();
+    const body = debuggingToGrant(grant, issuedAt);
+    const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt, body };
+    if (target.subject) clause.subject = target.subject;
+    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    await this.send(target.relays, wrap, CLAUSE_META, held);
+    try {
+      return { ...this.settle(held), issuedAt };
+    } catch (err) {
+      // A held send throws; hand the caller the value that was really signed.
+      if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;
+      throw err;
+    }
   }
 
   /**

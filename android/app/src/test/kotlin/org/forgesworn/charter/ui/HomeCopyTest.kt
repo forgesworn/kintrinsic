@@ -25,6 +25,18 @@ class HomeCopyTest {
     }
 
     @Test
+    fun debuggingLineOnlyWhenAllowed() {
+        val utc = java.time.ZoneOffset.UTC
+        val noon = java.time.LocalDateTime.of(2026, 10, 27, 12, 0).toEpochSecond(utc)
+        val six = java.time.LocalDateTime.of(2026, 10, 27, 18, 0).toEpochSecond(utc)
+        val tomorrow = java.time.LocalDateTime.of(2026, 10, 28, 9, 5).toEpochSecond(utc)
+        assertEquals(null, HomeCopy.debuggingLine(-1, noon, utc))
+        assertEquals("USB debugging is on until 18:00", HomeCopy.debuggingLine(six, noon, utc))
+        assertEquals("USB debugging is on until Wed 09:05", HomeCopy.debuggingLine(tomorrow, noon, utc))
+        assertEquals("USB debugging is on until your guardian turns it off", HomeCopy.debuggingLine(0, noon, utc))
+    }
+
+    @Test
     fun versionAndAboutLinesNameTheVersion() {
         assertEquals("Kintrinsic 0.6.11 (42)", HomeCopy.versionLine("0.6.11", 42))
         assertEquals("Kintrinsic ? (0)", HomeCopy.versionLine(null, 0))

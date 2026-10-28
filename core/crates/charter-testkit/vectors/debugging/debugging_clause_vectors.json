@@ -1,0 +1,52 @@
+{
+  "note": "Canonical debugging clause vectors — pins the guardian producer (TS) ↔ warden/enforcer (Rust: GrantDebugging parse + evaluate_debugging). USB/wireless debugging (adb) is default-blocked; a grant with allow:true opens it, optionally time-boxed via `until` (the allowance ends AT `until`). A blocked posture (allow:false) carries no `until`; a stray `until` on allow:false is ignored. A body `v` above 1 is blocked. `expect.allowedAt` is a list of {now, allowed} checks: `allowed` is the boolean result of evaluating the payload at instant `now` (true = debugging allowed, false = blocked). issuedAt fixed for determinism.",
+  "vectors": [
+    {
+      "name": "blocked_default",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": false },
+      "expect": { "allowedAt": [{ "now": 1782734400, "allowed": false }] }
+    },
+    {
+      "name": "allowed_open_ended",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": true },
+      "expect": {
+        "allowedAt": [
+          { "now": 1782734400, "allowed": true },
+          { "now": 1782820800, "allowed": true }
+        ]
+      }
+    },
+    {
+      "name": "allowed_until",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": true, "until": 1782738000 },
+      "expect": {
+        "allowedAt": [
+          { "now": 1782734400, "allowed": true },
+          { "now": 1782737999, "allowed": true },
+          { "now": 1782738000, "allowed": false },
+          { "now": 1782738001, "allowed": false }
+        ]
+      }
+    },
+    {
+      "name": "future_version_blocked",
+      "payload": { "v": 2, "issuedAt": 1782734400, "allow": true },
+      "expect": { "allowedAt": [{ "now": 1782734400, "allowed": false }] }
+    },
+    {
+      "name": "blocked_ignores_stray_until",
+      "payload": { "v": 1, "issuedAt": 1782734400, "allow": false, "until": 1782738000 },
+      "expect": {
+        "allowedAt": [
+          { "now": 1782734400, "allowed": false },
+          { "now": 1782737999, "allowed": false }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    { "name": "missing_allow", "payload": { "v": 1, "issuedAt": 1 } },
+    { "name": "allow_not_a_bool", "payload": { "v": 1, "issuedAt": 1, "allow": "true" } },
+    { "name": "wrong_version_type", "payload": { "v": "1", "issuedAt": 1, "allow": true } }
+  ]
+}

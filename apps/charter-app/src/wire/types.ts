@@ -63,6 +63,7 @@ export type ClauseKind =
   | "learning"
   | "apprules"
   | "tethering"
+  | "debugging"
   | "update"
   | "lifeline"
   | "buckets"
@@ -287,6 +288,23 @@ export interface GrantTethering {
   until?: number;
 }
 
+// --- debugging clause (USB / wireless debugging, per device) ----------------
+
+/**
+ * Contract `GrantDebugging` — whether adb may be open on ONE ward device (mirrors
+ * the Rust `charter_schedule::GrantDebugging`, camelCase). Default-blocked, and
+ * unlike every other kind it is gift-wrapped to a single device's key (still
+ * carrying the child `subject`). Replace-the-state. `until` (unix seconds) ends
+ * the allowance AT that instant; absent with `allow: true` = until a superseding
+ * clause revokes it. Omitted when `allow` is false — it would mean nothing.
+ */
+export interface GrantDebugging {
+  v: 1;
+  issuedAt: number;
+  allow: boolean;
+  until?: number;
+}
+
 // --- apps clause (standing per-app control, D3) -----------------------------
 
 export type AppPosture = "blocklist" | "allowlist";
@@ -500,6 +518,7 @@ export interface ClausePayload {
     | GrantLearning
     | GrantAppRules
     | GrantTethering
+    | GrantDebugging
     | GrantUpdate
     | GrantLifeline
     | GrantBuckets

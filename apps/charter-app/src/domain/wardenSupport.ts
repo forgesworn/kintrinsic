@@ -38,6 +38,7 @@ export type WardenFeature =
   | "listening"
   | "lifeline"
   | "tethering"
+  | "debugging"
   | "alwaysAvailable"
   // Honest attribution (2026-08-03): the `cmdline:` identity form and the
   // unrecognised-time counter are both Linux-only concepts by construction —
@@ -121,6 +122,11 @@ const MIN_VERSION: Record<WardenFeature, Partial<Record<Device["platform"], Thre
   alwaysAvailable: { android: 39, linux: NEVER },
   // A laptop has no hotspot for Kintrinsic to govern.
   tethering: { linux: NEVER },
+  // USB / wireless debugging is a Device Owner restriction: Android only.
+  // charterd has no adb to govern and never reads the clause. Ward Kintrinsic
+  // versionCode 47 is the first build that parses it; an older ward refuses
+  // the unknown tag, so the toggle is only offered from there up.
+  debugging: { android: 47, linux: NEVER },
   // Ward Kintrinsic 0.6.5 (36); charterd 0.7.1 (701) — before 0.7.1 charterd never
   // read the `apps` clause at all (only `appRules`), so on a laptop this
   // threshold gates the standing toggles AND holds alike: an older charterd

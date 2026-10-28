@@ -380,6 +380,30 @@ export interface Device {
   relays?: string[];
   /** 0 after recovery/new pairing; otherwise the signed relay change's time. */
   relaysUpdatedAt?: number;
+  /**
+   * The last USB-debugging state this guardian SENT to this one device (the
+   * `debugging` clause is per-device, not a Policy field). A local record of
+   * what was signed, not a report from the device: absent = never sent, which
+   * the ward reads as blocked. An `until` in the past is expired, i.e. Off. Once
+   * the device reports `debuggingOpen` in its STATUS, that report is the truth
+   * and this record is only the intention it is compared with.
+   */
+  debugging?: DeviceDebugging;
+}
+
+/** The last `debugging` clause sent to a device — see `Device.debugging`. */
+export interface DeviceDebugging {
+  allow: boolean;
+  /** Unix seconds the allowance ends AT. Absent while allowed = until turned off. */
+  until?: number;
+  /** Unix seconds the clause was sent. */
+  issuedAt: number;
+  /**
+   * True while that send is being held for the home network (signed, not yet
+   * delivered). Persisted so it survives leaving the screen; the next send
+   * replaces the whole record, so a non-held send clears it.
+   */
+  held?: boolean;
 }
 
 export interface Child {

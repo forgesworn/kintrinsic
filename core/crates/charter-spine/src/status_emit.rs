@@ -112,6 +112,9 @@ pub fn build_status(
         // Stamped by the Linux loop from the fapolicyd probe; Android has no
         // app lock of this kind and never sends it.
         app_lock_armed: None,
+        // Stamped by the Android loop from the platform's own restriction
+        // state (the `debugging` clause); Linux has no such control.
+        debugging_open: None,
     }
 }
 

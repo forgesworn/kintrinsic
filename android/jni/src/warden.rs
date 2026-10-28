@@ -55,6 +55,64 @@ const POLL_LOOKBACK_SECS: u64 = 2 * 24 * 60 * 60;
 /// (status_emit.rs:60-76). Its absence is the guardian's wipe-detection tell.
 const STATUS_HEARTBEAT_SECS: u64 = 60;
 
+/// How many reads of the debugging clause in a row may fail with an I/O error
+/// and still answer HOLD: holds 1, 2 and 3 are allowed, the 4th in a row
+/// blocks. Bounds a window that would otherwise never close on a store that
+/// stays unreadable.
+const MAX_DEBUGGING_HOLDS: u32 = 3;
+
+/// In-memory (never persisted) memory of the debugging answer, so an I/O
+/// error on the clause store can be answered without trusting it for ever.
+#[derive(Default)]
+struct DebuggingMemory {
+    /// The last answer a successful read produced (`None` since process start).
+    last: Option<i64>,
+    /// I/O-error reads answered HOLD in a row.
+    holds: u32,
+}
+
+impl DebuggingMemory {
+    /// A successful read: record its answer and reset the hold count.
+    fn record(&mut self, answer: i64) -> i64 {
+        self.last = Some(answer);
+        self.holds = 0;
+        answer
+    }
+
+    /// An I/O-type read error at `now_unix`: BLOCKED if the last answer was
+    /// blocked or an allowed `until` that has since passed, else HOLD for at
+    /// most [`MAX_DEBUGGING_HOLDS`] reads in a row.
+    fn on_read_error(&mut self, now_unix: i64) -> i64 {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
+        let blocked = match self.last {
+            Some(DEBUGGING_BLOCKED) => true,
+            Some(until) if until > 0 => until <= now_unix,
+            _ => false,
+        };
+        if blocked {
+            self.last = Some(DEBUGGING_BLOCKED);
+            return DEBUGGING_BLOCKED;
+        }
+        self.holds = self.holds.saturating_add(1);
+        if self.holds > MAX_DEBUGGING_HOLDS {
+            self.last = Some(DEBUGGING_BLOCKED);
+            DEBUGGING_BLOCKED
+        } else {
+            DEBUGGING_HOLD
+        }
+    }
+}
+
+/// `true` if a clause-store error says the stored clause's CONTENT is bad (it
+/// read but will not parse or is not UTF-8) rather than that the store could
+/// not be read. `fsutil::read_json` reports a parse failure as
+/// `Io("parse: …")` and a non-UTF-8 file as the `read_to_string` InvalidData
+/// message; a pinned test fails loudly if either wording changes.
+fn clause_error_is_malformed(e: &charter_sys::error::SysError) -> bool {
+    matches!(e, charter_sys::error::SysError::Io(m)
+        if m.starts_with("parse: ") || m.contains("valid UTF-8"))
+}
+
 /// Our own applicationId — the only package a self-update clause may target.
 const OWN_PACKAGE: &str = "org.forgesworn.charter";
 
@@ -178,6 +236,15 @@ pub struct Warden {
     /// reported in STATUS so the guardian can name what each ward runs.
     /// Empty = unknown (omitted from STATUS).
     app_version_name: String,
+    /// What the platform last said about DISALLOW_DEBUGGING_FEATURES, as
+    /// Kotlin read it back after its debugging step: `Some(true)` = not set
+    /// (adb allowed). STATUS `debuggingOpen`; `None` (absent) until Kotlin
+    /// reports it, or while the restrictions will not read.
+    debugging_open: Option<bool>,
+    /// What the debugging answer was, and how many I/O-error holds in a row —
+    /// see [`DebuggingMemory`]. Interior mutability because
+    /// [`Warden::debugging_until`] takes `&self`.
+    debugging_memory: Mutex<DebuggingMemory>,
     /// Consecutive broker rounds that reached no relay at all — STATUS
     /// `relayUnreachablePolls` (absent while 0), charterd's counter.
     consecutive_unreachable: u32,
@@ -326,6 +393,8 @@ impl Warden {
             install_window: None,
             app_version_code,
             app_version_name: String::new(),
+            debugging_open: None,
+            debugging_memory: Mutex::new(DebuggingMemory::default()),
             consecutive_unreachable: 0,
             status_step_undelivered: None,
             status_seq: charter_spine::status_emit::StatusSeq::resume(
@@ -1172,6 +1241,77 @@ impl Warden {
             charter_schedule::TetherMode::Raw => "raw",
             charter_schedule::TetherMode::Filtered => "filtered",
         }
+    }
+
+    /// The sole ward's debugging posture at `now_unix` (the `debugging` clause,
+    /// store_key 16), as the values defined once in `lib.rs` (above
+    /// `DEBUGGING_BLOCKED`): `0` allowed with no end, `>0` allowed until that
+    /// unix second, `-1` blocked, `-2` hold. Recomputed per tick so a window
+    /// ends AT its `until`. Fail-closed: no ward / no clause / a malformed
+    /// clause (including one that will not parse) / one issued before the
+    /// current pairing / an unreadable pairing ⇒ blocked. The clause is cached
+    /// per device (it is addressed to one device), so a device that was never
+    /// sent one stays blocked.
+    ///
+    /// The one exception is a store that will not READ (an I/O error): that is
+    /// hold, because blocking turns adb off and nothing here can turn it back
+    /// on, so one transient EIO would end a guardian-opened window for good.
+    /// The hold is bounded ([`DebuggingMemory::on_read_error`]): it never
+    /// outlives a blocked answer or an expired `until`, and the
+    /// [`MAX_DEBUGGING_HOLDS`]+1th in a row blocks.
+    pub fn debugging_until(&self, now_unix: i64) -> i64 {
+        use crate::DEBUGGING_BLOCKED;
+        let Some(subject) = self.subject else {
+            return DEBUGGING_BLOCKED;
+        };
+        let read = self.child_clauses.get_child_clause(
+            &subject.to_hex(),
+            charter_proto::ClauseKind::Debugging.store_key(),
+        );
+        let mut memory = self
+            .debugging_memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match read {
+            Ok(body) => memory.record(self.debugging_answer(body, now_unix)),
+            // Content that will not parse is malformed, not unreadable.
+            Err(e) if clause_error_is_malformed(&e) => memory.record(DEBUGGING_BLOCKED),
+            Err(_) => memory.on_read_error(now_unix),
+        }
+    }
+
+    /// The answer for a clause the store READ (`None` = never stored).
+    fn debugging_answer(&self, body: Option<String>, now_unix: i64) -> i64 {
+        use crate::DEBUGGING_BLOCKED;
+        let Some(body) = body else {
+            return DEBUGGING_BLOCKED;
+        };
+        let Ok(grant) = serde_json::from_str::<charter_schedule::GrantDebugging>(&body) else {
+            return DEBUGGING_BLOCKED;
+        };
+        // The pairing floor (the same one `try_apply_releases` applies): a
+        // re-paired device keeps its machine key, its broker refetches from
+        // the start, and the guardian re-sends the other kinds on claim but
+        // never this one. An `allow: true` from before the unpairing would
+        // otherwise open adb again while the guardian's record says off.
+        if grant.issued_at < self.paired_at {
+            return DEBUGGING_BLOCKED;
+        }
+        if !charter_schedule::evaluate_debugging(Some(&grant), now_unix.max(0) as u64) {
+            return DEBUGGING_BLOCKED;
+        }
+        // Allowed. An `until` that cannot be a positive i64 is not a window
+        // we can report; an overlong one is clamped rather than wrapped.
+        match grant.until {
+            Some(u) => i64::try_from(u).unwrap_or(i64::MAX).max(1),
+            None => 0,
+        }
+    }
+
+    /// Kotlin's read-back of DISALLOW_DEBUGGING_FEATURES (`None` = it would
+    /// not read). Rides STATUS as `debuggingOpen`.
+    pub fn set_debugging_open(&mut self, open: Option<bool>) {
+        self.debugging_open = open;
     }
 
     /// The ward-facing "your charter" mirror (spec D8): live lock state,
@@ -2107,6 +2247,13 @@ impl Warden {
                     status,
                     STATUS_HEARTBEAT_SECS,
                 )
+                    // adb opening or shutting is news the guardian is
+                    // waiting on (they have just flipped the toggle), and it
+                    // changes only when the restriction does: no churn.
+                    || self
+                        .last_status
+                        .as_ref()
+                        .is_some_and(|last| last.debugging_open != status.debugging_open)
             });
         // Only a status that is actually going out takes a number, stored
         // before it is published (a number spent on an emit that reaches no
@@ -2247,6 +2394,8 @@ impl Warden {
         if !self.app_version_name.is_empty() {
             status.app_version_name = Some(self.app_version_name.clone());
         }
+        // What the platform actually did with adb, not what was sent.
+        status.debugging_open = self.debugging_open;
         // Relay health, charterd's two fields: each absent unless actually
         // true / non-zero ("absent is the ordinary state").
         status.relay_unreachable_polls =
@@ -4900,6 +5049,78 @@ mod tests {
                 .accepted
         );
         assert_eq!(w.tethering_mode(5_000), "blocked");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The debugging clause (store_key 16): default-blocked; an open-ended
+    /// allowance reports 0, a time-boxed one reports its `until` and ends AT
+    /// it; a revoking clause blocks again.
+    #[test]
+    fn debugging_clause_drives_until_and_expires() {
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x45);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+
+        // No ward yet ⇒ blocked.
+        assert_eq!(w.debugging_until(1_000), -1);
+
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+
+        // Default-closed: no clause ⇒ blocked.
+        assert_eq!(w.debugging_until(1_000), -1);
+
+        let send = |w: &mut Warden, issued_at: u64, body: serde_json::Value, now: u64| {
+            let ev = ClauseBuilder {
+                kind: charter_proto::ClauseKind::Debugging,
+                issued_at,
+                body: json!({}),
+                created_at: issued_at,
+                subject: None,
+            }
+            .subject(ward.pubkey())
+            .body(body)
+            .build(&guardian);
+            w.ingest_clause(&serde_json::to_string(&ev).unwrap(), now)
+        };
+
+        // Allowed until t=2000: reports the end, and is dead AT the boundary.
+        let res = send(
+            &mut w,
+            1,
+            json!({"v": 1, "issuedAt": 1, "allow": true, "until": 2_000}),
+            1_000,
+        );
+        assert!(res.accepted, "debugging clause rejected: {}", res.reason);
+        assert_eq!(w.debugging_until(1_000), 2_000);
+        assert_eq!(w.debugging_until(1_999), 2_000);
+        assert_eq!(w.debugging_until(2_000), -1, "grant ends AT until");
+
+        // Superseding open-ended allowance — until revoked.
+        assert!(
+            send(
+                &mut w,
+                2,
+                json!({"v": 1, "issuedAt": 2, "allow": true}),
+                3_000
+            )
+            .accepted
+        );
+        assert_eq!(w.debugging_until(1_000_000), 0);
+
+        // Revocation: allow false ⇒ blocked again.
+        assert!(
+            send(
+                &mut w,
+                3,
+                json!({"v": 1, "issuedAt": 3, "allow": false}),
+                4_000
+            )
+            .accepted
+        );
+        assert_eq!(w.debugging_until(5_000), -1);
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -8615,6 +8836,226 @@ mod parity_port_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The debugging answer distinguishes a store that will not READ (hold:
+    /// Kotlin writes nothing, so a transient EIO cannot turn adb off for
+    /// good) from a clause that is absent or malformed (blocked).
+    #[test]
+    fn an_unreadable_debugging_clause_holds_and_a_bad_one_blocks() {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
+        let (w, subj, base, _) = paired("debugging-hold");
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "absent");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": true}),
+        );
+        assert_eq!(w.debugging_until(NOW), 0);
+
+        make_unreadable(&base, &subj, ClauseKind::Debugging);
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_HOLD, "unreadable");
+
+        let _ = std::fs::remove_dir_all(
+            base.join("children")
+                .join(&subj)
+                .join("clauses")
+                .join(format!("{}.json", ClauseKind::Debugging.store_key())),
+        );
+        assert!(w
+            .child_clauses
+            .put_child_clause(
+                &subj,
+                ClauseKind::Debugging.store_key(),
+                2,
+                &json!({"v": 1, "issuedAt": 2, "allow": "yes"}).to_string(),
+            )
+            .unwrap());
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "malformed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Overwrite the stored debugging clause file with raw bytes, so the
+    /// store READS it but cannot parse it.
+    fn corrupt_clause_file(base: &Path, subj: &str, bytes: &[u8]) {
+        let file = base
+            .join("children")
+            .join(subj)
+            .join("clauses")
+            .join(format!("{}.json", ClauseKind::Debugging.store_key()));
+        std::fs::write(file, bytes).unwrap();
+    }
+
+    /// A stored clause that will not parse is MALFORMED (blocked), not
+    /// unreadable (hold): otherwise a corrupt `16.json` would hold on every
+    /// tick for ever and a timed window would never close. Pins the wording
+    /// `clause_error_is_malformed` relies on.
+    #[test]
+    fn a_corrupt_debugging_clause_file_is_blocked_not_held() {
+        use crate::DEBUGGING_BLOCKED;
+        let (w, subj, base, _) = paired("debugging-corrupt");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": true, "until": NOW + 3_600}),
+        );
+        assert_eq!(w.debugging_until(NOW), NOW + 3_600);
+
+        for bytes in [&b"{not json"[..], b"", b"\xff\xfe\x00 not utf-8"] {
+            corrupt_clause_file(&base, &subj, bytes);
+            for _ in 0..(MAX_DEBUGGING_HOLDS + 2) {
+                assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "{bytes:?}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An I/O error holds for at most MAX_DEBUGGING_HOLDS reads in a row; the
+    /// next one blocks, and it stays blocked even once reads would fail the
+    /// same way again.
+    #[test]
+    fn an_unreadable_debugging_clause_holds_three_times_then_blocks() {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
+        let (w, subj, base, _) = paired("debugging-hold-3");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": true}),
+        );
+        assert_eq!(w.debugging_until(NOW), 0);
+        make_unreadable(&base, &subj, ClauseKind::Debugging);
+        for n in 1..=MAX_DEBUGGING_HOLDS {
+            assert_eq!(w.debugging_until(NOW), DEBUGGING_HOLD, "hold {n}");
+        }
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "4th in a row");
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "stays blocked");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// With no answer yet (first read since process start) only the count rule
+    /// applies.
+    #[test]
+    fn an_unreadable_debugging_clause_with_no_prior_answer_uses_the_count_rule() {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
+        let (w, subj, base, _) = paired("debugging-hold-first");
+        make_unreadable(&base, &subj, ClauseKind::Debugging);
+        for _ in 0..MAX_DEBUGGING_HOLDS {
+            assert_eq!(w.debugging_until(NOW), DEBUGGING_HOLD);
+        }
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An I/O error never overrides a blocked answer: a store that fails
+    /// after a BLOCKED read stays blocked from the first error.
+    #[test]
+    fn an_unreadable_debugging_clause_after_a_blocked_answer_is_blocked() {
+        use crate::DEBUGGING_BLOCKED;
+        let (w, subj, base, _) = paired("debugging-hold-after-blocked");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": false}),
+        );
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED);
+        make_unreadable(&base, &subj, ClauseKind::Debugging);
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An I/O error after an `until` that has passed is blocked (the window
+    /// closes even if the store cannot be read); before it, the window holds.
+    #[test]
+    fn an_unreadable_debugging_clause_after_an_expired_until_is_blocked() {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
+        let (w, subj, base, _) = paired("debugging-hold-expired");
+        let until = NOW + 100;
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": true, "until": until}),
+        );
+        assert_eq!(w.debugging_until(NOW), until);
+        make_unreadable(&base, &subj, ClauseKind::Debugging);
+        assert_eq!(w.debugging_until(until - 1), DEBUGGING_HOLD, "still open");
+        assert_eq!(w.debugging_until(until), DEBUGGING_BLOCKED, "ends AT until");
+        assert_eq!(w.debugging_until(until - 1), DEBUGGING_BLOCKED, "sticky");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A successful read resets the hold count (and records the new answer).
+    #[test]
+    fn a_successful_debugging_read_resets_the_hold_count() {
+        use crate::DEBUGGING_HOLD;
+        let (w, subj, base, _) = paired("debugging-hold-reset");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": true}),
+        );
+        for round in 0..3 {
+            assert_eq!(w.debugging_until(NOW), 0, "round {round}");
+            make_unreadable(&base, &subj, ClauseKind::Debugging);
+            for n in 1..=MAX_DEBUGGING_HOLDS {
+                assert_eq!(w.debugging_until(NOW), DEBUGGING_HOLD, "{round}/{n}");
+            }
+            // Heal the store: remove the directory and rewrite the clause.
+            std::fs::remove_dir_all(
+                base.join("children")
+                    .join(&subj)
+                    .join("clauses")
+                    .join(format!("{}.json", ClauseKind::Debugging.store_key())),
+            )
+            .unwrap();
+            put(
+                &w,
+                &subj,
+                ClauseKind::Debugging,
+                json!({"v": 1, "issuedAt": 2 + round, "allow": true}),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The pairing floor: a debugging clause issued before the CURRENT
+    /// pairing (a re-paired device refetching its old `allow: true`) is
+    /// blocked; one issued after it is honoured.
+    #[test]
+    fn a_debugging_clause_from_before_the_pairing_is_blocked() {
+        let (mut w, subj, base, _) = paired("debugging-floor");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 50, "allow": true}),
+        );
+        // The test pairing path leaves paired_at at 0 (legacy): honoured.
+        assert_eq!(w.debugging_until(NOW), 0);
+
+        w.paired_at = 100;
+        assert_eq!(w.debugging_until(NOW), crate::DEBUGGING_BLOCKED);
+
+        assert!(w
+            .child_clauses
+            .put_child_clause(
+                &subj,
+                ClauseKind::Debugging.store_key(),
+                200,
+                &json!({"v": 1, "issuedAt": 200, "allow": true}).to_string(),
+            )
+            .unwrap());
+        assert_eq!(w.debugging_until(NOW), 0, "issued after the pairing");
+
+        // Exactly at the floor is the current pairing's, not an earlier one's.
+        w.paired_at = 200;
+        assert_eq!(w.debugging_until(NOW), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// F2 / N1: a pairing record that will not READ at init reports the device
     /// as paired (so Kotlin keeps the install lock up), the tick HOLDS rather
     /// than emitting the release, every per-app and web read is an error
@@ -8993,6 +9434,57 @@ mod parity_port_tests {
             Some(t - 3600 + 61)
         );
         drop(g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `debuggingOpen` rides STATUS exactly as Kotlin read it back from the
+    /// platform (absent while unknown), and a change goes out at once rather
+    /// than waiting for the heartbeat: the guardian has just flipped it.
+    #[test]
+    fn status_carries_debugging_open_and_emits_on_its_change() {
+        let (mut w, base) = relay_paired("debugging-open");
+        let mock = charter_sys::relay::MockRelayTransport::new();
+        w.wire_test_relay(mock).unwrap();
+        let lock = Mutex::new(Some(w));
+        let set = |lock: &Mutex<Option<Warden>>, open: Option<bool>| {
+            lock.lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .set_debugging_open(open);
+        };
+        let last = |lock: &Mutex<Option<Warden>>| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_status_for_tests()
+                .cloned()
+                .unwrap()
+        };
+
+        let t = NOW as u64;
+        assert!(poll_once_locked(&lock, t).status_emitted);
+        assert_eq!(last(&lock).debugging_open, None, "unknown ⇒ absent");
+
+        set(&lock, Some(false));
+        assert!(
+            poll_once_locked(&lock, t + 1).status_emitted,
+            "change ⇒ emit"
+        );
+        let s = last(&lock);
+        assert_eq!(s.debugging_open, Some(false));
+        assert!(s.to_json().contains("\"debuggingOpen\":false"));
+
+        // Unchanged inside the heartbeat: nothing new to say.
+        assert!(!poll_once_locked(&lock, t + 2).status_emitted);
+
+        set(&lock, Some(true));
+        assert!(
+            poll_once_locked(&lock, t + 3).status_emitted,
+            "change ⇒ emit"
+        );
+        assert_eq!(last(&lock).debugging_open, Some(true));
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -60,8 +60,8 @@ android {
         applicationId = "org.forgesworn.charter"
         minSdk = 34
         targetSdk = 35
-        versionCode = 46
-        versionName = "0.6.15"
+        versionCode = 47
+        versionName = "0.6.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

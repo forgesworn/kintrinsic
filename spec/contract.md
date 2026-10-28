@@ -239,7 +239,7 @@ store. The full `ClauseKind` set (wire tag → store key) is `schedule` (1),
 `budget` (2), `content` (3), `apps` (4), `learning` (5), `apprules` (6),
 `tethering` (7), `update` (8), `lifeline` (9), `buckets` (10),
 `maintenance` (11), `gift` (12), `standdown` (13), `listening` (14),
-`alwaysavailable` (15). Three device-local, non-clause slots share the same
+`alwaysavailable` (15), `debugging` (16). Three device-local, non-clause slots share the same
 rollback-protected store and never cross the wire: `100` (cached USAGE_SYNC),
 `101` (the stand-down grace pin) and `102` (the install-window span). It is
 parsed and evaluated by the
@@ -916,6 +916,66 @@ A grant with `until` ends AT that instant — the next tick re-applies the block
 (auto-killing any live session). `until` recomputed each tick, like `appRules`;
 no alarms.
 
+### Debugging (v1 — device-enforced, Android)
+
+The `debugging` clause (wire tag `"debugging"`, store key `16`) lets the
+guardian open **USB and wireless debugging (adb)** on one ward device for a
+while: during a hardware test round, or to collect a log. It is
+**default-blocked**. adb can force-stop the warden, revoke the usage-stats
+app-op and read the ward's data, so an open debugging window is a reduced
+posture and the guardian UI must say so plainly.
+
+```ts
+interface GrantDebugging {
+  v: 1;
+  issuedAt: number;
+  allow: boolean;
+  /** Unix seconds when the allowance ends (ends AT this instant). Absent =
+   *  until a superseding clause revokes it. Meaningless (and omitted) when
+   *  `allow` is false. */
+  until?: number;
+}
+```
+
+**Targeting.** Unlike the other kinds, a debugging clause is addressed to
+**one device**: the guardian gift-wraps it to that device's key only, still
+carrying the child `subject`. Each device caches the clauses it receives, so
+the child's other devices keep their own (absent, so blocked) state.
+Replace-the-state, per-(subject, kind) monotonic `issuedAt` on each device.
+
+**Enforcement (fail-safe, level-triggered per tick):**
+- no clause / a malformed clause / `v` other than 1 / `allow: false` /
+  `now >= until` / a clause issued before the device's current pairing
+  (`issuedAt < paired_at`) ⇒ **blocked**: `DISALLOW_DEBUGGING_FEATURES` is
+  set. The platform turns adb off when it is applied. The pairing floor
+  matters because a re-paired device keeps its key and refetches its old
+  clauses: without it, an `allow: true` sent before the unpairing would open
+  adb again while the guardian's record says off.
+- `allow: true` and not expired ⇒ the restriction is **cleared**. Clearing it
+  does not turn adb back on: the ward device's user re-enables USB debugging
+  in Developer options.
+- The restriction is owned by this clause alone, not by the Device Owner
+  baseline or its periodic re-assertion. A re-assertion that set it and a
+  tick that cleared it again would turn adb off on every service restart.
+  A newly charted device is therefore blocked from its first tick, a window
+  of one tick.
+- The step runs on every tick of a paired Device Owner ward, whether or not
+  any other clause has configured it and in every enforcement mode. A ward
+  that cannot read its pairing or its native library blocks. A stored clause
+  that will not parse is malformed and blocks. A ward that cannot read its
+  clause store this tick leaves the restriction as it is, because blocking on
+  a transient read error would turn adb off for good. That hold is bounded:
+  it blocks instead when the last answer it read was blocked, or allowed
+  with an `until` that has since passed, and after 3 holds in a row.
+- A debuggable (debug) build of the ward app is always allowed.
+- STATUS carries `debuggingOpen`, read back from the platform, so the
+  guardian sees what the device actually did rather than what was sent.
+- The ward's own screen shows that debugging is allowed, and until when (a
+  ward can always see what is being enforced).
+
+A ward that predates this kind does not know the tag and refuses the clause,
+so the toggle is offered only for wards that implement it.
+
 ### Listening — audio at the lock (v1 — device-enforced, Android)
 
 The `listening` clause (wire tag `"listening"`, store key `14`) is the family's
@@ -1191,6 +1251,7 @@ against this table rather than assume parity (MyCharter: `wardenSupport`).
 | `standdown` (13) | enforced | enforced | |
 | `listening` (14) | **stored, inert** | enforced | a Linux lock freezes the slice, so audio stops regardless |
 | `alwaysavailable` (15) | **stored, inert** | enforced (≥ versionCode 39) | a Linux lock freezes the whole user slice, so an exempted app is frozen with everything else regardless of what the clause says |
+| `debugging` (16) | n/a (no adb to govern) | enforced (≥ versionCode 47) | addressed to one device, not to every device of the child |
 
 "**stored, inert**" means the clause is authenticated against the pinned
 guardian and cached exactly as any other — rollback protection and all — and
@@ -1551,6 +1612,7 @@ interface StatusPayload {
   clockSteppedBackFrom?: number;   // present only on the FIRST status after this device's clock stepped below its own previous ts; equals that previous ts
   seq?: number;                    // per-device sequence, strictly increasing across restarts (incl. a wipe) — the ORDERING signal once present; see below
   appLockArmed?: boolean;          // Linux: the app lock (fapolicyd) is armed and enforcing right now; a Linux warden that has it always sends true/false
+  debuggingOpen?: boolean;         // Android: adb is allowed right now (DISALLOW_DEBUGGING_FEATURES is not set); a ward that implements `debugging` sends true/false, or leaves it out when it cannot read the platform
 }
 ```
 
@@ -2473,8 +2535,8 @@ you change it in both, or a red test tells you which stack drifted.
   would keep its `raw` arm, i.e. unfiltered upstream internet. The required
   behaviour is therefore each kind's own fail-safe: `schedule` locks
   (malformed), `budget` reads as `paused` (quota 0 on both axes), `tethering`
-  is `blocked`, `content` fails closed, and a capping kind such as `buckets`
-  caps nothing.
+  is `blocked`, `debugging` is `blocked`, `content` fails closed, and a
+  capping kind such as `buckets` caps nothing.
 - The contract version (this document) is `v0.1` — pre-stable.
 - The NIP-46 method namespace is `charter_*`; we do not draft an upstream NIP until the namespace stabilises (matches the `heartwood_*` discipline).
 

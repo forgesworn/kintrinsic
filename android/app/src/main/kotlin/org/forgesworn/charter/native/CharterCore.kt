@@ -109,7 +109,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 3
+    const val EXPECTED_ABI_VERSION = 4
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -467,6 +467,33 @@ object CharterCore {
             "raw", "filtered" -> m
             else -> "blocked"
         }
+
+    /** [debuggingUntil]: blocked. Mirrors `DEBUGGING_BLOCKED` in
+     *  `android/jni/src/lib.rs`, which defines every value once. */
+    const val DEBUGGING_BLOCKED = -1L
+
+    /** [debuggingUntil]: the clause store would not read this tick, so leave
+     *  the restriction as it stands (`DEBUGGING_HOLD` in `lib.rs`). */
+    const val DEBUGGING_HOLD = -2L
+
+    /** Whether debugging (adb) is allowed right now: 0 allowed with no end, >0
+     *  allowed until that unix second, [DEBUGGING_BLOCKED], or
+     *  [DEBUGGING_HOLD]. Any throw (a refused or stale `.so`, an uninitialised
+     *  core) reads as blocked: fail-closed. */
+    fun debuggingUntil(nowUnix: Long): Long =
+        runCatching { jni().charterDebuggingUntil(nowUnix) }.getOrDefault(DEBUGGING_BLOCKED)
+
+    /** Report the platform's read-back of DISALLOW_DEBUGGING_FEATURES: true =
+     *  not set (adb allowed), null = it would not read. STATUS `debuggingOpen`. */
+    fun setDebuggingOpen(open: Boolean?) {
+        jni().charterSetDebuggingOpen(
+            when (open) {
+                true -> 1
+                false -> 0
+                null -> -1
+            },
+        )
+    }
 
     /** One forced-resolution rewrite (host -> answer) for SafeSearch / YouTube. */
     data class DnsRewrite(val host: String, val answer: String)

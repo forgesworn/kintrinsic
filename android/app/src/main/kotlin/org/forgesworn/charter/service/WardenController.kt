@@ -367,11 +367,23 @@ class WardenController(
     /**
      * One loop iteration: read the world, ask the core, apply the decision.
      * Level-triggered everywhere — safe to call every tick and on every restart.
+     *
+     * The debugging step runs LAST and on every way out of the tick: a failed
+     * init, a refused native core, an unreadable pairing, an unconfigured or
+     * observing ward, and a tick that threw. See [syncDebugging].
      */
     fun tickAndApply(
         nowUnix: Long = System.currentTimeMillis() / 1000,
         screenWas: Boolean? = null,
-    ): List<CharterCore.ChildDecision> {
+    ): List<CharterCore.ChildDecision> =
+        try {
+            tickOnce(nowUnix, screenWas)
+        } finally {
+            // Guarded: a throw here must not replace the tick's own.
+            guard.run("debugging") { syncDebugging(nowUnix) }
+        }
+
+    private fun tickOnce(nowUnix: Long, screenWas: Boolean?): List<CharterCore.ChildDecision> {
         if (!initialized) {
             // A warden that failed to come up must not stay down for the life
             // of the process: until it exists nothing is enforced at all, and
@@ -728,6 +740,9 @@ class WardenController(
             // before pushing it and never try again).
             guard.run("tether", ward) { restrictions.applyTetherMode(tetherMode) }
         }
+        // Debugging (adb) is not here: it runs once per tick, after every
+        // decision, whether or not any charter is configured (see
+        // [syncDebugging]).
         // A filtered clause is PERMISSION, not an instruction to hold an AP up
         // all day: the ward's own switch decides (see HotspotWish — the battery
         // reason is written up there). Drop the wish whenever the permission
@@ -836,6 +851,45 @@ class WardenController(
         } else if (!apply && baselineApplied) {
             restrictions.clearBaseline()
             baselineApplied = false
+        }
+    }
+
+    /**
+     * Debugging (adb): the `debugging` clause alone owns
+     * DISALLOW_DEBUGGING_FEATURES, level-triggered per tick so a window ends
+     * the moment its `until` passes. Not the baseline: setting it there would
+     * turn adb off again on every service restart.
+     *
+     * Unlike the other restrictions it does NOT wait for a configured charter
+     * or leave Observe alone. A ward upgraded from a build whose testing
+     * switch had CLEARED it would otherwise keep adb open for as long as it
+     * stayed unconfigured or observing. Whenever this app is Device Owner:
+     * - paired (and anything that cannot be told from paired: a failed init,
+     *   a refused `.so`, a pairing that will not read — as [installLockWanted]
+     *   holds them): the clause decides, and any native failure blocks;
+     * - known unpaired (released): cleared, so un-chartering leaves no
+     *   Kintrinsic restriction behind even where the baseline never ran;
+     * - the clause store would not read this tick: nothing is written.
+     *
+     * Then the platform's own state is read back for STATUS `debuggingOpen`.
+     * Runs after the decisions, so a baseline cleared this tick (a charter
+     * going away) is put back in the same tick.
+     */
+    private fun syncDebugging(nowUnix: Long) {
+        if (!Provisioning.isDeviceOwner(context)) {
+            runCatching { CharterCore.setDebuggingOpen(null) }
+            return
+        }
+        val pairing = runCatching { CharterCore.pairingState() }.getOrNull()?.takeIf { it.error == null }
+        val until = if (debuggingPaired(pairing)) CharterCore.debuggingUntil(nowUnix) else CharterCore.DEBUGGING_BLOCKED
+        try {
+            debuggingWrite(pairing, until)?.let { restrictions.applyDebugging(it) }
+        } finally {
+            // Read back even when the write threw: STATUS reports what the
+            // device did, not what was asked of it.
+            val debugKey = android.os.UserManager.DISALLOW_DEBUGGING_FEATURES
+            val open = runCatching { !restrictions.isRestrictionActive(debugKey) }.getOrNull()
+            runCatching { CharterCore.setDebuggingOpen(open) }
         }
     }
 
@@ -994,15 +1048,6 @@ class WardenController(
         /** How often a pinned DNS filter whose tunnel is down is restarted. */
         private const val DNS_REDISPATCH_SECS = 30L
 
-        /**
-         * TESTING WINDOW ONLY. While on, a release ward leaves USB debugging
-         * available (and clears the restriction an earlier build set), so a
-         * charted family phone can still be reached over adb during the
-         * hardware rounds. It is a reduced posture: a ward with adb can
-         * force-stop the warden. Turn it off before any public release.
-         */
-        const val ALLOW_DEBUGGING_IN_RELEASE = true
-
         /** The production wiring: DPM-backed ops + the real lock activity. */
         fun real(context: Context): WardenController {
             val dpm = Provisioning.dpm(context)
@@ -1014,8 +1059,7 @@ class WardenController(
                 dpm = dpm,
                 admin = admin,
                 appGate = DpmAppGateOps(context, dpm, admin),
-                restrictions =
-                    DpmRestrictionOps(dpm, admin, allowDebugging = debuggable || ALLOW_DEBUGGING_IN_RELEASE),
+                restrictions = DpmRestrictionOps(dpm, admin, forceAllowDebugging = debuggable),
                 usage = UsageStatsSource(context),
                 install = DpmApkInstallOps(context),
                 dnsFilter = VpnDnsFilterOps(context, dpm, admin),
@@ -1095,3 +1139,29 @@ internal fun lockLaunchWanted(shown: Boolean, alive: Boolean, shownReason: Strin
  */
 internal fun installLockWanted(pairing: CharterCore.PairingState?, maintenanceOpen: Boolean): Boolean =
     (pairing?.paired ?: true) && !maintenanceOpen
+
+/**
+ * Whether the debugging step treats the device as paired: the same rule as
+ * [installLockWanted]. A pairing answer that could not be had at all (null: an
+ * error reply, a throw, a failed init, a refused `.so`) or a record that will
+ * not read counts as paired; only a readable "unpaired" does not.
+ */
+internal fun debuggingPaired(pairing: CharterCore.PairingState?): Boolean =
+    pairing == null || pairing.paired || pairing.pairingUnreadable
+
+/**
+ * What the debugging step writes this tick: true = clear
+ * DISALLOW_DEBUGGING_FEATURES (allowed), false = set it (blocked), null =
+ * write nothing. [until] is [CharterCore.debuggingUntil].
+ *
+ * A known-unpaired device is cleared: a released phone keeps no Kintrinsic
+ * restriction. A paired one follows the clause, any negative answer blocks,
+ * except [CharterCore.DEBUGGING_HOLD], the store that would not read: setting
+ * the restriction turns adb off and clearing it does not turn it back on, so
+ * blocking on a transient error would end an opened window for good.
+ */
+internal fun debuggingWrite(pairing: CharterCore.PairingState?, until: Long): Boolean? = when {
+    !debuggingPaired(pairing) -> true
+    until == CharterCore.DEBUGGING_HOLD -> null
+    else -> until >= 0
+}

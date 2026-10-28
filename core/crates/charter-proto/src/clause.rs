@@ -79,12 +79,17 @@ pub enum ClauseKind {
     /// Replace-the-set, like `apprules`.
     #[serde(rename = "alwaysavailable")]
     AlwaysAvailable,
+    /// Guardian-opened USB/wireless debugging (adb) window on ONE ward device,
+    /// default-blocked and optionally time-boxed. Replace-the-state, like
+    /// `tethering`; unlike the other kinds the guardian gift-wraps it to a
+    /// single device's key, so only that device ever caches it.
+    Debugging,
 }
 
 /// Store key for the latest verified USAGE_SYNC view in the per-(subject, key)
 /// rollback-protected store. Not a clause — but the store's monotonic floor is
 /// exactly the `ts`-replay protection the contract requires, and `clear_for`
-/// on release wipes it with the clauses. Clause kinds own 1..=15; keep this
+/// on release wipes it with the clauses. Clause kinds own 1..=16; keep this
 /// well clear of them.
 pub const USAGE_SYNC_STORE_KEY: u16 = 100;
 
@@ -135,6 +140,7 @@ impl ClauseKind {
             ClauseKind::StandDown => 13,
             ClauseKind::Listening => 14,
             ClauseKind::AlwaysAvailable => 15,
+            ClauseKind::Debugging => 16,
         }
     }
 }
@@ -914,6 +920,35 @@ mod tests {
         let c = ClausePayload::from_json(json).unwrap();
         assert_eq!(c.kind, ClauseKind::Tethering);
         assert_eq!(c.kind.store_key(), 7);
+    }
+
+    #[test]
+    fn debugging_kind_serializes_lowercase_with_distinct_store_key() {
+        let k = ClauseKind::Debugging;
+        assert_eq!(serde_json::to_string(&k).unwrap(), "\"debugging\"");
+        let back: ClauseKind = serde_json::from_str("\"debugging\"").unwrap();
+        assert_eq!(back, ClauseKind::Debugging);
+        assert_eq!(k.store_key(), 16);
+        for other in [
+            ClauseKind::Schedule,
+            ClauseKind::Budget,
+            ClauseKind::Content,
+            ClauseKind::Apps,
+            ClauseKind::Learning,
+            ClauseKind::AppRules,
+            ClauseKind::Tethering,
+            ClauseKind::AlwaysAvailable,
+        ] {
+            assert_ne!(k.store_key(), other.store_key());
+        }
+    }
+
+    #[test]
+    fn parses_debugging_clause() {
+        let json = r#"{"v":1,"kind":"debugging","issuedAt":1700000000,"body":{"v":1,"issuedAt":1700000000,"allow":true,"until":1700003600}}"#;
+        let c = ClausePayload::from_json(json).unwrap();
+        assert_eq!(c.kind, ClauseKind::Debugging);
+        assert_eq!(c.kind.store_key(), 16);
     }
 
     #[test]

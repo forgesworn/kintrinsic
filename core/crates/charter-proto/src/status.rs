@@ -285,6 +285,15 @@ pub struct StatusPayload {
     /// decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_lock_armed: Option<bool>,
+    /// Android: whether debugging (adb) is allowed on this device right now,
+    /// read back from the platform: `true` iff `DISALLOW_DEBUGGING_FEATURES`
+    /// is NOT set. A ward that implements the `debugging` clause always sends
+    /// it while it can read its restrictions, so the guardian sees what the
+    /// device actually did rather than what was sent; absent means a device
+    /// with no such control (Linux), one that predates it, or a read that
+    /// failed. Additive under the open STATUS field-set decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debugging_open: Option<bool>,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -498,6 +507,7 @@ mod tests {
             seq: None,
             usage_unsaved: None,
             app_lock_armed: None,
+            debugging_open: None,
         }
     }
 
@@ -515,6 +525,24 @@ mod tests {
             );
             let back = StatusPayload::from_json(&json).unwrap();
             assert_eq!(back.app_lock_armed, Some(armed));
+        }
+    }
+
+    #[test]
+    fn debugging_open_omits_when_none_and_round_trips_camel_case() {
+        let mut s = sample();
+        assert!(
+            !s.to_json().contains("debuggingOpen"),
+            "absent when not reported"
+        );
+        for open in [true, false] {
+            s.debugging_open = Some(open);
+            let json = s.to_json();
+            assert!(
+                json.contains(&format!("\"debuggingOpen\":{open}")),
+                "{json}"
+            );
+            assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
         }
     }
 

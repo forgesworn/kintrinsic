@@ -24,7 +24,33 @@ use warden::{Warden, WARDEN};
 /// 2: `charterInit` takes the app's versionName (STATUS `appVersionName`).
 /// 3: the local link — `charterLinkDiscovered`, `charterLinkKick`,
 ///    `charterLinkState`.
-pub const ABI_VERSION: jint = 3;
+/// 4: the `debugging` clause — `charterDebuggingUntil` (and its
+///    [`DEBUGGING_HOLD`] answer) and `charterSetDebuggingOpen`.
+pub const ABI_VERSION: jint = 4;
+
+// ---- the debugging answer --------------------------------------------------
+//
+// The ONE place the values `charterDebuggingUntil` returns are defined (the
+// Kotlin mirror is `CharterCore.DEBUGGING_*`, which points back here):
+//
+// - `0`  allowed, with no end (until a superseding clause revokes it);
+// - `>0` allowed until that unix second (the window ends AT it);
+// - [`DEBUGGING_BLOCKED`] (`-1`): blocked. No ward, no clause, a malformed
+//   one, a body version this build does not implement, `allow: false`, an
+//   expired window, a clause from before the current pairing, an
+//   uninitialised warden, a panic. Kotlin sets `DISALLOW_DEBUGGING_FEATURES`.
+//   Kotlin's own catch-all (a JNI throw, a refused `.so`) also reads `-1`.
+// - [`DEBUGGING_HOLD`] (`-2`): unknown this tick, because the clause store
+//   would not read. Kotlin writes NOTHING: setting the restriction makes the
+//   platform turn adb off, and clearing it does not turn adb back on, so
+//   blocking on a transient read error would end a guardian-opened window for
+//   good. The next tick asks again.
+
+/// `charterDebuggingUntil`: blocked (set the restriction).
+pub const DEBUGGING_BLOCKED: i64 = -1;
+/// `charterDebuggingUntil`: the clause store would not read; leave the
+/// restriction exactly as it stands this tick.
+pub const DEBUGGING_HOLD: i64 = -2;
 
 // ---- helpers --------------------------------------------------------------
 
@@ -412,6 +438,48 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterT
     now_unix: jlong,
 ) -> jstring {
     with_warden(&env, |w| w.tethering_mode(now_unix).to_string())
+}
+
+/// The sole ward's debugging posture at `now_unix` (the `debugging` clause).
+/// The values are defined once, above [`DEBUGGING_BLOCKED`]. Recomputed per
+/// tick — a window ends AT its `until`. Kotlin applies it level-triggered to
+/// DISALLOW_DEBUGGING_FEATURES.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterDebuggingUntil(
+    _env: JNIEnv,
+    _class: JClass,
+    now_unix: jlong,
+) -> jlong {
+    let guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
+    // An uninitialised warden or a panic is "blocked", never "allowed", and a
+    // panic must not unwind across the FFI boundary.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guard
+            .as_ref()
+            .map_or(DEBUGGING_BLOCKED, |w| w.debugging_until(now_unix))
+    }))
+    .unwrap_or(DEBUGGING_BLOCKED)
+}
+
+/// Kotlin reports what the platform actually did with
+/// DISALLOW_DEBUGGING_FEATURES, read back after each tick's debugging step:
+/// `1` = not set (adb allowed), `0` = set (blocked), anything else = could not
+/// be read. Rides STATUS as `debuggingOpen` (absent while unknown).
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterSetDebuggingOpen(
+    env: JNIEnv,
+    _class: JClass,
+    state: jint,
+) -> jstring {
+    let open = match state {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    };
+    with_warden_mut(&env, |w| {
+        w.set_debugging_open(open);
+        "{\"ok\":true}".to_string()
+    })
 }
 
 /// The ward-facing "your charter" mirror (spec D8): `{"locked","minutesLeft",

@@ -233,6 +233,15 @@ export interface DeviceStatus {
    * charterd always sends one or the other, true or false.
    */
   appLockArmed?: boolean;
+  /**
+   * Android: adb is allowed right now (`DISALLOW_DEBUGGING_FEATURES` is not
+   * set), read back from the platform. A ward that implements the `debugging`
+   * clause always sends true or false; absent means an older ward, a Linux
+   * ward, or junk, and must never read as either state. The guardian shows this
+   * as the truth and the clause it sent only as an intention (see
+   * `domain/debugging.ts`).
+   */
+  debuggingOpen?: boolean;
 }
 
 /** One installed launchable app on a device. */
@@ -406,6 +415,8 @@ export function parseStatus(json: string): DeviceStatus | null {
     // posture as every other tolerant field here — never coerced to `false`,
     // which would read as "unarmed" for a ward that simply sent junk.
     appLockArmed: typeof o.appLockArmed === "boolean" ? o.appLockArmed : undefined,
+    // Same posture as appLockArmed: a non-boolean is absent, never `false`.
+    debuggingOpen: typeof o.debuggingOpen === "boolean" ? o.debuggingOpen : undefined,
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)
