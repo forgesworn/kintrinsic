@@ -10,16 +10,26 @@
  *   `-0` (libraries differ on `1.0` and `1e3` for integer fields);
  * - a lone UTF-16 surrogate in any string, escaped or raw (not valid Unicode,
  *   and refused by strict decoders).
+ * - nesting deeper than MAX_JSON_DEPTH (16; objects and arrays combined, the
+ *   top-level value being depth 1): decoders differ in their recursion limits,
+ *   so the contract fixes one.
  * Integers beyond 2^53 − 1 parse (they may sit in ignored fields) but lose
  * precision; every field the contract reads is range-checked separately.
  */
 
 export class StrictJsonError extends Error {}
 
+/** Deepest nesting accepted: objects and arrays combined, the top-level value is depth 1. */
+export const MAX_JSON_DEPTH = 16
+
 const WS = new Set([0x20, 0x09, 0x0a, 0x0d])
 
 export function parseStrictJson(text: string): unknown {
   let i = 0
+  let depth = 0
+  const enter = () => {
+    if (++depth > MAX_JSON_DEPTH) fail('nesting too deep')
+  }
   const fail = (msg: string): never => {
     throw new StrictJsonError(`${msg} at ${i}`)
   }
@@ -101,11 +111,13 @@ export function parseStrictJson(text: string): unknown {
     return out
   }
   const array = () => {
+    enter()
     i++
     const out: unknown[] = []
     ws()
     if (text[i] === ']') {
       i++
+      depth--
       return out
     }
     for (;;) {
@@ -117,18 +129,21 @@ export function parseStrictJson(text: string): unknown {
       }
       if (text[i] === ']') {
         i++
+        depth--
         return out
       }
       return fail('bad array')
     }
   }
   const object = () => {
+    enter()
     i++
     const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>
     const seen = new Set<string>()
     ws()
     if (text[i] === '}') {
       i++
+      depth--
       return { ...out }
     }
     for (;;) {
@@ -148,6 +163,7 @@ export function parseStrictJson(text: string): unknown {
       }
       if (text[i] === '}') {
         i++
+        depth--
         return { ...out }
       }
       return fail('bad object')

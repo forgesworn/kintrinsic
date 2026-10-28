@@ -45,6 +45,8 @@ export const RELAYS_TTL_SECONDS = 600
 export const TOKEN_LIFETIME_SECONDS = 600
 /** After a RELAYS change, a multi-root ward also sends STATUS on the old relays. */
 export const PREVIOUS_RELAYS_SECONDS = 7 * 24 * 60 * 60
+/** Most previous relay lists kept (rule 11); a 9th drops the oldest. */
+export const PREVIOUS_RELAYS_MAX = 8
 /** Maximum label length, in UTF-8 bytes. */
 export const MAX_LABEL_BYTES = 64
 

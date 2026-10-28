@@ -37,6 +37,7 @@ import {
   MAX_TOMBSTONES_PER_ROOT,
   OBJECTION_BLOCK_SECONDS,
   PENDING_MAX_SECONDS,
+  PREVIOUS_RELAYS_MAX,
   PREVIOUS_RELAYS_SECONDS,
   RELAYS_TTL_SECONDS,
   REMOVAL_NOTICE_SECONDS,
@@ -1021,6 +1022,7 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
       pin = v.record
     }
     s.previousRelays.push({ relays: s.relays, until: now + PREVIOUS_RELAYS_SECONDS })
+    while (s.previousRelays.length > PREVIOUS_RELAYS_MAX) s.previousRelays.shift()
     s.relays = [...ev.relays]
     s.relaysUpdatedAt = ev.ts
     if (pin) s.guardianPin = pin
