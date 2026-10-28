@@ -119,7 +119,7 @@ fn spawn_ward(
     WardLink::spawn(
         WardLinkConfig {
             machine_sk: zsk(m),
-            guardian: pinned,
+            signers: std::sync::Arc::new(charter_primitives::SinglePinned(pinned)),
             state_dir: dir.to_path_buf(),
             allow_loopback: true,
             prepare_socket: None,
@@ -1239,7 +1239,7 @@ fn a_ward_without_loopback_refuses_loopback_candidates_and_remembered_peers() {
     let strict = WardLink::spawn(
         WardLinkConfig {
             machine_sk: zsk("m"),
-            guardian: pk("g"),
+            signers: std::sync::Arc::new(charter_primitives::SinglePinned(pk("g"))),
             state_dir: wdir.path().to_path_buf(),
             allow_loopback: false,
             prepare_socket: None,
@@ -1403,7 +1403,7 @@ fn an_ingest_in_flight_finishes_when_the_ward_shuts_down() {
     let ward = WardLink::spawn(
         WardLinkConfig {
             machine_sk: zsk("m"),
-            guardian: pk("g"),
+            signers: std::sync::Arc::new(charter_primitives::SinglePinned(pk("g"))),
             state_dir: wdir.path().to_path_buf(),
             allow_loopback: true,
             prepare_socket: None,
@@ -1861,7 +1861,7 @@ fn spawn_ward_with_hook(
     WardLink::spawn(
         WardLinkConfig {
             machine_sk: zsk(m),
-            guardian: pinned,
+            signers: std::sync::Arc::new(charter_primitives::SinglePinned(pinned)),
             state_dir: dir.to_path_buf(),
             allow_loopback: true,
             prepare_socket: Some(hook),
