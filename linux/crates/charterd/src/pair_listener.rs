@@ -110,6 +110,7 @@ mod tests {
                 approval: None,
             },
             seal_author: PubKey::from_bytes([who; 32]),
+            inner: None,
         }
     }
 
