@@ -1,0 +1,17 @@
+[package]
+name = "charter-guardians"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+charter-crypto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+scrypt = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+# giftwrap.json only: NIP-44 v2 decryption of the wrap and seal layers.
+charter-transport = { workspace = true, default-features = false }

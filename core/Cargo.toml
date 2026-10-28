@@ -13,6 +13,7 @@ members = [
     "crates/charter-webpolicy",
     "crates/charter-spine",
     "crates/charter-link",
+    "crates/charter-guardians",
 ]
 
 [workspace.package]
