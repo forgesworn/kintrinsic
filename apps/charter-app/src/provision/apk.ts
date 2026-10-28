@@ -9,7 +9,7 @@
 // and never installed.
 //
 // What that does and does not buy. The APK itself comes from a third-party
-// host (Blossom at nostr.download first, then the GitHub Release), so a
+// host (Blossom at nostr.download), so a
 // tampered or substituted file there cannot get through: its digest would not
 // match. The feed, however, is served from the same origin as this code, so
 // whoever controls that origin could change both the file and the expected
@@ -18,9 +18,12 @@
 // APK should be), not against a compromised PWA origin. The digest is still
 // shown to the parent so it can be compared with the release notes by eye.
 //
-// Blossom is tried first because it answers with `access-control-allow-origin:
-// *`; GitHub release downloads redirect to a host that does not, so a browser
-// cannot read them cross-origin. They stay in the list as a fallback.
+// Only nostr.download is used: it answers with `access-control-allow-origin:
+// *` and it is the one https origin this page's CSP `connect-src` allows.
+// GitHub release downloads redirect to a host with no CORS headers and are
+// not in `connect-src`, so a browser could never read them; they are dropped
+// here rather than offered as a fallback that cannot work. If several
+// nostr.download URLs are listed they are tried in order.
 
 export const FEED_PATH = "/charter-apk.json";
 
@@ -29,8 +32,8 @@ const BLOSSOM_HOST = "nostr.download";
 export interface WardApkFeed {
   versionName: string;
   apkSha256: string;
-  sizeBytes?: number;
-  /** https URLs only, Blossom first, de-duplicated. */
+  sizeBytes: number;
+  /** https nostr.download URLs only, in listed order, de-duplicated. */
   sources: string[];
 }
 
@@ -64,7 +67,10 @@ function isBlossom(u: string): boolean {
   }
 }
 
-/** Validate the feed and order its sources: Blossom first, then the rest in listed order. */
+/** Largest APK the feed may claim. The real ward APK is about 28 MB. */
+export const MAX_APK_BYTES = 200 * 1024 * 1024;
+
+/** Validate the feed and keep only the sources this origin's CSP allows. */
 export function parseWardFeed(o: unknown): WardApkFeed {
   const bad = (why: string): never => {
     throw new Error(
@@ -77,21 +83,22 @@ export function parseWardFeed(o: unknown): WardApkFeed {
   if (typeof m.apkSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(m.apkSha256)) {
     return bad("no valid checksum");
   }
-  let sizeBytes: number | undefined;
-  if (m.sizeBytes !== undefined) {
-    if (typeof m.sizeBytes !== "number" || !Number.isInteger(m.sizeBytes) || m.sizeBytes <= 0) {
-      return bad("invalid size");
-    }
-    sizeBytes = m.sizeBytes;
+  if (
+    typeof m.sizeBytes !== "number" ||
+    !Number.isInteger(m.sizeBytes) ||
+    m.sizeBytes <= 0 ||
+    m.sizeBytes > MAX_APK_BYTES
+  ) {
+    return bad("no valid size");
   }
+  const sizeBytes = m.sizeBytes;
   const listed: unknown[] = [...(Array.isArray(m.urls) ? m.urls : []), m.url];
-  const https = Array.from(new Set(listed.filter(isHttps)));
-  const sources = [...https.filter(isBlossom), ...https.filter((u) => !isBlossom(u))];
-  if (sources.length === 0) return bad("no https download address");
+  const sources = Array.from(new Set(listed.filter(isHttps).filter(isBlossom)));
+  if (sources.length === 0) return bad("no nostr.download address");
   return {
     versionName: m.versionName,
     apkSha256: m.apkSha256.toLowerCase(),
-    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    sizeBytes,
     sources,
   };
 }
@@ -128,7 +135,7 @@ async function downloadVerified(src: string, feed: WardApkFeed): Promise<{ bytes
   const type = resp.headers?.get?.("content-type") ?? "";
   if (/text\/html/i.test(type)) throw new Error("the server sent a web page instead of the app");
   const bytes = new Uint8Array(await resp.arrayBuffer());
-  if (feed.sizeBytes !== undefined && bytes.length !== feed.sizeBytes) {
+  if (bytes.length !== feed.sizeBytes) {
     throw new Error(
       `the downloaded app is the wrong size (${bytes.length} bytes, expected ${feed.sizeBytes})`,
     );

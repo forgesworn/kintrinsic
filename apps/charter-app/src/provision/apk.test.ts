@@ -5,6 +5,7 @@ import { fetchReleaseApk } from "./apk";
 const BYTES = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
 const SHA = createHash("sha256").update(BYTES).digest("hex");
 const BLOSSOM = `https://nostr.download/${SHA}.apk`;
+const BLOSSOM2 = `https://nostr.download/mirror/${SHA}.apk`;
 const GITHUB = "https://github.com/forgesworn/kintrinsic/releases/download/ward-v1/kintrinsic-ward-1.apk";
 
 function feed(over: Record<string, unknown> = {}) {
@@ -69,20 +70,27 @@ describe("fetchReleaseApk", () => {
     ]);
   });
 
-  it("falls back to the GitHub URL when Blossom fails", async () => {
+  it("never contacts GitHub, even when Blossom fails (CSP would block it)", async () => {
     const calls = stubFetch(feed(), { [BLOSSOM]: "network-error", [GITHUB]: { body: BYTES } });
-    const res = await fetchReleaseApk();
-    expect(res.sha256).toBe(SHA);
-    expect(calls).toEqual(["/charter-apk.json", BLOSSOM, GITHUB]);
+    await expect(fetchReleaseApk()).rejects.toThrow(/could not be downloaded and verified/);
+    expect(calls).toEqual(["/charter-apk.json", BLOSSOM]);
   });
 
-  it("falls back when Blossom serves the wrong bytes", async () => {
-    const calls = stubFetch(feed(), {
+  it("tries a second nostr.download URL if the first fails or serves wrong bytes", async () => {
+    const calls = stubFetch(feed({ urls: [GITHUB, BLOSSOM, BLOSSOM2] }), {
       [BLOSSOM]: { body: new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]) },
-      [GITHUB]: { body: BYTES },
+      [BLOSSOM2]: { body: BYTES },
     });
     expect((await fetchReleaseApk()).sha256).toBe(SHA);
-    expect(calls).toEqual(["/charter-apk.json", BLOSSOM, GITHUB]);
+    expect(calls).toEqual(["/charter-apk.json", BLOSSOM, BLOSSOM2]);
+  });
+
+  it("ignores a legacy `url` that is not on nostr.download", async () => {
+    const calls = stubFetch(feed({ url: "https://cdn.example/a.apk", urls: [BLOSSOM] }), {
+      [BLOSSOM]: { body: BYTES },
+    });
+    await fetchReleaseApk();
+    expect(calls).toEqual(["/charter-apk.json", BLOSSOM]);
   });
 
   it("compares the digest case-insensitively", async () => {
@@ -92,52 +100,51 @@ describe("fetchReleaseApk", () => {
 
   it("refuses a digest mismatch from every source", async () => {
     const wrong = new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]);
-    stubFetch(feed(), { [BLOSSOM]: { body: wrong }, [GITHUB]: { body: wrong } });
+    stubFetch(feed(), { [BLOSSOM]: { body: wrong } });
     await expect(fetchReleaseApk()).rejects.toThrow(/does not match its published checksum/);
   });
 
   it("refuses a wrong size", async () => {
-    stubFetch(feed({ sizeBytes: BYTES.length + 1 }), {
-      [BLOSSOM]: { body: BYTES },
-      [GITHUB]: { body: BYTES },
-    });
+    stubFetch(feed({ sizeBytes: BYTES.length + 1 }), { [BLOSSOM]: { body: BYTES } });
     await expect(fetchReleaseApk()).rejects.toThrow(/wrong size/);
   });
 
-  it("skips the size check when the feed has no sizeBytes", async () => {
+  it("refuses a feed with no sizeBytes", async () => {
     const f = feed();
     delete (f as Record<string, unknown>).sizeBytes;
     stubFetch(f, { [BLOSSOM]: { body: BYTES } });
-    expect((await fetchReleaseApk()).sha256).toBe(SHA);
+    await expect(fetchReleaseApk()).rejects.toThrow(/no valid size/);
+  });
+
+  it("refuses a feed claiming more than 200 MB", async () => {
+    stubFetch(feed({ sizeBytes: 200 * 1024 * 1024 + 1 }), { [BLOSSOM]: { body: BYTES } });
+    await expect(fetchReleaseApk()).rejects.toThrow(/no valid size/);
   });
 
   it("refuses an HTML page served with status 200", async () => {
     const html = "<!doctype html><html><body>Kintrinsic</body></html>";
-    stubFetch(feed(), {
-      [BLOSSOM]: { body: html, type: "text/html; charset=utf-8" },
-      [GITHUB]: { body: html },
-    });
+    stubFetch(feed(), { [BLOSSOM]: { body: html, type: "text/html; charset=utf-8" } });
     await expect(fetchReleaseApk()).rejects.toThrow(/web page instead of the app/);
   });
 
   it("refuses HTML even without a content-type, via the pinned digest", async () => {
     const html = "<!doctype html><html><body>Kintrinsic</body></html>";
-    stubFetch(feed({ sizeBytes: undefined }), { [BLOSSOM]: { body: html }, [GITHUB]: { body: html } });
+    stubFetch(feed({ sizeBytes: html.length }), { [BLOSSOM]: { body: html } });
     await expect(fetchReleaseApk()).rejects.toThrow(/does not match its published checksum/);
   });
 
   it("never fetches a non-https source", async () => {
     const calls = stubFetch(
-      feed({ url: "http://nostr.download/x.apk", urls: ["http://evil.example/a.apk", GITHUB] }),
-      { [GITHUB]: { body: BYTES } },
+      feed({ url: "http://nostr.download/x.apk", urls: ["http://nostr.download/y.apk", BLOSSOM] }),
+      { [BLOSSOM]: { body: BYTES } },
     );
     expect((await fetchReleaseApk()).sha256).toBe(SHA);
-    expect(calls).toEqual(["/charter-apk.json", GITHUB]);
+    expect(calls).toEqual(["/charter-apk.json", BLOSSOM]);
   });
 
-  it("refuses a feed with only non-https sources", async () => {
-    stubFetch(feed({ url: "http://x.example/a.apk", urls: ["http://y.example/a.apk"] }), {});
-    await expect(fetchReleaseApk()).rejects.toThrow(/no https download address/);
+  it("refuses a feed with no nostr.download https source", async () => {
+    stubFetch(feed({ url: "http://x.example/a.apk", urls: [GITHUB] }), {});
+    await expect(fetchReleaseApk()).rejects.toThrow(/no nostr.download address/);
   });
 
   it("refuses a feed with no usable checksum", async () => {

@@ -18,7 +18,7 @@
 # pushes nothing and copies no binaries.
 set -euo pipefail
 cd "$(dirname "$0")/.."          # charter repo root
-PUB=apps/charter-app/public
+PUB="${CHARTER_PUBLIC_DIR:-apps/charter-app/public}"
 CY="${CHARTER_YOU_DIR:-./site}"
 
 [ -d "$CY" ] || { echo "front-door site dir not found at $CY (set CHARTER_YOU_DIR)"; exit 1; }
@@ -32,6 +32,15 @@ node --input-type=module -e '
   const [pub, site] = process.argv.slice(1);
   const HEX64 = /^[0-9a-f]{64}$/;
 
+  // These values are written into HTML attributes, text and JSON-LD, so
+  // refuse anything that could break out of them rather than escaping.
+  const VERSION = /^[0-9A-Za-z.+-]+$/;
+  const checkUrl = (file, what, u) => {
+    if (typeof u !== "string" || !u.startsWith("https://") || /["<>\x27 ]/.test(u)) {
+      throw new Error(`${file}: ${what} is not a plain https URL — refusing to write it into the page`);
+    }
+  };
+
   function platform(file, shaKey) {
     const m = JSON.parse(readFileSync(`${pub}/${file}`, "utf8"));
     const sha = m[shaKey];
@@ -40,10 +49,15 @@ node --input-type=module -e '
         typeof legacy !== "string" || !legacy.startsWith("https://")) {
       throw new Error(`${file} is missing version/url/sha — run the publish scripts first`);
     }
+    if (!VERSION.test(m.versionName)) {
+      throw new Error(`${file}: versionName ${JSON.stringify(m.versionName)} has unexpected characters — refusing to write it into the page`);
+    }
     const urls = Array.isArray(m.urls) ? m.urls : [];
     const github = urls.find((u) => isGithubReleaseUrl(u));
     const out = { version: m.versionName, url: github ?? legacy, sha256: sha };
     if (github && legacy !== github) out.mirror = legacy;
+    checkUrl(file, "url", out.url);
+    if (out.mirror) checkUrl(file, "mirror url", out.mirror);
     return out;
   }
 
