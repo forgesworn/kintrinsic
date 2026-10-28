@@ -10,10 +10,12 @@
 //! write. Shared by the Linux warden and the Android ward; std only, so it
 //! builds under every `charter-sys` feature set.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+use crate::secret_file::{read_secret, remove_secret, sibling, write_secret};
 
 /// How long a minted token stays valid (scan-to-pair's lifetime).
 pub const PRESENCE_TOKEN_TTL_SECS: u64 = 600;
@@ -70,47 +72,84 @@ impl PresenceTokenStore {
 
     /// The live token, or `None` when absent, unreadable, junk, or expired
     /// (also when minted in the future: a clock set back cannot stretch a
-    /// token's life).
+    /// token's life). For display; spending goes through
+    /// [`Self::consume_if_matches`].
     pub fn current(&self, now: u64) -> Option<PresenceToken> {
-        let text = std::fs::read_to_string(&self.path).ok()?;
-        let stored: PresenceToken = serde_json::from_str(&text).ok()?;
-        if stored.minted_at > now || now - stored.minted_at >= PRESENCE_TOKEN_TTL_SECS {
-            return None;
-        }
-        Some(stored)
+        let text = read_secret(&self.path).ok()??;
+        live(&text, now)
     }
 
     /// The live token if `candidate` matches it, compared in constant time.
-    /// Does not spend it: a token is spent only by a successful confirmation
-    /// (see [`Self::consume`]).
+    /// Does not spend it.
     pub fn matching(&self, candidate: &str, now: u64) -> Option<PresenceToken> {
         let live = self.current(now)?;
         constant_time_eq(live.token.as_bytes(), candidate.as_bytes()).then_some(live)
     }
 
-    /// Spend the token: single use, so a captured confirmation replayed later
-    /// finds nothing to match. Absent is not an error.
-    pub fn consume(&self) -> std::io::Result<()> {
-        match std::fs::remove_file(&self.path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            r => r,
-        }
-    }
-
-    /// [`Self::matching`] and, on a match, [`Self::consume`].
+    /// Spend the token if `candidate` matches it: single use, so a captured
+    /// confirmation replayed later finds nothing to match.
+    ///
+    /// The token is CLAIMED first, by renaming the file to a name unique to
+    /// this call, and only then read and compared. A rename is atomic, so of
+    /// two consumers (two processes, or a relay copy and a local-link copy of
+    /// one confirmation) exactly one gets the file; the other finds nothing.
+    /// On a mismatch the claimed token is put back, unless a fresh one was
+    /// minted meanwhile, which then stands (a mismatch reveals nothing, and
+    /// the fresh code is the one on screen). A token minted after the claim is
+    /// never touched.
     pub fn consume_if_matches(
         &self,
         candidate: &str,
         now: u64,
     ) -> std::io::Result<Option<PresenceToken>> {
-        match self.matching(candidate, now) {
-            Some(t) => {
-                self.consume()?;
-                Ok(Some(t))
-            }
-            None => Ok(None),
+        static CLAIMS: AtomicU64 = AtomicU64::new(0);
+        let claimed = sibling(
+            &self.path,
+            &format!(
+                ".claimed.{}.{}",
+                std::process::id(),
+                CLAIMS.fetch_add(1, Ordering::Relaxed)
+            ),
+        );
+        match std::fs::rename(&self.path, &claimed) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
         }
+        let text = read_secret(&claimed);
+        let hit = match &text {
+            Ok(Some(t)) => {
+                live(t, now).filter(|l| constant_time_eq(l.token.as_bytes(), candidate.as_bytes()))
+            }
+            _ => None,
+        };
+        if hit.is_none() {
+            if let Ok(Some(t)) = &text {
+                if live(t, now).is_some() {
+                    // Put a live token back, but only where nothing newer
+                    // stands: a hard link fails if the name exists.
+                    let _ = std::fs::hard_link(&claimed, &self.path);
+                }
+            }
+        }
+        remove_secret(&claimed)?;
+        Ok(hit)
     }
+
+    /// Forget the token, whatever it is (e.g. the statement it was minted for
+    /// was refused, or the ward unpaired).
+    pub fn clear(&self) -> std::io::Result<()> {
+        remove_secret(&self.path)
+    }
+}
+
+/// The token in `text` if it parses and is live at `now`.
+fn live(text: &str, now: u64) -> Option<PresenceToken> {
+    let stored: PresenceToken = serde_json::from_str(text).ok()?;
+    if stored.minted_at > now || now - stored.minted_at >= PRESENCE_TOKEN_TTL_SECS {
+        return None;
+    }
+    Some(stored)
 }
 
 /// Compare without an early exit, so the token cannot be walked out byte by
@@ -124,42 +163,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-/// Write `body` to `path` via a fresh `0600` temp file and a rename. The mode
-/// is set AT OPEN on a file this call created: a write-then-chmod would leave
-/// the token readable under a 022 umask for the length of the write. A
-/// leftover temp file is removed first so `create_new` never inherits an old
-/// file's mode or an open reader.
-fn write_secret(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    match std::fs::remove_file(&tmp) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        f.write_all(body)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -206,7 +209,25 @@ mod tests {
         let got = s.consume_if_matches(&t.token, 1_002).unwrap().unwrap();
         assert_eq!(got.bound_to.as_deref(), Some("kintrinsic/guardian/ab"));
         assert!(s.consume_if_matches(&t.token, 1_003).unwrap().is_none());
-        s.consume().unwrap();
+        s.clear().unwrap();
+    }
+
+    #[test]
+    fn a_claim_never_spends_a_token_minted_after_it() {
+        let (_d, s) = store("claim");
+        let first = s.mint(1_000, None, &mut fill_with(0x44)).unwrap();
+        // A mismatch puts the claimed token back.
+        assert!(s
+            .consume_if_matches(&"55".repeat(16), 1_001)
+            .unwrap()
+            .is_none());
+        assert_eq!(s.current(1_001), Some(first.clone()));
+        // Spent once; a second consumer of the same code finds nothing, and a
+        // fresh mint is untouched by it.
+        assert!(s.consume_if_matches(&first.token, 1_002).unwrap().is_some());
+        let fresh = s.mint(1_003, None, &mut fill_with(0x66)).unwrap();
+        assert!(s.consume_if_matches(&first.token, 1_004).unwrap().is_none());
+        assert_eq!(s.current(1_004), Some(fresh));
     }
 
     #[test]
