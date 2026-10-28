@@ -115,6 +115,7 @@ pub fn build_status(
         // Stamped by the Android loop from the platform's own restriction
         // state (the `debugging` clause); Linux has no such control.
         debugging_open: None,
+        guardians: None,
     }
 }
 
