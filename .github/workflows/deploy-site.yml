@@ -2,7 +2,7 @@ name: Deploy site
 
 # kintrinsic.app marketing site (site/ directory) → the Hetzner box.
 # Same target dir the retired charter-you repo deployed to; the vhost
-# (charter.signet.you today, kintrinsic.app when DNS lands) points at it.
+# (kintrinsic.app; the old charter.signet.you address still points at it) serves it.
 # Path-filtered so app commits don't re-deploy the site.
 
 on:

@@ -60,7 +60,8 @@
       <h1 class="t-display">Set up in one&nbsp;evening.</h1>
       <p class="t-sub lede">By the end of this page, your child's computer will lock itself outside the
         hours you chose, and give them a warning before their daily time runs out. That's a complete
-        setup. The phone is optional and can wait.</p>
+        setup. It's about a five-minute job on a Linux Mint 22 computer (X11 session); the phone is optional
+        and can wait.</p>
     </div>
   </header>
 
@@ -93,9 +94,9 @@
           regardless.</p>
 
         <div class="callout">
-          <b>You'll need:</b> a Linux Mint 22.x computer running an X11 session (Cinnamon's default — on the
+          <b>You'll need:</b> a Linux Mint 22 computer running an X11 session (Cinnamon's default — on the
           login screen, pick “Cinnamon”, not “Wayland”), your admin password, and about
-          five minutes. No account to create, nothing to sign up for.
+          five minutes. (Other distributions and Wayland sessions aren't supported yet.) No account to create, nothing to sign up for.
         </div>
 
         <h2 id="linux">On the&nbsp;computer</h2>
@@ -144,12 +145,13 @@
             phone</strong> and press <strong>Show the pairing code</strong>. It asks for your admin password, then
             shows a QR code.</li>
           <li>On your phone, open Kintrinsic, choose <strong>Add your child</strong>, then <strong>Set up a
-            computer</strong>, and point the camera at the QR. That links your key to the computer. Done — you now
-            manage it from the sofa or the school run.</li>
+            computer</strong>, and scan the QR with the phone's camera. That links your key to the computer. Done —
+            you now manage it from the sofa or the school run.</li>
         </ol>
-        <p style="color: var(--ink-3); font-size: 0.95rem;"><em>If the scan doesn't take:</em> there's an offline
-          path — the Kintrinsic app's parent-approval card shows a pairing link you can type in by hand. No internet needed on
-          either device.</p>
+        <p style="color: var(--ink-3); font-size: 0.95rem;"><em>If the scan doesn't take, or there's no internet:</em>
+          on the phone, copy the pairing link from Kintrinsic's <strong>Parent approval</strong> card
+          (<strong>Copy pairing link</strong>). On the computer, open <strong>No internet? Enter a code by hand</strong>
+          on the same <strong>Connect a phone</strong> screen and paste the link there. You can leave the child ID blank.</p>
         <p style="color: var(--ink-3); font-size: 0.95rem;"><em>From your child's side:</em> in a terminal they can run
           <code>charter time-left</code> to see what's left today, and <code>charter ask-for-more 15</code> to ask you for
           fifteen more minutes (that one needs a connected phone).</p>

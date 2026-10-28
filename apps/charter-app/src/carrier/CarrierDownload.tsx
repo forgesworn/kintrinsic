@@ -2,12 +2,12 @@ import { Card, SectionLabel } from "../components/ui";
 import { carrierNeedsUpdate } from "./bridge";
 
 // The "get Kintrinsic on your phone" card (spec D5). Points at the ONE canonical
-// download place — charter.signet.you/download — so there's a single, stable
+// download place — kintrinsic.app/download.html — so there's a single, stable
 // spot to get and update the app (resolves the app-inside-app circularity:
 // updating Kintrinsic used to mean opening Kintrinsic). Hidden when already
 // running INSIDE the carrier shell — there, the app IS the download.
 
-const DOWNLOAD_URL = "https://charter.signet.you/download.html#android";
+const DOWNLOAD_URL = "https://kintrinsic.app/download.html#android";
 
 export default function CarrierDownload() {
   // …EXCEPT when the shell itself is too old to name a ward. That case used to
