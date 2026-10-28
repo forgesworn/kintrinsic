@@ -38,6 +38,15 @@
 //! state and the clock, so it is applied even when its write fails, and is
 //! re-derived after a restart.
 //!
+//! # Invariant: once a ward has a state document, every broker carries the port
+//!
+//! A broker built without this port judges per-child clauses by the clause
+//! store's replay floor alone, so the store can get ahead of the state; the
+//! next clause the port judges between the two floors would then be accepted
+//! and written BELOW a newer body (the review-2a M1 rollback). A platform must
+//! never build the broker without the port for a ward that has one (no
+//! conditional wiring, no recovery mode without it).
+//!
 //! # Fail closed
 //!
 //! A state document that exists but cannot be read or parsed is NOT replaced
@@ -188,8 +197,11 @@ impl GuardianKeys {
     ///   for it arrives ([`SlotSeed`]).
     /// - A document from a different pairing (its `pairedAt` is not the
     ///   record's): replaced the same way. The record's `paired_at` and the
-    ///   state's must therefore agree; [`Self::from_paired`] takes care of it
-    ///   for scan-to-pair.
+    ///   state's must therefore agree: after [`Self::from_paired`], the
+    ///   pairing record MUST carry `PairDecision::paired_at()`, or the next
+    ///   load re-migrates and the working key bound at pairing is lost.
+    /// - Once loaded, every broker built for this ward must carry the port
+    ///   (module docs, *Invariant*).
     /// - A document that cannot be read or parsed: unavailable, fail closed
     ///   (module docs). It is left as it is on disk.
     ///
