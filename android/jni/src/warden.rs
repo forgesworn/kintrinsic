@@ -2534,6 +2534,7 @@ impl Warden {
             paired_at: 0,
             relays_updated_at: Some(0),
             battery: None,
+            guardian_pin: None,
         };
         let json = serde_json::to_string_pretty(&pairing).map_err(|e| format!("serialize: {e}"))?;
         self.pairing

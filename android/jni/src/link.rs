@@ -133,7 +133,7 @@ impl LinkHandle {
         let link = WardLink::spawn(
             WardLinkConfig {
                 machine_sk: zeroize::Zeroizing::new(machine_sk),
-                guardian,
+                signers: Arc::new(charter_primitives::SinglePinned(guardian)),
                 state_dir: state_dir.clone(),
                 allow_loopback,
                 prepare_socket: prepare_socket(net_handle.clone()),
