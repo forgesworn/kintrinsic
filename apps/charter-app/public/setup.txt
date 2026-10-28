@@ -106,7 +106,8 @@ requests from their phone.
    computer", then point the phone's camera at the QR code. The computer's
    screen says "Connected" on its own.
 No internet on either device? The "Connect a phone" screen has an offline path:
-paste the pairing link from the Kintrinsic app instead of scanning.
+use "No internet? Enter a code by hand" and paste the pairing link from the Kintrinsic
+app's Parent approval card instead of scanning.
 That's it: limits set on the phone now reach the computer, and "ask for more
 time" requests appear under Approvals on the phone.
 

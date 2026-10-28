@@ -17,6 +17,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import org.forgesworn.charter.admin.Provisioning
+import org.forgesworn.charter.admin.QrSetup
 import org.forgesworn.charter.enforce.hotspot.HotspotWish
 import org.forgesworn.charter.native.CharterCore
 import org.forgesworn.charter.native.wardMessageOr
@@ -72,6 +73,9 @@ class MainActivity : Activity() {
     private lateinit var heroCard: LinearLayout
     private lateinit var heroBig: TextView
     private lateinit var heroCaption: TextView
+    /** "Time limits can't count yet" + the switch to fix it (QR setup). */
+    private lateinit var usageNote: TextView
+    private lateinit var usageButton: Button
 
     /**
      * Which brokered ask (if any) is outstanding for a given named-times
@@ -160,6 +164,24 @@ class MainActivity : Activity() {
             addView(heroCaption)
         }
         root.addView(heroCard, CharterTheme.stackParams(this, 14))
+
+        // Usage access (docs/qr-setup.md): the cable setup grants it over adb;
+        // after a QR setup only a tap in Settings can. Until it is on the time
+        // meter cannot run, so say so plainly — and only then.
+        usageNote = line(
+            "Time limits can't count yet: Kintrinsic needs Usage access switched on.",
+            CharterTheme.FS_BODY, CharterTheme.WARN, 14,
+        ).apply { visibility = View.GONE }
+        usageButton = CharterTheme.primaryButton(this, "Turn on Usage access").apply {
+            visibility = View.GONE
+            setOnClickListener {
+                runCatching {
+                    startActivity(Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                }
+            }
+        }
+        root.addView(usageNote)
+        root.addView(usageButton, CharterTheme.stackParams(this, 8))
 
         if (!isOwner) {
             val help = line(
@@ -384,12 +406,36 @@ class MainActivity : Activity() {
         root.gravity = Gravity.START
 
         refresh()
+        offerHeldLink()
         handlePairingIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        offerHeldLink()
         handlePairingIntent(intent)
+    }
+
+    /**
+     * QR setup handed this phone a pairing link (docs/qr-setup.md): put it in
+     * the field, which renders the six-digit check — and stop there. It is
+     * pinned only by the same deliberate tap as a scanned link, because it is
+     * just as attacker-supplyable (see [showPairingCheck]). A field that
+     * already holds something is left alone; once paired the link is
+     * forgotten (see [render]).
+     */
+    private fun offerHeldLink() {
+        if (uriInput.text.isNotEmpty()) return
+        val link = QrSetup.held(this) ?: return
+        uriInput.setText(link)
+        scanBanner.text =
+            "This phone was set up with a QR code — check the code below with the grown-up, then tap Pair with guardian."
+        scanBanner.visibility = View.VISIBLE
+    }
+
+    private fun renderUsageAccess(needed: Boolean) {
+        usageNote.visibility = if (needed) View.VISIBLE else View.GONE
+        usageButton.visibility = usageNote.visibility
     }
 
     override fun onResume() {
@@ -398,6 +444,7 @@ class MainActivity : Activity() {
         // e.g. after a guardian RELEASE unpaired the device while this screen
         // was open, it must flip back to "waiting to pair" on its own.
         refresh()
+        offerHeldLink()
         mainHandler.postDelayed(ticker, UI_TICK_MS)
     }
 
@@ -500,7 +547,13 @@ class MainActivity : Activity() {
             // it now!" forever just because the ask was once answered yes
             // (round-2 review minor, 2026-08-03; see GroupMirror.kt).
             val holds = runCatching { CharterCore.appHolds(now) }.getOrDefault(emptyList())
-            runOnUiThread { render(state, view, tether, groups, askFirst, requests, holds, now, debugging) }
+            val usageNeeded = runCatching {
+                QrSetup.needsUsageAccess(Provisioning.isDeviceOwner(this), QrSetup.usageOpMode(this))
+            }.getOrDefault(false)
+            runOnUiThread {
+                render(state, view, tether, groups, askFirst, requests, holds, now, debugging)
+                renderUsageAccess(usageNeeded)
+            }
         }
     }
 
@@ -533,7 +586,10 @@ class MainActivity : Activity() {
             if (paired) ""
             else "Waiting to pair with a guardian…\nIn Kintrinsic: Family → Set up a device → Phone, then scan the QR with this device's camera."
         pairError.text = state?.error ?: ""
-        if (paired) scanBanner.text = ""
+        if (paired) {
+            scanBanner.text = ""
+            QrSetup.clear(this)
+        }
         for (v in listOf(pairingStatus, scanBanner, pairError)) {
             v.visibility = if (v.text.isNullOrEmpty()) View.GONE else View.VISIBLE
         }

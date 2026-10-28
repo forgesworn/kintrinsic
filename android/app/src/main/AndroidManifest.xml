@@ -70,6 +70,33 @@
             </intent-filter>
         </receiver>
 
+        <!-- QR setup from a factory reset (docs/qr-setup.md). Android 12+
+             asks the DPC two questions during QR provisioning; only the
+             platform may ask them (BIND_DEVICE_ADMIN). Both answer and
+             finish with no UI. -->
+        <activity
+            android:name=".admin.ProvisioningModeActivity"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.app.action.GET_PROVISIONING_MODE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".admin.PolicyComplianceActivity"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.app.action.ADMIN_POLICY_COMPLIANCE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <receiver
             android:name=".service.BootReceiver"
             android:directBootAware="true"

@@ -19,7 +19,7 @@ import type { UpdateManifest } from "../wire/types";
 export const MYCHARTER_MANIFEST_PATH = "/mycharter-apk.json";
 
 /** Where a guardian gets or updates the app — the one canonical place. */
-export const MYCHARTER_DOWNLOAD_URL = "https://charter.signet.you/download.html#android";
+export const MYCHARTER_DOWNLOAD_URL = "https://kintrinsic.app/download.html#android";
 
 /** What the shell reports about itself via the bridge's `version()`. */
 export interface CarrierVersion {

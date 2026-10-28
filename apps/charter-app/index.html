@@ -27,11 +27,14 @@
       - img-src data: — QR codes are rendered to data: URLs; blob: for the
         camera preview.
       - connect-src wss: — relays are wss://, and are chosen by the guardian,
-        so they cannot be enumerated into a fixed allowlist here.
+        so they cannot be enumerated into a fixed allowlist here. The one
+        https host is nostr.download: the Blossom server the cable-setup flow
+        downloads the ward APK from (it answers with CORS *). Its SHA-256 is
+        pinned against the same-origin /charter-apk.json feed.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self' wss: https://nostr.download; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
     />
     <meta name="referrer" content="no-referrer" />
     <link rel="icon" type="image/svg+xml" href="/seal.svg" />

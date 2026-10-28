@@ -72,9 +72,10 @@ until they are recaptured.
 
 - Deploy: push to `main` → GitHub Actions rsyncs the repo to `/opt/charter-you/`
   on the Hetzner box (needs the `HETZNER_SSH_KEY` repo secret).
-- Serving (one-time infra): DNS record for `kintrinsic.app` + a vhost pointing
-  at `/opt/charter-you/`; a redirect from the old `charter.signet.you` keeps
-  existing links alive.
+- Serving (one-time infra): the canonical address is `kintrinsic.app`, a vhost
+  pointing at `/opt/charter-you/`. The old `charter.signet.you` address is kept
+  alive so existing links still work; pages name `kintrinsic.app` as canonical.
+  The guardian web app is a separate site, `charter.mysignet.app`.
 - The deploy rsync uses `--delete-excluded` rather than plain `--delete`, so
   that adding an `--exclude` for any private/internal-only file actually
   removes it from the server rather than leaving a stale copy in place.
@@ -88,8 +89,9 @@ The release itself (tag, CI draft, verify and publish) is described in
 `docs/releasing.md`; `publish-release.mjs --from-draft` also writes the
 channel's download manifest. For the site, after a release:
 
-1. Check `site/downloads.json` matches the new manifest
-   (`./scripts/sync-front-door-downloads.sh` copies it).
-2. Bump the `data-ver` fallbacks and the `data-sha` fallback in
-   `site/download.html`, and the file names in the verify commands there.
-3. Commit `site/` and push `main`.
+1. Run `./scripts/sync-front-door-downloads.sh` (`publish-release.mjs
+   --from-draft` already does). It rewrites `site/downloads.json` and every
+   `data-ver`, `data-sha`, `data-dl`, `data-dl-mirror` and `data-mirror`
+   fallback in `site/download.html` for the guardian, ward and Linux rows, and
+   fails if any of them is missing from the markup.
+2. Commit `site/` and push `main`.

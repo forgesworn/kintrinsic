@@ -5,12 +5,14 @@ install it, lock the account down, set screen-time limits (on the box **or**
 from your phone), and use it day to day. Targets **Linux Mint 22.x (Cinnamon /
 X11)**.
 
-> **Before you start — honest status.** This is the **first real walk-through**.
-> The code is built and tested, but it has not yet been proven on a real Mint
-> box end to end. Do this on a **spare machine or a VM**, with a **separate
-> admin account for you** (so a mis-set limit can't lock you out while we shake
-> out the rough edges). Steps that are still rougher than they should be for a
-> non-technical parent are flagged **⚠ rough edge**.
+> **Before you start — honest status.** This is still an early release. A
+> Linux Mint 22 laptop (Cinnamon on X11) has been running it as a live ward
+> since September 2026, so it has run on real Mint
+> 22 hardware. Other Mint versions, other desktops and Wayland sessions have not
+> been tried. Do this first on a **spare machine or a VM** if you can, with a
+> **separate admin account for you** (so a mis-set limit can't lock you out
+> while we shake out the rough edges). Steps that are still rougher than they
+> should be for a non-technical parent are flagged **⚠ rough edge**.
 
 ---
 
@@ -104,9 +106,16 @@ and each child is judged on their own limits.
 This adds remote control on top of the on-box limits. On the **"Connect a
 phone"** tab (in the Kintrinsic app), press **Show the pairing code** — this
 asks for your admin password, since only a parent may invite a guardian —
-then scan the QR (or type the code) with **Kintrinsic on your phone**
-(**Add your child → Set up a computer**). The page flips to "Connected" on
-its own once the phone finishes.
+then scan the QR with **Kintrinsic on your phone**
+(**Add your child → Set up a computer**; if the camera won't scan, **No camera?
+Type the code instead** takes the code by hand). The page flips to "Connected"
+on its own once the phone finishes.
+
+With no internet on either device, use the fallback instead: in Kintrinsic on
+the phone, copy the pairing link from the **Parent approval** card (**Copy
+pairing link**), then on the computer open **No internet? Enter a code by
+hand** on the same **Connect a phone** tab and paste it there (the child ID box
+can stay blank).
 
 From then on you can set limits, see time used, and approve "more time" from
 Kintrinsic on your phone, from anywhere. The phone takes charge: once you've

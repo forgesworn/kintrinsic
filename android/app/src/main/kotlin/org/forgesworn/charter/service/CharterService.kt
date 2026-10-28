@@ -16,6 +16,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import org.forgesworn.charter.MainActivity
+import org.forgesworn.charter.admin.QrSetup
 
 /**
  * The loop host (port-spec §3.3) — the Android analog of charterd's run loop.
@@ -160,10 +161,32 @@ class CharterService : Service() {
         linkHandler.post(linkMonitor)
     }
 
+    /** Set once this process has brought a QR-set-up phone's pairing check
+     *  forward (docs/qr-setup.md); never twice per process. */
+    private var pairingNudged = false
+
+    /**
+     * QR setup: once the setup wizard is done, an unpaired phone holding a
+     * pairing link opens its pairing check and leaves a notice in the shade.
+     * Does not rely on `onProfileProvisioningComplete`, which a fully managed
+     * QR setup may never send. Never pairs anything: the link only pre-fills
+     * the field behind the on-screen check (see `QrSetup`).
+     */
+    private fun maybeNudgePairing() {
+        if (pairingNudged || !QrSetup.hasHeld(this)) return
+        val paired = runCatching { org.forgesworn.charter.native.CharterCore.pairingState().paired }.getOrNull()
+        val nudge = QrSetup.pairingNudge(QrSetup.held(this) != null, paired, QrSetup.userSetupComplete(this))
+        if (nudge == QrSetup.Nudge.NONE) return
+        pairingNudged = true
+        if (nudge.notify) QrSetup.postPairingNotice(this)
+        if (nudge.open) QrSetup.openPairingCheck(this)
+    }
+
     private val tick = object : Runnable {
         override fun run() {
             if (!running) return
             runTick()
+            runCatching { maybeNudgePairing() }
             handler.postDelayed(this, if (interactive) TICK_MS else DARK_TICK_MS)
         }
     }
