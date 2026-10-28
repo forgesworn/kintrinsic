@@ -31,21 +31,21 @@ pub use reason::{Reason, TickResult, ACCEPT_REASONS, DROP_REASONS, STATEMENT_REA
 pub use state::{
     accept_clause, accept_signed_event, apply_inbound, apply_presence_confirm, apply_relays,
     held_clause, is_departed, is_pinned, is_signer, mark_status_sent, pair_from_offer,
-    pending_expiry, project_state, recipients, register_presence_token, root_of, signer_set,
-    status_guardians, status_recipients, status_relays, tick, ClauseInput, GuardianState, Outcome,
-    PairToken, Paired, ProjectedState, RelaysChannel, RelaysInput, StatusGuardians, Step,
-    TickEntry, Verdict,
+    pair_from_seal, pending_expiry, project_state, recipients, register_presence_token, root_of,
+    signer_set, status_guardians, status_recipients, status_relays, tick, ClauseInput,
+    GuardianState, Outcome, PairToken, Paired, ProjectedState, RelaysChannel, RelaysInput,
+    StatusGuardians, Step, TickEntry, Verdict,
 };
 pub use statement::{parse_statement, split_pending_d, PendingType, Statement, StatementType};
 
-/// Scan-to-pair offer, guardian → unpaired ward.
-pub const CHARTER_DEVICE_PAIR_OFFER: u16 = 31117;
-/// Family roster, guardian install ↔ guardian install. Wards never read it.
-pub const CHARTER_FAMILY_ROSTER: u16 = 31119;
-/// Guardian statement (approval, withdrawal, co-guardian, …), addressable.
-pub const CHARTER_GUARDIAN_STATEMENT: u16 = 31120;
-/// Presence confirmation, a working key at the ward → the ward.
-pub const CHARTER_PRESENCE_CONFIRM: u16 = 31121;
+/// The guardian-keys event kinds, from the one table every crate shares:
+/// PAIR_OFFER (31117), the family roster (31119, wards never read it), the
+/// guardian statement (31120, addressable) and the presence confirmation
+/// (31121).
+pub use charter_primitives::kinds::{
+    CHARTER_DEVICE_PAIR_OFFER, CHARTER_FAMILY_ROSTER, CHARTER_GUARDIAN_STATEMENT,
+    CHARTER_PRESENCE_CONFIRM,
+};
 
 /// At most 4 roots per ward.
 pub const MAX_ROOTS: usize = 4;

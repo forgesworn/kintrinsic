@@ -1595,7 +1595,22 @@ pub fn pair_from_offer(
                 .collect()
         })
         .unwrap_or_default();
+    pair_from_seal(seal_author, o.get("approval"), relays, now)
+}
 
+/// The pinning decision of [`pair_from_offer`], once the offer itself (its
+/// signature, kind, marker, seal and token) has been checked: an offer with
+/// no `approval` pins its seal author; one with an approval pins the root
+/// that signed it, which must name the seal author, and binds that working
+/// key. `approval` is the offer's `approval` member as delivered (`null`
+/// included). For a ward whose PAIR_OFFER inner event is not itself signed
+/// (the seal authenticates it), the caller checks the token and calls this.
+pub fn pair_from_seal(
+    seal_author: &str,
+    approval: Option<&Value>,
+    relays: Vec<String>,
+    now: i64,
+) -> Result<Paired, Reason> {
     let mut state = GuardianState {
         v: 1,
         paired_at: now,
@@ -1615,7 +1630,7 @@ pub fn pair_from_offer(
         farewell: Vec::new(),
     };
 
-    let Some(approval) = o.get("approval") else {
+    let Some(approval) = approval else {
         state.roots.push(PinnedRoot {
             root: seal_author.to_owned(),
             pinned_at: now,

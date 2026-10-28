@@ -56,14 +56,10 @@ pub fn validate_pin_record(x: &Value) -> Option<GuardianPinRecord> {
 
 /// scrypt(UTF-8 `pin`, `salt`, N = 2^15, r = 8, p = 1, 32 bytes).
 pub fn pin_hash(pin: &str, salt: &[u8]) -> [u8; 32] {
-    let params = scrypt::Params::new(
-        PIN_SCRYPT_LOG_N,
-        PIN_SCRYPT_R,
-        PIN_SCRYPT_P,
-        PIN_SCRYPT_DK_LEN,
-    )
-    .expect("fixed scrypt parameters are valid");
-    let mut out = [0u8; 32];
+    // The output length is the buffer's: `PIN_SCRYPT_DK_LEN`.
+    let params = scrypt::Params::new(PIN_SCRYPT_LOG_N, PIN_SCRYPT_R, PIN_SCRYPT_P)
+        .expect("fixed scrypt parameters are valid");
+    let mut out = [0u8; PIN_SCRYPT_DK_LEN];
     scrypt::scrypt(pin.as_bytes(), salt, &params, &mut out).expect("32-byte output is valid");
     out
 }

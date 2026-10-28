@@ -8,9 +8,10 @@ publish = false
 
 [dependencies]
 charter-crypto = { workspace = true }
+charter-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-scrypt = { version = "0.11", default-features = false }
+scrypt = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 # giftwrap.json only: NIP-44 v2 decryption of the wrap and seal layers.
