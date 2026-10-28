@@ -14,9 +14,12 @@ path), **Question**, **Build's interim reading**, **Raised by** (batch).
 **Question:** two statements share a `d` and an `issuedAt` but differ (another
 label, another `expiresAt`, another signer). Which one wins?
 
-**Build's interim reading:** the one the ward already holds stays; the
-newcomer is dropped as `tie_not_newer`. Re-delivery of the held event itself is
-`duplicate`. Only a strictly newer `issuedAt` replaces a held statement.
+**Build's interim reading:** the statement with the lower event id (as
+lowercase hex) wins the tie, whichever arrived first, so every ward converges
+on the same one; the loser is dropped as `tie_not_newer`. Re-delivery of the
+held event itself is `duplicate`. (Batch 1 kept the first received; the
+review showed that two wards receiving a pair in different orders then held
+different pending signers.)
 
 **Raised by:** batch 1.
 
@@ -45,8 +48,11 @@ more than 300 seconds ahead … is refused"); `acceptSignedEvent`, `applyRelays`
 **Question:** does the 300-second refusal also apply to GRANT, RELAYS and
 USAGE_SYNC, which carry `ts` or `created_at` rather than `issuedAt`?
 
-**Build's interim reading:** yes. The reference refuses any of them whose
-timestamp is more than 300 seconds ahead, on top of their existing skew rules.
+**Build's interim reading:** yes for GRANT and USAGE_SYNC: the reference
+refuses either if its `ts` is more than 300 seconds ahead, on top of their
+existing skew rules. RELAYS keeps its existing, stricter rule (no future
+`created_at` at all, at most 600 s old, not before pairing, newer than the
+last applied), which the reference models.
 
 **Raised by:** batch 1.
 
@@ -60,12 +66,20 @@ targets (relays don't order delivery). Is it dropped, or held? If held, does
 an objection kill only removals at or below its `issuedAt`, or any later
 removal too?
 
-**Build's interim reading:** both are held. When the target arrives, it is
-dropped (`cancelled` / `objected`) if the held cancel was signed by the
-target's signer, or the held objection by the root being removed naming the
-removal's signer, and the target's `issuedAt` is at or below the held one's.
-A newer target is unaffected, mirroring the cancel rule. An objection never
-applies to a removal from a different signer than its `p`.
+**Build's interim reading:**
+- Both are held. When the target arrives it is dropped (`cancelled` /
+  `objected`) if the held cancel was signed by the target's signer, or the
+  held objection was signed by the root being removed and names the removal's
+  signer as `p`, and the target's `issuedAt` is at or below the held one's.
+  For an objection, see also "Removal re-issued after an objection".
+- An objection that meets an already pending removal by its `p` drops it
+  whatever the two `issuedAt` values: the contract puts no time condition on
+  an objection (batch 1 wrongly applied "at or below" here too).
+- Cancels are stored per (`d`, signer) and objections per (`d`, `p`), so one
+  root's cancel never shadows another's, and an objection against one remover
+  never displaces one against another.
+- An objection naming a remover other than the pending removal's signer is
+  held, not refused.
 
 **Raised by:** batch 1.
 
@@ -110,6 +124,9 @@ a withdrawal of a key that departed with a move?
   root that may re-bind it is applied, making the departure permanent.
 - A moved-away root is re-pinned only by a co-guardian newer than the move,
   as for a removed root.
+- A removed or moved-away root can't come back as another root's working
+  key (`key_departed`), in an approval or a presence confirmation; it returns
+  only as a root, by a co-guardian confirmed afresh (batch 1 review).
 
 **Raised by:** batch 1.
 
@@ -141,6 +158,16 @@ so a Heartwood-held root must seal its own objection?
 **Build's interim reading:** yes, as written: an objection must be sealed by
 its signer, the root being removed. One sealed by that root's working key is
 dropped (`seal_mismatch`).
+
+**Review argument (batch 1 review), for the design session:** this makes the
+defence harder than the attack. R1's removal of R2 can be sealed by R1's phone
+under exception 2, but to object, R2's root (often on a Heartwood or in My
+Signet) must both sign and seal to every ward. If that root is out of reach
+for the 72 hours, the removal applies against R2's will. The reviewer reads
+the objection's absence from exception 2 as an omission and recommends adding
+it (a W bound to the objecting root and in the signer set may seal it). The
+build keeps the literal reading until the design session decides; the vector
+`rule7_objection` pins it and would flip.
 
 **Raised by:** batch 1.
 
@@ -179,6 +206,12 @@ whether a root can confirm as itself.
   come from an active W bound to the removing root.
 - A second confirmation of an already confirmed removal is dropped
   (`duplicate`).
+- A confirmation re-checks R2 as it stands then: already pinned
+  (`already_pinned`), now a working key (`key_role_conflict`), departed since
+  (`not_newer_than_departure`), and R2's tombstone or held quota
+  (`root_at_quota`). When a co-guardian or move pins R2, every other pending
+  statement naming R2 is dropped, so R2 can't be pinned twice (batch 1
+  review).
 
 **Raised by:** batch 1.
 
@@ -209,6 +242,12 @@ the sender's approval go, and what tags does kind 31119 carry?
 the marker tag; the merge does not require any tag. A same-second record does
 not replace the local one.
 
+Batch 1 review: "approved by a root that the family's wards report" is read
+as "listed under that root in the wards' STATUS `guardians.roots[].keys`", so
+a withdrawn W's rosters are refused (`key_not_reported`). A child record more
+than 300 s ahead of the receiving install's clock refuses the whole roster
+(`future`), so a far-future `issuedAt` can't pin a child entry for ever.
+
 **Raised by:** batch 1.
 
 ## Guardian PIN salt and encoding
@@ -225,3 +264,122 @@ bytes. After the 5th consecutive failure the wait is 60 s, then 120, 240 …
 capped at 3600 s; fewer than 5 failures wait nothing.
 
 **Raised by:** batch 1.
+
+## Android pairing has no PAIR_OFFER
+
+**Where:** *Scan-to-pair with a working key*; `android/jni/src/warden.rs`
+`Warden::pair`, `ui/PairingSas.kt`.
+
+**Question:** the Android ward pairs by opening a `bunker://` link (guardian
+key + `&token=`, checked by a six-digit SAS), not by a PAIR_OFFER. The contract
+only says how a PAIR_OFFER sealed by a working key pins its root. Which key
+does the Android link name when the guardian install has a working key?
+
+**Build's interim reading:** the link names the root R, and the SAS covers R
+and the token, as today. The ward pins R. The working key then sends its own
+approval (sealed by W) before its first signed event, as for any W. Nothing
+in the link is trusted beyond what the SAS already covers.
+
+**Raised by:** batch 2 (planning).
+
+## How a guardian PIN reaches an Android ward
+
+**Where:** *Presence confirmation*, the Android guardian PIN (`guardianPin`
+inside the RELAYS body); rule 11; `charter-transport/src/relay_config.rs`
+(`RelayConfig` has `deny_unknown_fields`), `ui/AboutActivity.kt`.
+
+**Question:** RELAYS today reaches a ward only as a pasted code (Linux
+`charter-pair --relay-code`, Android "Change relays"). It is not delivered
+over relays or the local link. Is the PIN meant to travel the same way, or
+should RELAYS also be accepted gift-wrapped?
+
+**Build's interim reading (replaced after the batch 1 review):**
+`guardianPin` is accepted only from a RELAYS event delivered gift-wrapped
+(over relays or the local link) by a signer. A pasted relay code carrying
+`guardianPin` is refused whole (`pin_not_wrapped`); a pasted code without one
+works as today. The reference's `applyRelays` takes the channel
+(`wrapped` | `pasted`) and enforces this; vector `relays_guardian_pin`.
+
+**Review argument (M5), for the design session:** the PIN record is kept in
+Device Owner private storage so the child can't read it. Pasting the RELAYS
+JSON at the ward puts `{ salt, hash }` on the ward's screen and clipboard
+(keyboard clipboard history). A 4–6 digit PIN under scrypt N=2^15 is
+brute-forced offline in hours. Beyond the channel, the design session should
+decide whether a longer PIN or passphrase is required, and state in the
+contract everything the PIN gates besides presence tokens.
+
+**Raised by:** batch 2 (planning).
+
+## Removal notice measured from receipt
+
+**Where:** rule 7 ("takes effect at the later of the confirmation and
+`issuedAt` plus 72 hours"); `applyPresenceConfirm`.
+
+**Question:** `issuedAt` is chosen by the remover and statements have no
+floor, so a removal backdated by 72 hours applies the moment it is confirmed:
+the removed parent never sees it pending and can't object. Is the notice
+meant to run from `issuedAt`?
+
+**Build's interim reading:** the notice runs from the later of `issuedAt` and
+the ward's own receipt: `takesEffectAt = max(confirmedAt, max(issuedAt,
+receivedAt) + 72 h)`. `receivedAt` is persisted with the pending statement and
+projected. The contract wording needs the same fix. Vector
+`removal_notice_from_receipt`.
+
+**Raised by:** batch 1 review.
+
+## Clause floor after a departure
+
+**Where:** rule 4 ("compared only with clauses of that `(subject, kind)`
+still held from current signers … a relay can't restore an older rule from a
+current signer"); `acceptClause`, `clampClauses`.
+
+**Question:** once a departed key's clause is the one held, nothing from a
+current signer is held for that `(subject, kind)`, so a relay can replay any
+older clause from a current signer (issued after pairing) over it, rolling the
+rule back. The contract's wording admits this.
+
+**Build's interim reading:** the per-`(subject, kind)` floor survives the
+departure. When a signer departs, its held clause gets `floor = min(issuedAt,
+ward time of the departure)`. While its signer is departed, a replacement must
+be newer than the floor; while its signer is current, newer than its
+`issuedAt`. A far-future clause from a departed key is thus floored at the
+departure time, and a live guardian's fresh clause clears it. Vector
+`clause_replay_after_departure`.
+
+**Raised by:** batch 1 review.
+
+## Removal re-issued after an objection
+
+**Where:** rule 7 ("Neither parent can remove the other against their
+objection"); `objectedBy`.
+
+**Question:** an objection drops one removal. Nothing stops R1 sending a new
+removal one second later, so R2 must object again and again. What does an
+objection block?
+
+**Build's interim reading:** an objection by R2 naming R1 blocks every
+removal of R2 signed by R1 that reaches the ward within 7 days of the
+objection reaching it (`objected`), on arrival, at confirmation and when its
+timer falls due. After that a newer removal is pending as usual. The design
+session may prefer to tie this to a relationship change instead of a time.
+Vector `removal_reissued_after_objection`.
+
+**Raised by:** batch 1 review.
+
+## A moving root escapes a pending removal
+
+**Where:** rules 7 and 8; `applyPresenceConfirm` (a confirmed move drops
+pending statements naming the moved root).
+
+**Question:** R1 has a confirmed removal of R2 pending. R2 moves to R3 and
+confirms the move before the notice ends. The removal named R2, which is gone,
+so it is dropped, and R3 is pinned with R2's authority. Should the removal
+carry over to R3?
+
+**Build's interim reading:** unchanged: the removal is dropped with R2. This
+is no worse than an objection (R2 could have objected), but the design session
+should decide whether a pending removal follows a move. Design session only;
+no code change.
+
+**Raised by:** batch 1 review.

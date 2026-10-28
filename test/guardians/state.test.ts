@@ -226,7 +226,7 @@ describe('rule 4 and 5: departures fail closed; clauses record their signer', ()
   const cl = (author: Key, issuedAt: number, seal = author) => ({ author: author.pk, sealAuthor: seal.pk, subject: 'kid', kind: 'schedule', issuedAt })
   test('a clause from a signer is stored with its signer and root', () => {
     const s = ok(acceptClause(pairedR1W1(), cl(W1, T0 + 1), T0 + 10), 'clause_accepted')
-    expect(heldClause(s, 'kid', 'schedule')).toEqual({ subject: 'kid', kind: 'schedule', signer: W1.pk, root: R1.pk, issuedAt: T0 + 1 })
+    expect(heldClause(s, 'kid', 'schedule')).toEqual({ subject: 'kid', kind: 'schedule', signer: W1.pk, root: R1.pk, issuedAt: T0 + 1, floor: null })
   })
   test('a non-signer, a wrong seal, the pairing floor and the future are refused', () => {
     dropped(acceptClause(pairedR1W1(), cl(X, T0 + 1), T0 + 10), 'not_signer')
@@ -323,22 +323,22 @@ describe('rule 7: root removal', () => {
     s = ok(registerPresenceToken(s, TOKEN, dU(R2), T0 + 120))
     dropped(applyPresenceConfirm(s, { sealAuthor: W2.pk, inner: confirm(W2, rm.id, TOKEN, T0 + 130) }, T0 + 130), 'confirmer_not_bound')
     s = ok(applyPresenceConfirm(s, { sealAuthor: W1.pk, inner: confirm(W1, rm.id, TOKEN, T0 + 130) }, T0 + 130), 'removal_confirmed')
-    expect(statusGuardians(s).pending).toEqual([{ d: dU(R2), kind: 'removal', takesEffectAt: T0 + 100 + H72, expiresAt: T0 + 100 + 7 * DAY }])
-    s = tick(s, T0 + 100 + H72 - 1).state
+    expect(statusGuardians(s).pending).toEqual([{ d: dU(R2), kind: 'removal', takesEffectAt: T0 + 110 + H72, expiresAt: T0 + 100 + 7 * DAY }])
+    s = tick(s, T0 + 110 + H72 - 1).state
     expect(isSigner(s, R2.pk)).toBe(true)
-    const r = tick(s, T0 + 100 + H72)
+    const r = tick(s, T0 + 110 + H72)
     expect(r.outcome.ticked).toEqual([{ d: dU(R2), result: 'applied', reason: 'removal_applied' }])
     expect(r.outcome.departed).toEqual([R2.pk, W2.pk].sort())
     expect(isSigner(r.state, W2.pk)).toBe(false)
     expect(statusRecipients(r.state)).toContain(W2.pk) // one last STATUS
     expect(recipients(r.state)).not.toContain(W2.pk)
-    expect(markStatusSent(r.state, T0 + 100 + H72).state.farewell).toEqual([])
+    expect(markStatusSent(r.state, T0 + 110 + H72).state.farewell).toEqual([])
   })
   test('confirmation after the notice applies at once', () => {
     let s = twoRoots()
     const rm = removal(R1, R2, { issuedAt: T0 + 100 })
     s = ok(inb(s, W1, rm, T0 + 110))
-    const late = T0 + 100 + H72 + 5
+    const late = T0 + 110 + H72 + 5
     s = ok(registerPresenceToken(s, TOKEN, null, late))
     ok(applyPresenceConfirm(s, { sealAuthor: W1.pk, inner: confirm(W1, rm.id, TOKEN, late) }, late), 'removal_applied')
   })
@@ -349,7 +349,9 @@ describe('rule 7: root removal', () => {
     const ob = objection(R2, dU(R2), R1, { issuedAt: T0 + 101 })
     dropped(inb(s, W2, ob, T0 + 120), 'seal_mismatch') // objection is not in exception 2
     dropped(inb(s, R1, objection(R1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
-    dropped(inb(s, R2, objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
+    // An objection naming another remover does not touch this removal; it is held.
+    s = ok(inb(s, R2, objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120), 'objection_held')
+    expect(s.pending).toHaveLength(1)
     s = ok(inb(s, R2, ob, T0 + 120), 'objection_applied')
     expect(s.pending).toEqual([])
   })
@@ -357,7 +359,9 @@ describe('rule 7: root removal', () => {
     let s = twoRoots()
     s = ok(inb(s, R2, objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 110), 'objection_held')
     dropped(inb(s, W1, removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 120), 'objected')
-    ok(inb(s, W1, removal(R1, R2, { issuedAt: T0 + 102 }), T0 + 120), 'removal_pending')
+    // Within 7 days of the objection, even a newer removal by R1 is refused.
+    dropped(inb(s, W1, removal(R1, R2, { issuedAt: T0 + 102 }), T0 + 120), 'objected')
+    ok(inb(s, W1, removal(R1, R2, { issuedAt: T0 + 7 * DAY + 200 }), T0 + 7 * DAY + 110), 'removal_pending')
   })
   test('pending statements signed by R2 are dropped when the removal applies', () => {
     let s = twoRoots()
@@ -366,13 +370,13 @@ describe('rule 7: root removal', () => {
     s = ok(registerPresenceToken(s, TOKEN, dU(R2), T0 + 120))
     const rm = s.pending.find((p) => p.d === dU(R2))!
     s = ok(applyPresenceConfirm(s, { sealAuthor: W1.pk, inner: confirm(W1, rm.id, TOKEN, T0 + 130) }, T0 + 130))
-    s = tick(s, T0 + 100 + H72).state
+    s = tick(s, T0 + 110 + H72).state
     expect(s.pending).toEqual([])
   })
   test('re-pinning needs a co-guardian newer than the removal; a same-second one loses', () => {
-    let s = ok(inb(twoRoots(), W2, removal(R2, R2, { issuedAt: T0 + 50 }), T0 + 60))
+    const s = ok(inb(twoRoots(), W2, removal(R2, R2, { issuedAt: T0 + 50 }), T0 + 60))
     dropped(inb(s, W1, coGuardian(R1, R2, { issuedAt: T0 + 50 }), T0 + 70), 'not_newer_than_departure')
-    s = ok(inb(s, W1, coGuardian(R1, R2, { issuedAt: T0 + 51 }), T0 + 70), 'coguardian_pending')
+    ok(inb(s, W1, coGuardian(R1, R2, { issuedAt: T0 + 51 }), T0 + 70), 'coguardian_pending')
   })
   test('a removal never leaves the ward with no roots', () => {
     // R1 removes R2 (pending, confirmed), then R1 removes itself; the pending removal is refused at its time.
@@ -463,9 +467,9 @@ describe('pending statements', () => {
     expect(s.pending).toHaveLength(1)
   })
   test('a cancel that arrives before its statement drops it on arrival', () => {
-    let s = ok(inb(pairedR1W1(), R1, cancel(R1, dG(R2), { issuedAt: T0 + 5 })), 'cancel_held')
+    const s = ok(inb(pairedR1W1(), R1, cancel(R1, dG(R2), { issuedAt: T0 + 5 })), 'cancel_held')
     dropped(inb(s, W1, coGuardian(R1, R2, { issuedAt: T0 + 5 }), T0 + 20), 'cancelled')
-    s = ok(inb(s, W1, coGuardian(R1, R2, { issuedAt: T0 + 6 }), T0 + 20), 'coguardian_pending')
+    ok(inb(s, W1, coGuardian(R1, R2, { issuedAt: T0 + 6 }), T0 + 20), 'coguardian_pending')
   })
   test('only the pending statement’s signer can cancel it', () => {
     const s = twoRoots()

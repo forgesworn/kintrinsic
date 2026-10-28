@@ -15,6 +15,8 @@
  * says so with a pointer into docs/guardian-keys-open-questions.md ("OQ: …").
  */
 import type { ReasonCode, TickResult } from './reasons.js'
+import { tryParseStrictJson } from './json.js'
+import { validateGuardianPinRecord, type GuardianPinRecord } from './pin.js'
 import {
   isEventShape,
   verifySignedEvent,
@@ -33,8 +35,10 @@ import {
   MAX_HELD_PER_ROOT,
   MAX_ROOTS,
   MAX_TOMBSTONES_PER_ROOT,
+  OBJECTION_BLOCK_SECONDS,
   PENDING_MAX_SECONDS,
   PREVIOUS_RELAYS_SECONDS,
+  RELAYS_TTL_SECONDS,
   REMOVAL_NOTICE_SECONDS,
   TOKEN_LIFETIME_SECONDS,
   constantTimeEqual,
@@ -68,8 +72,14 @@ export interface WorkingKeyRecord {
   rebindRoot: string | null
 }
 
-/** The newest accepted statement for a `d` (rule 2). Withdrawals live in `heldWithdrawals` / `tombstones`. */
+/**
+ * The newest accepted statement per slot (rule 2). The slot is the `d`,
+ * except a cancel (`d` + signer) and an objection (`d` + `p`), so one
+ * signer's cancel or one objection never displaces another's. Withdrawals
+ * live in `heldWithdrawals` / `tombstones`.
+ */
 export interface StoredStatement {
+  slot: string
   d: string
   id: string
   type: Exclude<Statement['type'], 'withdrawal'>
@@ -78,6 +88,8 @@ export interface StoredStatement {
   issuedAt: number
   label: string | null
   expiresAt: number | null
+  /** The ward clock when it was accepted. */
+  receivedAt: number
   /** A cancel or objection that had nothing to act on when it arrived. */
   held: boolean
 }
@@ -91,6 +103,8 @@ export interface PendingRecord {
   /** R2. */
   key: string
   issuedAt: number
+  /** The ward clock when the statement was accepted. */
+  receivedAt: number
   expiresAt: number
   confirmedAt: number | null
   takesEffectAt: number | null
@@ -134,6 +148,12 @@ export interface HeldClause {
   /** The signer's root at acceptance, for "set by" display (rule 5). */
   root: string
   issuedAt: number
+  /**
+   * Set when the signer departs: min(`issuedAt`, the departure time). While
+   * the signer is departed, a replacement must be newer than this.
+   * OQ: Clause floor after a departure.
+   */
+  floor: number | null
 }
 
 export interface GuardianState {
@@ -150,7 +170,10 @@ export interface GuardianState {
   clauses: HeldClause[]
   relays: string[]
   relaysUpdatedAt: number
-  previousRelays: { relays: string[]; until: number } | null
+  /** Relay lists replaced within the last 7 days, oldest first (rule 11). */
+  previousRelays: { relays: string[]; until: number }[]
+  /** The Android guardian PIN record, set by a gift-wrapped RELAYS. */
+  guardianPin: GuardianPinRecord | null
   /** Departed keys owed one last STATUS showing their departure. */
   farewell: string[]
 }
@@ -190,7 +213,7 @@ function clone(s: GuardianState): GuardianState {
 /** Sort every list whose order carries no meaning, so JSON is stable. */
 function normalise(s: GuardianState): GuardianState {
   s.keys.sort((a, b) => cmp(a.key, b.key))
-  s.statements.sort((a, b) => cmp(a.d, b.d))
+  s.statements.sort((a, b) => cmp(a.slot, b.slot))
   s.pending.sort((a, b) => cmp(a.d, b.d))
   s.heldWithdrawals.sort((a, b) => cmp(a.d, b.d) || cmp(a.signer, b.signer))
   s.departedRoots.sort((a, b) => cmp(a.root, b.root))
@@ -212,11 +235,16 @@ function activeKey(s: GuardianState, key: string): WorkingKeyRecord | undefined 
   return k && k.status === 'active' && isPinned(s, k.root) ? k : undefined
 }
 
+/** A root that was removed or moved away and is not pinned again. */
+function isDepartedRoot(s: GuardianState, key: string): boolean {
+  return !isPinned(s, key) && s.departedRoots.some((d) => d.root === key)
+}
+
 /** Every pinned root, plus every active working key bound to a pinned root. Sorted. */
 export function signerSet(s: GuardianState): string[] {
   const out = s.roots.map((r) => r.root)
   for (const k of s.keys) if (k.status === 'active' && isPinned(s, k.root)) out.push(k.key)
-  return out.sort(cmp)
+  return [...new Set(out)].sort(cmp)
 }
 
 /** The generic signer-set gate for CLAUSE, GRANT, RELAYS and USAGE_SYNC authors. */
@@ -230,12 +258,15 @@ export function rootOf(s: GuardianState, pubkey: string): string | null {
   return activeKey(s, pubkey)?.root ?? null
 }
 
-/** A key that was in the signer set once and has left it (rule 4). */
+/**
+ * A key that is not in the signer set and is known as withdrawn, departed or
+ * a departed root (rule 4). Includes a key withdrawn the moment it bound.
+ */
 export function isDeparted(s: GuardianState, key: string): boolean {
   if (isSigner(s, key)) return false
   const k = keyRecord(s, key)
   if (k && k.status !== 'active') return true
-  return s.departedRoots.some((d) => d.root === key)
+  return isDepartedRoot(s, key)
 }
 
 function activeCount(s: GuardianState, root: string): number {
@@ -268,7 +299,7 @@ export function recipients(s: GuardianState): string[] {
     if (ws.length === 0) out.push(r.root)
     else out.push(...ws)
   }
-  return out.sort(cmp)
+  return [...new Set(out)].sort(cmp)
 }
 
 /** STATUS recipients: the live recipients plus departed keys owed one last STATUS. */
@@ -276,11 +307,18 @@ export function statusRecipients(s: GuardianState): string[] {
   return [...new Set([...recipients(s), ...s.farewell])].sort(cmp)
 }
 
-/** Rule 11: the relays STATUS goes out on (current, plus the previous list for 7 days on a multi-root ward). */
+/**
+ * Rule 11: the relays STATUS goes out on: the current list, then (on a
+ * multi-root ward) every list replaced within the last 7 days, newest first,
+ * without repeats.
+ */
 export function statusRelays(s: GuardianState, now: number): string[] {
   const out = [...s.relays]
-  if (s.roots.length > 1 && s.previousRelays && now < s.previousRelays.until) {
-    for (const r of s.previousRelays.relays) if (!out.includes(r)) out.push(r)
+  if (s.roots.length > 1) {
+    for (const prev of [...s.previousRelays].reverse()) {
+      if (now >= prev.until) continue
+      for (const r of prev.relays) if (!out.includes(r)) out.push(r)
+    }
   }
   return out
 }
@@ -291,14 +329,23 @@ export function pendingExpiry(issuedAt: number, expiresAt: number | null): numbe
   return expiresAt === null ? cap : Math.min(expiresAt, cap)
 }
 
-function storedFor(s: GuardianState, d: string): StoredStatement | undefined {
-  return s.statements.find((st) => st.d === d)
+/** The storage slot of a statement: see `StoredStatement`. OQ: Cancel or objection before its statement. */
+export function statementSlot(st: { type: Statement['type']; d: string; signer: string; p: string }): string {
+  if (st.type === 'cancel') return `${st.d}|${st.signer}`
+  if (st.type === 'objection') return `${st.d}|${st.p}`
+  return st.d
 }
 
-function putStatement(s: GuardianState, st: Statement, held = false): void {
+function storedFor(s: GuardianState, slot: string): StoredStatement | undefined {
+  return s.statements.find((st) => st.slot === slot)
+}
+
+function putStatement(s: GuardianState, st: Statement, now: number, held = false): void {
   if (st.type === 'withdrawal') return
-  s.statements = s.statements.filter((x) => x.d !== st.d)
+  const slot = statementSlot(st)
+  s.statements = s.statements.filter((x) => x.slot !== slot)
   s.statements.push({
+    slot,
     d: st.d,
     id: st.id,
     type: st.type,
@@ -307,21 +354,23 @@ function putStatement(s: GuardianState, st: Statement, held = false): void {
     issuedAt: st.issuedAt,
     label: st.label,
     expiresAt: st.expiresAt,
+    receivedAt: now,
     held,
   })
 }
 
 /**
- * Rule 2 within one `d`: the newest `issuedAt` wins. Re-delivery of the held
- * event is `duplicate`; an older one is `stale`. A different event at the same
- * `issuedAt` does not displace the held one (`tie_not_newer`).
+ * Rule 2 within one slot: the newest `issuedAt` wins. Re-delivery of the
+ * held event is `duplicate`; an older one is `stale`. At the same `issuedAt`
+ * the lower event id wins, so every ward converges whatever the arrival
+ * order; the loser is `tie_not_newer`.
  * OQ: Same d, same issuedAt, different content.
  */
 function orderAgainst(stored: { id: string; issuedAt: number } | undefined, st: Statement): ReasonCode | null {
   if (!stored) return null
   if (stored.id === st.id) return 'duplicate'
   if (st.issuedAt < stored.issuedAt) return 'stale'
-  if (st.issuedAt === stored.issuedAt) return 'tie_not_newer'
+  if (st.issuedAt === stored.issuedAt && cmp(st.id, stored.id) > 0) return 'tie_not_newer'
   return null
 }
 
@@ -337,35 +386,59 @@ function upsertDepartedRoot(s: GuardianState, root: string, issuedAt: number, by
   s.departedRoots.push({ root, issuedAt, by })
 }
 
-function withdraw(s: GuardianState, rec: WorkingKeyRecord, w: { d: string; id: string; signer: string; issuedAt: number }): void {
+/** Rule 4 floor: clamp the held clauses of keys departing at `at`. OQ: Clause floor after a departure. */
+function clampClauses(s: GuardianState, keys: string[], at: number): void {
+  for (const c of s.clauses) {
+    if (keys.includes(c.signer)) c.floor = Math.min(c.floor ?? c.issuedAt, c.issuedAt, at)
+  }
+}
+
+function withdraw(
+  s: GuardianState,
+  rec: WorkingKeyRecord,
+  w: { d: string; id: string; signer: string; issuedAt: number },
+  at: number,
+): void {
   rec.status = 'withdrawn'
   rec.departedBy = 'withdrawal'
   rec.rebindRoot = null
   s.tombstones.push({ type: 'withdrawal', d: w.d, id: w.id, key: rec.key, signer: w.signer, issuedAt: w.issuedAt })
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.key !== rec.key)
+  clampClauses(s, [rec.key], at)
 }
 
-/** Apply a root removal (rule 7). Refused if it would leave the ward with no root. */
-function applyRemoval(s: GuardianState, r: { d: string; id: string; signer: string; key: string; issuedAt: number }): 'applied' | 'last_root' {
-  if (s.roots.length <= 1 || !isPinned(s, r.key)) return 'last_root'
+/**
+ * Apply a root removal (rule 7) at time `at`. Refused unless another,
+ * distinct root remains: removal never leaves a ward with no roots.
+ */
+function applyRemoval(
+  s: GuardianState,
+  r: { d: string; id: string; signer: string; key: string; issuedAt: number },
+  at: number,
+): 'applied' | 'last_root' {
   const R2 = r.key
+  if (!isPinned(s, R2) || s.roots.filter((x) => x.root !== R2).length < 1) return 'last_root'
   s.roots = s.roots.filter((x) => x.root !== R2)
   upsertDepartedRoot(s, R2, r.issuedAt, 'removal')
   s.tombstones.push({ type: 'removal', d: r.d, id: r.id, key: R2, signer: r.signer, issuedAt: r.issuedAt })
+  const gone = [R2]
   for (const k of s.keys) {
     if (k.status === 'active' && k.root === R2) {
       k.status = 'departed'
       k.departedBy = 'removal'
       k.rebindRoot = null
+      gone.push(k.key)
     }
   }
+  clampClauses(s, gone, at)
   // "Once a removal applies, every pending statement signed by R2 is dropped."
   dropPending(s, (p) => p.signer === R2 || p.key === R2)
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.signer !== R2)
   return 'applied'
 }
 
-function bindKey(s: GuardianState, approval: Statement): WorkingKeyRecord {
+/** Bind W to the approval's root. Early withdrawals for W can never apply after this (rule 3). */
+function bindKey(s: GuardianState, approval: Statement, now: number): WorkingKeyRecord {
   const rec: WorkingKeyRecord = {
     key: approval.key,
     root: approval.signer,
@@ -378,8 +451,26 @@ function bindKey(s: GuardianState, approval: Statement): WorkingKeyRecord {
   }
   s.keys = s.keys.filter((k) => k.key !== approval.key)
   s.keys.push(rec)
-  putStatement(s, approval)
+  s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.key !== approval.key)
+  putStatement(s, approval, now)
   return rec
+}
+
+/**
+ * An objection by `removed` against removals signed by `remover`: it drops a
+ * removal arriving later whose `issuedAt` is at or below its own, and any
+ * removal arriving within 7 days of the objection reaching the ward.
+ * OQ: Cancel or objection before its statement; OQ: Removal re-issued after an objection.
+ */
+function objectedBy(s: GuardianState, d: string, removed: string, remover: string, issuedAt: number, now: number): boolean {
+  const o = storedFor(s, `${STATEMENT_PREFIXES.objection}${d}|${remover}`)
+  return !!o && o.signer === removed && (o.issuedAt >= issuedAt || now < o.receivedAt + OBJECTION_BLOCK_SECONDS)
+}
+
+/** A held cancel for `d` from `signer` at or after `issuedAt`. OQ: Cancel or objection before its statement. */
+function cancelledBy(s: GuardianState, d: string, signer: string, issuedAt: number): boolean {
+  const c = storedFor(s, `${STATEMENT_PREFIXES.cancel}${d}|${signer}`)
+  return !!c && c.issuedAt >= issuedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +486,7 @@ function bindKey(s: GuardianState, approval: Statement): WorkingKeyRecord {
 function advance(s: GuardianState, now: number): TickEntry[] {
   const out: TickEntry[] = []
   s.tokens = s.tokens.filter((t) => now < t.mintedAt + TOKEN_LIFETIME_SECONDS)
-  if (s.previousRelays && now >= s.previousRelays.until) s.previousRelays = null
+  s.previousRelays = s.previousRelays.filter((p) => now < p.until)
   for (;;) {
     let best: { at: number; p: PendingRecord; act: 'apply' | 'expire' } | null = null
     for (const p of s.pending) {
@@ -414,14 +505,14 @@ function advance(s: GuardianState, now: number): TickEntry[] {
     if (best.act === 'expire') {
       dropPending(s, (x) => x.d === p.d)
       out.push({ d: p.d, result: 'expired', reason: 'expired' })
+    } else if (objectedBy(s, p.d, p.key, p.signer, p.issuedAt, best.at)) {
+      dropPending(s, (x) => x.d === p.d)
+      out.push({ d: p.d, result: 'refused', reason: 'objected' })
+    } else if (applyRemoval(s, p, best.at) === 'applied') {
+      out.push({ d: p.d, result: 'applied', reason: 'removal_applied' })
     } else {
-      const res = applyRemoval(s, p)
-      if (res === 'applied') {
-        out.push({ d: p.d, result: 'applied', reason: 'removal_applied' })
-      } else {
-        dropPending(s, (x) => x.d === p.d)
-        out.push({ d: p.d, result: 'refused', reason: 'last_root' })
-      }
+      dropPending(s, (x) => x.d === p.d)
+      out.push({ d: p.d, result: 'refused', reason: 'last_root' })
     }
   }
   return out
@@ -471,12 +562,14 @@ function sealAllowed(s: GuardianState, st: Statement, sealAuthor: string): boole
   return w !== undefined && w.root === st.signer
 }
 
-function processApproval(s: GuardianState, st: Statement) {
+function processApproval(s: GuardianState, st: Statement, now: number) {
   // OQ: expiresAt on non-pending statements — an approval carrying one is refused.
   if (st.expiresAt !== null) return drop('expires_at_not_allowed')
   const W = st.key
   const R = st.signer
   if (isPinned(s, W) || W === R) return drop('key_role_conflict')
+  // Rule 4: a removed or moved-away root never returns as a working key.
+  if (isDepartedRoot(s, W)) return drop('key_departed')
   const rec = keyRecord(s, W)
   let mode: 'new' | 'update' | 'rebind' = 'new'
   if (rec) {
@@ -502,21 +595,19 @@ function processApproval(s: GuardianState, st: Statement) {
     rec.label = st.label
     rec.approvalId = st.id
     rec.approvalIssuedAt = st.issuedAt
-    putStatement(s, st)
+    putStatement(s, st, now)
     return accept('approval_updated')
   }
   const held = s.heldWithdrawals.find((h) => h.key === W && h.signer === R)
-  const bound = bindKey(s, st)
-  // Rule 3: early withdrawals from other roots can never apply now.
-  s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.key !== W)
+  const bound = bindKey(s, st, now)
   if (held) {
-    withdraw(s, bound, held)
+    withdraw(s, bound, held, now)
     return accept('approval_preempted')
   }
   return accept(mode === 'rebind' ? 'approval_rebound' : 'approval_applied')
 }
 
-function processWithdrawal(s: GuardianState, st: Statement) {
+function processWithdrawal(s: GuardianState, st: Statement, now: number) {
   const W = st.key
   const S = st.signer
   if (isPinned(s, W)) return drop('key_role_conflict')
@@ -525,14 +616,14 @@ function processWithdrawal(s: GuardianState, st: Statement) {
     if (rec.status === 'withdrawn') return drop('already_withdrawn')
     if (rec.status === 'active') {
       if (rec.root !== S) return drop('not_binding_root')
-      withdraw(s, rec, st)
+      withdraw(s, rec, st, now)
       return accept('withdrawal_applied')
     }
     // Departed: its old root (re-pinned since) or the root that may re-bind it
     // can still make the departure permanent. OQ: Working keys after a root
     // move or removal.
     if (rec.root === S || (rec.departedBy === 'move' && rec.rebindRoot === S)) {
-      withdraw(s, rec, st)
+      withdraw(s, rec, st, now)
       return accept('withdrawal_applied')
     }
     return drop('not_binding_root')
@@ -545,18 +636,7 @@ function processWithdrawal(s: GuardianState, st: Statement) {
   return accept('withdrawal_held')
 }
 
-/** A held cancel for `d` from `signer` at or after `issuedAt`. OQ: Cancel or objection before its statement. */
-function cancelledBy(s: GuardianState, d: string, signer: string, issuedAt: number): boolean {
-  const c = storedFor(s, STATEMENT_PREFIXES.cancel + d)
-  return !!c && c.signer === signer && c.issuedAt >= issuedAt
-}
-
-function objectedBy(s: GuardianState, d: string, removed: string, remover: string, issuedAt: number): boolean {
-  const o = storedFor(s, STATEMENT_PREFIXES.objection + d)
-  return !!o && o.signer === removed && o.p === remover && o.issuedAt >= issuedAt
-}
-
-function addPending(s: GuardianState, st: Statement, type: PendingType, expiresAt: number): void {
+function addPending(s: GuardianState, st: Statement, type: PendingType, expiresAt: number, now: number): void {
   dropPending(s, (p) => p.d === st.d)
   s.pending.push({
     d: st.d,
@@ -565,29 +645,33 @@ function addPending(s: GuardianState, st: Statement, type: PendingType, expiresA
     signer: st.signer,
     key: st.key,
     issuedAt: st.issuedAt,
+    receivedAt: now,
     expiresAt,
     confirmedAt: null,
     takesEffectAt: null,
   })
-  putStatement(s, st)
+  putStatement(s, st, now)
+}
+
+/** Rule 7: re-pinning a departed root needs a statement strictly newer than its departure. */
+function departedAtOrAfter(s: GuardianState, key: string, issuedAt: number): boolean {
+  const dep = s.departedRoots.find((d) => d.root === key)
+  // A same-second removal wins. OQ: Same-second ties across different d.
+  return !!dep && issuedAt <= dep.issuedAt
 }
 
 function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
   const R2 = st.key
   if (isPinned(s, R2)) return drop('already_pinned')
   if (keyRecord(s, R2)) return drop('key_role_conflict')
-  // Rule 7: re-pinning a removed root needs a statement newer than the removal
-  // (a same-second removal wins). A moved-away root is treated alike.
-  // OQ: Same-second ties across different d.
-  const dep = s.departedRoots.find((d) => d.root === R2)
-  if (dep && st.issuedAt <= dep.issuedAt) return drop('not_newer_than_departure')
+  if (departedAtOrAfter(s, R2, st.issuedAt)) return drop('not_newer_than_departure')
   const order = orderAgainst(storedFor(s, st.d), st)
   if (order) return drop(order)
   const expiresAt = pendingExpiry(st.issuedAt, st.expiresAt)
   if (now >= expiresAt) return drop('expired')
   if (cancelledBy(s, st.d, st.signer, st.issuedAt)) return drop('cancelled')
   if (st.type === 'coguardian' && s.roots.length >= MAX_ROOTS) return drop('root_quota')
-  addPending(s, st, st.type as PendingType, expiresAt)
+  addPending(s, st, st.type as PendingType, expiresAt, now)
   return accept(st.type === 'coguardian' ? 'coguardian_pending' : 'move_pending')
 }
 
@@ -597,29 +681,29 @@ function processRemoval(s: GuardianState, st: Statement, now: number) {
   const order = orderAgainst(storedFor(s, st.d), st)
   if (order) return drop(order)
   if (st.signer === R2) {
-    if (s.roots.length <= 1) return drop('last_root')
-    putStatement(s, st)
-    applyRemoval(s, st)
+    if (s.roots.filter((x) => x.root !== R2).length < 1) return drop('last_root')
+    putStatement(s, st, now)
+    applyRemoval(s, st, now)
     return accept('removal_applied')
   }
   const expiresAt = pendingExpiry(st.issuedAt, st.expiresAt)
   if (now >= expiresAt) return drop('expired')
-  if (objectedBy(s, st.d, R2, st.signer, st.issuedAt)) return drop('objected')
+  if (objectedBy(s, st.d, R2, st.signer, st.issuedAt, now)) return drop('objected')
   if (cancelledBy(s, st.d, st.signer, st.issuedAt)) return drop('cancelled')
-  addPending(s, st, 'removal', expiresAt)
+  addPending(s, st, 'removal', expiresAt, now)
   return accept('removal_pending')
 }
 
-function holdOrDrop(s: GuardianState, st: Statement, reason: 'cancel_held' | 'objection_held') {
-  const prev = storedFor(s, st.d)
+function holdOrDrop(s: GuardianState, st: Statement, now: number, reason: 'cancel_held' | 'objection_held') {
+  const prev = storedFor(s, statementSlot(st))
   const reclaim = prev && prev.held && prev.signer === st.signer ? 1 : 0
   if (heldCount(s, st.signer) - reclaim >= MAX_HELD_PER_ROOT) return drop('held_quota')
-  putStatement(s, st, true)
+  putStatement(s, st, now, true)
   return accept(reason)
 }
 
-function processCancel(s: GuardianState, st: Statement) {
-  const order = orderAgainst(storedFor(s, st.d), st)
+function processCancel(s: GuardianState, st: Statement, now: number) {
+  const order = orderAgainst(storedFor(s, statementSlot(st)), st)
   if (order) return drop(order)
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
@@ -627,25 +711,26 @@ function processCancel(s: GuardianState, st: Statement) {
   // At or below: a same-second cancel wins. OQ: Same-second ties across different d.
   if (pend && pend.issuedAt <= st.issuedAt) {
     dropPending(s, (p) => p.d === target)
-    putStatement(s, st)
+    putStatement(s, st, now)
     return accept('cancel_applied')
   }
-  return holdOrDrop(s, st, 'cancel_held')
+  return holdOrDrop(s, st, now, 'cancel_held')
 }
 
-function processObjection(s: GuardianState, st: Statement) {
+function processObjection(s: GuardianState, st: Statement, now: number) {
   if (st.signer !== st.key) return drop('objection_mismatch')
-  const order = orderAgainst(storedFor(s, st.d), st)
+  const order = orderAgainst(storedFor(s, statementSlot(st)), st)
   if (order) return drop(order)
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
-  if (pend && pend.signer !== st.p) return drop('objection_mismatch')
-  if (pend && pend.issuedAt <= st.issuedAt) {
+  // Rule 7: an objection drops the pending removal by its `p`, whatever the
+  // two issuedAt values.
+  if (pend && pend.signer === st.p) {
     dropPending(s, (p) => p.d === target)
-    putStatement(s, st)
+    putStatement(s, st, now)
     return accept('objection_applied')
   }
-  return holdOrDrop(s, st, 'objection_held')
+  return holdOrDrop(s, st, now, 'objection_held')
 }
 
 /**
@@ -655,6 +740,8 @@ function processObjection(s: GuardianState, st: Statement) {
  * `inner` is the signed statement. Checks run in this order: statement
  * validity (`parseStatement`), the 300-second future refusal, the seal rule,
  * the signer being a pinned root, then the type's own checks.
+ *
+ * Presence confirmations (kind 31121) go to `applyPresenceConfirm`, not here.
  */
 export function applyInbound(state: GuardianState, inbound: Inbound, now: number): StepResult {
   return step(state, now, (s) => {
@@ -666,18 +753,18 @@ export function applyInbound(state: GuardianState, inbound: Inbound, now: number
     if (!isPinned(s, st.signer)) return drop('signer_not_pinned')
     switch (st.type) {
       case 'approval':
-        return processApproval(s, st)
+        return processApproval(s, st, now)
       case 'withdrawal':
-        return processWithdrawal(s, st)
+        return processWithdrawal(s, st, now)
       case 'coguardian':
       case 'move':
         return processCoGuardianOrMove(s, st, now)
       case 'removal':
         return processRemoval(s, st, now)
       case 'cancel':
-        return processCancel(s, st)
+        return processCancel(s, st, now)
       case 'objection':
-        return processObjection(s, st)
+        return processObjection(s, st, now)
     }
   })
 }
@@ -714,12 +801,9 @@ interface ConfirmContent {
 function parseConfirm(inner: unknown): ConfirmContent | null {
   if (!isEventShape(inner) || !verifySignedEvent(inner)) return null
   if (inner.kind !== CHARTER_PRESENCE_CONFIRM || !hasMarker(inner)) return null
-  let c: unknown
-  try {
-    c = JSON.parse(inner.content)
-  } catch {
-    return null
-  }
+  const parsed = tryParseStrictJson(inner.content)
+  if (!parsed.ok) return null
+  const c = parsed.value
   if (typeof c !== 'object' || c === null || Array.isArray(c)) return null
   const o = c as Record<string, unknown>
   if (o.v !== 1 || typeof o.token !== 'string' || !HEX32.test(o.token)) return null
@@ -751,11 +835,17 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
       if (pend.confirmedAt !== null) return drop('duplicate')
       const rec = activeKey(s, W)
       if (!rec || rec.root !== pend.signer) return drop('confirmer_not_bound')
+      if (objectedBy(s, pend.d, pend.key, pend.signer, pend.issuedAt, now)) {
+        dropPending(s, (p) => p.d === pend.d)
+        return drop('objected')
+      }
       spend()
       pend.confirmedAt = now
-      pend.takesEffectAt = Math.max(now, pend.issuedAt + REMOVAL_NOTICE_SECONDS)
+      // Notice runs from the later of issuedAt and the ward's own receipt.
+      // OQ: Removal notice measured from receipt.
+      pend.takesEffectAt = Math.max(now, Math.max(pend.issuedAt, pend.receivedAt) + REMOVAL_NOTICE_SECONDS)
       if (pend.takesEffectAt <= now) {
-        if (applyRemoval(s, pend) === 'last_root') {
+        if (applyRemoval(s, pend, now) === 'last_root') {
           dropPending(s, (p) => p.d === pend.d)
           return drop('last_root')
         }
@@ -765,6 +855,8 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
     }
 
     // Co-guardian or move: the confirming W carries R2's approval of itself.
+    // R2's role is checked again: it may have changed since the statement
+    // arrived.
     const R2 = pend.key
     if (c.approval === undefined) return drop('approval_required')
     const pa = parseStatement(c.approval)
@@ -773,7 +865,10 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
     if (ap.type !== 'approval' || ap.signer !== R2 || ap.key !== W) return drop('bad_approval')
     if (ap.expiresAt !== null) return drop('expires_at_not_allowed')
     if (ap.issuedAt > now + FUTURE_SKEW_SECONDS) return drop('future')
-    if (isPinned(s, W) || W === R2) return drop('key_role_conflict')
+    if (isPinned(s, R2)) return drop('already_pinned')
+    if (keyRecord(s, R2) || isPinned(s, W) || W === R2) return drop('key_role_conflict')
+    if (departedAtOrAfter(s, R2, pend.issuedAt)) return drop('not_newer_than_departure')
+    if (isDepartedRoot(s, W)) return drop('key_departed')
     const rec = keyRecord(s, W)
     if (rec) {
       if (rec.status !== 'active') return drop('key_departed')
@@ -781,13 +876,15 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
     }
     const order = orderAgainst(storedFor(s, ap.d), ap)
     if (order) return drop(order)
+    if (rootAtQuota(s, R2)) return drop('root_at_quota')
     if (pend.type === 'coguardian' && s.roots.length >= MAX_ROOTS) return drop('root_quota')
     spend()
+    // Whichever statement pins R2 first, every other pending one naming R2 goes.
+    dropPending(s, (p) => p.key === R2)
 
     if (pend.type === 'coguardian') {
-      dropPending(s, (p) => p.d === pend.d)
       s.roots.push({ root: R2, pinnedAt: now, via: 'coguardian' })
-      bindKey(s, ap)
+      bindKey(s, ap, now)
       return accept('coguardian_applied')
     }
 
@@ -798,15 +895,18 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
     const idx = s.roots.findIndex((r) => r.root === R)
     s.roots.splice(idx, 1, { root: R2, pinnedAt: now, via: 'move' })
     upsertDepartedRoot(s, R, pend.issuedAt, 'move')
+    const gone = [R]
     for (const k of s.keys) {
       if (k.status === 'active' && k.root === R && k.key !== W) {
         k.status = 'departed'
         k.departedBy = 'move'
         k.rebindRoot = R2
+        gone.push(k.key)
       }
     }
-    bindKey(s, ap)
-    dropPending(s, (p) => p.d === pend.d || p.signer === R || p.key === R)
+    clampClauses(s, gone, now)
+    bindKey(s, ap, now)
+    dropPending(s, (p) => p.signer === R || p.key === R)
     s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.signer !== R)
     return accept('move_applied')
   })
@@ -826,9 +926,9 @@ export interface ClauseInput {
 
 /**
  * Rules 4 and 5: accept a CLAUSE if its author is in the signer set and it is
- * newer than the held clause of the same `(subject, kind)` when that clause's
- * signer is still current. A departed signer's clause stays enforced but its
- * `issuedAt` is ignored. Checks run: future, seal, signer, pairing floor,
+ * newer than the held clause of the same `(subject, kind)`: newer than its
+ * `issuedAt` while its signer is current, newer than its departure floor once
+ * the signer has departed. Checks run: future, seal, signer, pairing floor,
  * newer.
  */
 export function acceptClause(state: GuardianState, clause: ClauseInput, now: number): StepResult {
@@ -838,7 +938,10 @@ export function acceptClause(state: GuardianState, clause: ClauseInput, now: num
     if (!isSigner(s, clause.author)) return drop('not_signer')
     if (clause.issuedAt < s.pairedAt) return drop('pairing_floor')
     const held = s.clauses.find((c) => c.subject === clause.subject && c.kind === clause.kind)
-    if (held && isSigner(s, held.signer) && clause.issuedAt <= held.issuedAt) return drop('not_newer')
+    if (held) {
+      const bar = isSigner(s, held.signer) ? held.issuedAt : (held.floor ?? held.issuedAt)
+      if (clause.issuedAt <= bar) return drop('not_newer')
+    }
     s.clauses = s.clauses.filter((c) => !(c.subject === clause.subject && c.kind === clause.kind))
     s.clauses.push({
       subject: clause.subject,
@@ -846,6 +949,7 @@ export function acceptClause(state: GuardianState, clause: ClauseInput, now: num
       signer: clause.author,
       root: rootOf(s, clause.author) as string,
       issuedAt: clause.issuedAt,
+      floor: null,
     })
     return accept('clause_accepted')
   })
@@ -859,7 +963,7 @@ export function heldClause(state: GuardianState, subject: string, kind: string):
 export interface SignedEventInput {
   author: string
   sealAuthor: string
-  /** The event's own timestamp (`ts`, or `created_at` for RELAYS). */
+  /** The event's own timestamp (`ts`). */
   ts: number
 }
 
@@ -878,20 +982,48 @@ export function acceptSignedEvent(state: GuardianState, ev: SignedEventInput, no
   })
 }
 
-/** A RELAYS change from any signer (rule 11). */
-export function applyRelays(
-  state: GuardianState,
-  ev: SignedEventInput & { relays: string[] },
-  now: number,
-): StepResult {
+export interface RelaysInput {
+  author: string
+  /**
+   * `wrapped`: gift-wrapped over relays or the local link (then `sealAuthor`
+   * is the seal's author). `pasted`: the offline relay code typed or pasted
+   * at the ward (no seal).
+   */
+  channel: 'wrapped' | 'pasted'
+  sealAuthor: string | null
+  /** The event's `created_at`. */
+  ts: number
+  relays: string[]
+  /** The optional `guardianPin` field of the RELAYS body. */
+  guardianPin?: unknown
+}
+
+/**
+ * A RELAYS change from any signer (rule 11), with the existing RELAYS
+ * freshness checks: not in the future, at most 600 s old, not before pairing,
+ * newer than the last applied. A `guardianPin` is accepted only over the
+ * wrapped channel. OQ: How a guardian PIN reaches an Android ward.
+ * Relay-list validation (2–10 distinct secure endpoints) is not modelled.
+ */
+export function applyRelays(state: GuardianState, ev: RelaysInput, now: number): StepResult {
   return step(state, now, (s) => {
-    if (ev.ts > now + FUTURE_SKEW_SECONDS) return drop('future')
-    if (ev.sealAuthor !== ev.author) return drop('seal_mismatch')
+    if (ev.channel === 'wrapped' && ev.sealAuthor !== ev.author) return drop('seal_mismatch')
     if (!isSigner(s, ev.author)) return drop('not_signer')
+    if (ev.ts > now) return drop('future')
+    if (now - ev.ts > RELAYS_TTL_SECONDS) return drop('stale')
+    if (ev.ts < s.pairedAt) return drop('pairing_floor')
     if (ev.ts <= s.relaysUpdatedAt) return drop('not_newer')
-    s.previousRelays = { relays: s.relays, until: now + PREVIOUS_RELAYS_SECONDS }
+    let pin: GuardianPinRecord | null = null
+    if (ev.guardianPin !== undefined) {
+      if (ev.channel !== 'wrapped') return drop('pin_not_wrapped')
+      const v = validateGuardianPinRecord(ev.guardianPin)
+      if (!v.ok) return drop('bad_pin_record')
+      pin = v.record
+    }
+    s.previousRelays.push({ relays: s.relays, until: now + PREVIOUS_RELAYS_SECONDS })
     s.relays = [...ev.relays]
     s.relaysUpdatedAt = ev.ts
+    if (pin) s.guardianPin = pin
     return accept('relays_applied')
   })
 }
@@ -922,23 +1054,22 @@ export type PairResult =
  *
  * - An offer carrying `approval` must be sealed by the W the approval names,
  *   and signed (the approval) by R: the ward pins R and binds W.
- * - An offer with no approval pins its seal author as the root, as today.
+ * - An offer with no approval pins its seal author as the root, as today (a
+ *   ward cannot tell a W from a root by its key).
  * - Nothing is ever pinned from a key read out of the payload.
  *
  * Token rules are those of scan-to-pair: constant-time compare, 600-second
  * lifetime against the mint time and the offer's `ts`, a future `ts` refused.
+ * A contested token (two keys, one token) is the caller's to detect.
  */
 export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): PairResult {
   const inner = inbound.inner
   if (!isEventShape(inner) || !verifySignedEvent(inner)) return { ok: false, reason: 'bad_offer' }
   if (inner.kind !== CHARTER_DEVICE_PAIR_OFFER || !hasMarker(inner)) return { ok: false, reason: 'bad_offer' }
   if (inbound.sealAuthor !== inner.pubkey) return { ok: false, reason: 'seal_mismatch' }
-  let c: unknown
-  try {
-    c = JSON.parse(inner.content)
-  } catch {
-    return { ok: false, reason: 'bad_offer' }
-  }
+  const parsed = tryParseStrictJson(inner.content)
+  if (!parsed.ok) return { ok: false, reason: 'bad_offer' }
+  const c = parsed.value
   if (typeof c !== 'object' || c === null || Array.isArray(c)) return { ok: false, reason: 'bad_offer' }
   const o = c as Record<string, unknown>
   if (typeof o.token !== 'string' || !HEX32.test(o.token)) return { ok: false, reason: 'bad_offer' }
@@ -969,7 +1100,8 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
     clauses: [],
     relays: [...(o.relays as string[])],
     relaysUpdatedAt: 0,
-    previousRelays: null,
+    previousRelays: [],
+    guardianPin: null,
     farewell: [],
   }
 
@@ -985,7 +1117,7 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
   if (ap.expiresAt !== null) return { ok: false, reason: 'expires_at_not_allowed' }
   if (ap.issuedAt > now + FUTURE_SKEW_SECONDS) return { ok: false, reason: 'future' }
   state.roots.push({ root: ap.signer, pinnedAt: now, via: 'pair' })
-  bindKey(state, ap)
+  bindKey(state, ap, now)
   return { ok: true, reason: 'paired', state: normalise(state), root: ap.signer, workingKey: ap.key }
 }
 
@@ -1031,6 +1163,7 @@ export interface ProjectedState {
     signer: string
     statement: string
     issuedAt: number
+    receivedAt: number
     expiresAt: number
     confirmedAt: number | null
     takesEffectAt: number | null
@@ -1043,6 +1176,7 @@ export interface ProjectedState {
   clauses: HeldClause[]
   relays: string[]
   statusRelays: string[]
+  guardianPin: GuardianPinRecord | null
 }
 
 export function projectState(state: GuardianState, now: number): ProjectedState {
@@ -1058,6 +1192,7 @@ export function projectState(state: GuardianState, now: number): ProjectedState 
       signer: p.signer,
       statement: p.id,
       issuedAt: p.issuedAt,
+      receivedAt: p.receivedAt,
       expiresAt: p.expiresAt,
       confirmedAt: p.confirmedAt,
       takesEffectAt: p.takesEffectAt,
@@ -1070,6 +1205,7 @@ export function projectState(state: GuardianState, now: number): ProjectedState 
     clauses: state.clauses.map((c) => ({ ...c })),
     relays: [...state.relays],
     statusRelays: statusRelays(state, now),
+    guardianPin: state.guardianPin ? { ...state.guardianPin } : null,
   }
 }
 

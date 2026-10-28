@@ -76,7 +76,7 @@ describe('parseStatement: malformed statements are ignored', () => {
     ['v missing', raw([dW, pW, M], content({ issuedAt: T0 })), 'bad_version'],
     ['v "1"', raw([dW, pW, M], content({ v: '1', issuedAt: T0 })), 'bad_version'],
     ['issuedAt missing', raw([dW, pW, M], content({ v: 1 })), 'bad_issued_at'],
-    ['issuedAt fractional', raw([dW, pW, M], content({ v: 1, issuedAt: T0 + 0.5 })), 'bad_issued_at'],
+    ['issuedAt fractional', raw([dW, pW, M], content({ v: 1, issuedAt: T0 + 0.5 })), 'content_not_json'],
     ['issuedAt negative', raw([dW, pW, M], content({ v: 1, issuedAt: -1 })), 'bad_issued_at'],
     ['label 65 bytes', raw([dW, pW, M], content({ ...good, label: 'a'.repeat(65) })), 'bad_label'],
     ['label 66 bytes multi-byte', raw([dW, pW, M], content({ ...good, label: 'é'.repeat(33) })), 'bad_label'],

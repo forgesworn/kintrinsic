@@ -58,6 +58,7 @@ describe('builders', () => {
 })
 
 describe('family roster merge', () => {
+  const REP = [{ root: R2.pk, keys: [W2.pk] }]
   const kid = 'aa'.repeat(32)
   const dev = (m: string) => ({ machine: m.repeat(32), platform: 'android', name: `dev ${m}` })
   const roster = (issuedAt: number, devices: ReturnType<typeof dev>[], from = W2, root = R2) =>
@@ -73,7 +74,7 @@ describe('family roster merge', () => {
     }],
   }
   test('newest issuedAt per subject wins; self-paired and STATUS-seen devices are never deleted', () => {
-    const r = mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, [dev('44')]) }, [R1.pk, R2.pk])
+    const r = mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, [dev('44')]) }, [{ root: R1.pk, keys: [W1.pk] }, { root: R2.pk, keys: [W2.pk] }], T0)
     expect(r.ok).toBe(true)
     if (!r.ok) return
     const ch = r.roster.children[0]!
@@ -84,14 +85,18 @@ describe('family roster merge', () => {
     expect(isDeviceConfirmed(markDeviceStatusSeen(r.roster, added.machine).children[0]!.devices.find((d) => d.machine === added.machine)!)).toBe(true)
   })
   test('an older or same-second record does not replace the local one', () => {
-    const r = mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0, [dev('44')]) }, [R2.pk])
+    const r = mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0, [dev('44')]) }, REP, T0)
     expect(r.ok && r.roster).toEqual(local)
   })
   test('only from a W approved by a root the wards report, sealed by that W', () => {
-    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, []) }, [R1.pk])).toEqual({ ok: false, reason: 'root_not_reported' })
-    expect(mergeRoster(local, { sealAuthor: X.pk, inner: roster(T0 + 1, []) }, [R2.pk])).toEqual({ ok: false, reason: 'seal_mismatch' })
+    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, []) }, [{ root: R1.pk, keys: [W2.pk] }], T0)).toEqual({ ok: false, reason: 'root_not_reported' })
+    // A withdrawn W is no longer listed under its root.
+    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, []) }, [{ root: R2.pk, keys: [] }], T0)).toEqual({ ok: false, reason: 'key_not_reported' })
+    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 301, []) }, REP, T0)).toEqual({ ok: false, reason: 'future' })
+    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 300, []) }, REP, T0).ok).toBe(true)
+    expect(mergeRoster(local, { sealAuthor: X.pk, inner: roster(T0 + 1, []) }, REP, T0)).toEqual({ ok: false, reason: 'seal_mismatch' })
     const wrongApproval = sign(W2, familyRosterTemplate({ children: [], approval: approval(R2, W1, { issuedAt: T0 }), createdAt: T0 }))
-    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: wrongApproval }, [R2.pk])).toEqual({ ok: false, reason: 'bad_approval' })
+    expect(mergeRoster(local, { sealAuthor: W2.pk, inner: wrongApproval }, REP, T0)).toEqual({ ok: false, reason: 'bad_approval' })
   })
 })
 
