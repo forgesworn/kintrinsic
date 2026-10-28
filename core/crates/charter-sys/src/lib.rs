@@ -21,6 +21,7 @@ pub mod error;
 pub(crate) mod fsutil;
 pub mod layer;
 pub mod persistence;
+pub mod presence_token;
 pub mod relay;
 pub mod relay_auth;
 pub mod signer;
