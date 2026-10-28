@@ -192,8 +192,8 @@ Rules, taken from Kindependence where it already solved them:
      on the other's phone or Heartwood, and it matches "keys once across
      Kindred".
    - Either way, both have equal authority over rules, and the newest wins.
-   - Recommended: **(b)**. It costs one more statement and a pin list on
-     wards, and it is the version that survives two households.
+   - **Decided 2026-10-28: (b).** It costs one more statement and a pin list
+     on wards, and it is the version that survives two households.
 2. Is **R the parent's main My Signet identity,** shared with Kindependence
    and Kinterest (keys once across the suite), or a derived "Kintrinsic
    guardian" persona? A shared identity is the Kindred goal, but it means
