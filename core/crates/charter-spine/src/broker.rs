@@ -1770,6 +1770,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             // signer, at or below the last one.
             Err(_)
                 if signers.is_signer(&event.pubkey)
+                    && charter_verify::id_is_consistent(event)
                     && charter_verify::signature_is_valid(event)
                     && Some(event.created_at) <= pairing.relays_updated_at =>
             {

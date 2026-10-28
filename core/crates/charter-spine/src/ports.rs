@@ -119,7 +119,13 @@ impl GuardianApplied {
 /// guardian and does not implement the section: the pinned key is the whole
 /// signer set, and statements are dropped exactly as an unknown kind is.
 pub trait GuardianStatements: Send + Sync {
-    /// The current signer set (a snapshot; asked once per inbound event).
+    /// The signer set, as a LIVE handle: every query on it must answer for
+    /// the set as it is at that moment, for the port's whole lifetime, not a
+    /// copy taken when this was called. Three holders keep it: the broker
+    /// (asked afresh per inbound event), `CharterTransport::set_signer_set`
+    /// (recipients of every outbound wrap) and `WardLinkConfig::signers`
+    /// (who may complete a local-link handshake). The last two are wired once,
+    /// so a snapshot would never see a working key approved afterwards.
     fn signers(&self) -> Arc<dyn SignerSet>;
 
     /// Whether this ward processes statements and presence confirmations at
