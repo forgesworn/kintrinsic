@@ -11,7 +11,7 @@ import {
 import { useCharter } from "../store/store";
 import type { SendResult } from "../store/clauseDelivery";
 import { goToWard } from "../domain/wardRoute";
-import { updateAvailable } from "../store/updateCheck";
+import { linuxUpdateOffer, updateAvailable } from "../store/updateCheck";
 import {
   accountSummary,
   canOpenInstallWindow,
@@ -414,7 +414,7 @@ function UnclaimedPhones() {
 }
 
 function DeviceRow({ child, device }: { child: Child; device: Device }) {
-  const { unpairDevice, removeDevice, reconnectDevice, deviceStatus, updateManifest, debManifest, sendCharterUpdate, openMaintenanceWindow } =
+  const { unpairDevice, removeDevice, reconnectDevice, deviceStatus, updateManifest, debManifest, sendCharterUpdate, sendLinuxUpdate, openMaintenanceWindow } =
     useCharter();
   // When the install window this guardian opened runs out — an absolute expiry,
   // matching the clause, so the screen closes it on its own instead of latching
@@ -450,9 +450,10 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
     : undefined;
   const canUpdate =
     paired && device.platform === "android" && updateAvailable(updateManifest, reportedVersion);
-  // Linux is told, not offered: the laptop reports its version now, but Kintrinsic
-  // can't remotely install a .deb yet, so pointing at the download page is the
-  // honest affordance rather than a button that would do nothing.
+  // Linux: from charterd 0.7.12 the laptop installs a release the guardian's
+  // `update` clause and the release key's announcement both name, so a behind
+  // laptop gets "Install update". An older charterd never reads the clause, so
+  // it is told, not offered: the download page is the honest affordance there.
   // A Kintrinsic update that keeps failing. Previously invisible: the phone
   // retried in silence while this card showed only an Update button that kept
   // reappearing, which looks identical to "downloading" (two days lost,
@@ -460,11 +461,8 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
   const health = device.devicePubkey
     ? deviceStatus[device.devicePubkey]?.updateHealth
     : undefined;
-  const linuxBehind =
-    paired &&
-    device.platform === "linux" &&
-    updateAvailable(debManifest as never, reportedVersion);
-  const updateArrived = updateSent && !canUpdate;
+  const linuxOffer = linuxUpdateOffer(device, deviceStatus, debManifest);
+  const updateArrived = updateSent && !canUpdate && !linuxOffer;
   // Reconnect only ever reuses a REAL stored key (the old path re-"scanned" a
   // sentinel string and clobbered the key with a mock). Without one, the honest
   // route back is the full set-up flow.
@@ -613,9 +611,11 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
           <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
             Update isn’t completing — {health.lastError ?? "the install keeps failing"} (
             {health.attempts} tries since {new Date(health.sinceUnix * 1000).toLocaleDateString()}).
-            {openWindow.open
-              ? " You can repair it by cable while installs are open."
-              : " Allow installs to repair it by cable."}
+            {device.platform === "linux"
+              ? " It tries again every six hours; you can also install it by hand from the download page."
+              : openWindow.open
+                ? " You can repair it by cable while installs are open."
+                : " Allow installs to repair it by cable."}
           </div>
         )}
         {gap && (
@@ -630,10 +630,24 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
             guessing. Worth asking {child.name} about.
           </div>
         )}
-        {linuxBehind && debManifest && (
+        {linuxOffer?.kind === "download" && (
           <div className="card-sub">
-            Update available ({debManifest.versionName}) — install it from{" "}
+            Update available ({linuxOffer.deb.versionName}) — install it from{" "}
             <a href="https://charter.signet.you/download">the download page</a>.
+          </div>
+        )}
+        {linuxOffer?.kind === "install" && !updateSent && (
+          <div className="card-sub">Update available ({linuxOffer.deb.versionName}).</div>
+        )}
+        {linuxOffer?.kind === "install" && updateSent === true && (
+          <div className="card-sub">
+            Update sent. The computer installs it when it next hears from you —
+            the version above changes when it lands.
+          </div>
+        )}
+        {linuxOffer?.kind === "install" && typeof updateSent === "object" && (
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            Update not sent yet. {updateSent.message}
           </div>
         )}
         {healthNotes.length > 0 && healthStale && (
@@ -660,6 +674,17 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
               }}
             >
               Update Kintrinsic
+            </Button>
+          )}
+          {linuxOffer?.kind === "install" && !updateSent && (
+            <Button
+              variant="ghost"
+              aria-label={`Install Kintrinsic ${linuxOffer.deb.versionName} on ${device.label}`}
+              onClick={() => {
+                void sendLinuxUpdate(child.id, device.id).then((sent) => setUpdateSent(sent));
+              }}
+            >
+              Install update
             </Button>
           )}
           {openWindow.open && (

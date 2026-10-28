@@ -1171,8 +1171,49 @@ target (one was purged under the 0.6.9 release and every ward that trusted it
 alone retried HTTP 404 indefinitely, 2026-08-27). The guardian's own shell is
 handled the same way: GitHub from shell 0.1.15, Blossom below it.
 
-**Platform scope: Android only.** Charter for Linux updates through `apt` /
-the published `.deb`, so `charterd` stores this clause and never reads it.
+**Platform scope: Android, and Linux from 0.7.12 (versionCode 712).** An
+older `charterd` stores this clause and never reads it; its parent installs
+the `.deb` by hand, as before.
+
+#### On Linux (from 0.7.12)
+
+The guardian taps **Install update** on a Linux device; `charterd` installs a
+release it has itself verified, as root, and only with that consent. Nothing
+installs on its own: without a standing clause naming a newer version, the
+staged `.deb` just waits, as it always has.
+
+The guardian fills the same shape from the `charter-deb` feed:
+
+- `packageName`: `"kintrinsic"` (the Debian package). Any other value is
+  refused.
+- `versionCode` / `versionName`: the release's.
+- `url`: the `.deb` download (same naming rules as for Android).
+- `apkSha256`: the `.deb`'s sha256 (the field name is historical).
+- `signerCertSha256`: the release key, `RELEASE_PUBKEY_HEX` (x-only, hex).
+  This is the Linux equivalent of the signing-certificate continuity check:
+  `charterd` refuses a clause that names any other key.
+
+**Two keys must agree.** `charterd` installs only when the guardian's clause
+AND a kind-30063 `charter-deb` announcement, verified against the compiled-in
+release key, name the same `versionCode` and the same sha256. A guardian key
+alone cannot push arbitrary bytes onto the machine, and the release key alone
+cannot make a family's machine install anything.
+
+Rules:
+
+- Level-triggered. Installed `versionCode >= ` the clause's: nothing happens.
+- The bytes are the staged file from the release check when its sha256
+  matches; otherwise `charterd` fetches `url` (then the Blossom address of
+  the hash) under the same sha256 + size pins and stages it the same way. A
+  mismatch is dropped, never installed.
+- The install runs outside `charterd`'s own service, because the package's
+  `postinst` restarts `charterd`:
+  `systemd-run --unit=kintrinsic-update-<versionCode> --collect` running
+  `apt-get install -y <staged .deb>` with `DEBIAN_FRONTEND=noninteractive`.
+  The staged file lives in a root-only directory.
+- At most one attempt per `versionCode` every 6 hours. Attempts and the last
+  error ride STATUS `updateHealth`, exactly as on Android.
+- A downgrade (`versionCode` below the installed one) is refused.
 
 ### Software release announcements (kind 30063)
 
@@ -1243,7 +1284,7 @@ against this table rather than assume parity (MyCharter: `wardenSupport`).
 | `learning` (5) | enforced | **stored, inert** | |
 | `apprules` (6) | enforced | enforced | |
 | `tethering` (7) | n/a (no hotspot to govern) | enforced | |
-| `update` (8) | n/a (`apt` / `.deb`) | enforced | |
+| `update` (8) | enforced (≥ 0.7.12; `.deb`, two-key) | enforced | Linux installs only what the guardian clause and the release announcement both name |
 | `lifeline` (9) | **stored, inert** | enforced | no call/torch/break-glass on the Linux lock |
 | `buckets` (10) | enforced | enforced | |
 | `maintenance` (11) | n/a (no install lock) | enforced | |

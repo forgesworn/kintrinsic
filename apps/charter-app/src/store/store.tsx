@@ -106,7 +106,13 @@ import {
   type RoutedWrap,
 } from "../signer/routePublish";
 import type { UpdateManifest } from "../wire/types";
-import { fetchManifest, fetchDebManifest, APK_PATH, type DebManifest } from "./updateCheck";
+import {
+  fetchManifest,
+  fetchDebManifest,
+  linuxUpdateOffer,
+  APK_PATH,
+  type DebManifest,
+} from "./updateCheck";
 import { makeEmpty, makeSeed } from "../data/seed";
 import { decisionPath } from "./decisionGate";
 import { nextCursor, windowSince } from "./relayWindow";
@@ -571,6 +577,10 @@ export interface CharterContextValue {
   openMaintenanceWindow: (childId: string, minutes: number) => Promise<SendResult>;
   /** Publish the `update` clause to every governed device the child uses. */
   sendCharterUpdate: (childId: string) => Promise<SendResult>;
+  /** "Install update" on ONE laptop (charterd ≥ 0.7.12): signs the Linux
+   *  `update` clause from the `charter-deb` feed to that device alone.
+   *  Resolves `false` when nothing was sent (cancelled, no signer, no offer). */
+  sendLinuxUpdate: (childId: string, deviceId: string) => Promise<SendResult>;
   /**
    * Turn USB / wireless debugging on (optionally until `until`, unix seconds) or
    * off for ONE ward device: signs the `debugging` clause to that device's key
@@ -1444,7 +1454,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       fetchDebManifest().catch(() => null),
     ]);
     const ward = relay.ward ?? apk;
-    const linux = relay.deb ? { ...relay.deb, path: "" } : deb;
+    // The relay announcement carries the .deb's sha256 as `apkSha256`.
+    const linux = relay.deb ? { ...relay.deb, path: "", sha256: relay.deb.apkSha256 } : deb;
     if (ward) setUpdateManifest(ward);
     if (linux) setDebManifest(linux);
   }, []);
@@ -1639,6 +1650,44 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       }
     },
     [updateManifest, addActivity, queuedDelivery],
+  );
+
+  const sendLinuxUpdate = useCallback(
+    async (childId: string, deviceId: string): Promise<SendResult> => {
+      const s = signer.current;
+      if (!s?.signDebUpdateClause || !s.status().connected) return false;
+      const device = stateRef.current.children
+        .find((c) => c.id === childId)
+        ?.devices.find((d) => d.id === deviceId);
+      if (!device?.devicePubkey) return false;
+      const offer = linuxUpdateOffer(device, deviceStatusRef.current, debManifest);
+      if (offer?.kind !== "install") return false;
+      let queued: Extract<ClauseDelivery, { outcome: "queued" }> | null = null;
+      let wraps: string[] | undefined;
+      try {
+        try {
+          wraps = (await s.signDebUpdateClause(childId, device.devicePubkey, offer.deb, offer.url))
+            .wraps;
+        } catch (err) {
+          if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+          queued = queuedDelivery(err);
+          wraps = queued.wraps;
+        }
+        addActivity(
+          childId,
+          "rule-changed",
+          `You sent a Kintrinsic update (${offer.deb.versionName}) to ${device.label}` +
+            (queued ? undeliveredNote(queued) : ""),
+          undefined,
+          wraps,
+        );
+        return queued ? { outcome: "queued", message: queuedSendLine(queued) } : true;
+      } catch (err) {
+        if (err instanceof SignerCancelled) return false;
+        throw err;
+      }
+    },
+    [debManifest, addActivity, queuedDelivery],
   );
 
   const setDeviceDebugging = useCallback(
@@ -2750,6 +2799,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       standDown,
       openMaintenanceWindow,
       sendCharterUpdate,
+      sendLinuxUpdate,
       setDeviceDebugging,
       phonePairing,
       beginPhonePairing,
@@ -2805,6 +2855,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       standDown,
       openMaintenanceWindow,
       sendCharterUpdate,
+      sendLinuxUpdate,
       setDeviceDebugging,
       phonePairing,
       beginPhonePairing,

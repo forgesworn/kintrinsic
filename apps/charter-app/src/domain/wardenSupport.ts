@@ -54,7 +54,12 @@ export type WardenFeature =
   // the device is otherwise free. Linux-only for now — Android's foreground-
   // package reading of the same model is a later pass (the design doc's own
   // §3.3 build order), not yet landed on any ward build.
-  | "timeModel";
+  | "timeModel"
+  // Guardian-triggered self-update ("Install update"). Every Android ward
+  // build reads the `update` clause; charterd from 0.7.12 (712) — older
+  // laptops store it and never read it, so the guardian points at the
+  // download page instead.
+  | "selfUpdate";
 
 /**
  * A platform whose warden does not enforce this clause AT ALL — no version of
@@ -154,6 +159,10 @@ const MIN_VERSION: Record<WardenFeature, Partial<Record<Device["platform"], Thre
   // including this one is, and the day Android lands it this line becomes a
   // real threshold, not a re-interpretation of an old one.
   timeModel: { android: NEVER, linux: 706 },
+  // charterd 0.7.12 (712) installs a release the `update` clause and the
+  // release key's announcement both name (contract § "On Linux (from
+  // 0.7.12)"). Android has read the clause since self-update shipped.
+  selfUpdate: { linux: 712 },
 };
 
 /** Every paired device a clause would actually be sealed to. */

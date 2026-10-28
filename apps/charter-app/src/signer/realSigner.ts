@@ -9,7 +9,7 @@
 
 import type { NostrEvent } from "nostr-tools";
 import type { Policy, SignerKind, SignerState } from "../domain/types";
-import { appRulesToGrant, debuggingToGrant, policyToClauses, updateToGrant } from "../wire/clause";
+import { appRulesToGrant, debUpdateToGrant, debuggingToGrant, policyToClauses, updateToGrant } from "../wire/clause";
 import { effectivePolicyForDevice } from "../domain/effectivePolicy";
 import type { ClausePayload, GrantGift, GrantStandDown, UpdateManifest } from "../wire/types";
 import {
@@ -592,6 +592,39 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
+    return this.settle(held);
+  }
+
+  async signDebUpdateClause(
+    childId: string,
+    devicePubkey: string,
+    deb: { versionCode: number; versionName: string; sha256: string },
+    url: string,
+  ): Promise<SignOutcome> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const target = this.deps.resolveChild(childId);
+    if (!target) throw new Error(`unknown child: ${childId}`);
+    const device = target.devices.find((d) => d.pubkey === devicePubkey);
+    if (!device) {
+      throw new Error(
+        `That device isn't paired to ${target.name ?? childId}, so the update couldn't be sent to it.`,
+      );
+    }
+    const held = new SendBatch();
+    // Only THIS laptop is a recipient: the `update` slot is one per ward, and
+    // a phone handed this clause would drop its own pending update for it.
+    this.requireDeliverable({ ...target, devices: [device] }, childId);
+    await this.authorize(
+      "clause",
+      `Install Kintrinsic ${deb.versionName} on ${this.nameOf(devicePubkey)}`,
+    );
+    const issuedAt = this.nextIssuedAt();
+    const body = debUpdateToGrant(deb, url);
+    const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
+    if (target.subject) clause.subject = target.subject;
+    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    await this.send(target.relays, wrap, CLAUSE_META, held);
     return this.settle(held);
   }
 

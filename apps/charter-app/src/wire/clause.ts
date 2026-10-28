@@ -9,6 +9,7 @@
 // supersedes any previously-cached one with the parent's true current intent.
 
 import { normalizeWebDomain } from "../domain/webDomain";
+import { RELEASE_PUBKEY_HEX } from "../release/releaseTrust";
 import type { AlwaysAvailablePolicy, AppsPolicy, Budget, BucketsPolicy, LearningPolicy, Lifeline, ListeningPolicy, Policy, Schedule, ScheduleWindow, Tethering, WebPolicy } from "../domain/types";
 import type {
   AppBucket,
@@ -460,6 +461,32 @@ export function updateToGrant(manifest: UpdateManifest, url: string): GrantUpdat
     url,
     apkSha256: manifest.apkSha256,
     signerCertSha256: manifest.certSha256,
+  };
+}
+
+/** The Debian package charterd's `update` clause must name (contract § "On
+ *  Linux (from 0.7.12)"). Any other value is refused by the laptop. */
+export const DEB_PACKAGE_NAME = "kintrinsic";
+
+/**
+ * The Linux `update` clause body, filled from the `charter-deb` feed: the
+ * .deb's sha256 rides `apkSha256` (the field name is historical) and the
+ * release key rides `signerCertSha256` — the Linux equivalent of the signing-
+ * cert continuity check. charterd installs only when this AND the release
+ * key's own announcement name the same versionCode and sha256.
+ */
+export function debUpdateToGrant(
+  deb: { versionCode: number; versionName: string; sha256: string },
+  url: string,
+): GrantUpdate {
+  return {
+    v: 1,
+    packageName: DEB_PACKAGE_NAME,
+    versionCode: deb.versionCode,
+    versionName: deb.versionName,
+    url,
+    apkSha256: deb.sha256,
+    signerCertSha256: RELEASE_PUBKEY_HEX,
   };
 }
 

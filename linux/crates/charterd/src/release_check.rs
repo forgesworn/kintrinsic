@@ -1,11 +1,13 @@
 //! D2: the laptop learns about its own updates from **signed relay events**
 //! and stages the hash-verified `.deb` locally — no website in the loop.
 //!
-//! What this does NOT do: install. apt has no Blossom, and charterd silently
-//! self-replacing is not the model — the staged file plus a journald line
-//! hands the parent the same one-command install they do today, sourced
-//! decentralized. The guardian console shows the "behind" notice from the
-//! same event.
+//! What this module does NOT do: install. `charterd` never installs anything
+//! without a guardian clause: from 0.7.12 an `update` clause naming a newer
+//! version, backed by a release-key announcement of the same version and
+//! sha256, installs through [`crate::self_update`]. Without one, the staged
+//! file plus a journald line hands the parent the same one-command install
+//! they always had, sourced decentralised. The guardian console shows the
+//! "behind" notice from the same event.
 //!
 //! Trust: `verify_software_release` against [`RELEASE_PUBKEY_HEX`] (compiled
 //! in — a NEW trust-anchor category: every other pin is learned at pair
@@ -126,6 +128,14 @@ pub fn select_release(
     best
 }
 
+/// Create `dir` if needed and make it root-only (0700): the staged `.deb` is
+/// what a guardian-triggered update hands to `apt-get` as root.
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
 /// The staged path a release would land at (stable per version).
 pub fn staged_path(dir: &Path, r: &SoftwareRelease) -> PathBuf {
     dir.join(format!("charter_{}_amd64.deb", r.version_name))
@@ -152,7 +162,7 @@ pub fn stage_bytes(bytes: &[u8], r: &SoftwareRelease, dir: &Path) -> Option<Stag
         );
         return None;
     }
-    if fs::create_dir_all(dir).is_err() {
+    if ensure_private_dir(dir).is_err() {
         return None;
     }
     let dest = staged_path(dir, r);

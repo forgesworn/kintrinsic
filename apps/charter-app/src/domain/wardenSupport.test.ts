@@ -479,3 +479,14 @@ describe("supportNote", () => {
     expect(supportNote(s, "A weekly allowance")).toBeNull();
   });
 });
+
+describe("selfUpdate", () => {
+  it("needs charterd 0.7.12 on a laptop and any ward build on a phone", () => {
+    const old = { [laptop.devicePubkey as string]: status({ appVersionCode: 711 }) };
+    expect(wardenSupport([laptop], old, "selfUpdate").tooOld).toEqual([laptop]);
+    const ok = { [laptop.devicePubkey as string]: status({ appVersionCode: 712 }) };
+    expect(wardenSupport([laptop], ok, "selfUpdate").tooOld).toEqual([]);
+    const p = { [phone.devicePubkey as string]: status({ appVersionCode: 1 }) };
+    expect(wardenSupport([phone], p, "selfUpdate").tooOld).toEqual([]);
+  });
+});
