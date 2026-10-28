@@ -1,20 +1,20 @@
 {
   "android": {
-    "version": "0.1.19",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.19/kintrinsic-0.1.19.apk",
-    "sha256": "14881b31ad6871f6d6814c1a787304cb60bd2b22617e6a554d474498c70b8a7a",
-    "mirror": "https://nostr.download/14881b31ad6871f6d6814c1a787304cb60bd2b22617e6a554d474498c70b8a7a.apk"
+    "version": "0.1.20",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.1.20/kintrinsic-0.1.20.apk",
+    "sha256": "a616cffe1b1a487cc27899c9f2e030b16b2b3b43d29e2e12b8bec90be655d967",
+    "mirror": "https://nostr.download/a616cffe1b1a487cc27899c9f2e030b16b2b3b43d29e2e12b8bec90be655d967.apk"
   },
   "ward": {
-    "version": "0.6.16",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.16/kintrinsic-ward-0.6.16.apk",
-    "sha256": "cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1",
-    "mirror": "https://nostr.download/cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1.apk"
+    "version": "0.6.17",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.17/kintrinsic-ward-0.6.17.apk",
+    "sha256": "4ef5adf06d325ff99c79e63836764e351b8d4892cb86fc3ecef7b9f9bf070f3a",
+    "mirror": "https://nostr.download/4ef5adf06d325ff99c79e63836764e351b8d4892cb86fc3ecef7b9f9bf070f3a.apk"
   },
   "linux": {
-    "version": "0.7.11",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.7.11/kintrinsic_0.7.11_amd64.deb",
-    "sha256": "3e6dd5a3caabf5f72486b650b48c0eaa186b8f49bd15fa9a2277548bda4bec0c",
-    "mirror": "https://nostr.download/3e6dd5a3caabf5f72486b650b48c0eaa186b8f49bd15fa9a2277548bda4bec0c.deb"
+    "version": "0.7.12",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.7.12/kintrinsic_0.7.12_amd64.deb",
+    "sha256": "f324d92d4626a5be081206133a432da7e28253364aaa86be14812e133c1dbfd2",
+    "mirror": "https://nostr.download/f324d92d4626a5be081206133a432da7e28253364aaa86be14812e133c1dbfd2.deb"
   }
 }
