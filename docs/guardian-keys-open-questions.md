@@ -461,3 +461,108 @@ future refusal. Per-child `content` clauses (with a `subject`) follow rules 4
 and 5.
 
 **Raised by:** batch 2a.
+
+## A PAIR_OFFER whose inner event is not signed
+
+**Where:** *Scan-to-pair with a working key*; `charter-guardians`
+`pair_from_offer` (and the reference's `pairFromOffer`), which verify the inner
+kind-31117 event's id and signature; `CharterTransport::send_pair_offer`, which
+sends it as an unsigned rumor; `charter-spine` `scan_to_pair`.
+
+**Question:** the guardian app signs its PAIR_OFFER inner event, but the Rust
+guardian side does not (the seal alone authenticates it, as for a rumor). Must
+the inner offer be signed?
+
+**Build's interim reading:** a signed inner offer goes through
+`pair_from_offer` in full. An unsigned one gets the same token checks and pins
+its seal author, but only when it carries no `approval`: an offer with an
+approval needs a signed inner event, and is refused otherwise (fail closed).
+
+**Raised by:** batch 2c-A.
+
+## An unreadable guardian-keys state
+
+**Where:** rule 10; `charter-spine` `GuardianKeys::load`.
+
+**Question:** the ward's guardian-keys state file is there but cannot be read
+or parsed. Migrating afresh from the pairing record would re-admit a pinned
+root that has since been removed or moved. What should the ward do?
+
+**Build's interim reading:** fail closed. The signer set is empty, so nothing
+signed is accepted and no local-link handshake completes. There are no
+recipients, so nothing is encrypted to a key that may have departed. The
+stored clauses stay enforced. The file is left as it is; a read error is
+retried at each timer advance. Recovery is a local unpair by an administrator
+(or restoring the file). The guardian sees the ward go silent: the design
+session may prefer a STATUS to the last known roots saying the ward is stuck.
+
+**Raised by:** batch 2c-A.
+
+## The clause pairing floor on a ward that paired before the section
+
+**Where:** *Who may sign what* ("All existing checks (… pairing floor …) still
+apply"); `accept_clause` (refuses a CLAUSE issued before `paired_at`);
+`GuardianKeys::load`.
+
+**Question:** a ward that paired before the section never had a pairing floor
+for clauses, only the replay floor. Its migrated state takes `paired_at` from
+the pairing record, so from the upgrade on it refuses a clause issued before
+the current pairing. Is that intended? (It also refuses, on any ward, a clause
+signed by a guardian whose clock was behind the ward's when they paired.)
+
+**Build's interim reading:** yes, as the contract and the vectors have it: a
+clause from before the current pairing belongs to an earlier one. The slots a
+migrated ward already holds keep their own replay floors (the state seeds
+each slot from the clause store the first time a clause for it arrives; a
+seeded clause whose signer has since departed keeps its replay floor, fail
+closed).
+
+**Raised by:** batch 2c-A.
+
+## One presence token at a time
+
+**Where:** *Presence confirmation*; `register_presence_token`,
+`GuardianKeys::mint_presence_token`.
+
+**Question:** the state can hold several live tokens. May a ward show more
+than one code at once?
+
+**Build's interim reading:** no. Minting a token clears every earlier one, so
+the code on screen is the only one that works. Tokens live in the `0600`
+guardian-keys state and are spent by the confirmation in the same write; a
+display copy may also be kept in the presence-token file, which the
+confirmation takes down if it still holds that token.
+
+**Raised by:** batch 2c-A.
+
+## Two records of the relay list
+
+**Where:** rule 11; the pairing record's `relays` (what the transport reads,
+changed outside the broker by a pasted relay code) and the guardian-keys
+state's `relays` and `previousRelays`.
+
+**Question:** which one is authoritative, and does a pasted relay code start
+the 7-day previous-relays window too?
+
+**Build's interim reading:** the pairing record. A gift-wrapped RELAYS must
+pass both the pairing record's checks and the state's `apply_relays`, and is
+recorded in the state (with any guardian PIN) before the pairing record is
+saved. When the adapter loads and finds the pairing's list differs from the
+state's (a pasted code), it records that as a change, so the window covers it.
+
+**Raised by:** batch 2c-A.
+
+## Telling a guardian that the ward's clock is behind
+
+**Where:** *Who may sign what* (the 300-second future refusal); the CLAUSE
+ACK and STATUS counters.
+
+**Question:** a ward whose clock is more than 300 seconds behind refuses every
+new clause, tightening ones included, and the guardian sees a plain `refused`.
+Android locks its clock; a Linux ward before NTP, or with its clock set back
+while offline, does not. Should the ACK and STATUS name this refusal?
+
+**Build's interim reading:** the refusal stays, as the contract requires; it
+is reported as `refused`, like any other. Batch 2a review, L1.
+
+**Raised by:** batch 2c-A.
