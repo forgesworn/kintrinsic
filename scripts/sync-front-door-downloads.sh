@@ -4,8 +4,9 @@
 # publish scripts put them on their GitHub Release (the primary host) and
 # mirror them to Blossom. This writes downloads.json — which download.html
 # reads to set the download buttons — AND rewrites the page's no-JS fallback
-# hrefs, version labels and structured-data downloadUrl to match, so nothing
-# is left to hand-edit.
+# hrefs, version labels, printed checksums and structured-data downloadUrl to
+# match, so nothing is left to hand-edit. Platforms: android (the guardian
+# app), ward (the child's phone app) and linux.
 #
 # Per platform the button is the GitHub Release download (the first GitHub
 # entry of the manifest's `urls`), and the secondary "mirror" link is the
@@ -17,7 +18,7 @@
 # pushes nothing and copies no binaries.
 set -euo pipefail
 cd "$(dirname "$0")/.."          # charter repo root
-PUB=apps/charter-app/public
+PUB="${CHARTER_PUBLIC_DIR:-apps/charter-app/public}"
 CY="${CHARTER_YOU_DIR:-./site}"
 
 [ -d "$CY" ] || { echo "front-door site dir not found at $CY (set CHARTER_YOU_DIR)"; exit 1; }
@@ -31,6 +32,15 @@ node --input-type=module -e '
   const [pub, site] = process.argv.slice(1);
   const HEX64 = /^[0-9a-f]{64}$/;
 
+  // These values are written into HTML attributes, text and JSON-LD, so
+  // refuse anything that could break out of them rather than escaping.
+  const VERSION = /^[0-9A-Za-z.+-]+$/;
+  const checkUrl = (file, what, u) => {
+    if (typeof u !== "string" || !u.startsWith("https://") || /["<>\x27 ]/.test(u)) {
+      throw new Error(`${file}: ${what} is not a plain https URL — refusing to write it into the page`);
+    }
+  };
+
   function platform(file, shaKey) {
     const m = JSON.parse(readFileSync(`${pub}/${file}`, "utf8"));
     const sha = m[shaKey];
@@ -39,15 +49,23 @@ node --input-type=module -e '
         typeof legacy !== "string" || !legacy.startsWith("https://")) {
       throw new Error(`${file} is missing version/url/sha — run the publish scripts first`);
     }
+    if (!VERSION.test(m.versionName)) {
+      throw new Error(`${file}: versionName ${JSON.stringify(m.versionName)} has unexpected characters — refusing to write it into the page`);
+    }
     const urls = Array.isArray(m.urls) ? m.urls : [];
     const github = urls.find((u) => isGithubReleaseUrl(u));
     const out = { version: m.versionName, url: github ?? legacy, sha256: sha };
     if (github && legacy !== github) out.mirror = legacy;
+    checkUrl(file, "url", out.url);
+    if (out.mirror) checkUrl(file, "mirror url", out.mirror);
     return out;
   }
 
   const dl = {
     android: platform("mycharter-apk.json", "apkSha256"),
+    // The child-phone (ward) app: charter-apk.json is the feed the ward app
+    // itself updates from. It is never installed by tapping the download.
+    ward: platform("charter-apk.json", "apkSha256"),
     linux: platform("charter-deb.json", "sha256"),
   };
   writeFileSync(`${site}/downloads.json`, JSON.stringify(dl, null, 2) + "\n");
@@ -69,6 +87,11 @@ node --input-type=module -e '
       (_, a) => a + (d.mirror ? "" : " hidden") + ">", `data-mirror="${key}" wrapper`);
     sub(new RegExp(`(<span data-ver="${key}">)[^<]*(</span>)`, "g"),
       (_, a, b) => a + d.version + b, `data-ver="${key}" label`);
+    // The printed checksum fallback. This substitution was missing, so the
+    // span kept whatever a person last typed in and went stale every release.
+    // Every platform must carry exactly this span or the run fails loudly.
+    sub(new RegExp(`(<span data-sha="${key}">)[^<]*(</span>)`, "g"),
+      (_, a, b) => a + d.sha256 + b, `data-sha="${key}" checksum`);
   }
   sub(/("downloadUrl": ")[^"]*(")/g, (_, a, b) => a + dl.linux.url + b, "structured-data downloadUrl");
   writeFileSync(page, html);

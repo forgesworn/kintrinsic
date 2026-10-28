@@ -5,12 +5,14 @@ install it, lock the account down, set screen-time limits (on the box **or**
 from your phone), and use it day to day. Targets **Linux Mint 22.x (Cinnamon /
 X11)**.
 
-> **Before you start — honest status.** This is the **first real walk-through**.
-> The code is built and tested, but it has not yet been proven on a real Mint
-> box end to end. Do this on a **spare machine or a VM**, with a **separate
-> admin account for you** (so a mis-set limit can't lock you out while we shake
-> out the rough edges). Steps that are still rougher than they should be for a
-> non-technical parent are flagged **⚠ rough edge**.
+> **Before you start — honest status.** This is still an early release. A
+> Linux Mint 22 laptop (Cinnamon on X11) has been running it as a live ward
+> since September 2026, so it has run on real Mint
+> 22 hardware. Other Mint versions, other desktops and Wayland sessions have not
+> been tried. Do this first on a **spare machine or a VM** if you can, with a
+> **separate admin account for you** (so a mis-set limit can't lock you out
+> while we shake out the rough edges). Steps that are still rougher than they
+> should be for a non-technical parent are flagged **⚠ rough edge**.
 
 ---
 

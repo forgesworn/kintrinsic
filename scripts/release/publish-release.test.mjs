@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,10 +62,15 @@ test("--from-draft --dry-run prints the manifest shape it would write, then refu
   try {
     const keyFile = join(dir, "release-key.hex");
     writeFileSync(keyFile, randomBytes(32).toString("hex"));
-    // The real committed apps/charter-app/public/mycharter-apk.json is at
-    // versionCode 17 (guardian-v0.1.16) — passing the same code must refuse.
+    // Passing the committed apps/charter-app/public/mycharter-apk.json's own
+    // versionCode must refuse. Read it rather than pin it: every guardian
+    // release bumps it.
+    const published = String(
+      JSON.parse(readFileSync(new URL("../../apps/charter-app/public/mycharter-apk.json", import.meta.url), "utf8"))
+        .versionCode,
+    );
     const r = run(
-      ["--from-draft", "guardian-v0.1.16", "--version-code", "17", "--dry-run", "--resume"],
+      ["--from-draft", "guardian-v0.1.16", "--version-code", published, "--dry-run", "--resume"],
       { CHARTER_RELEASE_KEY_FILE: keyFile },
     );
     assert.notEqual(r.status, 0);
@@ -74,7 +79,7 @@ test("--from-draft --dry-run prints the manifest shape it would write, then refu
     assert.match(r.stdout, /"apkSha256": "<sha256 of the downloaded asset>"/);
     assert.match(r.stdout, /"certSha256": "<verified signing cert>"/);
     // The guard's refusal — nothing published, no `gh` call ever made.
-    assert.match(r.stderr, /versionCode 17 <= published 17/);
+    assert.match(r.stderr, new RegExp(`versionCode ${published} <= published ${published}`));
     assert.match(r.stderr, /mycharter-apk\.json/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -5,6 +5,12 @@
     "sha256": "14881b31ad6871f6d6814c1a787304cb60bd2b22617e6a554d474498c70b8a7a",
     "mirror": "https://nostr.download/14881b31ad6871f6d6814c1a787304cb60bd2b22617e6a554d474498c70b8a7a.apk"
   },
+  "ward": {
+    "version": "0.6.16",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.16/kintrinsic-ward-0.6.16.apk",
+    "sha256": "cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1",
+    "mirror": "https://nostr.download/cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1.apk"
+  },
   "linux": {
     "version": "0.7.11",
     "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.7.11/kintrinsic_0.7.11_amd64.deb",
