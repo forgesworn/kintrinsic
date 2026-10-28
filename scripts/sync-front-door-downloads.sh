@@ -4,8 +4,9 @@
 # publish scripts put them on their GitHub Release (the primary host) and
 # mirror them to Blossom. This writes downloads.json — which download.html
 # reads to set the download buttons — AND rewrites the page's no-JS fallback
-# hrefs, version labels and structured-data downloadUrl to match, so nothing
-# is left to hand-edit.
+# hrefs, version labels, printed checksums and structured-data downloadUrl to
+# match, so nothing is left to hand-edit. Platforms: android (the guardian
+# app), ward (the child's phone app) and linux.
 #
 # Per platform the button is the GitHub Release download (the first GitHub
 # entry of the manifest's `urls`), and the secondary "mirror" link is the
@@ -48,6 +49,9 @@ node --input-type=module -e '
 
   const dl = {
     android: platform("mycharter-apk.json", "apkSha256"),
+    // The child-phone (ward) app: charter-apk.json is the feed the ward app
+    // itself updates from. It is never installed by tapping the download.
+    ward: platform("charter-apk.json", "apkSha256"),
     linux: platform("charter-deb.json", "sha256"),
   };
   writeFileSync(`${site}/downloads.json`, JSON.stringify(dl, null, 2) + "\n");
@@ -69,6 +73,11 @@ node --input-type=module -e '
       (_, a) => a + (d.mirror ? "" : " hidden") + ">", `data-mirror="${key}" wrapper`);
     sub(new RegExp(`(<span data-ver="${key}">)[^<]*(</span>)`, "g"),
       (_, a, b) => a + d.version + b, `data-ver="${key}" label`);
+    // The printed checksum fallback. This substitution was missing, so the
+    // span kept whatever a person last typed in and went stale every release.
+    // Every platform must carry exactly this span or the run fails loudly.
+    sub(new RegExp(`(<span data-sha="${key}">)[^<]*(</span>)`, "g"),
+      (_, a, b) => a + d.sha256 + b, `data-sha="${key}" checksum`);
   }
   sub(/("downloadUrl": ")[^"]*(")/g, (_, a, b) => a + dl.linux.url + b, "structured-data downloadUrl");
   writeFileSync(page, html);

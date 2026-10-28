@@ -88,8 +88,9 @@ The release itself (tag, CI draft, verify and publish) is described in
 `docs/releasing.md`; `publish-release.mjs --from-draft` also writes the
 channel's download manifest. For the site, after a release:
 
-1. Check `site/downloads.json` matches the new manifest
-   (`./scripts/sync-front-door-downloads.sh` copies it).
-2. Bump the `data-ver` fallbacks and the `data-sha` fallback in
-   `site/download.html`, and the file names in the verify commands there.
-3. Commit `site/` and push `main`.
+1. Run `./scripts/sync-front-door-downloads.sh` (`publish-release.mjs
+   --from-draft` already does). It rewrites `site/downloads.json` and every
+   `data-ver`, `data-sha`, `data-dl`, `data-dl-mirror` and `data-mirror`
+   fallback in `site/download.html` for the guardian, ward and Linux rows, and
+   fails if any of them is missing from the markup.
+2. Commit `site/` and push `main`.

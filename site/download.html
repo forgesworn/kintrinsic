@@ -58,8 +58,8 @@
     <div class="container">
       <p class="t-eyebrow">Download</p>
       <h1 class="t-display">Get&nbsp;Kintrinsic.</h1>
-      <p class="t-sub lede">Two pieces, and you only strictly need the first: the installer for your
-        child's computer, and the app for your own phone. No account, no store, no tracking.</p>
+      <p class="t-sub lede">Three pieces, and you only strictly need the first: the installer for your
+        child's computer, the app for your own phone, and the app for your child's phone. No account, no store, no tracking.</p>
     </div>
   </header>
 
@@ -97,6 +97,40 @@
             New here? The <a href="/setup.html" style="color: var(--kin-accent); font-weight: 600;">setup guide</a>
             walks every step.
           </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== ANDROID (CHILD'S PHONE) ===================== -->
+  <section id="ward" aria-label="Download the Kintrinsic app for your child's phone">
+    <div class="container">
+      <div class="download__card">
+        <div>
+          <p class="t-eyebrow">Your child's phone · Android</p>
+          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic ward app for Android <span data-ver="ward">0.6.16</span></h2>
+          <p style="color: var(--ink-2); max-width: 30rem;">
+            <b>The app for your child's phone, not yours.</b> It is not installed by tapping
+            the download. It goes onto a <b>factory-reset</b> phone over a USB cable, through
+            the guardian app's cable setup, which makes it the phone's device owner. Most
+            parents never need this file: the guardian app fetches and checks it for you.
+          </p>
+          <p style="margin-top: 1.4rem;">
+            <a class="btn btn-wax" href="https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.16/kintrinsic-ward-0.6.16.apk" data-dl="ward" download="Kintrinsic-ward.apk">Download the ward app (.apk)</a>
+          </p>
+          <p class="download__meta">
+            About 28 MB · only needed for the scripted fallback,
+            <code>android/scripts/charter-provision.sh</code>, which takes this file and an optional
+            pairing link
+            <span data-mirror="ward"> · or from the <a href="https://nostr.download/cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1.apk" data-dl-mirror="ward" style="color: var(--kin-accent);">Blossom mirror</a></span>
+          </p>
+        </div>
+        <div>
+          <ul class="reqs">
+            <li>A factory-reset phone with no accounts signed in</li>
+            <li>A USB cable, and the guardian app's cable setup (or the fallback script above)</li>
+            <li>Android 10 or newer, GrapheneOS included</li>
+          </ul>
         </div>
       </div>
     </div>
@@ -180,11 +214,15 @@
             <p><b>Android.</b> Every release comes with a <code>SHA256SUMS</code> file and a GitHub build-provenance
               attestation. Put the two files in one folder, then:</p>
             <code class="cmd">sha256sum -c SHA256SUMS<br>gh attestation verify kintrinsic-<span data-ver="android">0.1.19</span>.apk --repo forgesworn/kintrinsic</code>
+            <p>Or compare the file's SHA-256 by eye:</p>
+            <code class="cmd"><span data-sha="android">14881b31ad6871f6d6814c1a787304cb60bd2b22617e6a554d474498c70b8a7a</span>  kintrinsic-<span data-ver="android">0.1.19</span>.apk</code>
             <p>The Android app is signed with our release key. Its certificate's SHA-256 fingerprint is
               <code class="cmd">4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc</code></p>
+            <p><b>Ward app (child's phone).</b> Compare the file's SHA-256 with:</p>
+            <code class="cmd"><span data-sha="ward">cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1</span>  kintrinsic-ward-<span data-ver="ward">0.6.16</span>.apk</code>
             <p><b>Linux.</b> The current package predates that pipeline, so its SHA-256 is published in the release
               notes and here instead:</p>
-            <code class="cmd"><span data-sha="linux">bf2fd45b51a728879f6d0f4e8c42109181d499bd15d024987795f9f08553cbbb</span>  kintrinsic_<span data-ver="linux">0.7.11</span>_amd64.deb</code>
+            <code class="cmd"><span data-sha="linux">3e6dd5a3caabf5f72486b650b48c0eaa186b8f49bd15fa9a2277548bda4bec0c</span>  kintrinsic_<span data-ver="linux">0.7.11</span>_amd64.deb</code>
             <p>Save that line as a file and run <code>sha256sum -c</code> on it, or just compare the output of
               <code>sha256sum kintrinsic_<span data-ver="linux">0.7.11</span>_amd64.deb</code> by eye. Later Linux releases carry
               <code>SHA256SUMS</code> and an attestation too.</p>

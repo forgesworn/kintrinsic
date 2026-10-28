@@ -1308,7 +1308,10 @@ function SetupPhoneCable({
       session = await connectPhone();
 
       setDetail("Downloading the Kintrinsic app…");
-      const { bytes } = await fetchReleaseApk();
+      const { bytes, sha256, versionName } = await fetchReleaseApk();
+      setDetail(
+        `Checked Kintrinsic ${versionName} (SHA-256 ${sha256.slice(0, 16)}…${sha256.slice(-8)}).`,
+      );
 
       const token = beginPhonePairing(child.id);
       const bunkerUri = guardianPairingBunkerUri(guardianPubkeyHex(), DEFAULT_RELAYS, token);
