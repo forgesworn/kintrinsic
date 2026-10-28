@@ -40,6 +40,7 @@ pub mod pairing_setup;
 pub mod release_check;
 #[cfg(feature = "real")]
 pub mod runtime;
+pub mod self_update;
 pub mod site_app;
 pub mod state_file;
 pub mod status_seq;

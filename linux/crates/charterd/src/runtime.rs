@@ -2017,6 +2017,10 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // release key) and stage it hash-verified under /var/lib/charter/updates.
     // Both modes — an unpaired device-only laptop deserves update news too.
     crate::release_check::real::spawn_release_check();
+    // From 0.7.12: the guardian-triggered install of a verified release. Its
+    // own task; the tick only hands it the stored `update` clause and reads
+    // back the STATUS health line.
+    let updater = crate::self_update::real::spawn_updater();
 
     // Serve the org.forgesworn.Charter1 surface in BOTH modes: `charter time-left`
     // / `charter status` must work for a device-only child too (the guardian-
@@ -2332,6 +2336,19 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         // unconstrained (see `child_policy::drop_duplicate_subjects`).
         crate::child_policy::drop_duplicate_subjects(&mut configs);
         let configs = configs;
+        // The stored `update` clause (one per paired ward; the machine is
+        // updated once), handed to the updater on the slow cadence. The
+        // updater decides; nothing here installs.
+        if slow_tick {
+            updater.set_clause(crate::self_update::pick_clause(configs.iter().filter_map(
+                |(_, cfg)| {
+                    sys.child_clauses()
+                        .get_child_clause(cfg.subject.as_deref()?, ClauseKind::Update.store_key())
+                        .ok()
+                        .flatten()
+                },
+            )));
+        }
         let policies: Vec<_> = resolve_child_policies(&sys, &passwd, &configs)
             .into_iter()
             .filter(|(uid, _)| {
@@ -3409,6 +3426,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // invisible to the guardian on that score.
                 status.app_version_code = Some(crate::version::version_code());
                 status.app_version_name = Some(crate::version::version_name().to_string());
+                // A guardian-triggered update that has not landed, and why
+                // (machine-wide, so every ward's STATUS carries it).
+                status.update_health = updater.health();
                 // The clock went backwards since the last emit: say from where,
                 // once, so the guardian takes this lower-`ts` status as current.
                 status.clock_stepped_back_from = crate::status_emit::clock_stepped_back_from(

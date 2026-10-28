@@ -120,6 +120,15 @@ export class MockSigner implements Signer {
     return { ok: true };
   }
 
+  async signDebUpdateClause(
+    childId: string,
+    _devicePubkey: string,
+    deb: { versionName: string },
+  ): Promise<{ ok: true }> {
+    await this.authorize("clause", `Install Kintrinsic ${deb.versionName} for ${childId}`);
+    return { ok: true };
+  }
+
   async signDebuggingClause(
     childId: string,
     _devicePubkey: string,

@@ -27,7 +27,11 @@ export function resolveChildTarget(
   );
   // The id rides along with the key so per-device rule overrides can be
   // resolved for the exact device each wrap is sealed to.
-  const devices = paired.map((d) => ({ id: d.id, pubkey: d.devicePubkey as string }));
+  const devices = paired.map((d) => ({
+    id: d.id,
+    pubkey: d.devicePubkey as string,
+    platform: d.platform,
+  }));
   // Each device's OWN relays (from its pairing), unioned with the defaults —
   // never just the current defaults, so a device paired under an older
   // default is not left unreachable when the defaults change.

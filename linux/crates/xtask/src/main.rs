@@ -307,6 +307,14 @@ fn build_deb() -> Result<(), String> {
         &stage_dir.join("usr/lib/charter/charter-learn"),
         true,
     )?;
+    // The guardian-triggered update (0.7.12): charterd starts it through
+    // systemd-run, as root, outside its own unit. Root-owned plumbing, never
+    // a command anyone types — so usr/lib, like charter-learn.
+    stage(
+        &pkg.join("setup/install-update"),
+        &stage_dir.join("usr/lib/charter/install-update"),
+        true,
+    )?;
     // The unified app — the single menu entry. Runs as the user; delegates the
     // privileged work to the helpers above via pkexec.
     stage(

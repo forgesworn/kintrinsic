@@ -195,6 +195,18 @@ export interface Signer {
     manifest: UpdateManifest,
     url: string,
   ): Promise<SignOutcome>;
+  /**
+   * Sign + publish the Linux `update` clause (charterd ≥ 0.7.12) to ONE
+   * laptop: gift-wrapped only to `devicePubkey`, still carrying the child's
+   * `subject`, so the ward's phones keep their own `update` clause. Throws when
+   * `devicePubkey` is not one of the child's paired devices.
+   */
+  signDebUpdateClause?(
+    childId: string,
+    devicePubkey: string,
+    deb: { versionCode: number; versionName: string; sha256: string },
+    url: string,
+  ): Promise<SignOutcome>;
 
   /**
    * Sign + publish the `debugging` clause (USB / wireless debugging) to ONE

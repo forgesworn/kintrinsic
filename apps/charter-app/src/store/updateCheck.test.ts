@@ -99,6 +99,7 @@ describe("parseDebManifest", () => {
       versionName: "0.3.6",
       versionCode: 306,
       path: "/charter-latest.deb",
+      sha256: "a".repeat(64),
       sizeBytes: 6568784,
       builtAt: "2026-07-26T00:00:00Z",
     });

@@ -1,11 +1,13 @@
 //! D2: the laptop learns about its own updates from **signed relay events**
 //! and stages the hash-verified `.deb` locally — no website in the loop.
 //!
-//! What this does NOT do: install. apt has no Blossom, and charterd silently
-//! self-replacing is not the model — the staged file plus a journald line
-//! hands the parent the same one-command install they do today, sourced
-//! decentralized. The guardian console shows the "behind" notice from the
-//! same event.
+//! What this module does NOT do: install. `charterd` never installs anything
+//! without a guardian clause: from 0.7.12 an `update` clause naming a newer
+//! version, backed by a release-key announcement of the same version and
+//! sha256, installs through [`crate::self_update`]. Without one, the staged
+//! file plus a journald line hands the parent the same one-command install
+//! they always had, sourced decentralised. The guardian console shows the
+//! "behind" notice from the same event.
 //!
 //! Trust: `verify_software_release` against [`RELEASE_PUBKEY_HEX`] (compiled
 //! in — a NEW trust-anchor category: every other pin is learned at pair
@@ -126,15 +128,44 @@ pub fn select_release(
     best
 }
 
-/// The staged path a release would land at (stable per version).
-pub fn staged_path(dir: &Path, r: &SoftwareRelease) -> PathBuf {
-    dir.join(format!("charter_{}_amd64.deb", r.version_name))
+/// Create `dir` if needed and make it root-only (0700): the staged `.deb` is
+/// what a guardian-triggered update hands to `apt-get` as root.
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+}
+
+/// The staged path a release would land at (stable per version), or None
+/// when the signed version string is anything but digits and dots — it is
+/// spliced into a filename that `apt-get` is later handed as root.
+pub fn staged_path(dir: &Path, r: &SoftwareRelease) -> Option<PathBuf> {
+    valid_version_name(&r.version_name)
+        .then(|| dir.join(format!("charter_{}_amd64.deb", r.version_name)))
+}
+
+/// Digits and dots only, starting and ending with a digit (`0.7.12`).
+pub fn valid_version_name(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 32
+        && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && v.starts_with(|c: char| c.is_ascii_digit())
+        && v.ends_with(|c: char| c.is_ascii_digit())
 }
 
 /// Verify `bytes` against the announcement and write them at the staged path
-/// via `.part` + rename — unverified bytes never sit at the final name.
+/// via a unique temporary file + rename — unverified bytes never sit at the
+/// final name, and the release check and the updater (two tasks) can never
+/// write through the same temporary name.
 /// Returns None on hash/size mismatch (poisoned or truncated download).
 pub fn stage_bytes(bytes: &[u8], r: &SoftwareRelease, dir: &Path) -> Option<StagedUpdate> {
+    let Some(dest) = staged_path(dir, r) else {
+        eprintln!(
+            "charterd: update: version {:?} is not digits and dots — dropped",
+            r.version_name
+        );
+        return None;
+    };
     if bytes.len() as u64 != r.size_bytes {
         eprintln!(
             "charterd: update {}: downloaded {} bytes, event says {} — dropped",
@@ -152,13 +183,10 @@ pub fn stage_bytes(bytes: &[u8], r: &SoftwareRelease, dir: &Path) -> Option<Stag
         );
         return None;
     }
-    if fs::create_dir_all(dir).is_err() {
+    if ensure_private_dir(dir).is_err() {
         return None;
     }
-    let dest = staged_path(dir, r);
-    let part = dest.with_extension("deb.part");
-    if fs::write(&part, bytes).is_err() || fs::rename(&part, &dest).is_err() {
-        let _ = fs::remove_file(&part);
+    if crate::atomic_file::atomic_write(&dest.to_string_lossy(), bytes, 0o600).is_err() {
         return None;
     }
     // A tiny marker consumers (console Today page, future tray line) can read
@@ -203,7 +231,7 @@ where
     };
     let events = transport.query(&relays, filter).await.unwrap_or_default();
     let r = select_release(&events, pinned, installed_code)?;
-    let dest = staged_path(dir, &r);
+    let dest = staged_path(dir, &r)?;
     if dest.is_file() {
         // Same version already staged and verified in a prior round.
         return None;
@@ -404,7 +432,7 @@ mod tests {
 
         // Wrong bytes: refused, nothing at the final name.
         assert!(stage_bytes(b"evil bytes!!!!", &r, &dir).is_none());
-        assert!(!staged_path(&dir, &r).exists());
+        assert!(!staged_path(&dir, &r).unwrap().exists());
 
         // Right bytes: staged + marker.
         let staged = stage_bytes(&bytes, &r, &dir).expect("staged");
@@ -468,6 +496,43 @@ mod tests {
         assert!(check_and_stage(&relay, &pin, 706, &dir, fetch)
             .await
             .is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_digits_and_dots_version_names_a_staged_file() {
+        assert!(valid_version_name("0.7.12"));
+        for bad in [
+            "",
+            "0.7.12-rc1",
+            "../../etc/x",
+            "0.7.12/../x",
+            ".7",
+            "7.",
+            "0 7",
+            "a.b",
+        ] {
+            assert!(!valid_version_name(bad), "{bad:?}");
+        }
+        let s = signer();
+        let bytes = b"deb".to_vec();
+        let sha = charter_primitives::Sha256Hex::from_bytes(charter_crypto::sha256(&bytes));
+        let tags = vec![
+            vec!["d".into(), CHANNEL.into()],
+            vec!["version".into(), "../../evil".into()],
+            vec!["version_code".into(), "800".into()],
+            vec!["x".into(), sha.to_hex()],
+            vec!["size".into(), bytes.len().to_string()],
+            vec![
+                "url".into(),
+                format!("https://blossom.example/{}", sha.to_hex()),
+            ],
+        ];
+        let ev = sign_release(&s, tags);
+        let r = verify_software_release(&ev, &pin_of(&s), CHANNEL).unwrap();
+        let dir = tmpdir();
+        assert!(staged_path(&dir, &r).is_none());
+        assert!(stage_bytes(&bytes, &r, &dir).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 
