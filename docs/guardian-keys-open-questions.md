@@ -566,3 +566,21 @@ while offline, does not. Should the ACK and STATUS name this refusal?
 is reported as `refused`, like any other. Batch 2a review, L1.
 
 **Raised by:** batch 2c-A.
+
+## Presence code encoding (build-defined)
+
+**Where:** *Presence confirmation* ("the ward then shows the one-time token as
+a code to scan, with a short form to type"); Linux `charter-presence`, the
+Android presence screen, the guardian app's scanner.
+
+**Question:** the contract doesn't give the encoding of the presence code.
+
+**Build's interim reading:** mirror the scan-to-pair invite
+(`charter://pair?m=<64hex>&t=<32hex>`):
+`charter://presence?m=<machine 64hex>&t=<token 32hex>&d=<pending d, percent-encoded>`.
+The short form to type is the token alone, 32 hex shown as four groups of 8;
+the guardian app asks which device and which pending statement it is for.
+The code is not a secret beyond its 600-second, single-use life, and is
+worthless without a working key bound to the right root.
+
+**Raised by:** batch 2c (planning).
