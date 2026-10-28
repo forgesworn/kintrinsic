@@ -1,6 +1,7 @@
-# Deploying MyCharter (charter.mysignet.app)
+# Deploying the Kintrinsic guardian app (charter.mysignet.app)
 
-MyCharter is a static **Progressive Web App** — same shape as signet-app
+The guardian app is the web app at `charter.mysignet.app`; the Kintrinsic site
+and downloads live separately at `kintrinsic.app`. It is a static **Progressive Web App** — same shape as signet-app
 (React + Vite + `vite-plugin-pwa`). There is no server to run; you build a
 static bundle and host the folder.
 
@@ -41,7 +42,7 @@ repo/sysadmin must provide:
    `deploy@$DEPLOY_HOST:/opt/charter-app/`. This MUST match the nginx vhost
    root the sysadmin set up for `charter.mysignet.app` (signet-app uses
    `/opt/signet-app/`). `--delete` keeps it a clean mirror, so the directory
-   must be dedicated to MyCharter.
+   must be dedicated to the guardian app.
 3. **Reach `main`** — it deploys from `main` (or a manual `workflow_dispatch`).
 
 ## Manual one-off deploy
@@ -70,7 +71,7 @@ markup, and can carry directives a meta tag is not allowed to
 
 ```nginx
 # charter.mysignet.app
-add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self' wss:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self' wss: https://nostr.download; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'" always;
 add_header Cross-Origin-Opener-Policy "same-origin" always;
 add_header Cross-Origin-Resource-Policy "same-origin" always;
 add_header Referrer-Policy "no-referrer" always;
@@ -91,7 +92,10 @@ Notes on the choices, so nobody "tidies" one away:
   third party ever does.
 - **`connect-src … wss:`** stays open because relays are the guardian's own
   choice and cannot be enumerated here. Narrow it if the deployment ever
-  fixes its relay set.
+  fixes its relay set. The single `https://nostr.download` entry is for the
+  cable-setup flow, which downloads the ward APK from that Blossom server and
+  checks it against the SHA-256 in `/charter-apk.json`. The vhost header must
+  carry it too, or the browser blocks the download.
 - **`style-src 'unsafe-inline'`** is deliberate: the app styles through React
   `style={{}}` props. Inline style cannot execute. Do **not** add
   `'unsafe-inline'` or `'unsafe-eval'` to `script-src` — that is the one line
