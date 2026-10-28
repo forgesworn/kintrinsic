@@ -49,6 +49,10 @@ export interface TargetDevice {
   id: string;
   /** The device's own pubkey hex (the gift-wrap recipient). */
   pubkey: string;
+  /** Which warden it runs. Decides where a platform's own clause goes: the
+   *  `update` slot is one per ward on each device, so an Android update must
+   *  never land in a laptop's slot, nor a Linux one in a phone's. */
+  platform?: "linux" | "android";
 }
 
 /** Where one child's clauses must be delivered. */
@@ -577,7 +581,11 @@ export class RealSigner implements Signer {
     const target = this.deps.resolveChild(childId);
     if (!target) throw new Error(`unknown child: ${childId}`);
     const held = new SendBatch();
-    this.requireDeliverable(target, childId);
+    // The APK clause is for phones only: in a laptop's `update` slot it would
+    // replace a pending Linux update, which charterd then refuses as the
+    // wrong package — and the laptop's update stalls in silence.
+    const phones = target.devices.filter((d) => d.platform !== "linux");
+    this.requireDeliverable({ ...target, devices: phones }, childId);
 
     await this.authorize(
       "clause",
@@ -588,7 +596,7 @@ export class RealSigner implements Signer {
     const body = updateToGrant(manifest, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    for (const device of target.devices) {
+    for (const device of phones) {
       const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
@@ -610,6 +618,9 @@ export class RealSigner implements Signer {
       throw new Error(
         `That device isn't paired to ${target.name ?? childId}, so the update couldn't be sent to it.`,
       );
+    }
+    if (device.platform === "android") {
+      throw new Error("That device is a phone: it takes the phone update, not the computer one.");
     }
     const held = new SendBatch();
     // Only THIS laptop is a recipient: the `update` slot is one per ward, and

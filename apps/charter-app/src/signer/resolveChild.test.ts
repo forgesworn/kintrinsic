@@ -35,8 +35,8 @@ describe("resolveChildTarget", () => {
       // The display name rides along so errors say "Sam", not `child_sam`.
       name: "Sam",
       devices: [
-        { id: "d1", pubkey: "1".repeat(64) },
-        { id: "d2", pubkey: "2".repeat(64) },
+        { id: "d1", pubkey: "1".repeat(64), platform: "linux" },
+        { id: "d2", pubkey: "2".repeat(64), platform: "linux" },
       ],
       relays: RELAYS,
     });
@@ -52,7 +52,7 @@ describe("resolveChildTarget", () => {
       ],
     });
     const t = resolveChildTarget([c], "child_sam", RELAYS);
-    expect(t?.devices).toEqual([{ id: "ok", pubkey: "1".repeat(64) }]);
+    expect(t?.devices).toEqual([{ id: "ok", pubkey: "1".repeat(64), platform: "linux" }]);
   });
 
   it("SKIPS non-hex (mock/demo) device keys — never feeds them to gift-wrap", () => {
@@ -67,7 +67,7 @@ describe("resolveChildTarget", () => {
       ],
     });
     const t = resolveChildTarget([c], "child_sam", RELAYS);
-    expect(t?.devices).toEqual([{ id: "real", pubkey: "1".repeat(64) }]);
+    expect(t?.devices).toEqual([{ id: "real", pubkey: "1".repeat(64), platform: "linux" }]);
   });
 
   it("returns undefined for an unknown child", () => {
@@ -98,5 +98,19 @@ describe("resolveChildTarget", () => {
     const c = child({ devices: [dev({ devicePubkey: "1".repeat(64) })] });
     const t = resolveChildTarget([c], "child_sam", RELAYS);
     expect(t?.relays).toEqual(RELAYS);
+  });
+
+  it("carries each device's platform, so a platform's own clause goes only there", () => {
+    const c = child({
+      devices: [
+        dev({ id: "laptop", platform: "linux", devicePubkey: "1".repeat(64) }),
+        dev({ id: "phone", platform: "android", devicePubkey: "2".repeat(64) }),
+      ],
+    });
+    const t = resolveChildTarget([c], "child_sam", RELAYS);
+    expect(t?.devices.map((d) => [d.id, d.platform])).toEqual([
+      ["laptop", "linux"],
+      ["phone", "android"],
+    ]);
   });
 });

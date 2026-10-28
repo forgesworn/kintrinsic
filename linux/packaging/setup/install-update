@@ -1,0 +1,48 @@
+#!/bin/sh
+# Kintrinsic guardian-triggered update (contract § "On Linux (from 0.7.12)").
+#
+#   install-update <versionCode> <staged .deb> <result file>
+#
+# Started by charterd through `systemd-run --unit=kintrinsic-update-<vc>`, as
+# root and OUTSIDE charterd's own unit: the package's postinst restarts
+# charterd, which would otherwise kill this half-way through dpkg. charterd
+# has already pinned the .deb to the guardian clause's sha256 and the release
+# key's announcement; this script only installs it and says how that went.
+#
+# The result file (in charterd's root-only updates directory) is how the
+# outcome survives `--collect` and charterd's restart:
+#
+#   versionCode=<vc>
+#   exit=<apt-get exit code>
+#   ---
+#   <the last lines apt-get / dpkg wrote to stderr>
+set -u
+
+if [ "$#" -ne 3 ]; then
+    echo "usage: install-update <versionCode> <deb> <result-file>" >&2
+    exit 2
+fi
+vc=$1
+deb=$2
+result=$3
+
+umask 077
+export DEBIAN_FRONTEND=noninteractive
+err="$result.stderr"
+: >"$err"
+
+# A power cut during an earlier install leaves dpkg interrupted, and apt-get
+# then refuses to do anything until it is finished.
+dpkg --configure -a 2>>"$err"
+
+apt-get install -y "$deb" 2>>"$err"
+code=$?
+
+{
+    echo "versionCode=$vc"
+    echo "exit=$code"
+    echo "---"
+    tail -n 20 "$err"
+} >"$result.tmp" && mv -f "$result.tmp" "$result"
+rm -f "$err"
+exit "$code"

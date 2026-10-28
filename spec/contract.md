@@ -1208,11 +1208,18 @@ Rules:
   mismatch is dropped, never installed.
 - The install runs outside `charterd`'s own service, because the package's
   `postinst` restarts `charterd`:
-  `systemd-run --unit=kintrinsic-update-<versionCode> --collect` running
-  `apt-get install -y <staged .deb>` with `DEBIAN_FRONTEND=noninteractive`.
-  The staged file lives in a root-only directory.
-- At most one attempt per `versionCode` every 6 hours. Attempts and the last
-  error ride STATUS `updateHealth`, exactly as on Android.
+  `systemd-run --unit=kintrinsic-update-<versionCode> --collect` running the
+  package's root-owned helper `/usr/lib/charter/install-update`, which runs
+  `dpkg --configure -a` (a power cut may have left dpkg interrupted), then
+  `apt-get install -y <staged .deb>` with `DEBIAN_FRONTEND=noninteractive`,
+  and writes the exit code and the tail of stderr to a result file that
+  `charterd` reads on its next round. The staged file and the result live in
+  a root-only directory.
+- At most one attempt per `versionCode` every 6 hours. An attempt is counted
+  only once an agreeing announcement is in hand: unreachable release relays
+  or a missing announcement are noted, not counted, and retried. Attempts and
+  the last error ride STATUS `updateHealth`, exactly as on Android; a record
+  no stored clause names any more is dropped.
 - A downgrade (`versionCode` below the installed one) is refused.
 
 ### Software release announcements (kind 30063)
