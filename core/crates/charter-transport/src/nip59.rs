@@ -82,6 +82,9 @@ pub enum Nip59Error {
     Json,
     /// A key was invalid.
     BadKey,
+    /// A seal-exempt inner event (see [`SEAL_EXEMPT_KINDS`]) was not a signed
+    /// event, or its own id or signature did not verify.
+    BadInnerEvent,
 }
 
 /// Sign an arbitrary event with a raw secret key (computes the NIP-01 id, then
@@ -180,8 +183,127 @@ pub fn unwrap(
 
 /// Like [`unwrap`] but also returns the seal author (the sender that vouched for
 /// the rumor). For a guardian-signed grant the seal author equals the inner
-/// grant author — both must be the pinned guardian.
+/// grant author — both must be in the ward's signer set.
+///
+/// Strict for every kind: a rumor whose author is not its seal author is
+/// refused ([`Nip59Error::AuthorMismatch`]), including the seal-exempt kinds.
+/// Those reach a ward only through [`unwrap_opened`].
 pub fn unwrap_with_author(
+    wrap: &NostrEvent,
+    recipient_sk: &[u8; 32],
+    now: u64,
+    max_jitter_secs: u64,
+) -> Result<(Rumor, PubKey), Nip59Error> {
+    let (rumor, seal_author) = open(wrap, recipient_sk, now, max_jitter_secs)?;
+    // The sealed author must equal the rumor author (no forged sender).
+    if rumor.pubkey != seal_author {
+        return Err(Nip59Error::AuthorMismatch);
+    }
+    Ok((rumor, seal_author))
+}
+
+/// Inner kinds whose seal author may differ from their signer, so the strict
+/// author binding cannot apply to them (contract, *Delivery and the two seal
+/// exceptions*):
+/// - a guardian statement (31120): an approval is sealed by the working key
+///   it names, and a root's statement may be carried by one of its working
+///   keys;
+/// - a presence confirmation (31121): handed over with both authors so the
+///   guardian-keys state machine applies its own rule.
+///
+/// A PAIR_OFFER is deliberately NOT here: its rumor is authored by the key
+/// that seals it, with or without an `approval`, and the unpaired ward pins
+/// that seal author, so it keeps the strict binding.
+pub const SEAL_EXEMPT_KINDS: [u16; 2] = [
+    kinds::CHARTER_GUARDIAN_STATEMENT,
+    kinds::CHARTER_PRESENCE_CONFIRM,
+];
+
+/// A seal-exempt inner event, with the key that sealed it. Only
+/// [`unwrap_opened`] builds one, and only for a [`SEAL_EXEMPT_KINDS`] kind
+/// whose own id and signature verified.
+///
+/// This is the one way an event whose seal author is not its signer reaches
+/// a ward, and it can only carry a statement or a presence confirmation, so
+/// it can never be passed off as a CLAUSE, GRANT, RELEASE, RELAYS or
+/// USAGE_SYNC: their verifiers check the kind first. Its consumer is the
+/// guardian-keys state machine, which decides from both authors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardianSealed {
+    event: NostrEvent,
+    seal_author: PubKey,
+}
+
+impl GuardianSealed {
+    /// The inner signed event (kind 31120 or 31121), its signature verified.
+    pub fn event(&self) -> &NostrEvent {
+        &self.event
+    }
+    /// The inner event's kind.
+    pub fn kind(&self) -> u16 {
+        self.event.kind
+    }
+    /// The inner event's author (who signed it).
+    pub fn signer(&self) -> PubKey {
+        self.event.pubkey
+    }
+    /// The key that sealed it (authenticated by the seal's signature).
+    pub fn seal_author(&self) -> PubKey {
+        self.seal_author
+    }
+    /// The event and its seal author.
+    pub fn into_parts(self) -> (NostrEvent, PubKey) {
+        (self.event, self.seal_author)
+    }
+
+    /// Test fixture: build one directly from a signed event, re-checking
+    /// what [`unwrap_opened`] checks (kind and signature).
+    #[cfg(any(test, feature = "mock"))]
+    pub fn for_test(event: NostrEvent, seal_author: PubKey) -> Option<Self> {
+        (SEAL_EXEMPT_KINDS.contains(&event.kind) && sig_valid(&event))
+            .then_some(GuardianSealed { event, seal_author })
+    }
+}
+
+/// What [`unwrap_opened`] found inside a wrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    /// Any kind outside [`SEAL_EXEMPT_KINDS`], with the strict author binding
+    /// checked: the rumor and its seal author, which are the same key.
+    Bound(Rumor, PubKey),
+    /// A seal-exempt kind, for the guardian-keys state machine.
+    Guardian(GuardianSealed),
+}
+
+/// Unwrap a gift-wrap as [`unwrap_with_author`] does, except that a
+/// [`SEAL_EXEMPT_KINDS`] inner event is returned as [`Opened::Guardian`] with
+/// both authors instead of being refused when they differ. The inner event
+/// must then be a signed event whose own id and signature verify. Every other
+/// kind keeps the strict binding.
+pub fn unwrap_opened(
+    wrap: &NostrEvent,
+    recipient_sk: &[u8; 32],
+    now: u64,
+    max_jitter_secs: u64,
+) -> Result<Opened, Nip59Error> {
+    let (rumor, seal_author) = open(wrap, recipient_sk, now, max_jitter_secs)?;
+    if SEAL_EXEMPT_KINDS.contains(&rumor.kind) {
+        let event = rumor.into_signed_event().ok_or(Nip59Error::BadInnerEvent)?;
+        if !sig_valid(&event) {
+            return Err(Nip59Error::BadInnerEvent);
+        }
+        return Ok(Opened::Guardian(GuardianSealed { event, seal_author }));
+    }
+    if rumor.pubkey != seal_author {
+        return Err(Nip59Error::AuthorMismatch);
+    }
+    Ok(Opened::Bound(rumor, seal_author))
+}
+
+/// Open a wrap down to the rumor: wrap and seal kinds, signatures and the
+/// jitter bound, but NOT the author binding — every public entry point
+/// applies that (or, for a seal-exempt kind, hands both authors on).
+fn open(
     wrap: &NostrEvent,
     recipient_sk: &[u8; 32],
     now: u64,
@@ -214,11 +336,6 @@ pub fn unwrap_with_author(
         .map_err(Nip59Error::Decrypt)?;
     let rumor_json = nip44::decrypt(&seal.content, &seal_ck).map_err(Nip59Error::Decrypt)?;
     let rumor: Rumor = serde_json::from_str(&rumor_json).map_err(|_| Nip59Error::Json)?;
-
-    // The sealed author must equal the rumor author (no forged sender).
-    if rumor.pubkey != seal.pubkey {
-        return Err(Nip59Error::AuthorMismatch);
-    }
     Ok((rumor, seal.pubkey))
 }
 
@@ -258,6 +375,104 @@ mod tests {
         let got = unwrap(&w, &recipient, 1_700_000_000, MAX_JITTER_SECS).unwrap();
         assert_eq!(got.pubkey, rumor.pubkey);
         assert_eq!(got.content, rumor.content);
+    }
+
+    fn randomness() -> WrapRandomness {
+        WrapRandomness {
+            ephemeral_secret: secret(0x55),
+            seal_nonce: [1; 32],
+            wrap_nonce: [2; 32],
+            seal_created_at: 1_700_000_000,
+            wrap_created_at: 1_700_000_000,
+        }
+    }
+
+    /// A signed `kind` event by `signer`, sealed by `sealer`, wrapped to
+    /// `recipient`.
+    fn sealed_by(kind: u16, signer: u8, sealer: u8, recipient: u8) -> NostrEvent {
+        let ev = sign_event_raw(
+            &secret(signer),
+            kind,
+            1_700_000_000,
+            vec![kinds::marker_tag()],
+            "{}".into(),
+        )
+        .unwrap();
+        let recipient_pk = charter_crypto::xonly_pubkey(&secret(recipient)).unwrap();
+        wrap(
+            &Rumor::from_signed_event(&ev),
+            &secret(sealer),
+            &recipient_pk,
+            &randomness(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_statement_sealed_by_another_key_opens_only_through_the_seal_exempt_unwrap() {
+        let now = 1_700_000_000;
+        let w = sealed_by(kinds::CHARTER_GUARDIAN_STATEMENT, 0x21, 0x22, 0x11);
+        assert_eq!(
+            unwrap_with_author(&w, &secret(0x11), now, MAX_JITTER_SECS),
+            Err(Nip59Error::AuthorMismatch),
+            "the strict unwrap never hands it on"
+        );
+        match unwrap_opened(&w, &secret(0x11), now, MAX_JITTER_SECS).unwrap() {
+            Opened::Guardian(g) => {
+                let signer = charter_crypto::xonly_pubkey(&secret(0x21)).unwrap();
+                let sealer = charter_crypto::xonly_pubkey(&secret(0x22)).unwrap();
+                assert_eq!(g.signer(), PubKey::from_bytes(signer));
+                assert_eq!(g.seal_author(), PubKey::from_bytes(sealer));
+                assert_eq!(g.kind(), kinds::CHARTER_GUARDIAN_STATEMENT);
+            }
+            other => panic!("expected a guardian event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_other_kind_keeps_the_strict_binding_in_the_seal_exempt_unwrap() {
+        let now = 1_700_000_000;
+        for kind in [
+            kinds::CHARTER_DEVICE_CLAUSE,
+            kinds::CHARTER_DEVICE_GRANT,
+            kinds::CHARTER_DEVICE_RELEASE,
+            kinds::CHARTER_DEVICE_RELAYS,
+            kinds::CHARTER_DEVICE_USAGE_SYNC,
+            kinds::CHARTER_DEVICE_PAIR_OFFER,
+        ] {
+            let w = sealed_by(kind, 0x21, 0x22, 0x11);
+            assert_eq!(
+                unwrap_opened(&w, &secret(0x11), now, MAX_JITTER_SECS),
+                Err(Nip59Error::AuthorMismatch),
+                "kind {kind}"
+            );
+            let same = sealed_by(kind, 0x21, 0x21, 0x11);
+            assert!(matches!(
+                unwrap_opened(&same, &secret(0x11), now, MAX_JITTER_SECS),
+                Ok(Opened::Bound(_, _))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_seal_exempt_kind_must_be_a_signed_event() {
+        let now = 1_700_000_000;
+        let author = secret(0x22);
+        let rumor = Rumor {
+            id: None,
+            pubkey: PubKey::from_bytes(charter_crypto::xonly_pubkey(&author).unwrap()),
+            created_at: now,
+            kind: kinds::CHARTER_GUARDIAN_STATEMENT,
+            tags: vec![],
+            content: "{}".into(),
+            sig: None,
+        };
+        let recipient_pk = charter_crypto::xonly_pubkey(&secret(0x11)).unwrap();
+        let w = wrap(&rumor, &author, &recipient_pk, &randomness()).unwrap();
+        assert_eq!(
+            unwrap_opened(&w, &secret(0x11), now, MAX_JITTER_SECS),
+            Err(Nip59Error::BadInnerEvent)
+        );
     }
 
     #[test]
