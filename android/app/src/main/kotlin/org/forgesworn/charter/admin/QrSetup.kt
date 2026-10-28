@@ -1,10 +1,17 @@
 package org.forgesworn.charter.admin
 
 import android.app.AppOpsManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.admin.DevicePolicyManager
 import android.content.Context
+import android.content.Intent
 import android.os.PersistableBundle
+import android.provider.Settings
 import android.util.Log
+import org.forgesworn.charter.MainActivity
+import org.forgesworn.charter.service.CharterService
 import org.forgesworn.charter.ui.PairingSas
 
 /**
@@ -30,6 +37,8 @@ object QrSetup {
     private const val PREFS = "qr_setup"
     private const val KEY_LINK = "held_pairing_link"
     private const val TAG = "CharterQrSetup"
+    private const val NOTICE_CHANNEL = "charter-setup"
+    private const val NOTICE_ID = 1004
 
     /**
      * The pairing link to hold, from the raw admin-extras value, or `null` for
@@ -63,7 +72,71 @@ object QrSetup {
     fun needsUsageAccess(isOwner: Boolean, opMode: Int): Boolean =
         isOwner && opMode != AppOpsManager.MODE_ALLOWED
 
+    /** What the running warden does about a held, unpaired link. */
+    data class Nudge(val open: Boolean, val notify: Boolean) {
+        companion object {
+            val NONE = Nudge(open = false, notify = false)
+        }
+    }
+
+    /**
+     * Open the pairing check once the phone is out of its setup wizard — the
+     * path that does not depend on `onProfileProvisioningComplete`, which a
+     * fully managed QR setup may never send.
+     *
+     * [paired] `null` (the warden cannot say) and [setupComplete] `false` (the
+     * wizard is still on screen; opening over it would strand the family in
+     * the middle of it) both mean "not yet". [setupComplete] `null` (the
+     * setting is unreadable) means the notification alone: it waits in the
+     * shade without taking the screen from anything.
+     */
+    fun pairingNudge(held: Boolean, paired: Boolean?, setupComplete: Boolean?): Nudge = when {
+        !held || paired != false -> Nudge.NONE
+        setupComplete == false -> Nudge.NONE
+        setupComplete == true -> Nudge(open = true, notify = true)
+        else -> Nudge(open = false, notify = true)
+    }
+
     // ---- platform glue (not exercised on the JVM) ----------------------------
+
+    /** Whether a link is held at all — the cheap per-tick question. */
+    fun hasHeld(context: Context): Boolean = prefs(context).contains(KEY_LINK)
+
+    /** `Settings.Secure.USER_SETUP_COMPLETE` ("user_setup_complete"), or
+     *  `null` when this build will not say. */
+    fun userSetupComplete(context: Context): Boolean? = runCatching {
+        Settings.Secure.getInt(context.contentResolver, "user_setup_complete") == 1
+    }.getOrNull()
+
+    /** Bring the pairing check forward. A Device Owner may start an activity
+     *  from the background; if this build refuses, the notice remains. */
+    fun openPairingCheck(context: Context) {
+        runCatching {
+            context.startActivity(
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }.onFailure { Log.w(TAG, "could not open the pairing check", it) }
+    }
+
+    /** "Finish setting up" in the shade, tapping through to the pairing check. */
+    fun postPairingNotice(context: Context) {
+        runCatching {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(
+                NotificationChannel(NOTICE_CHANNEL, "Setting up", NotificationManager.IMPORTANCE_DEFAULT),
+            )
+            nm.notify(
+                NOTICE_ID,
+                Notification.Builder(context, NOTICE_CHANNEL)
+                    .setContentTitle("Finish setting up Kintrinsic")
+                    .setContentText("Check the pairing code with the grown-up, then tap Pair with guardian.")
+                    .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+                    .setContentIntent(CharterService.openApp(context))
+                    .setAutoCancel(true)
+                    .build(),
+            )
+        }.onFailure { Log.w(TAG, "could not post the pairing notice", it) }
+    }
 
     /** Hold the link from a provisioning extras bundle, if it carries one. */
     fun holdFrom(context: Context, extras: PersistableBundle?) {
@@ -78,10 +151,13 @@ object QrSetup {
     /** The held link, re-checked on the way out. */
     fun held(context: Context): String? = pairingLink(prefs(context).getString(KEY_LINK, null))
 
-    /** Forget the held link — once paired it has done its job. */
+    /** Forget the held link, and its notice — once paired they have done
+     *  their job. */
     fun clear(context: Context) {
         val p = prefs(context)
-        if (p.contains(KEY_LINK)) p.edit().remove(KEY_LINK).apply()
+        if (!p.contains(KEY_LINK)) return
+        p.edit().remove(KEY_LINK).apply()
+        runCatching { context.getSystemService(NotificationManager::class.java).cancel(NOTICE_ID) }
     }
 
     /** The usage-stats app-op mode, read the way `WardenController` reads it. */

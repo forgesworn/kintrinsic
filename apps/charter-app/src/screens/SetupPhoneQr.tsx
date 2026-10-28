@@ -8,14 +8,19 @@ import { guardianPairingBunkerUri } from "../signer/guardianPairing";
 import { DEFAULT_RELAYS } from "../signer/config";
 import { pairingSas } from "../domain/pairingSas";
 import { fetchApkFeed } from "../provision/apkFeed";
-import { QrPayloadError, qrPayloadText, type WifiSecurity } from "../provision/qrPayload";
+import {
+  QrPayloadError,
+  qrPayloadText,
+  type QrPayloadProblem,
+  type WifiSecurity,
+} from "../provision/qrPayload";
 
 type Feed = { status: "loading" } | { status: "ready"; feed: unknown } | { status: "error" };
 
 /**
  * QR setup for a ward phone (docs/qr-setup.md): Android's own setup wizard
  * scans this code from a factory reset, downloads the ward app, checks its
- * signing certificate, makes it Device Owner and hands it the pairing link —
+ * checksum, makes it Device Owner and hands it the pairing link —
  * no computer, no cable, no developer options.
  *
  * It owns the one-time pairing token while it is on screen, exactly as the
@@ -49,7 +54,8 @@ export default function SetupPhoneQr({
   const [security, setSecurity] = useState<WifiSecurity>("WPA");
   const [payload, setPayload] = useState<string | null>(null);
   const [qrSrc, setQrSrc] = useState<string | null>(null);
-  const [problem, setProblem] = useState(false);
+  /** Why no code can be shown; "render" when the QR itself failed to draw. */
+  const [problem, setProblem] = useState<QrPayloadProblem | "render" | null>(null);
 
   // The one-time pairing token: this screen's for as long as it is shown.
   useEffect(() => {
@@ -86,16 +92,16 @@ export default function SetupPhoneQr({
   useEffect(() => {
     setQrSrc(null);
     setPayload(null);
-    setProblem(false);
+    setProblem(null);
     if (feed.status !== "ready" || !link) return;
     let text: string;
     try {
       // No password means an open network, whatever the picker says.
-      const wifi = ssid.trim() ? { ssid, password, security: password ? security : ("NONE" as const) } : undefined;
+      const wifi = ssid !== "" ? { ssid, password, security: password ? security : ("NONE" as const) } : undefined;
       text = qrPayloadText(feed.feed, link, wifi);
     } catch (e) {
       if (e instanceof QrPayloadError) {
-        setProblem(true);
+        setProblem(e.problem);
         return;
       }
       throw e;
@@ -107,7 +113,7 @@ export default function SetupPhoneQr({
         if (alive) setQrSrc(url);
       })
       .catch(() => {
-        if (alive) setProblem(true);
+        if (alive) setProblem("render");
       });
     return () => {
       alive = false;
@@ -115,17 +121,19 @@ export default function SetupPhoneQr({
   }, [feed, link, ssid, password, security]);
 
   if (feed.status === "error" || problem) {
+    const oldRelease = problem === "old-release";
     return (
       <div className="stack">
         <Banner tone="warn">
-          Kintrinsic couldn't read the details of the current ward app, so there
-          is no setup code to show. A code that can't name the app's signing
-          certificate is never shown. Try again in a moment, or set the phone up
-          with a cable instead.
+          {oldRelease
+            ? "QR setup needs the next ward release; use the cable setup for now."
+            : "Kintrinsic couldn't read the details of the current ward app, so there is no setup code to show. A code that can't pin the exact app the phone will install is never shown. Try again in a moment, or set the phone up with a cable instead."}
         </Banner>
-        <Button block onClick={() => setAttempt((n) => n + 1)}>
-          Try again
-        </Button>
+        {!oldRelease && (
+          <Button block onClick={() => setAttempt((n) => n + 1)}>
+            Try again
+          </Button>
+        )}
         <Button variant="secondary" block onClick={onUseCable}>
           🔌 Set up with a cable instead
         </Button>
@@ -187,8 +195,8 @@ export default function SetupPhoneQr({
             {sas}
           </div>
           <div className="card-sub">
-            When the phone finishes setting up, Kintrinsic opens on it and shows
-            this code. Check it matches before tapping <b>Pair with guardian</b>.
+            Kintrinsic opens on the phone; if it doesn't, open Kintrinsic from
+            the app list. It shows this code. Check it matches before tapping <b>Pair with guardian</b>.
             It will then ask for <b>Usage access</b>: one switch, so time limits
             can count.
           </div>
@@ -203,7 +211,8 @@ export default function SetupPhoneQr({
         <>
           <div className="card-sub">
             Only needed if the phone can't find your Wi-Fi itself. Kept on this
-            screen only, never saved.
+            screen only, never saved. A WPA3-only network can't be set here:
+            connect the phone to it on its own Wi-Fi screen before scanning.
           </div>
           <label className="field" htmlFor="qr-wifi-ssid" style={{ margin: 0 }}>
             <span className="field-label">Wi-Fi name</span>
@@ -235,7 +244,7 @@ export default function SetupPhoneQr({
               value={security}
               onChange={(e) => setSecurity(e.target.value as WifiSecurity)}
             >
-              <option value="WPA">WPA / WPA2 / WPA3</option>
+              <option value="WPA">WPA / WPA2</option>
               <option value="WEP">WEP</option>
               <option value="NONE">None (open network)</option>
             </select>

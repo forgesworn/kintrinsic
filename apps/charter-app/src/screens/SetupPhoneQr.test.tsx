@@ -7,12 +7,14 @@ import SetupPhoneQr from "./SetupPhoneQr";
 const PK = "ab".repeat(32);
 const TOKEN = "0f".repeat(16);
 const CERT = "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc";
+const APK = "cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1";
 const BLOSSOM = "https://nostr.download/cb04.apk";
 const FEED = {
   versionName: "0.6.17",
   versionCode: 48,
   url: BLOSSOM,
   urls: ["https://github.com/forgesworn/kintrinsic/releases/download/x.apk", BLOSSOM],
+  apkSha256: APK,
   certSha256: CERT,
 };
 
@@ -89,9 +91,10 @@ describe("QR setup screen", () => {
     expect(container.textContent).toContain("123 456");
     const p = payload();
     expect(p["android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION"]).toBe(BLOSSOM);
-    expect(p["android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM"]).toBe(
-      Buffer.from(CERT, "hex").toString("base64url"),
+    expect(p["android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_CHECKSUM"]).toBe(
+      Buffer.from(APK, "hex").toString("base64url"),
     );
+    expect("android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM" in p).toBe(false);
     const link = (p["android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE"] as Record<string, string>)[
       "org.forgesworn.charter.PAIRING_LINK"
     ];
@@ -116,13 +119,22 @@ describe("QR setup screen", () => {
     expect(p["android.app.extra.PROVISIONING_WIFI_SECURITY_TYPE"]).toBe("WPA");
   });
 
-  it("never shows a code for a feed with no certificate, and offers the cable", async () => {
-    const { certSha256: _c, ...noCert } = FEED;
+  it("never shows a code for a feed with no APK checksum, and offers the cable", async () => {
+    const { apkSha256: _c, ...noSum } = FEED;
     void _c;
-    respond(noCert);
+    respond(noSum);
     await mount();
     expect(img()).toBeNull();
     expect(container.textContent).toContain("no setup code to show");
+    await act(async () => button("Set up with a cable instead")!.click());
+    expect(onUseCable).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for the cable while the released ward predates QR setup", async () => {
+    respond({ ...FEED, versionCode: 47 });
+    await mount();
+    expect(img()).toBeNull();
+    expect(container.textContent).toContain("QR setup needs the next ward release; use the cable setup for now");
     await act(async () => button("Set up with a cable instead")!.click());
     expect(onUseCable).toHaveBeenCalledTimes(1);
   });

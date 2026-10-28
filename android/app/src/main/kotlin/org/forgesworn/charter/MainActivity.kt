@@ -444,6 +444,7 @@ class MainActivity : Activity() {
         // e.g. after a guardian RELEASE unpaired the device while this screen
         // was open, it must flip back to "waiting to pair" on its own.
         refresh()
+        offerHeldLink()
         mainHandler.postDelayed(ticker, UI_TICK_MS)
     }
 

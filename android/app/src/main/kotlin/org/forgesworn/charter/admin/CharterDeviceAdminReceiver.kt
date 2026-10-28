@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.PersistableBundle
 import android.util.Log
-import org.forgesworn.charter.MainActivity
 import org.forgesworn.charter.service.CharterService
 
 /**
@@ -38,11 +37,10 @@ class CharterDeviceAdminReceiver : DeviceAdminReceiver() {
         if (!Provisioning.isDeviceOwner(context)) return
         runCatching { CharterService.start(context) }
             .onFailure { Log.e(TAG, "could not start the warden after provisioning", it) }
-        runCatching {
-            context.startActivity(
-                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        }.onFailure { Log.w(TAG, "could not open the pairing check after provisioning", it) }
+        // Best effort: this broadcast may never come for a fully managed QR
+        // setup, so the warden also opens the check itself once the setup
+        // wizard is done (CharterService.maybeNudgePairing).
+        QrSetup.openPairingCheck(context)
     }
 
     companion object {

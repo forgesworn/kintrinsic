@@ -6,19 +6,21 @@ import {
   WARD_ADMIN_COMPONENT,
   buildQrPayload,
   downloadLocation,
+  MIN_QR_WARD_VERSION_CODE,
+  packageChecksum,
   qrPayloadText,
-  signatureChecksum,
 } from "./qrPayload";
 
 const CERT = "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc";
+const APK = "cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1";
 const BLOSSOM = "https://nostr.download/cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1.apk";
 const GITHUB = "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.6.16/kintrinsic-ward-0.6.16.apk";
 const FEED = {
-  versionName: "0.6.16",
-  versionCode: 47,
+  versionName: "0.6.17",
+  versionCode: 48,
   url: "https://example.org/ward.apk",
   urls: [GITHUB, BLOSSOM],
-  apkSha256: "cb04d9bc7a3ec77100d144cf22fd82b80a252dca8409b5fff905ca87aae0aac1",
+  apkSha256: APK,
   certSha256: CERT,
   sizeBytes: 29702085,
   builtAt: "2026-10-28T12:01:02Z",
@@ -35,20 +37,20 @@ function problem(fn: () => unknown): string | undefined {
   return undefined;
 }
 
-describe("signatureChecksum", () => {
+describe("packageChecksum", () => {
   it("re-encodes the hex digest as URL-safe base64 without padding", () => {
-    const got = signatureChecksum(CERT);
-    expect(got).toBe(Buffer.from(CERT, "hex").toString("base64url"));
-    expect(got).toBe("Sng6PiwIeQa_KdTVACtUZwX6UPnYNE7F2tCI5HQM_Nw");
+    expect(packageChecksum(CERT)).toBe("Sng6PiwIeQa_KdTVACtUZwX6UPnYNE7F2tCI5HQM_Nw");
+    const got = packageChecksum(APK);
+    expect(got).toBe(Buffer.from(APK, "hex").toString("base64url"));
     expect(got).not.toMatch(/[+/=]/);
     expect(got).toHaveLength(43);
   });
 
-  it("refuses a missing or malformed certificate", () => {
-    expect(problem(() => signatureChecksum(undefined))).toBe("no-cert");
-    expect(problem(() => signatureChecksum(""))).toBe("no-cert");
-    expect(problem(() => signatureChecksum(CERT.slice(2)))).toBe("no-cert");
-    expect(problem(() => signatureChecksum(`${CERT.slice(1)}z`))).toBe("no-cert");
+  it("refuses a missing or malformed checksum", () => {
+    expect(problem(() => packageChecksum(undefined))).toBe("no-checksum");
+    expect(problem(() => packageChecksum(""))).toBe("no-checksum");
+    expect(problem(() => packageChecksum(APK.slice(2)))).toBe("no-checksum");
+    expect(problem(() => packageChecksum(`${APK.slice(1)}z`))).toBe("no-checksum");
   });
 });
 
@@ -60,6 +62,10 @@ describe("downloadLocation", () => {
   it("falls back to url when no urls[] entry is on the Blossom host", () => {
     expect(downloadLocation({ ...FEED, urls: [GITHUB] })).toBe("https://example.org/ward.apk");
     expect(downloadLocation({ ...FEED, urls: undefined })).toBe("https://example.org/ward.apk");
+  });
+
+  it("passes over a non-https Blossom entry to url", () => {
+    expect(downloadLocation({ ...FEED, urls: ["http://nostr.download/x.apk"] })).toBe("https://example.org/ward.apk");
   });
 
   it("refuses anything that is not https", () => {
@@ -76,7 +82,7 @@ describe("buildQrPayload", () => {
     expect(p).toEqual({
       "android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME": WARD_ADMIN_COMPONENT,
       "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION": BLOSSOM,
-      "android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM": "Sng6PiwIeQa_KdTVACtUZwX6UPnYNE7F2tCI5HQM_Nw",
+      "android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_CHECKSUM": Buffer.from(APK, "hex").toString("base64url"),
       "android.app.extra.PROVISIONING_LEAVE_ALL_SYSTEM_APPS_ENABLED": true,
       "android.app.extra.PROVISIONING_SKIP_ENCRYPTION": false,
       "android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE": { [PAIRING_LINK_EXTRA]: LINK },
@@ -85,8 +91,14 @@ describe("buildQrPayload", () => {
     expect(PAIRING_LINK_EXTRA).toBe("org.forgesworn.charter.PAIRING_LINK");
   });
 
+  it("never carries a signature checksum, from either certificate", () => {
+    const text = qrPayloadText(FEED, LINK);
+    expect(text).not.toContain("SIGNATURE_CHECKSUM");
+    expect(text).not.toContain(Buffer.from(CERT, "hex").toString("base64url"));
+  });
+
   it("carries no Wi-Fi keys unless an SSID is given", () => {
-    for (const wifi of [undefined, { ssid: "" }, { ssid: "   ", password: "secret" }]) {
+    for (const wifi of [undefined, { ssid: "" }, { ssid: "", password: "secret" }]) {
       const keys = Object.keys(buildQrPayload(FEED, LINK, wifi));
       expect(keys.some((k) => k.includes("WIFI"))).toBe(false);
     }
@@ -94,7 +106,8 @@ describe("buildQrPayload", () => {
 
   it("adds the Wi-Fi keys when given, WPA by default with a password", () => {
     const p = buildQrPayload(FEED, LINK, { ssid: " Home ", password: "hunter22" });
-    expect(p[K.wifiSsid]).toBe('"Home"');
+    // Exactly as typed: spaces are legal in an SSID.
+    expect(p[K.wifiSsid]).toBe('" Home "');
     expect(p[K.wifiPassword]).toBe("hunter22");
     expect(p[K.wifiSecurity]).toBe("WPA");
   });
@@ -106,11 +119,20 @@ describe("buildQrPayload", () => {
     expect(buildQrPayload(FEED, LINK, { ssid: "Old", password: "k", security: "WEP" })[K.wifiSecurity]).toBe("WEP");
   });
 
-  it("refuses a feed with no certificate, even when everything else is there", () => {
-    const { certSha256: _drop, ...noCert } = FEED;
+  it("refuses a feed with no APK checksum, even when everything else is there", () => {
+    const { apkSha256: _drop, ...noSum } = FEED;
     void _drop;
-    expect(problem(() => buildQrPayload(noCert, LINK))).toBe("no-cert");
-    expect(problem(() => buildQrPayload(null, LINK))).toBe("no-cert");
+    expect(problem(() => buildQrPayload(noSum, LINK))).toBe("no-checksum");
+    expect(problem(() => buildQrPayload({ ...FEED, apkSha256: "abc" }, LINK))).toBe("no-checksum");
+    expect(problem(() => buildQrPayload(null, LINK))).toBe("no-checksum");
+  });
+
+  it("refuses a ward release older than the provisioning activities", () => {
+    expect(MIN_QR_WARD_VERSION_CODE).toBe(48);
+    expect(problem(() => buildQrPayload({ ...FEED, versionCode: 47 }, LINK))).toBe("old-release");
+    expect(problem(() => buildQrPayload({ ...FEED, versionCode: undefined }, LINK))).toBe("old-release");
+    expect(problem(() => buildQrPayload({ ...FEED, versionCode: "48" }, LINK))).toBe("old-release");
+    expect(problem(() => buildQrPayload({ ...FEED, versionCode: 49 }, LINK))).toBeUndefined();
   });
 
   it("refuses a feed whose only download is not https", () => {

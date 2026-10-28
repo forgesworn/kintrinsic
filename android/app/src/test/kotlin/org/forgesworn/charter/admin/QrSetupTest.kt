@@ -68,4 +68,23 @@ class QrSetupTest {
         assertFalse(QrSetup.needsUsageAccess(true, AppOpsManager.MODE_ALLOWED))
         assertFalse(QrSetup.needsUsageAccess(false, AppOpsManager.MODE_DEFAULT))
     }
+
+    @Test
+    fun `the warden opens the pairing check only once setup is done and unpaired`() {
+        val open = QrSetup.Nudge(open = true, notify = true)
+        assertEquals(open, QrSetup.pairingNudge(held = true, paired = false, setupComplete = true))
+        // The wizard is still on screen: wait rather than open over it.
+        assertEquals(QrSetup.Nudge.NONE, QrSetup.pairingNudge(true, false, false))
+        // The setting is unreadable: the notice alone, no screen taken.
+        assertEquals(QrSetup.Nudge(open = false, notify = true), QrSetup.pairingNudge(true, false, null))
+    }
+
+    @Test
+    fun `no nudge without a held link, once paired, or when pairing state is unknown`() {
+        for (setup in listOf(true, false, null)) {
+            assertEquals(QrSetup.Nudge.NONE, QrSetup.pairingNudge(false, false, setup))
+            assertEquals(QrSetup.Nudge.NONE, QrSetup.pairingNudge(true, true, setup))
+            assertEquals(QrSetup.Nudge.NONE, QrSetup.pairingNudge(true, null, setup))
+        }
+    }
 }
