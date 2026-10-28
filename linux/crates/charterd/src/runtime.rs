@@ -1985,7 +1985,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             match charter_link::WardLink::spawn(
                 charter_link::WardLinkConfig {
                     machine_sk: zeroize::Zeroizing::new(secret),
-                    guardian,
+                    signers: Arc::new(charter_primitives::SinglePinned(guardian)),
                     state_dir: link_state_dir(&config.key_path),
                     // The carrier is the guardian's phone, never this
                     // machine: a loopback "guardian" is a local process.
