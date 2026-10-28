@@ -48,21 +48,42 @@ fine. It is even a feature: adding a parent needs a physical press.
 
 - A ward still pins **R** at pairing, and the pairing link is unchanged.
 - A ward accepts an approval only if R signed it. It keeps the newest approval
-  per working key.
+  per working key. The pairing floor (`issuedAt >= paired_at`) does **not**
+  apply to approvals: a working key approved before this ward paired still
+  counts.
 - A clause, GRANT or pair offer is accepted if it is signed by R itself, or by
   a W whose newest approval is active. Everything else about clause checking
   stays as it is.
-- **Withdrawing a working key drops every clause that key signed,**
-  whatever its `issuedAt`. A stolen phone can backdate `issuedAt`, so time
-  cannot be trusted here. To avoid a gap, the guardian app re-signs the
-  family's current clause set with a live working key **before** it publishes
-  the withdrawal. The pairing floor and replay rules apply to the re-signed
-  set as usual.
-- Wards encrypt STATUS, usage and requests to **every active working key**,
-  not to R. R is never asked to decrypt anything.
-- Approvals reach wards the same way clauses do: gift-wrapped to each ward,
-  over relays and the home network. A ward also fetches R's approvals from its
-  relays on start.
+- **A withdrawn working key can sign nothing new.** The ward refuses any
+  clause, GRANT or pair offer from it whose arrival follows the withdrawal,
+  whatever its `issuedAt`: a stolen phone can backdate `issuedAt`, so time
+  cannot be trusted here.
+- **Clauses it already signed stay enforced until a live key replaces them,
+  kind by kind.** Dropping them at once would fail open: an absent schedule is
+  "unconstrained", and relays do not guarantee that a ward sees the re-signed
+  set before the withdrawal. So the guardian app re-signs the family's current
+  clause set with a live working key and sends it **before** the withdrawal.
+  The pairing floor and replay rules apply to the re-signed set as usual.
+- Stored clauses keep their signer's pubkey. This is a store-format change on
+  both wards, and it is what lets the screen say who set a rule.
+- Wards encrypt STATUS, usage and requests to **every active working key**
+  they hold an approval for, not to R. R is never asked to decrypt anything.
+  A working key whose approval a ward hasn't received yet gets nothing from
+  that ward until it has. Requests fan out once per active key.
+
+**How approvals reach a ward.** A ward requires a seal's author to be the
+inner event's author (`charter-proto` NIP-59 unwrap). An approval is signed by
+R, but R must not be asked to seal one per ward. So there is one narrow
+exception, for kind 31119 only:
+- the seal may be authored by the very working key the approval names, and by
+  no other key;
+- R's signature proves R approved W, and the seal proves the sender holds W.
+
+A working key sends its own approval to each ward, gift-wrapped over relays and
+the home network, before or alongside its first clause. A scan-to-pair offer
+(31117) signed by W carries W's approval in the same delivery, so a new ward
+can check it at once. Approvals are never published openly: the label and the
+family's shape stay private.
 
 ## Two parents
 
@@ -98,8 +119,14 @@ fine. It is even a feature: adding a parent needs a physical press.
 **Moving the root.** A key can't be moved onto a Heartwood: only seeds can be
 restored to one, and that passes through the host. So moving the root means a
 new root R2 and a **root move** event. The old R signs "the family root is now
-R2", and every ward that pinned R switches its pin to R2. The old R is then
-deleted from the phone.
+R2", and every ward that pinned R switches its pin to R2. The old R is deleted
+from the phone only once every ward has confirmed the move in STATUS.
+
+Anyone holding R can already set any rule, but a root move would make that
+**permanent**, locking the real parent out for good. So a ward does not take
+a root move silently. It shows the same six-digit check it shows at pairing,
+for R2, and a grown-up confirms it on the device. This happens once per ward,
+and rarely. See decision 5.
 - If the old root is already lost, there is nothing to sign the move. Those
   wards have to be paired again.
 - That is why the guardian app should offer the move early, as part of
@@ -140,13 +167,29 @@ with a new working key. No ward needs touching.
 4. Does the **child's identity** (a dependant key shared across Kindred apps)
    come into scope now, or later? This design leaves the ward's own identity
    as it is.
+5. **Root move confirmation on each ward** (recommended), or signature-only?
+   Confirmation costs one tap per ward and closes the permanent lock-out.
+   Signature-only is smoother but makes a stolen root unrecoverable.
+6. **How the second parent's app learns the family.** A newly approved working
+   key knows no children, devices or names: those live only in the first
+   parent's app. Recommended: an encrypted **family roster**, a new kind
+   signed by a working key and gift-wrapped to the other active working keys.
+   It carries children, names, colours and device pubkeys, and the wards'
+   STATUS fills in the live state. The alternative, wards announcing
+   themselves to a new key, can't supply names. Without one of these, "add a
+   second parent" opens on an empty Family screen.
 
 ## Build order (once agreed)
 
-1. Contract and vectors: the two kinds, ward acceptance, withdrawal drops
-   clauses, root move.
-2. Wards (core, Linux, Android): approval store, signer check, multi-recipient
-   STATUS, root move. Old wards keep working.
+1. Contract and vectors:
+   - the two kinds (plus the roster kind, if decision 6 goes that way);
+   - ward acceptance, the seal exception for 31119, and the withdrawal rules;
+   - root move and its confirmation.
+2. Wards (core, Linux, Android):
+   - the approval store, the signer check, and the stored-clause format
+     carrying the signer;
+   - multi-recipient STATUS, and root move with confirmation.
+   - Old wards keep working.
 3. Guardian app:
    - working keys, and signing with W;
    - "Connect My Signet" as R;
