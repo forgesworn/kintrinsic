@@ -81,8 +81,9 @@ pub fn migrate_legacy_relays(pairing: &mut Pairing) -> bool {
 
 /// The ward's guardian PIN record, as a guardian sets it inside a RELAYS body
 /// (contract, *Presence confirmation*): scrypt (N=2^15, r=8, p=1, 32-byte
-/// output) of the PIN's UTF-8 bytes under `salt`. Stored next to the pairing
-/// for the Android ward to check a PIN against; Linux ignores it.
+/// output) of the PIN's UTF-8 bytes under `salt`. Never stored in the pairing
+/// record, which is not a secret: [`apply_signed_relays`] hands it back, and
+/// the guardian-keys state keeps it in its `0600` file (review 2a, L2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuardianPin {
@@ -140,8 +141,10 @@ pub struct PreviousRelays {
 pub struct RelaysApplied {
     /// The list it replaced (rule 11).
     pub previous: PreviousRelays,
-    /// Whether it set (or replaced) the guardian PIN record.
-    pub pin_set: bool,
+    /// The guardian PIN record it carried, validated. NOT written into the
+    /// pairing: the caller stores it with the guardian-keys state, or drops
+    /// it on a ward without one.
+    pub pin: Option<GuardianPin>,
 }
 
 /// Validate before mutating; callers must persist successfully before swapping
@@ -174,7 +177,8 @@ pub fn apply_signed_config(pairing: &mut Pairing, json: &str, now: u64) -> Resul
 /// marker, `p` names this machine, id and signature, not future-dated, at
 /// most 600 seconds old, not before pairing, newer than the last change —
 /// with the author checked against the signer set. A `guardianPin` is
-/// accepted here, and replaces any held one. Nothing is mutated on `Err`.
+/// accepted here and returned in [`RelaysApplied::pin`]; the pairing never
+/// holds it. Nothing is mutated on `Err`.
 /// The caller must have checked that the seal author is the event's author.
 pub fn apply_signed_relays(
     pairing: &mut Pairing,
@@ -194,11 +198,10 @@ pub fn apply_signed_relays(
         until: now.saturating_add(PREVIOUS_RELAYS_SECS),
     };
     pairing.relays_updated_at = Some(event.created_at);
-    let pin_set = config.guardian_pin.is_some();
-    if let Some(pin) = config.guardian_pin {
-        pairing.guardian_pin = Some(pin);
-    }
-    Ok(RelaysApplied { previous, pin_set })
+    Ok(RelaysApplied {
+        previous,
+        pin: config.guardian_pin,
+    })
 }
 
 /// The checks every RELAYS event passes, however it arrived, returning its
@@ -405,8 +408,8 @@ mod tests {
             fn root_of(&self, _k: &PubKey) -> Option<PubKey> {
                 Some(self.0)
             }
-            fn departed_at(&self, _k: &PubKey) -> Option<u64> {
-                None
+            fn is_departed(&self, _k: &PubKey) -> bool {
+                false
             }
             fn recipients(&self) -> Vec<PubKey> {
                 vec![self.1]
@@ -426,14 +429,14 @@ mod tests {
             serde_json::json!({"machine": p.machine, "relays": default_relays(), "guardianPin": pin()}),
         );
         let applied = apply_signed_relays(&mut p, &ev, &set, 200).unwrap();
-        assert!(applied.pin_set);
+        assert_eq!(applied.pin.as_ref().unwrap().hash, "cd".repeat(32));
         assert_eq!(applied.previous.relays, before);
         assert_eq!(applied.previous.until, 200 + PREVIOUS_RELAYS_SECS);
         assert_eq!(p.relays, default_relays());
-        assert_eq!(p.guardian_pin.as_ref().unwrap().hash, "cd".repeat(32));
-        // The PIN round-trips through the persisted pairing.
-        let back: Pairing = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
-        assert_eq!(back, p);
+        // The PIN never reaches the persisted pairing (L2).
+        assert!(!serde_json::to_string(&p)
+            .unwrap()
+            .contains("cd".repeat(32).as_str()));
         // Same event again: not newer.
         assert!(apply_signed_relays(&mut p.clone(), &ev, &set, 201).is_err());
         // A key outside the set is refused, and nothing changes.

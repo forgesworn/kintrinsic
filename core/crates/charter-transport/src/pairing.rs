@@ -22,12 +22,6 @@ pub struct Pairing {
     /// Later values are the last applied guardian-signed relay change.
     #[serde(default)]
     pub relays_updated_at: Option<u64>,
-    /// The ward's guardian PIN record, set by a gift-wrapped RELAYS change
-    /// from a signer (contract, *Presence confirmation*). Read by the Android
-    /// ward to gate minting a presence token; Linux ignores it. Absent until
-    /// a guardian sets one, and then omitted from older-shaped records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guardian_pin: Option<crate::relay_config::GuardianPin>,
 }
 
 /// Why a `bunker://` URI was rejected.
@@ -157,7 +151,6 @@ pub fn pin_from_connect(
         audit_transparency,
         paired_at: now,
         relays_updated_at: Some(0),
-        guardian_pin: None,
     })
 }
 
