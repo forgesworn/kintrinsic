@@ -36,7 +36,11 @@ in addition, anywhere in the document,
 - no object has two members with the same name;
 - every number token is an integer: no fraction, no exponent (`1.0`, `1e3`,
   `17e8` are refused), and not `-0`;
-- no string contains a lone UTF-16 surrogate, escaped (`"\ud800"`) or raw.
+- no string contains a lone UTF-16 surrogate, escaped (`"\ud800"`) or raw;
+- nesting is at most **16** deep, objects and arrays combined, the top-level
+  object being depth 1 (an object holding 15 nested arrays is depth 16 and
+  parses; 16 nested arrays make depth 17 and are refused). A decoder
+  refuses anything deeper, whatever its own recursion limit.
 
 Content that fails is `content_not_json` (statements, rosters), `bad_confirm`
 (confirmations) or `bad_offer` (offers). Integers beyond 2^53 − 1 parse (they
@@ -213,6 +217,8 @@ that.
   while the ward has more than one root, each relay list replaced within the
   last 604800 s (a list replaced at time t counts while `now` < t + 604800),
   newest replacement first, adding only URLs not already listed.
+  At most the **8** most recent replaced lists are kept: when a 9th would be
+  added, the oldest is dropped (scenario `relays_previous_cap`).
 - `guardianPin`: the last PIN record set by a wrapped RELAYS, or null.
 
 Internal state (stored statements, tokens, tombstone and token order) is not

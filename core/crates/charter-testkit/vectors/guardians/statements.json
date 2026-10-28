@@ -698,6 +698,42 @@
         "label": null,
         "expiresAt": null
       }
+    },
+    {
+      "name": "nesting_depth_16_in_unknown_field",
+      "event": {
+        "id": "bd42c7825b4f2fc1ccf63f3d8111815ee8030e23ca50c16e842539af391b93cc",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"x\":[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]}",
+        "sig": "9332c7a336255389b3ed20c9ecb1660ef2aedda996bdfaaf7868084a2039865b39731733bf4de505debe9ab8bafac6ff3f5c61ef4f295f791eb7165c541a94a7"
+      },
+      "expected": {
+        "type": "approval",
+        "d": "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "p": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "target": null,
+        "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "issuedAt": 1700000000,
+        "label": null,
+        "expiresAt": null
+      }
     }
   ],
   "invalid": [
@@ -1608,6 +1644,32 @@
         ],
         "content": "{\"v\":1,\"issuedAt\":1700000000,}",
         "sig": "894f6c307b6b2d07e2aacf12ad94d69e03bf120623de708a60a6cb30677263bd1c88661c3be887a6f7e2ac9f0c523ec3d986fb29f7e8695da34135aaed17a227"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "nesting_too_deep",
+      "event": {
+        "id": "f3959b546f244a21a2ce8b4a8e8a208d34e8a1af3bfc833923eed68a0b90adbd",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"x\":[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]}",
+        "sig": "3d81b73774ac89da8e679b1503a39d92d8320796488ad904b2c2f895ca77206e80c05ff27e7fce8f7bf2042443a4e9308e57069ae62ebcd294c33a410851c9b3"
       },
       "reason": "content_not_json"
     },

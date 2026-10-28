@@ -158,6 +158,7 @@ const offerEv = (sealer, token, ts, approval) =>
   addValid("tag_order_free", st.raw(R1, [MARKER, pW, dW], good));
   addValid("label_surrogate_pair_and_escapes", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"label":"\\ud83d\\ude00 \\"x\\""}`));
   addValid("integer_beyond_2_53_in_unknown_field", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"big":123456789012345678901}`));
+  addValid("nesting_depth_16_in_unknown_field", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"x":${"[".repeat(15)}${"]".repeat(15)}}`));
 
   const base = st.approval(R1, W1, o);
   addInvalid("not_an_object", "not an event", "bad_event");
@@ -198,6 +199,9 @@ const offerEv = (sealer, token, ts, approval) =>
   addInvalid("label_lone_surrogate", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"label":"\\ud800"}`), "content_not_json");
   addInvalid("label_lone_low_surrogate", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"label":"a\\udc00"}`), "content_not_json");
   addInvalid("trailing_comma", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},}`), "content_not_json");
+  // Nesting: the top-level object is depth 1; 16 is the most accepted.
+  const nestedAt = (depth) => `{"v":1,"issuedAt":${T0},"x":${"[".repeat(depth - 1)}${"]".repeat(depth - 1)}}`;
+  addInvalid("nesting_too_deep", st.raw(R1, [dW, pW, MARKER], nestedAt(17)), "content_not_json");
   addInvalid("issued_at_negative", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: -1 })), "bad_issued_at");
   addInvalid("issued_at_string", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: String(T0) })), "bad_issued_at");
   addInvalid("label_65_bytes", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: T0, label: "a".repeat(65) })), "bad_label");
@@ -683,6 +687,15 @@ scenario("rule11_relays", ["11"], "A RELAYS change from any signer applies; a mu
   c.tick(T0 + 100 + 7 * DAY - 1);
   c.tick(T0 + 100 + 7 * DAY);
   c.tick(T0 + 300 + 7 * DAY);
+});
+
+scenario("relays_previous_cap", ["11"], "Only the 8 most recent previous relay lists are kept; a 9th change drops the oldest.", (c) => {
+  twoRoots(c);
+  // Ten changes: the list from pairing and the first change fall out of statusRelays.
+  for (let n = 1; n <= 10; n++) {
+    c.relays(W1, T0 + 100 + n, [`wss://relay.n${n}.example`, `wss://relay.m${n}.example`], T0 + 100 + n, A("relays_applied"));
+  }
+  c.tick(T0 + 110 + 7 * DAY);
 });
 
 scenario("relays_existing_checks", ["11", "offline relay recovery"], "The existing RELAYS checks apply first: no future created_at, at most 600 s old, not before pairing, newer than the last applied.", (c) => {

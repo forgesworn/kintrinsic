@@ -383,3 +383,25 @@ should decide whether a pending removal follows a move. Design session only;
 no code change.
 
 **Raised by:** batch 1 review.
+
+## An old objection re-arms the removal block
+
+**Where:** rule 7 ("Neither parent can remove the other against their
+objection"); `src/guardians/state.ts` `processObjection` and `objectedBy`.
+
+**Question:** an objection has no freshness bound. An objection signed long
+ago but never delivered, then delivered now, drops R1's fresh removal
+(`objection_applied`) and blocks re-issues for 7 days from its *receipt*. The
+exposure is narrow (the seal is per ward, so the old wrap must have been
+addressed to this ward and never processed, and R2 could object afresh
+anyway), but it matters when R2's key is lost and R1 is removing an absent
+co-guardian: each stray wrap buys another week. Should the 7-day block run
+from `max(issuedAt, receivedAt)` clamped to `issuedAt + 7 d`, or should an
+objection count only if its `issuedAt` is within 7 days of the pending
+removal's?
+
+**Build's interim reading:** unchanged: the block runs for 7 days from the
+objection's receipt, however old its `issuedAt`. No code change. Design
+session only.
+
+**Raised by:** batch 1 re-review.
