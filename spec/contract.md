@@ -2407,6 +2407,7 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 | root removal | `kintrinsic/unguardian/<R2>` | R2 | R2, or another pinned root | R2 leaves, at once if R2 signed it; otherwise after presence confirmation |
 | root move | `kintrinsic/root/<R2>` | R2 | the root R being replaced | R2 replaces R, after presence confirmation |
 | cancel | `kintrinsic/cancel/<d of the pending statement>` | the pending statement's `p` | the pending statement's signer | a pending co-guardian, removal or move is dropped |
+| objection | `kintrinsic/object/<d of the pending removal>` | the removal's signer | the root being removed | the pending removal is dropped |
 
 - `<W>` and `<R2>` are 64 lowercase hex.
 - A statement is ignored if its `d` and `p` disagree, its content is malformed,
@@ -2531,6 +2532,15 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
   administrator on Linux (polkit, as for other admin actions), or the ward's
   guardian PIN on Android. Neither the child, nor anyone the child passes a
   code to, can mint one.
+- **The Android guardian PIN:**
+  - It is set by a guardian, as `{ v: 1, salt, hash }` (scrypt, N=2^15, r=8,
+    p=1, 32-byte output, hex) inside a `guardianPin` field of the RELAYS event
+    body. It is signed by any key in the signer set and stored in the Device
+    Owner's private storage.
+  - A ward with no PIN set can't mint a token. The guardian app sets one
+    before it offers anything that needs presence.
+  - Wrong entries back off: after 5 failures the next try waits 1 minute,
+    doubling to a 1-hour cap. The counter survives restarts.
 - The ward then shows the one-time token as a code to scan, with a short form
   to type. Token rules are as for scan-to-pair: 16 random bytes, a 600-second
   lifetime, single use, compared in constant time.
