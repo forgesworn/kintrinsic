@@ -34,6 +34,13 @@ export const FUTURE_SKEW_SECONDS = 300
 export const PENDING_MAX_SECONDS = 7 * 24 * 60 * 60
 /** Notice period for a root removal signed by another root (rule 7). */
 export const REMOVAL_NOTICE_SECONDS = 72 * 60 * 60
+/**
+ * An objection blocks further removals of its signer by the same remover for
+ * this long after it reaches the ward. OQ: Removal re-issued after an objection.
+ */
+export const OBJECTION_BLOCK_SECONDS = 7 * 24 * 60 * 60
+/** The existing RELAYS rule: an event more than this old is refused. */
+export const RELAYS_TTL_SECONDS = 600
 /** Presence and pairing token lifetime. */
 export const TOKEN_LIFETIME_SECONDS = 600
 /** After a RELAYS change, a multi-root ward also sends STATUS on the old relays. */

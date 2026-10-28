@@ -13,6 +13,7 @@
  * generated from this module.
  */
 export * from './types.js'
+export * from './json.js'
 export * from './reasons.js'
 export * from './statements.js'
 export * from './state.js'

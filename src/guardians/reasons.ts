@@ -94,6 +94,8 @@ export const DROP_REASONS = [
   'pairing_floor',
   'not_newer',
   'bad_offer',
+  'pin_not_wrapped',
+  'bad_pin_record',
 ] as const
 export type DropReason = (typeof DROP_REASONS)[number]
 

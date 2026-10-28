@@ -8,10 +8,11 @@
  * - A device known only from a roster is unconfirmed until a STATUS from it
  *   arrives.
  * - A roster is accepted only from a W approved by a root that the family's
- *   wards report in STATUS.
+ *   wards report in STATUS, and listed under that root there.
  */
 import { isEventShape, parseStatement, verifySignedEvent } from './statements.js'
-import { CHARTER_FAMILY_ROSTER, isHex64, isUnixSeconds, type Inbound } from './types.js'
+import { tryParseStrictJson } from './json.js'
+import { CHARTER_FAMILY_ROSTER, FUTURE_SKEW_SECONDS, isHex64, isUnixSeconds, type Inbound } from './types.js'
 
 export interface LocalRosterDevice {
   machine: string
@@ -43,8 +44,10 @@ export type RosterReason =
   | 'content_not_json'
   | 'bad_version'
   | 'bad_children'
+  | 'future'
   | 'bad_approval'
   | 'root_not_reported'
+  | 'key_not_reported'
 
 export type MergeRosterResult =
   | { ok: true; roster: LocalRoster; updated: string[] }
@@ -79,30 +82,40 @@ function validChild(x: unknown): x is LocalRosterChild {
 /**
  * Merge an incoming roster into the local one.
  *
- * @param reportedRoots the roots the family's wards report in STATUS
- *   `guardians.roots`; the sender's approval must be signed by one of them.
+ * @param reported the family's wards' STATUS `guardians.roots` (merged
+ *   across wards): the sender's approval must be signed by one of these roots
+ *   and the sender must be listed under it, so a withdrawn W is refused.
+ * @param now the receiving install's clock: a child record more than 300
+ *   seconds ahead of it refuses the whole roster.
  */
-export function mergeRoster(local: LocalRoster, inbound: Inbound, reportedRoots: readonly string[]): MergeRosterResult {
+export function mergeRoster(
+  local: LocalRoster,
+  inbound: Inbound,
+  reported: readonly { root: string; keys: readonly string[] }[],
+  now: number,
+): MergeRosterResult {
   const inner = inbound.inner
   if (!isEventShape(inner)) return { ok: false, reason: 'bad_event' }
   if (!verifySignedEvent(inner)) return { ok: false, reason: 'bad_signature' }
   if (inner.kind !== CHARTER_FAMILY_ROSTER) return { ok: false, reason: 'wrong_kind' }
   if (inbound.sealAuthor !== inner.pubkey) return { ok: false, reason: 'seal_mismatch' }
-  let c: unknown
-  try {
-    c = JSON.parse(inner.content)
-  } catch {
-    return { ok: false, reason: 'content_not_json' }
-  }
+  const parsed = tryParseStrictJson(inner.content)
+  if (!parsed.ok) return { ok: false, reason: 'content_not_json' }
+  const c = parsed.value
   if (typeof c !== 'object' || c === null || Array.isArray(c)) return { ok: false, reason: 'content_not_json' }
   const o = c as Record<string, unknown>
   if (o.v !== 1) return { ok: false, reason: 'bad_version' }
   if (!Array.isArray(o.children) || !o.children.every(validChild)) return { ok: false, reason: 'bad_children' }
+  if ((o.children as LocalRosterChild[]).some((ch) => ch.issuedAt > now + FUTURE_SKEW_SECONDS)) {
+    return { ok: false, reason: 'future' }
+  }
   const pa = parseStatement(o.approval)
   if (!pa.ok || pa.statement.type !== 'approval' || pa.statement.key !== inner.pubkey || pa.statement.expiresAt !== null) {
     return { ok: false, reason: 'bad_approval' }
   }
-  if (!reportedRoots.includes(pa.statement.signer)) return { ok: false, reason: 'root_not_reported' }
+  const root = reported.find((r) => r.root === pa.statement.signer)
+  if (!root) return { ok: false, reason: 'root_not_reported' }
+  if (!root.keys.includes(inner.pubkey)) return { ok: false, reason: 'key_not_reported' }
 
   const out: LocalRoster = JSON.parse(JSON.stringify(local)) as LocalRoster
   const updated: string[] = []

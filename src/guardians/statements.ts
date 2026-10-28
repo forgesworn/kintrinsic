@@ -10,6 +10,7 @@
  */
 import { verifyEvent, type NostrEvent } from 'nostr-tools/pure'
 import type { StatementReason } from './reasons.js'
+import { tryParseStrictJson } from './json.js'
 import {
   CHARTER_GUARDIAN_STATEMENT,
   MAX_LABEL_BYTES,
@@ -148,7 +149,7 @@ function tagValues(event: SignedEvent, name: string): string[] {
  *
  * Checks run in this order, and the first failure is the reason: event shape,
  * signature, kind, marker, `d` count, `p` count, `d` prefix, key format,
- * cancel/objection target, `d`/`p` agreement, content JSON, `v`, `issuedAt`,
+ * cancel/objection target, `d`/`p` agreement, content strict JSON, `v`, `issuedAt`,
  * `label`, `expiresAt`.
  */
 export function parseStatement(event: unknown): ParseStatementResult {
@@ -191,12 +192,11 @@ export function parseStatement(event: unknown): ParseStatementResult {
     targetType = 'removal'
   }
 
-  let content: unknown
-  try {
-    content = JSON.parse(event.content)
-  } catch {
-    return { ok: false, reason: 'content_not_json' }
-  }
+  // Strict JSON: no duplicate names, integer number tokens only, no lone
+  // surrogates, so every ward reads one event the same way.
+  const parsedContent = tryParseStrictJson(event.content)
+  if (!parsedContent.ok) return { ok: false, reason: 'content_not_json' }
+  const content = parsedContent.value
   if (typeof content !== 'object' || content === null || Array.isArray(content)) {
     return { ok: false, reason: 'content_not_json' }
   }
