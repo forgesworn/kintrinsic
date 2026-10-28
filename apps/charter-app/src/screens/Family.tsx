@@ -37,6 +37,7 @@ import { QRScanner } from "../components/QRScanner";
 import UnlockDevice from "./UnlockDevice";
 import DeviceRelays from "./DeviceRelays";
 import DeviceDebugging from "./DeviceDebugging";
+import SetupPhoneQr from "./SetupPhoneQr";
 import AppVersion from "../carrier/AppVersion";
 import { isValidDevicePubkey } from "./offlineUnlock";
 import { anyOnHomeNetwork, bestLiveness, livenessChip } from "../domain/liveness";
@@ -830,6 +831,9 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
   /** The six-digit code both screens show for this pairing link (S6). */
   const [pairSas, setPairSas] = useState<string | null>(null);
   const [cableMode, setCableMode] = useState(false);
+  // QR setup from a factory reset (docs/qr-setup.md): its own token owner,
+  // exclusive with the pairing QR and the cable exactly as cableMode is.
+  const [qrSetupMode, setQrSetupMode] = useState(false);
   const [cableSupported, setCableSupported] = useState(false);
   // True while a cable provision is mid-flight — locks the kind toggle so a
   // stray click can't unmount SetupPhoneCable and orphan the provision (Fix 3).
@@ -841,7 +845,7 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
   // The QR path and the cable path are mutually exclusive: entering cable mode
   // makes phoneScanMode false, so the QR-mint effect's cleanup cancels the QR
   // token (Fix 1) — the single shared pairing token is never owned by both.
-  const phoneScanMode = kind === "android" && !manualEntry && step === "scan" && !cableMode;
+  const phoneScanMode = kind === "android" && !manualEntry && step === "scan" && !cableMode && !qrSetupMode;
 
   // Checked lazily via a dynamic import, only once the parent has picked
   // "Phone" — nothing WebUSB-related loads until it's actually relevant.
@@ -866,7 +870,10 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
   // cancel the wait whenever it isn't (leaving the flow kills the token).
   useEffect(() => {
     if (!phoneScanMode || !haveLocalSigner) {
-      cancelPhonePairing();
+      // QR setup mints its own token on mount, and a child's effects run
+      // before this one: cancelling here would wipe it in the same commit.
+      // SetupPhoneQr cancels its own token when it unmounts.
+      if (!qrSetupMode) cancelPhonePairing();
       setQrSrc(null);
       return;
     }
@@ -891,7 +898,7 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
     // cableMode is a dep so LEAVING cable mode re-mints the QR — otherwise the
     // displayed QR would encode the cancelled (dead) token and scanning hangs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phoneScanMode, haveLocalSigner, child.id, cableMode]);
+  }, [phoneScanMode, haveLocalSigner, child.id, cableMode, qrSetupMode]);
 
   // The phone scanned our QR and announced itself: bind its real pubkey and
   // jump straight to naming it.
@@ -907,7 +914,10 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
   function chooseKind(next: Device["platform"]) {
     setKind(next);
     setManualEntry(false);
-    if (next !== "android") setCableMode(false);
+    if (next !== "android") {
+      setCableMode(false);
+      setQrSetupMode(false);
+    }
     // Only swap the default label if the parent hasn't customised it.
     const defaults = [`${child.name}'s laptop`, `${child.name}'s phone`];
     if (defaults.includes(label)) {
@@ -1010,6 +1020,15 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
                 onBusyChange={setCableBusy}
               />
             )
+          ) : kind === "android" && qrSetupMode && haveLocalSigner ? (
+            <SetupPhoneQr
+              child={child}
+              onBack={() => setQrSetupMode(false)}
+              onUseCable={() => {
+                setQrSetupMode(false);
+                setCableMode(true);
+              }}
+            />
           ) : (
             <>
               {phoneScanMode ? (
@@ -1025,6 +1044,13 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
                   </>
                 ) : (
                   <>
+                    <Button block onClick={() => setQrSetupMode(true)}>
+                      Set up with a QR code
+                    </Button>
+                    <div className="card-sub" style={{ textAlign: "center" }}>
+                      Recommended for a new or factory-reset phone. Already has
+                      the Kintrinsic ward app? Scan the code below instead.
+                    </div>
                     <Banner tone="info">
                       <span>
                         Scan this with {child.name}'s <b>phone camera</b>. The
@@ -1169,9 +1195,12 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
               )}
 
               {kind === "android" && cableSupported && haveLocalSigner && (
-                <Button variant="ghost" block onClick={() => setCableMode(true)}>
-                  🔌 Set up with a cable (no scanning)
-                </Button>
+                <>
+                  <SectionLabel>Other ways</SectionLabel>
+                  <Button variant="ghost" block onClick={() => setCableMode(true)}>
+                    🔌 Set up with a cable (no scanning)
+                  </Button>
+                </>
               )}
             </>
           )}
