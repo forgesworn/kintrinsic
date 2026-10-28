@@ -1,6 +1,6 @@
 # Guardian keys: a family root and working keys
 
-Status: **proposed**, for review. Nothing here is built. Once agreed, the wire
+Status: **agreed 2026-10-28**, not yet built. Once agreed, the wire
 parts move into `spec/contract.md` and this note is cut down to the reasoning.
 
 ## Why
@@ -196,17 +196,22 @@ Rules, taken from Kindependence where it already solved them:
      on wards, and it is the version that survives two households.
 2. Is **R the parent's main My Signet identity,** shared with Kindependence
    and Kinterest (keys once across the suite), or a derived "Kintrinsic
-   guardian" persona? A shared identity is the Kindred goal, but it means
-   Kintrinsic's slot can sign approvals with the parent's main identity.
-3. **Reusing Kindependence's kind-30078 statement** (recommended) or new
-   Kintrinsic kinds. Reuse means My Signet already knows how to sign it.
+   guardian" persona?
+   - **Decided 2026-10-28:** the main identity is the default, but a parent
+     may choose a separate persona or key for Kintrinsic.
+   - So Kintrinsic treats R as whichever identity the parent connects, and
+     never assumes it is the one Kindependence or Kinterest uses.
+3. **Reusing Kindependence's kind-30078 statement** or new Kintrinsic kinds.
+   **Decided 2026-10-28: reuse.**
 4. Does the **child's identity** (a dependant key shared across Kindred apps)
-   come into scope now, or later? This design leaves the ward's own identity
-   as it is.
-5. **Root move confirmation on each ward** (recommended), or signature-only?
+   come into scope now, or later? **Later.** This design leaves the ward's own
+   identity as it is.
+5. **Root move confirmation on each ward,** or signature-only? **Decided
+   2026-10-28: confirmation on each ward.**
    Confirmation costs one tap per ward and closes the permanent lock-out.
    Signature-only is smoother but makes a stolen root unrecoverable.
-6. **How the second parent's app learns the family.** A newly approved working
+6. **How the second parent's app learns the family.** **Decided 2026-10-28:
+   the encrypted family roster.** A newly approved working
    key knows no children, devices or names: those live only in the first
    parent's app. Recommended: an encrypted **family roster**, a new kind
    signed by a working key and gift-wrapped to the other active working keys.
