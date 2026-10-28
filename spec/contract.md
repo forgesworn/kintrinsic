@@ -2375,8 +2375,8 @@ A root is never asked to decrypt ward traffic.
   the ward. It is the same basis as scan-to-pair, and is defined below.
 
 **Who may sign what.**
-- A CLAUSE, GRANT, RELAYS, USAGE_SYNC or break-glass inner event is accepted
-  only if its author is in the signer set.
+- A CLAUSE, GRANT, RELAYS or USAGE_SYNC inner event is accepted only if its
+  author is in the signer set.
 - A PAIR_OFFER to an unpaired ward is governed by *Scan-to-pair* (below and in
   its own section), not by the signer set.
 - All existing checks (inner `id` and `sig`, kind, marker tag, replay floor,
@@ -2450,10 +2450,13 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      and its working keys, or a moved root's keys that R2 hasn't re-approved.
    - From the moment a ward applies a departure, it accepts nothing new from
      the departed keys.
-   - Clauses they signed **stay enforced** until a clause of the same kind
-     from a current signer replaces them.
-   - That replacement wins **whatever the two `issuedAt` values**, so a
-     far-future clause from a departed key can't pin a rule for ever.
+   - Clauses they signed **stay enforced** until a clause of the same
+     `(subject, kind)` from a current signer replaces them.
+   - The replacement is compared only with clauses of that `(subject, kind)`
+     still held from **current** signers. It must be newer than every one of
+     those, but the departed key's own `issuedAt` is ignored. So a far-future
+     clause from a departed key can't pin a rule for ever, and a relay can't
+     restore an older rule from a current signer.
    - A guardian app re-signs the current clause set with a live key before it
      sends a departure.
 5. **Stored clauses record their signer.** The ward screen and STATUS then say
@@ -2470,8 +2473,16 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 7. **Root removal.**
    - Signed by R2 itself, it takes effect at once, unless R2 is the last root.
      The last root leaves only by unpairing.
-   - Signed by another pinned root R1, it takes effect only after **presence
-     confirmation by an install bound to R1**.
+   - Signed by another pinned root R1, it needs **presence confirmation by an
+     install bound to R1**, and it has a **72-hour notice period**.
+     - It takes effect at the later of the confirmation and `issuedAt` plus
+       72 hours.
+     - Throughout, it is reported in STATUS to R2's working keys.
+     - R2 can **object** with a statement whose `d` is
+       `kintrinsic/object/<d of the removal>` and whose `p` is R1. That drops
+       the removal.
+     - Neither parent can remove the other against their objection. Both
+       remain, with equal authority.
    - Removal never leaves a ward with no roots; a removal that would is
      refused.
    - Once a removal applies, every pending statement signed by R2 is dropped.
@@ -2481,8 +2492,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    - It takes effect only after **presence confirmation by an install bound to
      R2**. A W approved by R2 travels with the move.
    - Until then R stays pinned, and the move is pending in STATUS.
-   - A pending move expires at its `expiresAt` (at most 7 days after
-     `issuedAt`; 24 hours if absent), or when R cancels it.
+   - Like every pending statement, it expires (see *Pending statements*), or
+     ends when R cancels it.
    - Once confirmed, R is replaced by R2. A W bound to R stays only if R2
      approves it; that approval re-binds it to R2.
 9. **Recipients.**
@@ -2493,20 +2504,46 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    - The first GRANT the ward accepts for a request settles it.
 10. **Limits and storage.**
     - Applied withdrawals and removals are kept as tombstones for the life of
-      the pairing: 64 bytes each, at most 1024. At the limit, the ward refuses
-      new approvals until it is re-paired.
+      the pairing.
+    - Each root has a quota of 256 tombstones and 64 held early withdrawals.
+      A root at its quota can't approve new working keys until a re-pair;
+      other roots are unaffected.
     - A ward persists a statement before it applies it.
+11. **Re-pairing and relays on a ward with this section.**
+    - Pinning a different root in place of a current one happens only through
+      a confirmed root move, or a local unpair by an administrator. No signer,
+      root or working key can re-pair the ward any other way.
+    - A RELAYS change from any signer applies as usual. STATUS `guardians`
+      carries the relay list. For 7 days after a change, a ward with more than
+      one root also sends STATUS on its previous relays, so the other parent
+      sees the change wherever they are listening.
+
+**Pending statements.**
+- A co-guardian, removal or move is pending until it takes effect, is
+  cancelled or objected to, or expires.
+- It expires at its `expiresAt`, clamped to at most 7 days after `issuedAt`.
+  Without one, it expires 7 days after `issuedAt`.
+- A cancel drops pending statements with its `d` whose `issuedAt` is at or
+  below the cancel's. A later statement with that `d` is unaffected.
 
 **Presence confirmation.**
-- When a statement needs it, the ward shows a one-time token as a code to
-  scan, with a short form to type. Token rules are as for scan-to-pair: 16
-  random bytes, a 600-second lifetime, single use, compared in constant time.
-- The confirming install scans it. It must be bound to the root the rule
-  names. It replies with a confirmation, an inner event signed by that W:
-  `{ v: 1, token, statement: <the pending statement's id> }`.
-- The ward accepts the confirmation only from a W bound to the named root and
-  in its signer set, or for a co-guardian or move, a W carried with that
-  statement.
+- **The token is only minted on a privileged request at the ward:** an
+  administrator on Linux (polkit, as for other admin actions), or the ward's
+  guardian PIN on Android. Neither the child, nor anyone the child passes a
+  code to, can mint one.
+- The ward then shows the one-time token as a code to scan, with a short form
+  to type. Token rules are as for scan-to-pair: 16 random bytes, a 600-second
+  lifetime, single use, compared in constant time.
+- The confirming install, which must be bound to the root the rule names,
+  scans it and replies with a confirmation:
+  - an inner event of kind `CHARTER_PRESENCE_CONFIRM = 31121`, signed by that
+    W, sealed by it and gift-wrapped to the ward;
+  - content `{ v: 1, token, statement: <the pending statement's event id> }`;
+  - for a co-guardian or move, the content also carries `"approval"`: R2's
+    signed approval of this W.
+- The ward accepts it only from a W that is bound to the named root and in
+  its signer set. For a co-guardian or move, it accepts a W whose inline
+  approval R2 signed; that approval is then applied with it.
 - The ward's own screen never accepts a tap as confirmation. A child at the
   device cannot confirm anything.
 - Confirmation proves that a guardian install was physically at the child's
@@ -2538,12 +2575,13 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 - Wards never receive or read rosters.
 
 **STATUS.** A ward implementing this section adds `guardians` to STATUS:
-- `roots`: hex list;
-- `keys`: count of active working keys per root;
-- `pending`: list of `{ d, kind: 'coguardian' | 'removal' | 'move', expiresAt? }`;
-- `tombstones`: count, so a dropped withdrawal shows up as a mismatch.
+- `roots`: a list of `{ root, keys: [working-key hex] }`;
+- `pending`: a list of `{ d, kind: 'coguardian' | 'removal' | 'move', takesEffectAt?, expiresAt }`;
+- `tombstones`: a count, so a dropped withdrawal shows up as a mismatch;
+- `relays`: the ward's current relay list.
 
-Every root's working keys receive it.
+Every root's working keys receive it, and a departed key receives one last
+STATUS that shows its departure.
 
 **Other places that name the guardian.** In this section's terms:
 - the local link's `G`, the NIP-42 AUTH key, the RELAYS author and the
@@ -2556,7 +2594,8 @@ Every root's working keys receive it.
 - A guardian install therefore signs directly with its root for any child
   with such a ward. It offers co-guardians and root moves only once every ward
   of that child reports `appVersionCode` at or above the first version that
-  implements this section (recorded here at release).
+  implements this section (recorded here at release). This section adds
+  `appVersionCode` to STATUS for wards that don't send it already.
 
 ## NIP-46 methods
 
