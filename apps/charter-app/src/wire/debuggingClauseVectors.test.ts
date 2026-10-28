@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { debuggingToGrant } from "./clause";
+import { debuggingView } from "../domain/debugging";
 
 // Golden cross-stack vectors: the SAME file is asserted from the Rust consumer
 // (core/crates/charter-schedule/tests/debugging_clause_vectors.rs). Here we prove
@@ -46,5 +47,50 @@ describe("debugging clause golden vectors (Kintrinsic ↔ warden contract)", () 
         expect(debuggingToGrant({ allow, ...(until != null ? { until } : {}) }, issuedAt)).toEqual(v.payload);
       });
     }
+  }
+});
+
+// The guardian's own evaluation. The ward blocks a body whose `v` is not 1, so
+// the guardian's reading of a record it could never have sent is blocked too:
+// debuggingView takes the record the store keeps, which is only ever written
+// from a v1 grant.
+describe("debugging clause golden vectors: the guardian's own evaluation (debuggingView)", () => {
+  for (const v of file.vectors) {
+    const { allow, until, issuedAt } = v.payload;
+    for (const { now, allowed } of v.expect.allowedAt) {
+      it(`${v.name} at ${now} is ${allowed ? "On" : "Off"}`, () => {
+        const record = v.payload.v === 1 ? { allow, ...(until != null ? { until } : {}), issuedAt } : undefined;
+        expect(debuggingView(record, now).state === "on").toBe(allowed);
+      });
+    }
+  }
+});
+
+// There is no TS parser for a clause body: the guardian only PRODUCES this
+// clause (the ward parses it, in Rust, against these same `invalid` payloads).
+// So the check available here is that debuggingToGrant can never emit one: for
+// every input shape it is handed, the body is a v1 with a boolean `allow`.
+describe("debugging clause golden vectors: the producer can never emit an invalid payload", () => {
+  const shapes = [
+    { allow: false },
+    { allow: true },
+    { allow: false, until: 5 },
+    { allow: true, until: 5 },
+    { allow: true, until: 0 },
+  ];
+  const isInvalid = (g: Record<string, unknown>) =>
+    g.v !== 1 || typeof g.allow !== "boolean" || typeof g.issuedAt !== "number";
+
+  it("pins what the invalid payloads are, so a new one is noticed", () => {
+    expect(file.invalid.map((i) => i.name)).toEqual(["missing_allow", "allow_not_a_bool", "wrong_version_type"]);
+    for (const i of file.invalid) expect(isInvalid(i.payload as Record<string, unknown>), i.name).toBe(true);
+  });
+
+  for (const shape of shapes) {
+    it(`debuggingToGrant(${JSON.stringify(shape)}) is a well-formed v1 body`, () => {
+      const g = debuggingToGrant(shape, 1) as unknown as Record<string, unknown>;
+      expect(isInvalid(g)).toBe(false);
+      expect(Object.keys(g).sort()).toEqual(shape.allow && shape.until != null ? ["allow", "issuedAt", "until", "v"] : ["allow", "issuedAt", "v"]);
+    });
   }
 });

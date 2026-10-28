@@ -384,7 +384,9 @@ export interface Device {
    * The last USB-debugging state this guardian SENT to this one device (the
    * `debugging` clause is per-device, not a Policy field). A local record of
    * what was signed, not a report from the device: absent = never sent, which
-   * the ward reads as blocked. An `until` in the past is expired, i.e. Off.
+   * the ward reads as blocked. An `until` in the past is expired, i.e. Off. Once
+   * the device reports `debuggingOpen` in its STATUS, that report is the truth
+   * and this record is only the intention it is compared with.
    */
   debugging?: DeviceDebugging;
 }
@@ -396,6 +398,12 @@ export interface DeviceDebugging {
   until?: number;
   /** Unix seconds the clause was sent. */
   issuedAt: number;
+  /**
+   * True while that send is being held for the home network (signed, not yet
+   * delivered). Persisted so it survives leaving the screen; the next send
+   * replaces the whole record, so a non-held send clears it.
+   */
+  held?: boolean;
 }
 
 export interface Child {

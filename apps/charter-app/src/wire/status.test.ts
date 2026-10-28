@@ -619,3 +619,25 @@ describe("groups (named-times bucket progress)", () => {
     );
   });
 });
+
+// Android debugging: a ward that implements the `debugging` clause always sends
+// true or false (adb allowed right now); absent is an older ward, and must
+// never read as either state.
+describe("debuggingOpen", () => {
+  const base = sample("ab".repeat(32), "cd".repeat(32));
+
+  it("parses a reported true and a reported false", () => {
+    expect(parseStatus(JSON.stringify({ ...base, debuggingOpen: true }))?.debuggingOpen).toBe(true);
+    expect(parseStatus(JSON.stringify({ ...base, debuggingOpen: false }))?.debuggingOpen).toBe(false);
+  });
+
+  it("stays undefined when absent — an older ward", () => {
+    expect(parseStatus(JSON.stringify(base))?.debuggingOpen).toBeUndefined();
+  });
+
+  it("treats a non-boolean value as absent rather than trusting it", () => {
+    for (const junk of ["true", 1, 0, null, {}]) {
+      expect(parseStatus(JSON.stringify({ ...base, debuggingOpen: junk }))?.debuggingOpen).toBeUndefined();
+    }
+  });
+});

@@ -468,11 +468,32 @@ object CharterCore {
             else -> "blocked"
         }
 
-    /** Whether debugging (adb) is allowed right now: -1 blocked, 0 allowed with
-     *  no end, >0 allowed until that unix second. Any throw (a stale `.so`
-     *  without the export, an uninitialised core) reads as blocked: fail-closed. */
+    /** [debuggingUntil]: blocked. Mirrors `DEBUGGING_BLOCKED` in
+     *  `android/jni/src/lib.rs`, which defines every value once. */
+    const val DEBUGGING_BLOCKED = -1L
+
+    /** [debuggingUntil]: the clause store would not read this tick, so leave
+     *  the restriction as it stands (`DEBUGGING_HOLD` in `lib.rs`). */
+    const val DEBUGGING_HOLD = -2L
+
+    /** Whether debugging (adb) is allowed right now: 0 allowed with no end, >0
+     *  allowed until that unix second, [DEBUGGING_BLOCKED], or
+     *  [DEBUGGING_HOLD]. Any throw (a refused or stale `.so`, an uninitialised
+     *  core) reads as blocked: fail-closed. */
     fun debuggingUntil(nowUnix: Long): Long =
-        runCatching { jni().charterDebuggingUntil(nowUnix) }.getOrDefault(-1L)
+        runCatching { jni().charterDebuggingUntil(nowUnix) }.getOrDefault(DEBUGGING_BLOCKED)
+
+    /** Report the platform's read-back of DISALLOW_DEBUGGING_FEATURES: true =
+     *  not set (adb allowed), null = it would not read. STATUS `debuggingOpen`. */
+    fun setDebuggingOpen(open: Boolean?) {
+        jni().charterSetDebuggingOpen(
+            when (open) {
+                true -> 1
+                false -> 0
+                null -> -1
+            },
+        )
+    }
 
     /** One forced-resolution rewrite (host -> answer) for SafeSearch / YouTube. */
     data class DnsRewrite(val host: String, val answer: String)

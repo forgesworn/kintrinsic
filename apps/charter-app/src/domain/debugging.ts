@@ -47,6 +47,58 @@ export function debuggingLabel(sent: DeviceDebugging | undefined, nowUnix: numbe
   return `On until ${sameDay ? "" : `${DAYS[end.getDay()]} `}${clock(end)}`;
 }
 
+export interface DebuggingReading {
+  /** The headline: what the device is doing, or plainly what we are still waiting for. */
+  label: string;
+  /** Anything on, or on its way on or off: the control offered is "Turn off". */
+  offerOff: boolean;
+  /** Set for a held send the device has not confirmed, when no `debuggingOpen` report can say so in the headline. */
+  note?: string;
+}
+
+/**
+ * The per-device headline. The device's own `debuggingOpen` (STATUS) is the
+ * truth when it has sent one; what the guardian sent is only the intention it
+ * is compared with. Where they disagree the label says so ("Turned on —
+ * waiting for the device"), and a send held for the home network says that
+ * instead, because the device cannot have got it.
+ *
+ * A device that has never reported `debuggingOpen` is either an older ward
+ * (it reports a Kintrinsic version but no field: fall back to the sent record,
+ * as before) or one we know nothing about yet (no version reported: it may not
+ * implement the clause at all, so an "on" we sent is never claimed as fact).
+ */
+export function debuggingReading(
+  sent: DeviceDebugging | undefined,
+  status: Pick<DeviceStatus, "debuggingOpen" | "appVersionCode"> | undefined,
+  nowUnix: number,
+): DebuggingReading {
+  const intended = debuggingView(sent, nowUnix);
+  const held = sent?.held === true;
+  const waitingFor = held ? "the home network" : "the device";
+  const open = status?.debuggingOpen;
+
+  if (open === true) {
+    // Open with a live "on" on record: say how long. Open with nothing on record
+    // (a debuggable build is always allowed, or the record was lost): plain On.
+    if (intended.state === "on") return { label: debuggingLabel(sent, nowUnix), offerOff: true };
+    if (sent) return { label: `Turning off — waiting for ${waitingFor}`, offerOff: true };
+    return { label: "On", offerOff: true };
+  }
+  if (open === false) {
+    if (intended.state === "on") return { label: `Turned on — waiting for ${waitingFor}`, offerOff: true };
+    return { label: "Off", offerOff: false };
+  }
+
+  // Never reported debuggingOpen.
+  const label = debuggingLabel(sent, nowUnix);
+  const note = held ? "Waiting for the home network." : undefined;
+  if (intended.state === "on" && status?.appVersionCode == null) {
+    return { label: `Turned on — waiting for ${waitingFor}`, offerOff: true };
+  }
+  return { label, offerOff: intended.state === "on", ...(note ? { note } : {}) };
+}
+
 /**
  * How to treat the toggle for this device: `offer` (Android, and not reporting a
  * Kintrinsic older than the first build that knows the clause), `tooOld` (an

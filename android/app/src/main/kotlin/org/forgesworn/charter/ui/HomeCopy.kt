@@ -38,8 +38,8 @@ object HomeCopy {
     /**
      * The ward's own line when the guardian has opened USB debugging (the
      * `debugging` clause): a ward can always see what is being enforced.
-     * [until] is the core's `debuggingUntil`: -1 blocked (null, no line), 0 no
-     * end, >0 the unix second it ends. Local time; the day is named only when
+     * [until] is the core's `debuggingUntil`: negative (blocked, or held on a
+     * store read error) is null, no line; 0 no end, >0 the unix second it ends. Local time; the day is named only when
      * the window ends on another day than [now].
      */
     fun debuggingLine(until: Long, now: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String? = when {

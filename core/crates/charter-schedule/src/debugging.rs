@@ -26,17 +26,19 @@ pub struct GrantDebugging {
 }
 
 /// Level-triggered per-tick evaluation: `true` means debugging is allowed right
-/// now. No clause, `allow: false`, an expired window, or a body version this
-/// build does not implement all mean blocked — fail-safe in every direction.
+/// now. No clause, `allow: false`, an expired window, or any body version other
+/// than the one this build implements all mean blocked — fail-safe in every
+/// direction.
 ///
 /// The version check is why [`DEBUGGING_VERSION`] exists: serde drops unknown
 /// fields, so a `v: 2` that (say) added a required scope would otherwise read
-/// as "allowed, unbounded".
+/// as "allowed, unbounded". It is an exact match, not a ceiling: `v: 0` was
+/// never a debugging body either, so it is not read as v1.
 pub fn evaluate_debugging(grant: Option<&GrantDebugging>, now: u64) -> bool {
     let Some(g) = grant else {
         return false;
     };
-    if g.v > DEBUGGING_VERSION || !g.allow {
+    if g.v != DEBUGGING_VERSION || !g.allow {
         return false;
     }
     match g.until {
@@ -108,6 +110,18 @@ mod tests {
             ..g
         };
         assert!(evaluate_debugging(Some(&ok), 1_700_000_000));
+    }
+
+    /// `v: 0` predates the frozen v1 body: blocked, not read as v1.
+    #[test]
+    fn a_zero_body_version_is_blocked() {
+        let g = GrantDebugging {
+            v: 0,
+            issued_at: 1,
+            allow: true,
+            until: None,
+        };
+        assert!(!evaluate_debugging(Some(&g), 1_700_000_000));
     }
 
     #[test]

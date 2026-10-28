@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Device } from "./types";
 import type { DeviceStatus } from "../wire/status";
-import { debuggingLabel, debuggingSupport, debuggingView } from "./debugging";
+import { debuggingLabel, debuggingReading, debuggingSupport, debuggingView } from "./debugging";
 
 // Local time, so the clock the label prints is the clock the test builds.
 const at = (h: number, m = 0, dayOffset = 0) =>
@@ -28,6 +28,68 @@ describe("debuggingLabel", () => {
     expect(debuggingLabel(sent, at(18) - 1)).toBe("On until 18:00");
     expect(debuggingLabel(sent, at(18))).toBe("Off");
     expect(debuggingView(sent, at(19))).toEqual({ state: "off" });
+  });
+});
+
+describe("debuggingReading", () => {
+  const now = at(12);
+  const on = { allow: true, until: at(18), issuedAt: now };
+  const onOpenEnded = { allow: true, issuedAt: now };
+  const off = { allow: false, issuedAt: now };
+  const rep = (debuggingOpen: boolean | undefined, appVersionCode: number | undefined = 47) => ({ debuggingOpen, appVersionCode });
+
+  describe("the device reports debuggingOpen: that is the truth", () => {
+    it("open and sent on reads On, with the window", () => {
+      expect(debuggingReading(on, rep(true), now)).toEqual({ label: "On until 18:00", offerOff: true });
+      expect(debuggingReading(onOpenEnded, rep(true), now).label).toBe("On until you turn it off");
+    });
+    it("open with nothing on record reads plain On", () => {
+      expect(debuggingReading(undefined, rep(true), now)).toEqual({ label: "On", offerOff: true });
+    });
+    it("closed and never sent, or sent off, reads Off", () => {
+      expect(debuggingReading(undefined, rep(false), now)).toEqual({ label: "Off", offerOff: false });
+      expect(debuggingReading(off, rep(false), now)).toEqual({ label: "Off", offerOff: false });
+    });
+    it("closed although an on was sent: waiting for the device, or for the home network if held", () => {
+      expect(debuggingReading(on, rep(false), now)).toEqual({ label: "Turned on — waiting for the device", offerOff: true });
+      expect(debuggingReading({ ...on, held: true }, rep(false), now).label).toBe("Turned on — waiting for the home network");
+    });
+    it("closed although the on has run out reads Off, never On", () => {
+      expect(debuggingReading(on, rep(false), at(19)).label).toBe("Off");
+    });
+    it("open although off was sent (or the window ran out): turning off, waiting", () => {
+      expect(debuggingReading(off, rep(true), now)).toEqual({ label: "Turning off — waiting for the device", offerOff: true });
+      expect(debuggingReading({ ...off, held: true }, rep(true), now).label).toBe("Turning off — waiting for the home network");
+      expect(debuggingReading(on, rep(true), at(19)).label).toBe("Turning off — waiting for the device");
+    });
+    it("a held flag is ignored once the report agrees with the intention", () => {
+      expect(debuggingReading({ ...on, held: true }, rep(true), now).label).toBe("On until 18:00");
+      expect(debuggingReading({ ...off, held: true }, rep(false), now).label).toBe("Off");
+    });
+  });
+
+  describe("an older ward that reports a version but no debuggingOpen: the sent record, as before", () => {
+    it("labels from what was sent", () => {
+      expect(debuggingReading(on, rep(undefined), now)).toEqual({ label: "On until 18:00", offerOff: true });
+      expect(debuggingReading(undefined, rep(undefined), now)).toEqual({ label: "Off", offerOff: false });
+      expect(debuggingReading(on, rep(undefined), at(19)).label).toBe("Off");
+    });
+    it("says a held send is waiting for the home network", () => {
+      expect(debuggingReading({ ...on, held: true }, rep(undefined), now).note).toBe("Waiting for the home network.");
+      expect(debuggingReading(on, rep(undefined), now).note).toBeUndefined();
+    });
+  });
+
+  describe("a ward that has reported nothing: never claim On as fact", () => {
+    it("an on that was sent is waiting", () => {
+      expect(debuggingReading(on, undefined, now)).toEqual({ label: "Turned on — waiting for the device", offerOff: true });
+      expect(debuggingReading(on, { debuggingOpen: undefined, appVersionCode: undefined }, now).label).toBe("Turned on — waiting for the device");
+      expect(debuggingReading({ ...onOpenEnded, held: true }, undefined, now).label).toBe("Turned on — waiting for the home network");
+    });
+    it("nothing sent, or off sent, still reads Off (the default-blocked posture)", () => {
+      expect(debuggingReading(undefined, undefined, now).label).toBe("Off");
+      expect(debuggingReading(off, undefined, now).label).toBe("Off");
+    });
   });
 });
 

@@ -178,6 +178,11 @@ pub struct Warden {
     /// reported in STATUS so the guardian can name what each ward runs.
     /// Empty = unknown (omitted from STATUS).
     app_version_name: String,
+    /// What the platform last said about DISALLOW_DEBUGGING_FEATURES, as
+    /// Kotlin read it back after its debugging step: `Some(true)` = not set
+    /// (adb allowed). STATUS `debuggingOpen`; `None` (absent) until Kotlin
+    /// reports it, or while the restrictions will not read.
+    debugging_open: Option<bool>,
     /// Consecutive broker rounds that reached no relay at all — STATUS
     /// `relayUnreachablePolls` (absent while 0), charterd's counter.
     consecutive_unreachable: u32,
@@ -326,6 +331,7 @@ impl Warden {
             install_window: None,
             app_version_code,
             app_version_name: String::new(),
+            debugging_open: None,
             consecutive_unreachable: 0,
             status_step_undelivered: None,
             status_seq: charter_spine::status_emit::StatusSeq::resume(
@@ -1175,28 +1181,44 @@ impl Warden {
     }
 
     /// The sole ward's debugging posture at `now_unix` (the `debugging` clause,
-    /// store_key 16): `-1` = blocked, `0` = allowed with no end, `>0` = allowed
-    /// until that unix second. Recomputed per tick so a window ends AT its
-    /// `until`. Fail-closed in every direction: no ward / no clause / an
-    /// unreadable store / a malformed clause ⇒ `-1`. The clause is cached
-    /// per device (it is addressed to one device), so a device that was never
-    /// sent one stays blocked.
+    /// store_key 16), as the values defined once in `lib.rs` (above
+    /// `DEBUGGING_BLOCKED`): `0` allowed with no end, `>0` allowed until that
+    /// unix second, `-1` blocked, `-2` hold. Recomputed per tick so a window
+    /// ends AT its `until`. Fail-closed: no ward / no clause / a malformed
+    /// clause / one issued before the current pairing ⇒ blocked. The clause is
+    /// cached per device (it is addressed to one device), so a device that was
+    /// never sent one stays blocked.
+    ///
+    /// The one exception is a store that will not READ: that is hold, not
+    /// blocked, because blocking turns adb off and nothing here can turn it
+    /// back on, so one transient EIO would end a guardian-opened window for
+    /// good.
     pub fn debugging_until(&self, now_unix: i64) -> i64 {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
         let Some(subject) = self.subject else {
-            return -1;
+            return DEBUGGING_BLOCKED;
         };
-        let stored = self.child_clauses.get_child_clause(
+        let body = match self.child_clauses.get_child_clause(
             &subject.to_hex(),
             charter_proto::ClauseKind::Debugging.store_key(),
-        );
-        let Ok(Some(body)) = stored else {
-            return -1;
+        ) {
+            Ok(Some(body)) => body,
+            Ok(None) => return DEBUGGING_BLOCKED,
+            Err(_) => return DEBUGGING_HOLD,
         };
         let Ok(grant) = serde_json::from_str::<charter_schedule::GrantDebugging>(&body) else {
-            return -1;
+            return DEBUGGING_BLOCKED;
         };
+        // The pairing floor (the same one `try_apply_releases` applies): a
+        // re-paired device keeps its machine key, its broker refetches from
+        // the start, and the guardian re-sends the other kinds on claim but
+        // never this one. An `allow: true` from before the unpairing would
+        // otherwise open adb again while the guardian's record says off.
+        if grant.issued_at < self.paired_at {
+            return DEBUGGING_BLOCKED;
+        }
         if !charter_schedule::evaluate_debugging(Some(&grant), now_unix.max(0) as u64) {
-            return -1;
+            return DEBUGGING_BLOCKED;
         }
         // Allowed. An `until` that cannot be a positive i64 is not a window
         // we can report; an overlong one is clamped rather than wrapped.
@@ -1204,6 +1226,12 @@ impl Warden {
             Some(u) => i64::try_from(u).unwrap_or(i64::MAX).max(1),
             None => 0,
         }
+    }
+
+    /// Kotlin's read-back of DISALLOW_DEBUGGING_FEATURES (`None` = it would
+    /// not read). Rides STATUS as `debuggingOpen`.
+    pub fn set_debugging_open(&mut self, open: Option<bool>) {
+        self.debugging_open = open;
     }
 
     /// The ward-facing "your charter" mirror (spec D8): live lock state,
@@ -2139,6 +2167,13 @@ impl Warden {
                     status,
                     STATUS_HEARTBEAT_SECS,
                 )
+                    // adb opening or shutting is news the guardian is
+                    // waiting on (they have just flipped the toggle), and it
+                    // changes only when the restriction does: no churn.
+                    || self
+                        .last_status
+                        .as_ref()
+                        .is_some_and(|last| last.debugging_open != status.debugging_open)
             });
         // Only a status that is actually going out takes a number, stored
         // before it is published (a number spent on an emit that reaches no
@@ -2279,6 +2314,8 @@ impl Warden {
         if !self.app_version_name.is_empty() {
             status.app_version_name = Some(self.app_version_name.clone());
         }
+        // What the platform actually did with adb, not what was sent.
+        status.debugging_open = self.debugging_open;
         // Relay health, charterd's two fields: each absent unless actually
         // true / non-zero ("absent is the ordinary state").
         status.relay_unreachable_polls =
@@ -8719,6 +8756,79 @@ mod parity_port_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The debugging answer distinguishes a store that will not READ (hold:
+    /// Kotlin writes nothing, so a transient EIO cannot turn adb off for
+    /// good) from a clause that is absent or malformed (blocked).
+    #[test]
+    fn an_unreadable_debugging_clause_holds_and_a_bad_one_blocks() {
+        use crate::{DEBUGGING_BLOCKED, DEBUGGING_HOLD};
+        let (w, subj, base, _) = paired("debugging-hold");
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "absent");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 1, "allow": true}),
+        );
+        assert_eq!(w.debugging_until(NOW), 0);
+
+        make_unreadable(&base, &subj, ClauseKind::Debugging);
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_HOLD, "unreadable");
+
+        let _ = std::fs::remove_dir_all(
+            base.join("children")
+                .join(&subj)
+                .join("clauses")
+                .join(format!("{}.json", ClauseKind::Debugging.store_key())),
+        );
+        assert!(w
+            .child_clauses
+            .put_child_clause(
+                &subj,
+                ClauseKind::Debugging.store_key(),
+                2,
+                &json!({"v": 1, "issuedAt": 2, "allow": "yes"}).to_string(),
+            )
+            .unwrap());
+        assert_eq!(w.debugging_until(NOW), DEBUGGING_BLOCKED, "malformed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The pairing floor: a debugging clause issued before the CURRENT
+    /// pairing (a re-paired device refetching its old `allow: true`) is
+    /// blocked; one issued after it is honoured.
+    #[test]
+    fn a_debugging_clause_from_before_the_pairing_is_blocked() {
+        let (mut w, subj, base, _) = paired("debugging-floor");
+        put(
+            &w,
+            &subj,
+            ClauseKind::Debugging,
+            json!({"v": 1, "issuedAt": 50, "allow": true}),
+        );
+        // The test pairing path leaves paired_at at 0 (legacy): honoured.
+        assert_eq!(w.debugging_until(NOW), 0);
+
+        w.paired_at = 100;
+        assert_eq!(w.debugging_until(NOW), crate::DEBUGGING_BLOCKED);
+
+        assert!(w
+            .child_clauses
+            .put_child_clause(
+                &subj,
+                ClauseKind::Debugging.store_key(),
+                200,
+                &json!({"v": 1, "issuedAt": 200, "allow": true}).to_string(),
+            )
+            .unwrap());
+        assert_eq!(w.debugging_until(NOW), 0, "issued after the pairing");
+
+        // Exactly at the floor is the current pairing's, not an earlier one's.
+        w.paired_at = 200;
+        assert_eq!(w.debugging_until(NOW), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// F2 / N1: a pairing record that will not READ at init reports the device
     /// as paired (so Kotlin keeps the install lock up), the tick HOLDS rather
     /// than emitting the release, every per-app and web read is an error
@@ -9097,6 +9207,57 @@ mod parity_port_tests {
             Some(t - 3600 + 61)
         );
         drop(g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `debuggingOpen` rides STATUS exactly as Kotlin read it back from the
+    /// platform (absent while unknown), and a change goes out at once rather
+    /// than waiting for the heartbeat: the guardian has just flipped it.
+    #[test]
+    fn status_carries_debugging_open_and_emits_on_its_change() {
+        let (mut w, base) = relay_paired("debugging-open");
+        let mock = charter_sys::relay::MockRelayTransport::new();
+        w.wire_test_relay(mock).unwrap();
+        let lock = Mutex::new(Some(w));
+        let set = |lock: &Mutex<Option<Warden>>, open: Option<bool>| {
+            lock.lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .set_debugging_open(open);
+        };
+        let last = |lock: &Mutex<Option<Warden>>| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_status_for_tests()
+                .cloned()
+                .unwrap()
+        };
+
+        let t = NOW as u64;
+        assert!(poll_once_locked(&lock, t).status_emitted);
+        assert_eq!(last(&lock).debugging_open, None, "unknown ⇒ absent");
+
+        set(&lock, Some(false));
+        assert!(
+            poll_once_locked(&lock, t + 1).status_emitted,
+            "change ⇒ emit"
+        );
+        let s = last(&lock);
+        assert_eq!(s.debugging_open, Some(false));
+        assert!(s.to_json().contains("\"debuggingOpen\":false"));
+
+        // Unchanged inside the heartbeat: nothing new to say.
+        assert!(!poll_once_locked(&lock, t + 2).status_emitted);
+
+        set(&lock, Some(true));
+        assert!(
+            poll_once_locked(&lock, t + 3).status_emitted,
+            "change ⇒ emit"
+        );
+        assert_eq!(last(&lock).debugging_open, Some(true));
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -6,17 +6,17 @@ import type { Child, Device } from "../domain/types";
 import {
   DEBUGGING_HINT,
   DEBUGGING_WARNING,
-  debuggingLabel,
+  debuggingReading,
   debuggingSupport,
-  debuggingView,
 } from "../domain/debugging";
 import { endOfTodayUnix, TETHER_WINDOWS } from "../domain/tetherWindow";
 import { tooOldNote, wardenSupport } from "../domain/wardenSupport";
 
 /**
  * One ward device's USB-debugging control: its state (Off / On until 18:00 / On
- * until you turn it off), a confirmed turn-on with a window, and a one-tap turn
- * off. Android wards that understand the clause only; a Linux laptop gets
+ * until you turn it off, from what the device reports; or "Turned on — waiting
+ * for the device" where it has not caught up), a confirmed turn-on with a
+ * window, and a one-tap turn off. Android wards that understand the clause only; a Linux laptop gets
  * nothing at all, and a phone reporting an older Kintrinsic gets one sentence.
  */
 export default function DeviceDebugging({ child, device }: { child: Child; device: Device }) {
@@ -24,8 +24,10 @@ export default function DeviceDebugging({ child, device }: { child: Child; devic
   const [choosing, setChoosing] = useState(false);
   const [windowLabel, setWindowLabel] = useState(TETHER_WINDOWS[0].label);
   const [busy, setBusy] = useState(false);
-  // A turn-on / turn-off the carrier is holding for the home network, or one
-  // that failed: the device has NOT got it, so say that, never "sent".
+  // The result of the send just made (the Developer options hint, or why it
+  // failed). That the carrier is holding it for the home network is not here:
+  // it is stored on the device record, so the headline keeps saying so after
+  // you leave the screen.
   const [notice, setNotice] = useState<{ tone: "warn" | "ok"; text: string } | null>(null);
 
   // Re-render the moment a timed allowance runs out, so "On until 18:00" turns
@@ -48,8 +50,9 @@ export default function DeviceDebugging({ child, device }: { child: Child; devic
   }
 
   const nowUnix = Math.floor(Date.now() / 1000);
-  const view = debuggingView(device.debugging, nowUnix);
-  const on = view.state === "on";
+  const status = device.devicePubkey ? deviceStatus[device.devicePubkey] : undefined;
+  const reading = debuggingReading(device.debugging, status, nowUnix);
+  const on = reading.offerOff;
 
   const send = async (grant: { allow: boolean; until?: number }) => {
     setBusy(true);
@@ -59,10 +62,7 @@ export default function DeviceDebugging({ child, device }: { child: Child; devic
       if (sent === true) {
         setNotice(grant.allow ? { tone: "ok", text: DEBUGGING_HINT } : null);
       } else if (sent) {
-        setNotice({
-          tone: "warn",
-          text: `Waiting for the home network. ${sent.message}`,
-        });
+        setNotice({ tone: "warn", text: sent.message });
       }
     } catch (err) {
       setNotice({
@@ -92,8 +92,9 @@ export default function DeviceDebugging({ child, device }: { child: Child; devic
         <div>
           <div className="row-sub">USB debugging</div>
           <div className="card-sub" aria-live="polite">
-            {debuggingLabel(device.debugging, nowUnix)}
+            {reading.label}
           </div>
+          {reading.note && <div className="card-sub">{reading.note}</div>}
         </div>
         {on ? (
           <Button

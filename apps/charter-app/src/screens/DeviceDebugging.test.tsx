@@ -52,6 +52,8 @@ describe("USB debugging control", () => {
   });
 
   it("shows 'On until you turn it off' and 'On until <time>', and Off once expired", () => {
+    // An older ward (reports a version, no debuggingOpen): the label comes from what was sent.
+    store.deviceStatus = { [PK]: { appVersionCode: 47 } };
     mount({ ...phone, debugging: { allow: true, issuedAt: NOW } });
     expect(container.textContent).toContain("On until you turn it off");
     act(() => root.unmount());
@@ -97,6 +99,7 @@ describe("USB debugging control", () => {
   });
 
   it("turning off is one tap", async () => {
+    store.deviceStatus = { [PK]: { appVersionCode: 47, debuggingOpen: true } };
     mount({ ...phone, debugging: { allow: true, issuedAt: NOW } });
     await click("Turn off USB debugging on Robin’s phone");
     expect(store.setDeviceDebugging).toHaveBeenCalledWith("c", "d", { allow: false });
@@ -107,7 +110,60 @@ describe("USB debugging control", () => {
     mount(phone);
     await click("Turn on USB debugging on Robin’s phone");
     await click("Turn on USB debugging");
-    expect(container.textContent).toContain("Waiting for the home network");
+    expect(container.textContent).toContain("Not sent yet");
     expect(container.textContent).not.toContain(DEBUGGING_HINT);
+  });
+
+  describe("what the device reports is the truth", () => {
+    const sentOn = { allow: true, until: NOW + 3600, issuedAt: NOW };
+    const reports = (debuggingOpen: boolean | undefined) => {
+      store.deviceStatus = { [PK]: { appVersionCode: 47, debuggingOpen } };
+    };
+
+    it("reported open shows On with the window; reported closed shows Off", () => {
+      reports(true);
+      mount({ ...phone, debugging: sentOn });
+      expect(container.textContent).toMatch(/On until \d\d:\d\d/);
+      expect(buttons().map((b) => b.textContent)).toEqual(["Turn off"]);
+      act(() => root.unmount());
+      reports(false);
+      mount(phone);
+      expect(container.textContent).toContain("Off");
+      expect(buttons().map((b) => b.textContent)).toEqual(["Turn on"]);
+    });
+
+    it("sent on but the device reports closed: waiting for the device, never On", () => {
+      reports(false);
+      mount({ ...phone, debugging: sentOn });
+      expect(container.textContent).toContain("Turned on — waiting for the device");
+      expect(container.textContent).not.toContain("On until");
+    });
+
+    it("a held send says it is waiting for the home network, and still does after navigating back", () => {
+      reports(false);
+      mount({ ...phone, debugging: { ...sentOn, held: true } });
+      expect(container.textContent).toContain("Turned on — waiting for the home network");
+      act(() => root.unmount());
+      mount({ ...phone, debugging: { ...sentOn, held: true } }); // a fresh mount: the flag is in the record
+      expect(container.textContent).toContain("Turned on — waiting for the home network");
+    });
+
+    it("sent off but the device reports open: turning off, waiting for the device", () => {
+      reports(true);
+      mount({ ...phone, debugging: { allow: false, issuedAt: NOW } });
+      expect(container.textContent).toContain("Turning off — waiting for the device");
+    });
+
+    it("a ward that has reported nothing is offered the toggle but its on is not claimed as fact", () => {
+      mount({ ...phone, debugging: sentOn });
+      expect(container.textContent).toContain("Turned on — waiting for the device");
+      expect(container.textContent).not.toContain("On until");
+    });
+
+    it("an older ward (version but no debuggingOpen) keeps the sent-record label", () => {
+      reports(undefined);
+      mount({ ...phone, debugging: sentOn });
+      expect(container.textContent).toMatch(/On until \d\d:\d\d/);
+    });
   });
 });

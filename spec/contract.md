@@ -944,9 +944,13 @@ the child's other devices keep their own (absent, so blocked) state.
 Replace-the-state, per-(subject, kind) monotonic `issuedAt` on each device.
 
 **Enforcement (fail-safe, level-triggered per tick):**
-- no clause / a malformed clause / `v` above 1 / `allow: false` / `now >= until`
-  ⇒ **blocked**: `DISALLOW_DEBUGGING_FEATURES` is set. The platform turns adb
-  off when it is applied.
+- no clause / a malformed clause / `v` other than 1 / `allow: false` /
+  `now >= until` / a clause issued before the device's current pairing
+  (`issuedAt < paired_at`) ⇒ **blocked**: `DISALLOW_DEBUGGING_FEATURES` is
+  set. The platform turns adb off when it is applied. The pairing floor
+  matters because a re-paired device keeps its key and refetches its old
+  clauses: without it, an `allow: true` sent before the unpairing would open
+  adb again while the guardian's record says off.
 - `allow: true` and not expired ⇒ the restriction is **cleared**. Clearing it
   does not turn adb back on: the ward device's user re-enables USB debugging
   in Developer options.
@@ -955,7 +959,14 @@ Replace-the-state, per-(subject, kind) monotonic `issuedAt` on each device.
   tick that cleared it again would turn adb off on every service restart.
   A newly charted device is therefore blocked from its first tick, a window
   of one tick.
+- The step runs on every tick of a paired Device Owner ward, whether or not
+  any other clause has configured it and in every enforcement mode. A ward
+  that cannot read its pairing or its native library blocks. A ward that
+  cannot read its clause store this tick leaves the restriction as it is,
+  because blocking on a transient read error would turn adb off for good.
 - A debuggable (debug) build of the ward app is always allowed.
+- STATUS carries `debuggingOpen`, read back from the platform, so the
+  guardian sees what the device actually did rather than what was sent.
 - The ward's own screen shows that debugging is allowed, and until when (a
   ward can always see what is being enforced).
 
@@ -1598,6 +1609,7 @@ interface StatusPayload {
   clockSteppedBackFrom?: number;   // present only on the FIRST status after this device's clock stepped below its own previous ts; equals that previous ts
   seq?: number;                    // per-device sequence, strictly increasing across restarts (incl. a wipe) — the ORDERING signal once present; see below
   appLockArmed?: boolean;          // Linux: the app lock (fapolicyd) is armed and enforcing right now; a Linux warden that has it always sends true/false
+  debuggingOpen?: boolean;         // Android: adb is allowed right now (DISALLOW_DEBUGGING_FEATURES is not set); a ward that implements `debugging` always sends true/false
 }
 ```
 

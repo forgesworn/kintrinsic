@@ -255,4 +255,14 @@ describe("reducer — SET_DEVICE_DEBUGGING (last-sent USB debugging, per device)
     const kept = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", relays: ["wss://x"], relaysUpdatedAt: 5 });
     expect(kept.children[0].devices[0].debugging).toEqual(on);
   });
+
+  it("keeps the held flag across reads, and the next non-held send clears it", () => {
+    const held = { allow: true, issuedAt: 1000, held: true };
+    const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: held });
+    expect(first.children[0].devices[0].debugging?.held).toBe(true);
+    const sent = { allow: false, issuedAt: 1001 };
+    const next = reducer(first, { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: sent });
+    expect(next.children[0].devices[0].debugging).toEqual(sent);
+    expect(next.children[0].devices[0].debugging).not.toHaveProperty("held");
+  });
 });

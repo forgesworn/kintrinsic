@@ -1668,6 +1668,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
             allow: grant.allow,
             ...(grant.allow && grant.until != null ? { until: grant.until } : {}),
             issuedAt: Math.floor(Date.now() / 1000),
+            // Replaces the whole record, so a later non-held send clears this.
+            ...(queued ? { held: true } : {}),
           },
         });
         addActivity(
