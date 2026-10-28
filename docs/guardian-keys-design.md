@@ -37,8 +37,8 @@ and day-to-day work is done by keys it has vouched for.
   - Signs clauses, seals, GRANTs and pair offers.
   - Receives ward traffic.
 - **Approval (A).** R signs one event per working key: "W speaks for me as a
-  guardian, labelled 'Sam's phone'". Withdrawing it is a newer event from R
-  for the same W.
+  guardian, labelled 'Sam's phone'". Withdrawing it is a separate, permanent
+  statement from R for that W.
 
 R signs only approvals, withdrawals and a root move. That is a handful of
 signatures in a family's lifetime, so a Heartwood button press for each is
