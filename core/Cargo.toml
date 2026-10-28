@@ -53,3 +53,4 @@ charter-content = { path = "crates/charter-content" }
 charter-webpolicy = { path = "crates/charter-webpolicy" }
 charter-spine = { path = "crates/charter-spine", default-features = false }
 charter-link = { path = "crates/charter-link" }
+charter-guardians = { path = "crates/charter-guardians" }

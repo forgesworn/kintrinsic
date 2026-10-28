@@ -173,6 +173,7 @@ dependencies = [
  "async-trait",
  "charter-content",
  "charter-crypto",
+ "charter-guardians",
  "charter-link",
  "charter-primitives",
  "charter-proto",

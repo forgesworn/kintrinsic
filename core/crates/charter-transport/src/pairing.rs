@@ -28,12 +28,6 @@ pub struct Pairing {
         skip_serializing_if = "Option::is_none"
     )]
     pub battery: Option<crate::relay_config::BatterySettings>,
-    /// The ward's guardian PIN record, set by a gift-wrapped RELAYS change
-    /// from a signer (contract, *Presence confirmation*). Read by the Android
-    /// ward to gate minting a presence token; Linux ignores it. Absent until
-    /// a guardian sets one, and then omitted from older-shaped records.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guardian_pin: Option<crate::relay_config::GuardianPin>,
 }
 
 // Scheduling metadata must never make the identity/enforcement record unreadable.
@@ -176,7 +170,6 @@ pub fn pin_from_connect(
         paired_at: now,
         relays_updated_at: Some(0),
         battery: None,
-        guardian_pin: None,
     })
 }
 

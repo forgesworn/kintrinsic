@@ -113,6 +113,10 @@ pub struct FetchedCuratorList {
 pub struct ReceivedPairOffer {
     pub offer: crate::pair_offer::PairOffer,
     pub seal_author: PubKey,
+    /// The inner kind-31117 event when it arrived signed (the guardian app
+    /// signs it; the Rust guardian side sends an unsigned rumor), for the
+    /// guardian-keys pairing check, which verifies it.
+    pub inner: Option<NostrEvent>,
 }
 
 /// One inbound guardian wrap, opened by [`CharterTransport::unwrap_inbound_opened`].
@@ -226,19 +230,13 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     }
 
     /// The keys machine→guardian wraps are addressed to: the signer set's
-    /// recipients, or the pinned guardian. Never empty: a set reporting no
-    /// recipients falls back to the pinned guardian rather than sending
-    /// nothing.
+    /// recipients, or the pinned guardian when no set is installed. A set
+    /// that reports none (its state could not be read) gets nothing: the
+    /// pinned key may have departed, and a departed key must not keep
+    /// receiving the ward's REQUEST and STATUS (review 2a, Info 4).
     pub fn recipients(&self) -> Vec<PubKey> {
         match &self.signers {
-            Some(set) => {
-                let r = set.recipients();
-                if r.is_empty() {
-                    vec![self.guardian_pk]
-                } else {
-                    r
-                }
-            }
+            Some(set) => set.recipients(),
             None => vec![self.guardian_pk],
         }
     }
@@ -630,7 +628,12 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             {
                 if rumor.kind == kinds::CHARTER_DEVICE_PAIR_OFFER {
                     if let Some(offer) = crate::pair_offer::parse_pair_offer(&rumor.content) {
-                        out.push(ReceivedPairOffer { offer, seal_author });
+                        let inner = rumor.into_signed_event();
+                        out.push(ReceivedPairOffer {
+                            offer,
+                            seal_author,
+                            inner,
+                        });
                     }
                 }
             }

@@ -25,19 +25,18 @@ pub trait SignerSet: Send + Sync {
     /// departed one).
     fn root_of(&self, key: &PubKey) -> Option<PubKey>;
 
-    /// When `key` left the signer set (ward time, unix seconds), if it is a
-    /// departed signer (rule 4). `None` for a current signer and for a key
-    /// that was never one.
-    fn departed_at(&self, key: &PubKey) -> Option<u64>;
-
-    /// Whether `key` has left the signer set.
-    fn is_departed(&self, key: &PubKey) -> bool {
-        self.departed_at(key).is_some()
-    }
+    /// Whether `key` has left the signer set (rule 4): a withdrawn working
+    /// key, a removed or moved-away root, or a moved root's key nobody
+    /// re-approved. `false` for a current signer and for a key that was never
+    /// one. (The clause floor a departure leaves behind lives in the
+    /// guardian-keys state, not here.)
+    fn is_departed(&self, key: &PubKey) -> bool;
 
     /// Who the ward encrypts REQUEST, STATUS, USAGE, AUDIT and break-glass
     /// events to (rule 9): every working key in the set, plus each pinned root
-    /// with no working key in the set. Never empty for a paired ward.
+    /// with no working key in the set. Never empty for a paired ward whose
+    /// set could be read; empty when it could not (send nothing rather than
+    /// guess).
     fn recipients(&self) -> Vec<PubKey>;
 
     /// The pinned roots, in pinning order.
@@ -56,8 +55,8 @@ impl SignerSet for SinglePinned {
     fn root_of(&self, key: &PubKey) -> Option<PubKey> {
         (*key == self.0).then_some(self.0)
     }
-    fn departed_at(&self, _key: &PubKey) -> Option<u64> {
-        None
+    fn is_departed(&self, _key: &PubKey) -> bool {
+        false
     }
     fn recipients(&self) -> Vec<PubKey> {
         vec![self.0]
@@ -75,8 +74,8 @@ impl SignerSet for PubKey {
     fn root_of(&self, key: &PubKey) -> Option<PubKey> {
         SinglePinned(*self).root_of(key)
     }
-    fn departed_at(&self, _key: &PubKey) -> Option<u64> {
-        None
+    fn is_departed(&self, _key: &PubKey) -> bool {
+        false
     }
     fn recipients(&self) -> Vec<PubKey> {
         vec![*self]

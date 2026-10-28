@@ -96,8 +96,10 @@ impl HeldSigner {
     }
 }
 
-/// What a per-child clause slot holds, for the signer-aware replacement rule
-/// (contract rules 4 and 5).
+/// What a per-child clause slot holds: its replay floor and who signed the
+/// held clause (contract rule 5). On a ward with the guardian-keys section the
+/// floor a new clause must clear is the guardian-keys state's (rule 4), not
+/// this one; the state seeds a slot it has never seen from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotState {
     /// The replay floor, exactly as [`ChildClauseStore::replay_floor`] reports
@@ -106,41 +108,6 @@ pub struct SlotState {
     /// Who signed the held clause. Only meaningful when `floor` is a record
     /// floor.
     pub signer: HeldSigner,
-    /// The slot's persisted departure floor, if a signer of a clause it held
-    /// has departed: `min(that clause's issuedAt, ward time at departure)`.
-    pub departure_floor: Option<u64>,
-}
-
-impl SlotState {
-    /// The floor a new clause must clear (rule 4).
-    ///
-    /// - The held clause's signer is current (or unknown, or the floor is a
-    ///   sidecar floor, whose clause's signer cannot be known): the replay
-    ///   floor, as before the guardian-keys section.
-    /// - The held clause's signer has departed: its `issuedAt` is ignored and
-    ///   the departure floor applies instead, so a far-future clause from a
-    ///   departed key cannot pin a rule for ever. With no departure floor on
-    ///   record (the departure was never recorded), the replay floor applies:
-    ///   fail closed.
-    ///
-    /// `held_is_current` answers for the held clause's signer; a store calls
-    /// it with the signer it read, under its own lock.
-    pub fn effective_floor(
-        &self,
-        held_is_current: &dyn Fn(HeldSigner) -> bool,
-    ) -> Option<ReplayFloor> {
-        match self.floor {
-            Some(ReplayFloor::Record(_))
-                if self.signer != HeldSigner::Unknown && !held_is_current(self.signer) =>
-            {
-                match self.departure_floor {
-                    Some(d) => Some(ReplayFloor::Record(d)),
-                    None => self.floor,
-                }
-            }
-            other => other,
-        }
-    }
 }
 
 /// Authenticated standing-clause store with per-kind monotonic `issuedAt`
@@ -264,19 +231,16 @@ pub trait ChildClauseStore: Send + Sync {
     }
     /// Forget every clause for `subject_hex` (a release: enforcement must stop,
     /// and the rollback floor must reset so a later re-pair starts clean).
-    /// Departure floors and recorded signers go with them.
+    /// Recorded signers go with them.
     fn clear_for(&self, subject_hex: &str) -> SysResult<()>;
 
-    /// The slot's floor, the held clause's signer and its departure floor
-    /// (rules 4 and 5), read together.
+    /// The slot's replay floor and the held clause's signer, read together.
     fn slot_state(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState>;
 
-    /// Store a clause signed by `signer`, recording the signer with it (rule
-    /// 5), under the signer-aware replacement rule (rule 4): it must clear
-    /// [`SlotState::effective_floor`], evaluated under the store's lock with
-    /// `held_is_current`. On success the replay floor becomes `issued_at` —
-    /// LOWERED, when it replaces a departed signer's clause dated above it.
-    /// Returns false (nothing written) when the floor refuses it.
+    /// [`Self::put_child_clause`], recording `signer` with the clause (rule
+    /// 5). The replay floor is the only bar: a ward that pins one guardian
+    /// and nothing else. Returns false (nothing written) when the floor
+    /// refuses it.
     fn put_child_clause_signed(
         &self,
         subject_hex: &str,
@@ -284,36 +248,21 @@ pub trait ChildClauseStore: Send + Sync {
         issued_at: u64,
         signer: &PubKey,
         json: &str,
-        held_is_current: &dyn Fn(HeldSigner) -> bool,
     ) -> SysResult<bool>;
 
-    /// The departure hook (rule 4): for every held clause, in every subject's
-    /// slots, whose signer is in `departed` (`(key, ward time at departure)`),
-    /// raise the slot's departure floor to `min(clause issuedAt, departure
-    /// time)` (never lowering one already there). A record with no signer is
-    /// read as `legacy_signer`'s. An unreadable record is skipped: its replay
-    /// floor stays in force, which is the fail-closed reading. The clauses
-    /// themselves stay enforced until a current signer replaces them.
-    fn record_departures(
+    /// Store a clause signed by `signer` whose acceptance the guardian-keys
+    /// state has already decided (rules 4 and 5): no replay-floor check here,
+    /// because once the held clause's signer has departed the bar can be
+    /// BELOW this slot's floor. The sidecar floor is set to `issued_at` first,
+    /// then the record, as for every put.
+    fn replace_child_clause(
         &self,
-        departed: &[(PubKey, u64)],
-        legacy_signer: &PubKey,
+        subject_hex: &str,
+        kind: u16,
+        issued_at: u64,
+        signer: &PubKey,
+        json: &str,
     ) -> SysResult<()>;
-}
-
-/// The departure floor for a held clause at `issued_at` signed by `signer`,
-/// if that signer is among `departed`.
-pub fn departure_floor_for(
-    signer: HeldSigner,
-    issued_at: u64,
-    departed: &[(PubKey, u64)],
-    legacy_signer: &PubKey,
-) -> Option<u64> {
-    let key = signer.resolve(legacy_signer)?;
-    departed
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, at)| issued_at.min(*at))
 }
 
 /// Usage-accounting snapshot store (opaque JSON; shape owned by Phase 6).
@@ -361,8 +310,6 @@ mod mock {
         /// The recorded signer of each per-child clause (rule 5); absent for
         /// a record written without one ([`HeldSigner::Legacy`]).
         child_signers: BTreeMap<(String, u16), PubKey>,
-        /// Per-(subject, kind) departure floors (rule 4).
-        departure_floors: BTreeMap<(String, u16), u64>,
         curator_lists: BTreeMap<String, (u64, String)>,
         usage: Option<String>,
         extension: Option<String>,
@@ -735,7 +682,6 @@ mod mock {
             let mut g = self.disk.0.lock().expect("disk lock");
             g.child_clauses.retain(|(s, _), _| s != subject_hex);
             g.child_signers.retain(|(s, _), _| s != subject_hex);
-            g.departure_floors.retain(|(s, _), _| s != subject_hex);
             Ok(())
         }
         fn slot_state(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState> {
@@ -752,16 +698,14 @@ mod mock {
             issued_at: u64,
             signer: &PubKey,
             json: &str,
-            held_is_current: &dyn Fn(HeldSigner) -> bool,
         ) -> SysResult<bool> {
             if self.disk.clause_writes_broken() || self.disk.clause_reads_broken() {
                 return Err(unwritable());
             }
             let mut g = self.disk.0.lock().expect("disk lock");
             let key = (subject_hex.to_string(), kind);
-            let state = Self::state_locked(&g, &key);
-            if state
-                .effective_floor(held_is_current)
+            if Self::state_locked(&g, &key)
+                .floor
                 .is_some_and(|f| !f.admits(issued_at))
             {
                 return Ok(false);
@@ -771,33 +715,22 @@ mod mock {
             g.child_clauses.insert(key, (issued_at, json.to_string()));
             Ok(true)
         }
-        fn record_departures(
+        fn replace_child_clause(
             &self,
-            departed: &[(PubKey, u64)],
-            legacy_signer: &PubKey,
+            subject_hex: &str,
+            kind: u16,
+            issued_at: u64,
+            signer: &PubKey,
+            json: &str,
         ) -> SysResult<()> {
             if self.disk.clause_writes_broken() {
                 return Err(unwritable());
             }
             let mut g = self.disk.0.lock().expect("disk lock");
-            let torn = g.records_torn;
-            let updates: Vec<((String, u16), u64)> = g
-                .child_clauses
-                .iter()
-                .filter(|_| !torn)
-                .filter_map(|(key, (issued_at, _))| {
-                    let signer = g
-                        .child_signers
-                        .get(key)
-                        .map_or(HeldSigner::Legacy, |k| HeldSigner::Key(*k));
-                    departure_floor_for(signer, *issued_at, departed, legacy_signer)
-                        .map(|f| (key.clone(), f))
-                })
-                .collect();
-            for (key, floor) in updates {
-                let slot = g.departure_floors.entry(key).or_insert(floor);
-                *slot = (*slot).max(floor);
-            }
+            let key = (subject_hex.to_string(), kind);
+            g.records_torn = false;
+            g.child_signers.insert(key.clone(), *signer);
+            g.child_clauses.insert(key, (issued_at, json.to_string()));
             Ok(())
         }
     }
@@ -817,11 +750,7 @@ mod mock {
                     .get(key)
                     .map_or(HeldSigner::Legacy, |k| HeldSigner::Key(*k))
             };
-            SlotState {
-                floor,
-                signer,
-                departure_floor: g.departure_floors.get(key).copied(),
-            }
+            SlotState { floor, signer }
         }
     }
 
@@ -1060,12 +989,6 @@ mod real {
         }
     }
 
-    /// The departure-floor file beside a slot's record (rule 4): decimal text,
-    /// like the replay-floor sidecar, and no extension for the same reason.
-    fn departure_file(dir: &std::path::Path, kind: u16) -> PathBuf {
-        dir.join(format!("departed-{kind}"))
-    }
-
     // ---- replay-floor sidecar (M3) -----------------------------------------
     //
     // Next to every `<kind>.json` record sits `floor-<kind>`, holding only the
@@ -1160,8 +1083,8 @@ mod real {
     }
 
     /// [`put_rec`], recording `signer` with the clause. The sidecar is set to
-    /// `issued_at`, which lowers it when the caller's floor came from a
-    /// departure floor (rule 4).
+    /// `issued_at`, which lowers it when the caller passes no floor because
+    /// the guardian-keys state decided (rule 4).
     fn put_rec_signed(
         record_path: &std::path::Path,
         floor_path: &std::path::Path,
@@ -1301,9 +1224,6 @@ mod real {
         fn current(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ClauseRec>> {
             read_json(&self.file(subject_hex, kind)?)
         }
-        fn departure(&self, subject_hex: &str, kind: u16) -> SysResult<PathBuf> {
-            Ok(departure_file(&self.clauses_dir(subject_hex)?, kind))
-        }
         /// The slot's state. The caller holds `lock` (`floor_of` may backfill
         /// the sidecar).
         fn state_locked(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState> {
@@ -1313,12 +1233,7 @@ mod real {
                 _ => HeldSigner::Unknown,
             };
             let floor = floor_of(rec, &self.floor(subject_hex, kind)?)?;
-            let departure_floor = read_floor(&self.departure(subject_hex, kind)?)?;
-            Ok(SlotState {
-                floor,
-                signer,
-                departure_floor,
-            })
+            Ok(SlotState { floor, signer })
         }
     }
     impl ChildClauseStore for RealChildClauseStore {
@@ -1432,12 +1347,9 @@ mod real {
             issued_at: u64,
             signer: &PubKey,
             json: &str,
-            held_is_current: &dyn Fn(HeldSigner) -> bool,
         ) -> SysResult<bool> {
             let _g = self.lock.lock().expect("child clause lock");
-            let floor = self
-                .state_locked(subject_hex, kind)?
-                .effective_floor(held_is_current);
+            let floor = self.state_locked(subject_hex, kind)?.floor;
             put_rec_signed(
                 &self.file(subject_hex, kind)?,
                 &self.floor(subject_hex, kind)?,
@@ -1447,66 +1359,26 @@ mod real {
                 Some(*signer),
             )
         }
-        fn record_departures(
+        fn replace_child_clause(
             &self,
-            departed: &[(PubKey, u64)],
-            legacy_signer: &PubKey,
+            subject_hex: &str,
+            kind: u16,
+            issued_at: u64,
+            signer: &PubKey,
+            json: &str,
         ) -> SysResult<()> {
             let _g = self.lock.lock().expect("child clause lock");
-            let children = self.base.join("children");
-            let subjects = match fs::read_dir(&children) {
-                Ok(rd) => rd,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(e) => return Err(io_err("read_dir children", e)),
-            };
-            for entry in subjects {
-                let Ok(entry) = entry else { continue };
-                let Some(subject_hex) = entry.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                let Ok(dir) = self.clauses_dir(&subject_hex) else {
-                    continue;
-                };
-                let records = match fs::read_dir(&dir) {
-                    Ok(rd) => rd,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(io_err("read_dir child clauses", e)),
-                };
-                for record in records {
-                    let Ok(record) = record else { continue };
-                    let path = record.path();
-                    if !is_json(&path) {
-                        continue;
-                    }
-                    let Some(kind) = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .and_then(|s| s.parse::<u16>().ok())
-                    else {
-                        continue;
-                    };
-                    // Unreadable: skipped, its replay floor stays in force.
-                    let Ok(Some(rec)) = read_json::<ClauseRec>(&path) else {
-                        continue;
-                    };
-                    let Some(floor) = departure_floor_for(
-                        rec.held_signer(),
-                        rec.issued_at,
-                        departed,
-                        legacy_signer,
-                    ) else {
-                        continue;
-                    };
-                    let file = departure_file(&dir, kind);
-                    // An unreadable departure floor is replaced: the new one is
-                    // at or below the held clause either way.
-                    let held = read_floor(&file).ok().flatten();
-                    if held.is_none_or(|h| floor > h) {
-                        atomic_write(&file, floor.to_string().as_bytes())?;
-                    }
-                }
-            }
-            Ok(())
+            // No floor: the guardian-keys state decided. The record may be
+            // torn or unreadable; it is replaced either way.
+            put_rec_signed(
+                &self.file(subject_hex, kind)?,
+                &self.floor(subject_hex, kind)?,
+                None,
+                issued_at,
+                json,
+                Some(*signer),
+            )
+            .map(|_| ())
         }
     }
 
@@ -1686,12 +1558,11 @@ mod real {
         }
 
         #[test]
-        fn child_clause_signer_and_departure_floor_survive_a_restart() {
+        fn child_clause_signer_survives_a_restart_and_a_replacement_may_lower_the_floor() {
             let base = tmp("childclause-signer");
             let subject = "ab".repeat(32);
             let root = PubKey::from_bytes([1; 32]);
             let working = PubKey::from_bytes([2; 32]);
-            let current = |cur: PubKey| move |h: HeldSigner| h.resolve(&root) == Some(cur);
             {
                 let s = RealChildClauseStore::with_base(&base);
                 // A legacy record: no signer, read as the pinned root's.
@@ -1702,37 +1573,34 @@ mod real {
                 );
                 // The working key replaces it far ahead.
                 assert!(s
-                    .put_child_clause_signed(&subject, 2, 900, &working, "{\"w\":1}", &|_| true)
+                    .put_child_clause_signed(&subject, 2, 900, &working, "{\"w\":1}")
                     .unwrap());
                 assert_eq!(
                     s.slot_state(&subject, 2).unwrap().signer,
                     HeldSigner::Key(working)
                 );
-                s.record_departures(&[(working, 200)], &root).unwrap();
             }
             let s = RealChildClauseStore::with_base(&base);
             let st = s.slot_state(&subject, 2).unwrap();
             assert_eq!(st.floor, Some(ReplayFloor::Record(900)));
-            assert_eq!(st.departure_floor, Some(200));
-            // Root only is current now: the floor is the departure floor.
+            assert_eq!(st.signer, HeldSigner::Key(working));
+            // The replay floor alone refuses an older clause.
             assert!(!s
-                .put_child_clause_signed(&subject, 2, 200, &root, "{}", &current(root))
+                .put_child_clause_signed(&subject, 2, 201, &root, "{}")
                 .unwrap());
-            assert!(s
-                .put_child_clause_signed(&subject, 2, 201, &root, "{\"r\":1}", &current(root))
-                .unwrap());
+            // The guardian-keys state decided (the working key departed): the
+            // replacement lands below the old floor, which comes down with it.
+            s.replace_child_clause(&subject, 2, 201, &root, "{\"r\":1}")
+                .unwrap();
             assert_eq!(
                 s.get_child_clause(&subject, 2).unwrap().unwrap(),
                 "{\"r\":1}"
             );
-            // The replay floor came down to the replacement's issuedAt.
-            assert_eq!(
-                s.slot_state(&subject, 2).unwrap().floor,
-                Some(ReplayFloor::Record(201))
-            );
-            // A release forgets the departure floor with the clauses.
+            let st = s.slot_state(&subject, 2).unwrap();
+            assert_eq!(st.floor, Some(ReplayFloor::Record(201)));
+            assert_eq!(st.signer, HeldSigner::Key(root));
             s.clear_for(&subject).unwrap();
-            assert_eq!(s.slot_state(&subject, 2).unwrap().departure_floor, None);
+            assert_eq!(s.slot_state(&subject, 2).unwrap().floor, None);
         }
 
         #[test]

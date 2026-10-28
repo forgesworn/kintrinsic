@@ -417,8 +417,11 @@ async fn a_kind_not_acted_on_locally_is_ignored() {
     assert_eq!(out.inner_kind, Some(kinds::CHARTER_FAMILY_ROSTER));
 }
 
+/// A gift-wrapped RELAYS belongs to the guardian-keys section (rule 11): a
+/// ward without its port ignores one, as before the section (review 2a,
+/// Info 1). With the port it is checked and applied: `guardian_keys.rs`.
 #[tokio::test]
-async fn a_malformed_gift_wrapped_relays_change_is_refused() {
+async fn a_gift_wrapped_relays_change_is_ignored_without_the_guardian_keys_port() {
     let w = Ward::new();
     let b = w.broker();
     let ev = sign_event(
@@ -429,7 +432,7 @@ async fn a_malformed_gift_wrapped_relays_change_is_refused() {
         "{}".into(),
     );
     let out = b.ingest_local(&w.wrap(&ev, 1), LOCAL).await;
-    assert_eq!(out.result, AckResult::Refused);
+    assert_eq!(out.result, AckResult::Ignored);
     assert_eq!(out.inner_kind, Some(kinds::CHARTER_DEVICE_RELAYS));
     assert!(!out.relays_changed);
 }
