@@ -1550,9 +1550,10 @@ consequences follow:
   binding-ordering race; the clause is guardian-signed, so it is authentic
   regardless of arrival order.
 
-The **trust root is unchanged**: there is still exactly **one pinned guardian**,
-and every CLAUSE is its fully-signed inner event. Per-child keying changes *which
-subject* a clause addresses, never *who* may author it.
+The **trust root is unchanged** by per-child keying: every CLAUSE is a
+fully-signed inner event from the pinned guardian, or, on a ward that implements
+*Guardian roots and working keys*, from its signer set. Per-child keying changes
+*which subject* a clause addresses, never *who* may author it.
 
 **Pairing — `bunker://` grammar, and its https App Link wrapper.**
 `charterd`/`charter-cli`/`charter-setup` pin the guardian from
@@ -2328,9 +2329,12 @@ vectors for the three signature inputs live in
 
 ### Authority + identity model (per-child, multi-device)
 
-- **One pinned guardian** signs **every** CLAUSE and every USAGE_SYNC. Per-child
-  and per-device keying changes *which subject / period* an event addresses, never
-  the trust root — there is always exactly one pinned guardian authority.
+- **The pinned guardian roots** (one or more; see *Guardian roots and working
+  keys* below), and the working keys they approve, sign **every** CLAUSE and
+  every USAGE_SYNC. A ward that implements that section accepts any of them; one
+  that predates it accepts its single pinned guardian only. Per-child and
+  per-device keying changes *which subject / period* an event addresses, never
+  the trust roots.
 - A **child = a subject pubkey**, independent of any device; an admin binds local
   account(s) to that subject (the privileged pairing step). **Device-only** limits
   are the **fallback**: an unpaired device, an offline gap, or a child the guardian
@@ -2344,6 +2348,215 @@ vectors for the three signature inputs live in
   guardian **budget** fail-**opens** (no cap) — the schedule remains the fail-safe
   gate. Both behaviors are scoped per child, so one child's bad clause can never
   affect a sibling.
+
+### Guardian roots and working keys (v1)
+
+The design and its reasoning are in `docs/guardian-keys-design.md`. In short:
+- a ward pins one or more **guardian roots**, one per parent, each a Nostr
+  identity the parent controls (on a Heartwood through My Signet, in My Signet,
+  or in the guardian app on the phone);
+- each root vouches once for the **working keys** of that parent's guardian
+  installs, and the working keys do the day-to-day signing and receiving.
+
+A root is never asked to decrypt ward traffic.
+
+**Terms.**
+- **Root (R):** a pinned guardian identity.
+  - A ward pins its first R at pairing, and others through confirmed
+    co-guardian statements.
+  - At most **4** roots per ward.
+- **Working key (W):** one per guardian install, generated there and never
+  copied.
+  - Bound to exactly one R.
+  - At most **16** active working keys per root.
+- **Signer set:** every pinned R, plus every W that is bound to a pinned R,
+  approved and not withdrawn.
+- **Presence confirmation:** proof that a guardian install was physically at
+  the ward. It is the same basis as scan-to-pair, and is defined below.
+
+**Who may sign what.**
+- A CLAUSE, GRANT, RELAYS, USAGE_SYNC or break-glass inner event is accepted
+  only if its author is in the signer set.
+- A PAIR_OFFER to an unpaired ward is governed by *Scan-to-pair* (below and in
+  its own section), not by the signer set.
+- All existing checks (inner `id` and `sig`, kind, marker tag, replay floor,
+  pairing floor, skew) still apply.
+- In addition, **a CLAUSE or statement whose `issuedAt` is more than 300
+  seconds ahead of the ward's clock is refused.** A far-future rule could
+  otherwise never be replaced. A ward's clock is not the child's to set.
+
+**Statements: kind `CHARTER_GUARDIAN_STATEMENT = 31120`.**
+
+Statements are signed NIP-01 kind-31120 events (addressable), with:
+- exactly one `d` tag and exactly one `p` tag;
+- `["t","charter-device"]`;
+- `content` JSON `{ "v": 1, "issuedAt": <unix s>, "label"?: <string ≤ 64 UTF-8
+  bytes>, "expiresAt"?: <unix s> }`. Unknown fields are ignored.
+
+The `d` and `p` layout follows Kindependence's device statements, so the suite
+reads alike. **The kind is Kintrinsic's own, deliberately.** Kindependence uses
+kind 30078 (generic NIP-78 app data). Many apps are allowed to sign 30078 with a
+parent's main identity, and any of them could then approve an attacker's key.
+A guardian's signer grants kind 31120 to Kintrinsic alone.
+
+| Statement | `d` | `p` | Signed by | Effect |
+|---|---|---|---|---|
+| approval | `kintrinsic/device/<W>` | W | R | W joins the signer set, bound to R |
+| withdrawal | `kintrinsic/revoke/<W>` | W | W's binding root | W leaves the signer set, for good |
+| co-guardian | `kintrinsic/guardian/<R2>` | R2 | a pinned root | R2 is pinned, after presence confirmation |
+| root removal | `kintrinsic/unguardian/<R2>` | R2 | R2, or another pinned root | R2 leaves, at once if R2 signed it; otherwise after presence confirmation |
+| root move | `kintrinsic/root/<R2>` | R2 | the root R being replaced | R2 replaces R, after presence confirmation |
+| cancel | `kintrinsic/cancel/<d of the pending statement>` | the pending statement's `p` | the pending statement's signer | a pending co-guardian, removal or move is dropped |
+
+- `<W>` and `<R2>` are 64 lowercase hex.
+- A statement is ignored if its `d` and `p` disagree, its content is malformed,
+  or its `v` is not 1.
+- `issuedAt` orders statements; `created_at` is ignored.
+
+**Delivery and the two seal exceptions.**
+- Statements are gift-wrapped to each ward (relays and the local link), as
+  clauses are, and are never published openly.
+- A ward normally requires a seal's author to be the inner author. Two
+  exceptions apply to statements only:
+  1. **An approval may be sealed only by the W it names.** That is proof of
+     possession. An approval sealed by anyone else is ignored, even if a root
+     signed it.
+  2. **A withdrawal, co-guardian, root removal, root move or cancel signed by
+     root R may also be sealed by a W bound to R and currently in the signer
+     set.** So a Heartwood-held root signs once, and its working keys carry the
+     statement to every ward.
+- A W sends its own approval to a ward before its first signed event. A signed
+  event from a key that isn't in the signer set is dropped, not buffered; the
+  sender re-sends once its approval has landed.
+- An approval for a root that isn't pinned yet is dropped.
+
+**Rules.**
+1. **Binding.**
+   - A ward binds W to the root of the first valid approval it accepts for W,
+     and ignores approvals for W from any other root.
+   - The one re-binding is a confirmed root move (rule 8).
+2. **No pairing floor for statements.** A W approved before this ward paired
+   still counts.
+   - Among statements with the same `d`, the newest `issuedAt` wins.
+   - A withdrawal, removal or cancel wins a same-second tie.
+3. **Withdrawal is permanent and checked against the binding root.**
+   - A withdrawal counts only if signed by W's binding root.
+   - A withdrawal received before W is bound is kept, but only if a pinned
+     root signed it. It applies only if that root becomes W's binding root;
+     it then pre-empts the approval.
+   - Once applied, no approval revives W, whatever its `issuedAt`.
+4. **Every departure fails closed.**
+   - A departure is a signer leaving the set: a withdrawn W, a removed root
+     and its working keys, or a moved root's keys that R2 hasn't re-approved.
+   - From the moment a ward applies a departure, it accepts nothing new from
+     the departed keys.
+   - Clauses they signed **stay enforced** until a clause of the same kind
+     from a current signer replaces them.
+   - That replacement wins **whatever the two `issuedAt` values**, so a
+     far-future clause from a departed key can't pin a rule for ever.
+   - A guardian app re-signs the current clause set with a live key before it
+     sends a departure.
+5. **Stored clauses record their signer.** The ward screen and STATUS then say
+   who set a rule. Each label is shown next to the signer's root identity (a
+   short npub), because a label alone can be spoofed.
+6. **Co-guardian.**
+   - A co-guardian statement for R2, from a pinned root, takes effect only
+     after **presence confirmation by an install bound to R2**: the new parent
+     at the child's device.
+   - Until then it is pending, and is reported in STATUS to every root's
+     working keys.
+   - Both roots then have equal authority. Among clauses of one kind from
+     current signers, the newest `issuedAt` wins, whoever signed it.
+7. **Root removal.**
+   - Signed by R2 itself, it takes effect at once, unless R2 is the last root.
+     The last root leaves only by unpairing.
+   - Signed by another pinned root R1, it takes effect only after **presence
+     confirmation by an install bound to R1**.
+   - Removal never leaves a ward with no roots; a removal that would is
+     refused.
+   - Once a removal applies, every pending statement signed by R2 is dropped.
+   - Re-pinning R2 later needs a co-guardian statement newer than the removal,
+     confirmed afresh.
+8. **Root move.**
+   - It takes effect only after **presence confirmation by an install bound to
+     R2**. A W approved by R2 travels with the move.
+   - Until then R stays pinned, and the move is pending in STATUS.
+   - A pending move expires at its `expiresAt` (at most 7 days after
+     `issuedAt`; 24 hours if absent), or when R cancels it.
+   - Once confirmed, R is replaced by R2. A W bound to R stays only if R2
+     approves it; that approval re-binds it to R2.
+9. **Recipients.**
+   - A ward encrypts REQUEST, STATUS, USAGE, AUDIT and break-glass events to
+     every W in its signer set, plus each pinned root with no W in the set (a
+     phone-held root that signs directly).
+   - A W that a ward holds no approval for gets nothing from it.
+   - The first GRANT the ward accepts for a request settles it.
+10. **Limits and storage.**
+    - Applied withdrawals and removals are kept as tombstones for the life of
+      the pairing: 64 bytes each, at most 1024. At the limit, the ward refuses
+      new approvals until it is re-paired.
+    - A ward persists a statement before it applies it.
+
+**Presence confirmation.**
+- When a statement needs it, the ward shows a one-time token as a code to
+  scan, with a short form to type. Token rules are as for scan-to-pair: 16
+  random bytes, a 600-second lifetime, single use, compared in constant time.
+- The confirming install scans it. It must be bound to the root the rule
+  names. It replies with a confirmation, an inner event signed by that W:
+  `{ v: 1, token, statement: <the pending statement's id> }`.
+- The ward accepts the confirmation only from a W bound to the named root and
+  in its signer set, or for a co-guardian or move, a W carried with that
+  statement.
+- The ward's own screen never accepts a tap as confirmation. A child at the
+  device cannot confirm anything.
+- Confirmation proves that a guardian install was physically at the child's
+  device, the same basis on which pairing is trusted today.
+
+**Scan-to-pair with a working key.**
+- A PAIR_OFFER sealed by W adds `"approval": <the signed approval event>`.
+- The ward checks that the approval is valid, that its `p` is the seal author,
+  and that it is signed by R. It pins **R**, not W, and holds the approval.
+- An offer sealed by W without a valid approval for W is refused.
+- An offer sealed by a root, with no approval, pins that root as today.
+- "Never pin a key read from the payload" still holds: the approval is signed
+  by R and names the sender, so a forged offer can only nominate its sender's
+  own root.
+
+**Family roster (guardian ↔ guardian, kind `CHARTER_FAMILY_ROSTER = 31119`).**
+- A guardian install shares the family with the other guardians' working keys.
+  The inner event is signed by a W and gift-wrapped to each other W, and
+  carries the sender's approval.
+- Content: `{ v: 1, children: [{ subject, issuedAt, name, colour, devices:
+  [{ machine, platform, name }] }] }`.
+- Records merge per child: the newest `issuedAt` per `subject` wins.
+- A receiving install never deletes a device it paired itself or has had a
+  STATUS from.
+- A device known only from a roster is shown as unconfirmed until a STATUS
+  from it arrives.
+- An install accepts a roster only from a W approved by a root that the
+  family's wards report in STATUS.
+- Wards never receive or read rosters.
+
+**STATUS.** A ward implementing this section adds `guardians` to STATUS:
+- `roots`: hex list;
+- `keys`: count of active working keys per root;
+- `pending`: list of `{ d, kind: 'coguardian' | 'removal' | 'move', expiresAt? }`;
+- `tombstones`: count, so a dropped withdrawal shows up as a mismatch.
+
+Every root's working keys receive it.
+
+**Other places that name the guardian.** In this section's terms:
+- the local link's `G`, the NIP-42 AUTH key, the RELAYS author and the
+  re-pairing authority are **any key in the signer set**;
+- the local-link ACK goes to the key that completed the handshake.
+
+**Versioning.**
+- A ward that predates this section pins one guardian and refuses kind 31120
+  as an unknown inner event.
+- A guardian install therefore signs directly with its root for any child
+  with such a ward. It offers co-guardians and root moves only once every ward
+  of that child reports `appVersionCode` at or above the first version that
+  implements this section (recorded here at release).
 
 ## NIP-46 methods
 
