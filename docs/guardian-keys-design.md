@@ -74,7 +74,7 @@ fine. It is even a feature: adding a parent needs a physical press.
 **How approvals reach a ward.** A ward requires a seal's author to be the
 inner event's author (`charter-proto` NIP-59 unwrap). An approval is signed by
 R, but R must not be asked to seal one per ward. So there is one narrow
-exception, for kind 31119 only:
+exception, for approval statements only:
 - the seal may be authored by the very working key the approval names, and by
   no other key;
 - R's signature proves R approved W, and the seal proves the sender holds W.
@@ -136,34 +136,70 @@ and rarely. See decision 5.
 My Signet, withdraw the lost phone's working key. Then set the phone up again
 with a new working key. No ward needs touching.
 
-## Wire sketch (kinds to be confirmed)
+## Wire sketch: Kindependence's device statements, reused
 
-| Kind | Name | Signed by | Shape |
-|---|---|---|---|
-| 31119 | guardian approval | R | addressable; `d` = W hex. Body `{v:1, issuedAt, status: "active" \| "withdrawn", label}` |
-| 31120 | root move | old R | addressable; `d` = `"root"`. Body `{v:1, issuedAt, newRoot}` |
+Kindependence (another Kindred app) already ships this pattern, with tests:
+- a local phone key per install;
+- a **device statement** signed once by the My Signet identity;
+- a permanent revocation.
 
-- Both are fail-safe: a malformed or unknown version is ignored, and an
-  unparseable approval leaves that working key unapproved.
-- 31119 and 31120 are the next free kinds after 31118.
-- For a Heartwood-held R, Kintrinsic's slot policy needs `sign_event` for
-  31119 and 31120 only. Neither is on Signet's never-listed list (24133,
-  31000). The slot can be set to ask every time.
+Its statement is a kind-30078 event (NIP-78 app data), and My Signet already
+signs it for Kindependence. Kintrinsic reuses the same shape with its own `d`
+prefix and scope. That makes "a family identity vouching for a device" read
+the same across the suite, while a phone trusted for Kindependence's location
+circles is not thereby a Kintrinsic guardian.
+
+| Event | Kind | `d` | Signed by | Tags and content |
+|---|---|---|---|---|
+| approval | 30078 | `kintrinsic/device/<W hex>` | R | `p` = W, `scope` = `kintrinsic:guardian`; content `{v:1, issuedAt, label}` |
+| withdrawal | 30078 | `kintrinsic/revoke/<W hex>` | R | `p` = W; content `{v:1, issuedAt}` |
+| root move | 30078 | `kintrinsic/root/<new R hex>` | old R | `p` = new R; content `{v:1, issuedAt}` |
+
+Rules, taken from Kindependence where it already solved them:
+- **Proof of possession:** the seal that carries an approval must be authored
+  by the W in its `p` tag (the seal exception above).
+- **One identity per working key:** a ward binds a W to the first R that
+  approved it, and ignores approvals for that W from any other key.
+- **Withdrawal is permanent.** It has its own `d`, so no later-dated approval
+  can bring a withdrawn W back. A family that wants the phone back gives it a
+  new working key.
+- **Order doesn't matter:** a withdrawal that arrives before its approval is
+  kept, not dropped, and wins when the approval arrives. In a same-second tie,
+  the withdrawal wins.
+- **Fail-safe:** a malformed statement or an unknown `v` is ignored, and the
+  working key stays unapproved.
+- **My Signet and the Heartwood:**
+  - Kintrinsic's slot needs `sign_event` for kind 30078 only, which isn't on
+    Signet's never-listed list (24133, 31000).
+  - The slot can be set to ask every time.
+  - One check is needed: Signet may scope 30078 by `d` prefix, and if so,
+    `kintrinsic/` has to be allowed.
 - Old wards understand neither kind. The guardian app keeps signing with R
   directly for any child that has a ward below the version that supports this
   model, and says so ("update Robin's phone to add a second parent").
 
 ## Decisions needed
 
-1. **Equal authority** for both parents, newest wins. Or does one parent hold
-   the root and the other only a working key? The design supports both,
-   because only whoever controls R can withdraw. Equal authority is the
-   default here.
+1. **One family root, or one per parent?**
+   - **(a) One family root.** Both parents' working keys sit under one R. That
+     R lives in one parent's My Signet or Heartwood, so that parent alone can
+     add or remove the other. This is simple for wards (one pin).
+   - **(b) Each parent's own identity.** This is how Kindependence does it:
+     each parent's own My Signet identity is a guardian root. A ward pins
+     both: the first at pairing, the second through a co-guardian statement
+     from the first, confirmed on the device like a root move. Each parent's
+     working keys sit under their own root. Neither parent's custody depends
+     on the other's phone or Heartwood, and it matches "keys once across
+     Kindred".
+   - Either way, both have equal authority over rules, and the newest wins.
+   - Recommended: **(b)**. It costs one more statement and a pin list on
+     wards, and it is the version that survives two households.
 2. Is **R the parent's main My Signet identity,** shared with Kindependence
    and Kinterest (keys once across the suite), or a derived "Kintrinsic
    guardian" persona? A shared identity is the Kindred goal, but it means
    Kintrinsic's slot can sign approvals with the parent's main identity.
-3. **Kind numbers 31119 and 31120,** or numbers agreed with the Signet side.
+3. **Reusing Kindependence's kind-30078 statement** (recommended) or new
+   Kintrinsic kinds. Reuse means My Signet already knows how to sign it.
 4. Does the **child's identity** (a dependant key shared across Kindred apps)
    come into scope now, or later? This design leaves the ward's own identity
    as it is.
@@ -182,8 +218,9 @@ with a new working key. No ward needs touching.
 ## Build order (once agreed)
 
 1. Contract and vectors:
-   - the two kinds (plus the roster kind, if decision 6 goes that way);
-   - ward acceptance, the seal exception for 31119, and the withdrawal rules;
+   - the three statements (plus the roster kind, if decision 6 goes that way);
+   - ward acceptance, the seal exception for approvals, and the withdrawal
+     rules;
    - root move and its confirmation.
 2. Wards (core, Linux, Android):
    - the approval store, the signer check, and the stored-clause format
