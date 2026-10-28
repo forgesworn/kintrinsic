@@ -578,6 +578,7 @@ function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
   if (keyRecord(s, R2)) return drop('key_role_conflict')
   // Rule 7: re-pinning a removed root needs a statement newer than the removal
   // (a same-second removal wins). A moved-away root is treated alike.
+  // OQ: Same-second ties across different d.
   const dep = s.departedRoots.find((d) => d.root === R2)
   if (dep && st.issuedAt <= dep.issuedAt) return drop('not_newer_than_departure')
   const order = orderAgainst(storedFor(s, st.d), st)
@@ -623,6 +624,7 @@ function processCancel(s: GuardianState, st: Statement) {
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
   if (pend && pend.signer !== st.signer) return drop('cancel_signer_mismatch')
+  // At or below: a same-second cancel wins. OQ: Same-second ties across different d.
   if (pend && pend.issuedAt <= st.issuedAt) {
     dropPending(s, (p) => p.d === target)
     putStatement(s, st)
