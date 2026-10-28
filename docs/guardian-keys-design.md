@@ -1,6 +1,6 @@
 # Guardian keys: a family root and working keys
 
-Status: **agreed 2026-10-28**, not yet built. Once agreed, the wire
+Status: **agreed 2026-10-28**, not yet built. Where this note and `spec/contract.md` (*Guardian roots and working keys*) differ, the contract wins: it carries the fixes from its independent review. Once agreed, the wire
 parts move into `spec/contract.md` and this note is cut down to the reasoning.
 
 ## Why
@@ -202,7 +202,10 @@ Rules, taken from Kindependence where it already solved them:
    - So Kintrinsic treats R as whichever identity the parent connects, and
      never assumes it is the one Kindependence or Kinterest uses.
 3. **Reusing Kindependence's kind-30078 statement** or new Kintrinsic kinds.
-   **Decided 2026-10-28: reuse.**
+   Decided 2026-10-28: reuse, then **changed after the contract review** to a
+   dedicated kind (31120) with the same `d`/`p` layout. Kind 30078 is generic
+   app data that many apps may sign with a parent's main identity, so any of
+   them could have approved an attacker's key. The contract has the details.
 4. Does the **child's identity** (a dependant key shared across Kindred apps)
    come into scope now, or later? **Later.** This design leaves the ward's own
    identity as it is.
