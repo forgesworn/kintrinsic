@@ -52,8 +52,8 @@ describe("USB debugging control", () => {
   });
 
   it("shows 'On until you turn it off' and 'On until <time>', and Off once expired", () => {
-    // An older ward (reports a version, no debuggingOpen): the label comes from what was sent.
-    store.deviceStatus = { [PK]: { appVersionCode: 47 } };
+    // The ward confirms it is open (debuggingOpen), so the label comes from what was sent.
+    store.deviceStatus = { [PK]: { appVersionCode: 47, debuggingOpen: true } };
     mount({ ...phone, debugging: { allow: true, issuedAt: NOW } });
     expect(container.textContent).toContain("On until you turn it off");
     act(() => root.unmount());
@@ -61,6 +61,7 @@ describe("USB debugging control", () => {
     mount({ ...phone, debugging: { allow: true, until, issuedAt: NOW } });
     expect(container.textContent).toMatch(/On until \d\d:\d\d/);
     act(() => root.unmount());
+    store.deviceStatus = { [PK]: { appVersionCode: 47, debuggingOpen: false } };
     mount({ ...phone, debugging: { allow: true, until: NOW - 1, issuedAt: NOW - 3600 } });
     expect(container.textContent).not.toContain("On until");
     expect(buttons().map((b) => b.textContent)).toContain("Turn on");
@@ -160,10 +161,11 @@ describe("USB debugging control", () => {
       expect(container.textContent).not.toContain("On until");
     });
 
-    it("an older ward (version but no debuggingOpen) keeps the sent-record label", () => {
+    it("a ward that reports a version but no debuggingOpen is still unconfirmed: waiting, never On", () => {
       reports(undefined);
       mount({ ...phone, debugging: sentOn });
-      expect(container.textContent).toMatch(/On until \d\d:\d\d/);
+      expect(container.textContent).toContain("Turned on — waiting for the device");
+      expect(container.textContent).not.toContain("On until");
     });
   });
 });

@@ -961,9 +961,12 @@ Replace-the-state, per-(subject, kind) monotonic `issuedAt` on each device.
   of one tick.
 - The step runs on every tick of a paired Device Owner ward, whether or not
   any other clause has configured it and in every enforcement mode. A ward
-  that cannot read its pairing or its native library blocks. A ward that
-  cannot read its clause store this tick leaves the restriction as it is,
-  because blocking on a transient read error would turn adb off for good.
+  that cannot read its pairing or its native library blocks. A stored clause
+  that will not parse is malformed and blocks. A ward that cannot read its
+  clause store this tick leaves the restriction as it is, because blocking on
+  a transient read error would turn adb off for good. That hold is bounded:
+  it blocks instead when the last answer it read was blocked, or allowed
+  with an `until` that has since passed, and after 3 holds in a row.
 - A debuggable (debug) build of the ward app is always allowed.
 - STATUS carries `debuggingOpen`, read back from the platform, so the
   guardian sees what the device actually did rather than what was sent.
@@ -1609,7 +1612,7 @@ interface StatusPayload {
   clockSteppedBackFrom?: number;   // present only on the FIRST status after this device's clock stepped below its own previous ts; equals that previous ts
   seq?: number;                    // per-device sequence, strictly increasing across restarts (incl. a wipe) — the ORDERING signal once present; see below
   appLockArmed?: boolean;          // Linux: the app lock (fapolicyd) is armed and enforcing right now; a Linux warden that has it always sends true/false
-  debuggingOpen?: boolean;         // Android: adb is allowed right now (DISALLOW_DEBUGGING_FEATURES is not set); a ward that implements `debugging` always sends true/false
+  debuggingOpen?: boolean;         // Android: adb is allowed right now (DISALLOW_DEBUGGING_FEATURES is not set); a ward that implements `debugging` sends true/false, or leaves it out when it cannot read the platform
 }
 ```
 

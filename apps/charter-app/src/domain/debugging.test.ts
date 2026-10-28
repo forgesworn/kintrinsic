@@ -68,15 +68,18 @@ describe("debuggingReading", () => {
     });
   });
 
-  describe("an older ward that reports a version but no debuggingOpen: the sent record, as before", () => {
-    it("labels from what was sent", () => {
-      expect(debuggingReading(on, rep(undefined), now)).toEqual({ label: "On until 18:00", offerOff: true });
-      expect(debuggingReading(undefined, rep(undefined), now)).toEqual({ label: "Off", offerOff: false });
-      expect(debuggingReading(on, rep(undefined), at(19)).label).toBe("Off");
+  describe("a ward that reports a version but no debuggingOpen: unconfirmed, never claimed as fact", () => {
+    it("an on that was sent is waiting", () => {
+      expect(debuggingReading(on, rep(undefined), now)).toEqual({ label: "Turned on — waiting for the device", offerOff: true });
+      expect(debuggingReading({ ...on, held: true }, rep(undefined), now).label).toBe("Turned on — waiting for the home network");
     });
-    it("says a held send is waiting for the home network", () => {
-      expect(debuggingReading({ ...on, held: true }, rep(undefined), now).note).toBe("Waiting for the home network.");
-      expect(debuggingReading(on, rep(undefined), now).note).toBeUndefined();
+    it("an off that was sent (or an on that has run out) reads as turning off, waiting", () => {
+      expect(debuggingReading(off, rep(undefined), now)).toEqual({ label: "Turning off — waiting for the device", offerOff: false });
+      expect(debuggingReading({ ...off, held: true }, rep(undefined), now).label).toBe("Turning off — waiting for the home network");
+      expect(debuggingReading(on, rep(undefined), at(19)).label).toBe("Turning off — waiting for the device");
+    });
+    it("nothing sent reads Off", () => {
+      expect(debuggingReading(undefined, rep(undefined), now)).toEqual({ label: "Off", offerOff: false });
     });
   });
 

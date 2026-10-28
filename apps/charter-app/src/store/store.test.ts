@@ -256,6 +256,17 @@ describe("reducer — SET_DEVICE_DEBUGGING (last-sent USB debugging, per device)
     expect(kept.children[0].devices[0].debugging).toEqual(on);
   });
 
+  it("re-pairing with a different key drops the record; the same key keeps it", () => {
+    const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: on });
+    const oldKey = first.children[0].devices[0].devicePubkey;
+    const same = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", devicePubkey: oldKey });
+    expect(same.children[0].devices[0].debugging).toEqual(on);
+    const rekeyed = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", devicePubkey: "e".repeat(64) });
+    expect(rekeyed.children[0].devices[0].devicePubkey).toBe("e".repeat(64));
+    expect(rekeyed.children[0].devices[0].debugging).toBeUndefined();
+    expect(rekeyed.children[0].devices[1].debugging).toBeUndefined();
+  });
+
   it("keeps the held flag across reads, and the next non-held send clears it", () => {
     const held = { allow: true, issuedAt: 1000, held: true };
     const first = reducer(state(), { type: "SET_DEVICE_DEBUGGING", childId: "c", deviceId: "a", debugging: held });

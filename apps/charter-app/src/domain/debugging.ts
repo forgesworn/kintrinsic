@@ -63,10 +63,12 @@ export interface DebuggingReading {
  * waiting for the device"), and a send held for the home network says that
  * instead, because the device cannot have got it.
  *
- * A device that has never reported `debuggingOpen` is either an older ward
- * (it reports a Kintrinsic version but no field: fall back to the sent record,
- * as before) or one we know nothing about yet (no version reported: it may not
- * implement the clause at all, so an "on" we sent is never claimed as fact).
+ * A device that has never reported `debuggingOpen` is unconfirmed, whether or
+ * not it reports a version: a ward below the first build that knows the clause
+ * never gets here (`debuggingSupport` routes it to `tooOld`), so one that
+ * reports a version but no field is simply a ward on a supporting build that
+ * has not reported yet. Either way the sent record is an intention, never a
+ * fact, so an "on" we sent reads as waiting, and a sent "off" as turning off.
  */
 export function debuggingReading(
   sent: DeviceDebugging | undefined,
@@ -90,13 +92,15 @@ export function debuggingReading(
     return { label: "Off", offerOff: false };
   }
 
-  // Never reported debuggingOpen.
-  const label = debuggingLabel(sent, nowUnix);
-  const note = held ? "Waiting for the home network." : undefined;
-  if (intended.state === "on" && status?.appVersionCode == null) {
-    return { label: `Turned on — waiting for ${waitingFor}`, offerOff: true };
+  // Never reported debuggingOpen: nothing here is confirmed by the device.
+  if (intended.state === "on") return { label: `Turned on — waiting for ${waitingFor}`, offerOff: true };
+  // A ward that reports a version has been heard from, so a sent off (or an on
+  // that has run out) is awaiting its confirmation. One never heard from may not
+  // implement the clause at all: its default-blocked posture reads Off.
+  if (sent && status?.appVersionCode != null) {
+    return { label: `Turning off — waiting for ${waitingFor}`, offerOff: false };
   }
-  return { label, offerOff: intended.state === "on", ...(note ? { note } : {}) };
+  return { label: debuggingLabel(sent, nowUnix), offerOff: false };
 }
 
 /**

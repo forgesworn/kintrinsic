@@ -29,7 +29,7 @@ import {
   endOfDayUnix,
   DEFAULT_STANDDOWN_GRACE_SECS,
 } from "../wire/grant";
-import type { DecisionContext, SignOutcome, Signer } from "./Signer";
+import type { DecisionContext, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
 import { localRouteAvailable } from "../carrier/localLink";
@@ -605,7 +605,7 @@ export class RealSigner implements Signer {
     childId: string,
     devicePubkey: string,
     grant: { allow: boolean; until?: number },
-  ): Promise<SignOutcome> {
+  ): Promise<SignOutcomeAt> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
@@ -634,7 +634,13 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
-    return this.settle(held);
+    try {
+      return { ...this.settle(held), issuedAt };
+    } catch (err) {
+      // A held send throws; hand the caller the value that was really signed.
+      if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;
+      throw err;
+    }
   }
 
   /**

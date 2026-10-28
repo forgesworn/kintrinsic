@@ -85,6 +85,15 @@ describe("RealSigner.signDebuggingClause", () => {
     expect(u.payload.body).toEqual({ v: 1, issuedAt: u.payload.issuedAt, allow: true, until: 1_700_003_600 });
   });
 
+  it("returns the issuedAt it signed with, in unix seconds", async () => {
+    const { signer, published } = setup();
+    await signer.connect("local");
+    const out = await signer.signDebuggingClause("c", DPK2, { allow: true });
+    const [u] = readFor(published, DEV2);
+    expect(out.issuedAt).toBe(u.payload.issuedAt);
+    expect(out.issuedAt).toBe(1_700_000_000);
+  });
+
   it("drops `until` when turning debugging off", async () => {
     const { signer, published } = setup();
     await signer.connect("local");

@@ -134,6 +134,13 @@ export class QueuedForHomeNetworkError extends Error {
   readonly failed: FailedDevice[];
   /** Ids of the batch's wraps the carrier took, so their ACKs can be shown. */
   readonly wraps: string[];
+  /**
+   * The `issuedAt` (unix seconds) a single-clause send signed with, when the
+   * signer sets it (`signDebuggingClause`): a held send throws instead of
+   * returning, so the value rides on the error to let the caller record what
+   * was really signed.
+   */
+  issuedAt?: number;
   constructor(
     devices: string[],
     reached: string[] = [],

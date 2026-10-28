@@ -124,12 +124,12 @@ export class MockSigner implements Signer {
     childId: string,
     _devicePubkey: string,
     grant: { allow: boolean; until?: number },
-  ): Promise<{ ok: true }> {
+  ): Promise<{ ok: true; issuedAt: number }> {
     await this.authorize(
       "clause",
       grant.allow ? `Turn on USB debugging for ${childId}` : `Turn off USB debugging for ${childId}`,
     );
-    return { ok: true };
+    return { ok: true, issuedAt: Math.floor(Date.now() / 1000) };
   }
 
   async sendPairOffer(): Promise<{ ok: true }> {

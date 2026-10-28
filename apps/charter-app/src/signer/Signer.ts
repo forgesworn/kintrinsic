@@ -131,6 +131,11 @@ export interface SignOutcome {
   wraps?: string[];
 }
 
+/** A `SignOutcome` that also reports the `issuedAt` (unix seconds) the clause was signed with. */
+export interface SignOutcomeAt extends SignOutcome {
+  issuedAt: number;
+}
+
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
   signRelayConfig?(machine: string, relays: string[], label: string): Promise<string>;
@@ -195,13 +200,16 @@ export interface Signer {
    * Sign + publish the `debugging` clause (USB / wireless debugging) to ONE
    * device: gift-wrapped only to `devicePubkey`, still carrying the child's
    * `subject`. `until` (unix seconds) is dropped when `allow` is false. Throws
-   * when `devicePubkey` is not one of the child's paired devices.
+   * when `devicePubkey` is not one of the child's paired devices. Resolves with
+   * the `issuedAt` (unix seconds) the clause carries; a send held for the home
+   * network throws `QueuedForHomeNetworkError` with that same value on its
+   * `issuedAt`.
    */
   signDebuggingClause(
     childId: string,
     devicePubkey: string,
     grant: { allow: boolean; until?: number },
-  ): Promise<SignOutcome>;
+  ): Promise<SignOutcomeAt>;
 
   /**
    * Sign + publish a parent-gated RELEASE to a device's machine pubkey — the
