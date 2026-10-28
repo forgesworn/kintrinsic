@@ -120,7 +120,7 @@ export default function Onboarding() {
           done={connected}
           n={2}
           title="Connect their computer"
-          detail="Once Kintrinsic is installed on their computer, it shows a short code — enter it here to link it (preview)."
+          detail="Once Kintrinsic is installed on their computer, its “Connect a phone” screen shows a QR code — scan it here to link it. If the camera won’t scan, you can type the code instead (preview)."
           action={{ label: "Connect a computer", onClick: goToFamilyChildren }}
         />
       </ol>

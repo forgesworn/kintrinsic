@@ -72,9 +72,10 @@ until they are recaptured.
 
 - Deploy: push to `main` → GitHub Actions rsyncs the repo to `/opt/charter-you/`
   on the Hetzner box (needs the `HETZNER_SSH_KEY` repo secret).
-- Serving (one-time infra): DNS record for `kintrinsic.app` + a vhost pointing
-  at `/opt/charter-you/`; a redirect from the old `charter.signet.you` keeps
-  existing links alive.
+- Serving (one-time infra): the canonical address is `kintrinsic.app`, a vhost
+  pointing at `/opt/charter-you/`. The old `charter.signet.you` address is kept
+  alive so existing links still work; pages name `kintrinsic.app` as canonical.
+  The guardian web app is a separate site, `charter.mysignet.app`.
 - The deploy rsync uses `--delete-excluded` rather than plain `--delete`, so
   that adding an `--exclude` for any private/internal-only file actually
   removes it from the server rather than leaving a stale copy in place.

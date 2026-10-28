@@ -59,7 +59,7 @@ export const APP_CATALOG: readonly CatalogApp[] = [
     publisher: "ForgeSworn",
     signerCertSha256: "4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc",
     source: "staged",
-    homepage: "https://charter.signet.you",
+    homepage: "https://kintrinsic.app",
   },
 ];
 

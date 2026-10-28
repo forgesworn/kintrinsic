@@ -106,9 +106,16 @@ and each child is judged on their own limits.
 This adds remote control on top of the on-box limits. On the **"Connect a
 phone"** tab (in the Kintrinsic app), press **Show the pairing code** — this
 asks for your admin password, since only a parent may invite a guardian —
-then scan the QR (or type the code) with **Kintrinsic on your phone**
-(**Add your child → Set up a computer**). The page flips to "Connected" on
-its own once the phone finishes.
+then scan the QR with **Kintrinsic on your phone**
+(**Add your child → Set up a computer**; if the camera won't scan, **No camera?
+Type the code instead** takes the code by hand). The page flips to "Connected"
+on its own once the phone finishes.
+
+With no internet on either device, use the fallback instead: in Kintrinsic on
+the phone, copy the pairing link from the **Parent approval** card (**Copy
+pairing link**), then on the computer open **No internet? Enter a code by
+hand** on the same **Connect a phone** tab and paste it there (the child ID box
+can stay blank).
 
 From then on you can set limits, see time used, and approve "more time" from
 Kintrinsic on your phone, from anywhere. The phone takes charge: once you've
