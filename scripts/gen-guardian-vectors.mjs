@@ -12,6 +12,7 @@
 //   statements.json  individually signed statements, valid and invalid
 //   scenarios.json   ordered ward steps with expected outcome and state
 //   giftwrap.json    full NIP-59 wraps exercising the seal exceptions
+//   roster.json      guardian-side family roster merge
 //   pin.json         guardian PIN scrypt vectors and the backoff table
 // The schema of each file is fixed in that directory's README.md.
 //
@@ -155,6 +156,8 @@ const offerEv = (sealer, token, ts, approval) =>
   addValid("unknown_content_fields_ignored", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: T0, colour: "red", nested: { a: 1 } })));
   addValid("created_at_ignored", st.raw(R1, [dW, pW, MARKER], good, G.CHARTER_GUARDIAN_STATEMENT, 5));
   addValid("tag_order_free", st.raw(R1, [MARKER, pW, dW], good));
+  addValid("label_surrogate_pair_and_escapes", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"label":"\\ud83d\\ude00 \\"x\\""}`));
+  addValid("integer_beyond_2_53_in_unknown_field", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"big":123456789012345678901}`));
 
   const base = st.approval(R1, W1, o);
   addInvalid("not_an_object", "not an event", "bad_event");
@@ -182,7 +185,19 @@ const offerEv = (sealer, token, ts, approval) =>
   addInvalid("v_missing", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ issuedAt: T0 })), "bad_version");
   addInvalid("v_string", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: "1", issuedAt: T0 })), "bad_version");
   addInvalid("issued_at_missing", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1 })), "bad_issued_at");
-  addInvalid("issued_at_fractional", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: T0 + 0.5 })), "bad_issued_at");
+  addInvalid("issued_at_fractional", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: T0 + 0.5 })), "content_not_json");
+  // Strict JSON: duplicate names, non-integer number tokens, -0 and lone
+  // surrogates are refused anywhere in the content.
+  addInvalid("duplicate_issued_at", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"issuedAt":${T0 + 99}}`), "content_not_json");
+  addInvalid("duplicate_in_nested_unknown", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"x":{"a":1,"a":2}}`), "content_not_json");
+  addInvalid("v_1_0", st.raw(R1, [dW, pW, MARKER], `{"v":1.0,"issuedAt":${T0}}`), "content_not_json");
+  addInvalid("issued_at_exponent", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":1.7e9}`), "content_not_json");
+  addInvalid("issued_at_exponent_integer", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":17e8}`), "content_not_json");
+  addInvalid("issued_at_negative_zero", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":-0}`), "content_not_json");
+  addInvalid("float_in_unknown_field", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"x":0.5}`), "content_not_json");
+  addInvalid("label_lone_surrogate", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"label":"\\ud800"}`), "content_not_json");
+  addInvalid("label_lone_low_surrogate", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},"label":"a\\udc00"}`), "content_not_json");
+  addInvalid("trailing_comma", st.raw(R1, [dW, pW, MARKER], `{"v":1,"issuedAt":${T0},}`), "content_not_json");
   addInvalid("issued_at_negative", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: -1 })), "bad_issued_at");
   addInvalid("issued_at_string", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: String(T0) })), "bad_issued_at");
   addInvalid("label_65_bytes", st.raw(R1, [dW, pW, MARKER], JSON.stringify({ v: 1, issuedAt: T0, label: "a".repeat(65) })), "bad_label");
@@ -261,9 +276,11 @@ function scenario(name, rules, description, build) {
       const input = { type: "signed", now, author: author.pk, sealAuthor: seal.pk, ts };
       return run("signed", input, () => G.acceptSignedEvent(state, { author: author.pk, sealAuthor: seal.pk, ts }, now), want);
     },
-    relays(author, ts, relays, now, want) {
-      const input = { type: "relays", now, author: author.pk, sealAuthor: author.pk, ts, relays };
-      return run("relays", input, () => G.applyRelays(state, { author: author.pk, sealAuthor: author.pk, ts, relays }, now), want);
+    relays(author, ts, relays, now, want, { channel = "wrapped", seal = author, guardianPin } = {}) {
+      const ev = { author: author.pk, channel, sealAuthor: channel === "wrapped" ? seal.pk : null, ts, relays };
+      if (guardianPin !== undefined) ev.guardianPin = guardianPin;
+      const input = { type: "relays", now, ...ev };
+      return run("relays", input, () => G.applyRelays(state, ev, now), want);
     },
     statusSent(now) {
       return run("status_sent", { type: "status_sent", now }, () => G.markStatusSent(state, now), ["accepted", "status_sent"]);
@@ -368,7 +385,9 @@ scenario("rule2_ordering", ["2"], "No pairing floor for statements; newest issue
   c.inbound(W1b, a1, T0 + 10, A("approval_applied"));
   c.inbound(W1b, a1, T0 + 11, D("duplicate"));
   c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 - 30 * DAY - 1, label: "older" }), T0 + 12, D("stale"));
-  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 - 30 * DAY, label: "same second" }), T0 + 13, D("tie_not_newer"));
+  // Same second, different event: the lower event id wins (every ward converges).
+  const tie = st.approval(R1, W1b, { issuedAt: T0 - 30 * DAY, label: "same second" });
+  c.inbound(W1b, tie, T0 + 13, tie.id < a1.id ? A("approval_updated") : D("tie_not_newer"));
   c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 1, label: "two" }), T0 + 14, A("approval_updated"));
 });
 
@@ -509,7 +528,7 @@ scenario("rule7_self_removal", ["7"], "Signed by R2 itself, a removal takes effe
   c.statusSent(T0 + 90);
 });
 
-scenario("rule7_removal_by_other_root", ["7", "9"], "Signed by another root: presence by an R1-bound install, then the later of confirmation and issuedAt + 72 h; R2 and its keys depart and get one last STATUS.", (c) => {
+scenario("rule7_removal_by_other_root", ["7", "9"], "Signed by another root: presence by an R1-bound install, then the later of confirmation and max(issuedAt, receipt) + 72 h; R2 and its keys depart and get one last STATUS.", (c) => {
   twoRoots(c);
   const rm = st.removal(R1, R2, { issuedAt: T0 + 100 });
   c.inbound(W1, rm, T0 + 110, A("removal_pending"));
@@ -517,18 +536,19 @@ scenario("rule7_removal_by_other_root", ["7", "9"], "Signed by another root: pre
   c.confirm(W2, confirmEv(W2, rm.id, tokenHex("rm"), T0 + 130), T0 + 130, D("confirmer_not_bound"));
   c.confirm(R1, confirmEv(R1, rm.id, tokenHex("rm"), T0 + 130), T0 + 130, D("confirmer_not_bound"));
   c.confirm(W1, confirmEv(W1, rm.id, tokenHex("rm"), T0 + 130), T0 + 130, A("removal_confirmed"));
-  c.tick(T0 + 100 + H72 - 1);
-  c.clause(W2, T0 + 200, T0 + 100 + H72 - 1, A("clause_accepted"));
-  c.tick(T0 + 100 + H72);
-  c.clause(W1, T0 + 201, T0 + 100 + H72 + 1, A("clause_accepted"));
-  c.statusSent(T0 + 100 + H72 + 2);
+  c.tick(T0 + 110 + H72 - 1);
+  c.clause(W2, T0 + 200, T0 + 110 + H72 - 1, A("clause_accepted"));
+  c.tick(T0 + 110 + H72);
+  c.clause(W1, T0 + 199, T0 + 110 + H72 + 1, D("not_newer"));
+  c.clause(W1, T0 + 201, T0 + 110 + H72 + 1, A("clause_accepted"));
+  c.statusSent(T0 + 110 + H72 + 2);
 });
 
 scenario("rule7_removal_confirmed_after_notice", ["7"], "Confirmed after the 72 hours, a removal applies at once.", (c) => {
   twoRoots(c);
   const rm = st.removal(R1, R2, { issuedAt: T0 + 100 });
   c.inbound(W1, rm, T0 + 110, A("removal_pending"));
-  const late = T0 + 100 + H72 + 5;
+  const late = T0 + 110 + H72 + 5;
   c.token(tokenHex("late"), null, late);
   c.confirm(W1, confirmEv(W1, rm.id, tokenHex("late"), late), late, A("removal_applied"));
 });
@@ -539,17 +559,18 @@ scenario("rule7_objection", ["7", "seal exceptions"], "The root being removed ob
   c.inbound(W1, rm, T0 + 110, A("removal_pending"));
   c.inbound(W2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("seal_mismatch"));
   c.inbound(R1, st.objection(R1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
-  c.inbound(R2, st.objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
+  c.inbound(R2, st.objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120, A("objection_held"));
   c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, A("objection_applied"));
   c.tick(T0 + 100 + H72 + 1);
 });
 
-scenario("rule7_objection_first", ["7"], "An objection that arrives before its removal is held and drops it on arrival; a newer removal is unaffected.", (c) => {
+scenario("rule7_objection_first", ["7"], "An objection that arrives before its removal is held and drops it on arrival; for 7 days after the objection any removal by that remover is refused.", (c) => {
   twoRoots(c);
   c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 110, A("objection_held"));
   c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 120, D("objected"));
   c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 101 }), T0 + 120, D("objected"));
-  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 102 }), T0 + 120, A("removal_pending"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 102 }), T0 + 120, D("objected"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 110 + 7 * DAY }), T0 + 110 + 7 * DAY, A("removal_pending"));
 });
 
 scenario("rule7_pending_dropped_on_removal", ["7"], "Once a removal applies, every pending statement signed by R2 is dropped.", (c) => {
@@ -559,7 +580,7 @@ scenario("rule7_pending_dropped_on_removal", ["7"], "Once a removal applies, eve
   c.inbound(W1, rm, T0 + 110, A("removal_pending"));
   c.token(tokenHex("pd"), dU(R2), T0 + 120);
   c.confirm(W1, confirmEv(W1, rm.id, tokenHex("pd"), T0 + 130), T0 + 130, A("removal_confirmed"));
-  c.tick(T0 + 100 + H72);
+  c.tick(T0 + 110 + H72);
 });
 
 scenario("rule7_repin", ["7", "2"], "Re-pinning a removed root needs a co-guardian newer than the removal; a same-second one loses. Its old working keys stay departed.", (c) => {
@@ -618,7 +639,8 @@ scenario("pending_expiry", ["pending"], "expiresAt is clamped to 7 days after is
   c.tick(T0 + 7 * DAY);
   c.inbound(W1, st.coguardian(R1, R5, { issuedAt: T0 - 7 * DAY }), T0 + 7 * DAY, D("expired"));
   c.inbound(W1, long, T0 + 7 * DAY, D("duplicate"));
-  c.inbound(W1, st.coguardian(R1, R2, { issuedAt: T0 }), T0 + 7 * DAY, D("tie_not_newer"));
+  const same = st.coguardian(R1, R2, { issuedAt: T0 });
+  c.inbound(W1, same, T0 + 7 * DAY, D(same.id < long.id ? "expired" : "tie_not_newer"));
 });
 
 scenario("removal_expires_before_effect", ["7", "pending"], "A removal whose expiresAt comes before issuedAt + 72 h expires instead of taking effect.", (c) => {
@@ -652,13 +674,181 @@ scenario("rule9_recipients", ["9"], "A root with no W in the set receives direct
   c.statusSent(T0 + 15);
 });
 
-scenario("rule11_relays", ["11"], "A RELAYS change from any signer applies; a multi-root ward also sends STATUS on the previous relays for 7 days.", (c) => {
+scenario("rule11_relays", ["11"], "A RELAYS change from any signer applies; a multi-root ward also sends STATUS on every list replaced within the last 7 days.", (c) => {
   twoRoots(c);
   c.relays(W2, T0 + 100, ["wss://relay.three.example", "wss://relay.four.example"], T0 + 100, A("relays_applied"));
   c.relays(W1, T0 + 100, ["wss://relay.five.example", "wss://relay.six.example"], T0 + 101, D("not_newer"));
   c.relays(X, T0 + 200, ["wss://relay.five.example", "wss://relay.six.example"], T0 + 201, D("not_signer"));
+  c.relays(W1, T0 + 300, ["wss://relay.five.example", "wss://relay.one.example"], T0 + 300, A("relays_applied"));
   c.tick(T0 + 100 + 7 * DAY - 1);
   c.tick(T0 + 100 + 7 * DAY);
+  c.tick(T0 + 300 + 7 * DAY);
+});
+
+scenario("relays_existing_checks", ["11", "offline relay recovery"], "The existing RELAYS checks apply first: no future created_at, at most 600 s old, not before pairing, newer than the last applied.", (c) => {
+  pairW1(c);
+  c.relays(W1, T0 + 101, RELAYS, T0 + 100, D("future"));
+  c.relays(W1, T0 + 100, RELAYS, T0 + 701, D("stale"));
+  c.relays(W1, T0 - 1, RELAYS, T0 + 10, D("pairing_floor"));
+  c.relays(W1, T0 + 100, RELAYS, T0 + 100, D("seal_mismatch"), { seal: X });
+  c.relays(W1, T0 + 100, ["wss://relay.three.example", "wss://relay.four.example"], T0 + 100, A("relays_applied"), { channel: "pasted" });
+  c.relays(R1, T0 + 100, RELAYS, T0 + 110, D("not_newer"));
+});
+
+scenario("relays_guardian_pin", ["presence confirmation", "11"], "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole.", (c) => {
+  pairW1(c);
+  const pin = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.0").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash")) };
+  c.relays(W1, T0 + 100, RELAYS, T0 + 100, D("pin_not_wrapped"), { channel: "pasted", guardianPin: pin });
+  c.relays(W1, T0 + 100, RELAYS, T0 + 100, D("bad_pin_record"), { guardianPin: { ...pin, v: 2 } });
+  c.relays(W1, T0 + 100, RELAYS, T0 + 100, A("relays_applied"), { guardianPin: pin });
+});
+
+
+scenario("coguardian_and_move_same_root", ["6", "8", "7"], "A co-guardian and a move naming the same R2: once one pins R2 the other is dropped, so R2 is never pinned twice and a later self-removal can't empty the ward.", (c) => {
+  pairW1(c);
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 10 });
+  const mv = st.move(R1, R2, { issuedAt: T0 + 11 });
+  c.inbound(W1, cg, T0 + 20, A("coguardian_pending"));
+  c.inbound(W1, mv, T0 + 20, A("move_pending"));
+  c.token(tokenHex("dup1"), null, T0 + 30);
+  c.token(tokenHex("dup2"), null, T0 + 30);
+  c.confirm(W2, confirmEv(W2, cg.id, tokenHex("dup1"), T0 + 40, st.approval(R2, W2, { issuedAt: T0 })), T0 + 40, A("coguardian_applied"));
+  c.confirm(W3, confirmEv(W3, mv.id, tokenHex("dup2"), T0 + 41, st.approval(R2, W3, { issuedAt: T0 })), T0 + 41, D("not_pending"));
+  c.inbound(W2, st.removal(R2, R2, { issuedAt: T0 + 50 }), T0 + 60, A("removal_applied"));
+  c.inbound(W1, st.removal(R1, R1, { issuedAt: T0 + 61 }), T0 + 70, D("last_root"));
+});
+
+scenario("confirm_rechecks_root_role", ["presence confirmation", "1"], "A confirmation re-checks R2: if R2 has become a working key meanwhile, the co-guardian can't pin it.", (c) => {
+  pairW1(c);
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 10 });
+  c.inbound(W1, cg, T0 + 20, A("coguardian_pending"));
+  c.inbound(R2, st.approval(R1, R2, { issuedAt: T0 + 11 }), T0 + 21, A("approval_applied"));
+  c.token(tokenHex("role"), null, T0 + 30);
+  c.confirm(W2, confirmEv(W2, cg.id, tokenHex("role"), T0 + 40, st.approval(R2, W2, { issuedAt: T0 })), T0 + 40, D("key_role_conflict"));
+});
+
+scenario("removal_notice_from_receipt", ["7"], "The 72-hour notice runs from the later of issuedAt and the ward's receipt, so a backdated removal still waits 72 hours.", (c) => {
+  twoRoots(c);
+  const now = T0 + 10 * DAY;
+  const rm = st.removal(R1, R2, { issuedAt: now - H72 - 60 });
+  c.inbound(W1, rm, now, A("removal_pending"));
+  c.token(tokenHex("back"), dU(R2), now + 1);
+  c.confirm(W1, confirmEv(W1, rm.id, tokenHex("back"), now + 2), now + 2, A("removal_confirmed"));
+  c.tick(now + H72 - 1);
+  c.tick(now + H72);
+});
+
+scenario("objection_below_pending_removal", ["7"], "An objection drops the pending removal by its p whatever the two issuedAt (here the objection's is older).", (c) => {
+  twoRoots(c);
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 300 }), T0 + 100, A("removal_pending"));
+  c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 160 }), T0 + 110, A("objection_applied"));
+  c.tick(T0 + 110 + H72 + 1);
+});
+
+scenario("removal_reissued_after_objection", ["7"], "After an objection, the same remover's new removals of the objector are refused for 7 days from the objection's receipt.", (c) => {
+  twoRoots(c);
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 100, A("removal_pending"));
+  c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 110, A("objection_applied"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 200 }), T0 + 200, D("objected"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 110 + 7 * DAY - 1 }), T0 + 110 + 7 * DAY - 1, D("objected"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 110 + 7 * DAY }), T0 + 110 + 7 * DAY, A("removal_pending"));
+});
+
+scenario("clause_replay_after_departure", ["4"], "A relay can't restore an older rule from a current signer: the departed signer's clause keeps a floor of min(issuedAt, departure time).", (c) => {
+  twoRoots(c);
+  c.clause(W1, T0 + 100, T0 + 100, A("clause_accepted"), { kind: "apps" });
+  c.clause(W2, T0 + 200, T0 + 200, A("clause_accepted"), { kind: "apps" });
+  c.inbound(R2, st.withdrawal(R2, W2, { issuedAt: T0 + 210 }), T0 + 210, A("withdrawal_applied"));
+  c.clause(W1, T0 + 100, T0 + 220, D("not_newer"), { kind: "apps" });
+  c.clause(W1, T0 + 200, T0 + 220, D("not_newer"), { kind: "apps" });
+  c.clause(W1, T0 + 201, T0 + 220, A("clause_accepted"), { kind: "apps" });
+  c.clause(W2, T0 + 500, T0 + 230, D("not_signer"), { kind: "schedule" });
+  c.clause(W1, T0 + 500, T0 + 230, A("clause_accepted"), { kind: "schedule" });
+  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 240 }), T0 + 240, A("approval_applied"));
+  c.clause(W1b, T0 + 520, T0 + 240, A("clause_accepted"), { kind: "schedule" });
+  c.inbound(W1, st.withdrawal(R1, W1b, { issuedAt: T0 + 250 }), T0 + 250, A("withdrawal_applied"));
+  c.clause(W1, T0 + 251, T0 + 260, A("clause_accepted"), { kind: "schedule" });
+});
+
+scenario("departed_root_as_working_key", ["4", "7"], "A removed root can't come back as another root's working key.", (c) => {
+  twoRoots(c);
+  c.inbound(W2, st.removal(R2, R2, { issuedAt: T0 + 50 }), T0 + 60, A("removal_applied"));
+  c.inbound(R2, st.approval(R1, R2, { issuedAt: T0 + 70 }), T0 + 80, D("key_departed"));
+  c.clause(R2, T0 + 81, T0 + 82, D("not_signer"));
+});
+
+scenario("withdrawal_of_move_departed_key", ["3", "8"], "A key that departed with a move can be withdrawn for good by the new root, or by its old root once that is pinned again.", (c) => {
+  pairW1(c);
+  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 }), T0 + 10, A("approval_applied"));
+  c.inbound(W3, st.approval(R1, W3, { issuedAt: T0 }), T0 + 10, A("approval_applied"));
+  const mv = st.move(R1, R3, { issuedAt: T0 + 100 });
+  c.inbound(W1, mv, T0 + 110, A("move_pending"));
+  c.token(tokenHex("mvw"), null, T0 + 120);
+  c.confirm(W1, confirmEv(W1, mv.id, tokenHex("mvw"), T0 + 130, st.approval(R3, W1, { issuedAt: T0 + 105 })), T0 + 130, A("move_applied"));
+  c.inbound(W1, st.withdrawal(R3, W1b, { issuedAt: T0 + 140 }), T0 + 150, A("withdrawal_applied"));
+  c.inbound(W1b, st.approval(R3, W1b, { issuedAt: T0 + 160 }), T0 + 170, D("key_departed"));
+  const cg = st.coguardian(R3, R1, { issuedAt: T0 + 180 });
+  c.inbound(W1, cg, T0 + 190, A("coguardian_pending"));
+  c.token(tokenHex("mvw2"), dG(R1), T0 + 200);
+  c.confirm(W4, confirmEv(W4, cg.id, tokenHex("mvw2"), T0 + 210, st.approval(R1, W4, { issuedAt: T0 + 185 })), T0 + 210, A("coguardian_applied"));
+  c.inbound(W2, st.withdrawal(R2, W3, { issuedAt: T0 + 220 }), T0 + 230, D("seal_mismatch"));
+  c.inbound(W4, st.withdrawal(R1, W3, { issuedAt: T0 + 220 }), T0 + 230, A("withdrawal_applied"));
+});
+
+scenario("timer_tie_mutual_removals", ["7", "timers"], "Two confirmed removals due the same second (R1 removes R2, R2 removes R1): the lower d applies first, and the other, signed by the removed root, is dropped with it.", (c) => {
+  twoRoots(c);
+  const a = st.removal(R1, R2, { issuedAt: T0 + 100 });
+  const b = st.removal(R2, R1, { issuedAt: T0 + 100 });
+  c.inbound(W1, a, T0 + 100, A("removal_pending"));
+  c.inbound(W2, b, T0 + 100, A("removal_pending"));
+  c.token(tokenHex("mut1"), null, T0 + 110);
+  c.token(tokenHex("mut2"), null, T0 + 110);
+  c.confirm(W1, confirmEv(W1, a.id, tokenHex("mut1"), T0 + 120), T0 + 120, A("removal_confirmed"));
+  c.confirm(W2, confirmEv(W2, b.id, tokenHex("mut2"), T0 + 120), T0 + 120, A("removal_confirmed"));
+  c.tick(T0 + 100 + H72);
+});
+
+scenario("token_dropped_with_its_statement", ["presence confirmation", "pending"], "A token bound to a d goes when that pending statement is cancelled; a new pending statement with the same d needs a new token.", (c) => {
+  pairW1(c);
+  c.inbound(W1, st.coguardian(R1, R2, { issuedAt: T0 }), T0 + 10, A("coguardian_pending"));
+  c.token(tokenHex("bound"), dG(R2), T0 + 20);
+  c.inbound(W1, st.cancel(R1, dG(R2), { issuedAt: T0 }), T0 + 30, A("cancel_applied"));
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 1 });
+  c.inbound(W1, cg, T0 + 40, A("coguardian_pending"));
+  c.confirm(W2, confirmEv(W2, cg.id, tokenHex("bound"), T0 + 50, st.approval(R2, W2, { issuedAt: T0 })), T0 + 50, D("token_invalid"));
+  c.token(tokenHex("bound"), dG(R2), T0 + 60);
+  c.confirm(W2, confirmEv(W2, cg.id, tokenHex("bound"), T0 + 70, st.approval(R2, W2, { issuedAt: T0 })), T0 + 70, A("coguardian_applied"));
+});
+
+scenario("removal_sealed_by_removed_roots_key", ["seal exception 2", "7"], "R1's removal of R2 sealed by R2's working key is refused: exception 2 needs a W bound to the signer.", (c) => {
+  twoRoots(c);
+  c.inbound(W2, st.removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 110, D("seal_mismatch"));
+});
+
+scenario("cancel_per_signer", ["pending", "2"], "Cancels are kept per signer: another root's held cancel for the same d does not shadow the signer's own cancel.", (c) => {
+  twoRoots(c);
+  c.inbound(W2, st.cancel(R2, dG(R3), { issuedAt: T0 + 400 }), T0 + 150, A("cancel_held"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 200 }), T0 + 160, A("coguardian_pending"));
+  c.inbound(W1, st.cancel(R1, dG(R3), { issuedAt: T0 + 300 }), T0 + 170, A("cancel_applied"));
+});
+
+scenario("same_second_tie_lowest_id", ["2"], "Two statements with the same d and issuedAt: the lower event id wins whichever arrives first.", (c) => {
+  twoRoots(c);
+  const x = st.removal(R1, R2, { issuedAt: T0 + 100, label: "x" });
+  const y = st.removal(R1, R2, { issuedAt: T0 + 100, label: "y" });
+  const [lo, hi] = x.id < y.id ? [x, y] : [y, x];
+  c.inbound(W1, hi, T0 + 110, A("removal_pending"));
+  c.inbound(W1, lo, T0 + 111, A("removal_pending"));
+  c.inbound(W1, hi, T0 + 112, D("tie_not_newer"));
+});
+
+scenario("confirm_clears_held_withdrawals", ["3", "10"], "Binding W at a confirmation discards other roots' held withdrawals for W, as an ordinary approval does.", (c) => {
+  pairW1(c);
+  c.inbound(R1, st.withdrawal(R1, W2, { issuedAt: T0 }), T0 + 5, A("withdrawal_held"));
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 5 });
+  c.inbound(W1, cg, T0 + 10, A("coguardian_pending"));
+  c.token(tokenHex("clr"), null, T0 + 20);
+  c.confirm(W2, confirmEv(W2, cg.id, tokenHex("clr"), T0 + 30, st.approval(R2, W2, { issuedAt: T0 })), T0 + 30, A("coguardian_applied"));
 });
 
 scenario("giftwrap_setup", ["seal exceptions"], "Setup for giftwrap.json: paired by W1 (R1), with W1b approved.", (c) => {
@@ -721,6 +911,64 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
     keys: keysJson(),
     vectors: entries,
   });
+}
+
+// --- roster.json -------------------------------------------------------------
+{
+  const kid = bytesToHex(seedBytes("guardians.roster.subject.kid"));
+  const kid2 = bytesToHex(seedBytes("guardians.roster.subject.kid2"));
+  const m = (label) => bytesToHex(seedBytes(`guardians.roster.machine.${label}`));
+  const local = {
+    children: [
+      {
+        subject: kid, issuedAt: T0, name: "Rob", colour: "#000000",
+        devices: [
+          { machine: m("laptop"), platform: "linux", name: "laptop", pairedHere: true, statusSeen: false },
+          { machine: m("tablet"), platform: "android", name: "tablet", pairedHere: false, statusSeen: true },
+          { machine: m("old"), platform: "android", name: "old phone", pairedHere: false, statusSeen: false },
+        ],
+      },
+    ],
+  };
+  const now = T0 + 1000;
+  const reported = [{ root: R1.pk, keys: [W1.pk] }, { root: R2.pk, keys: [W2.pk] }];
+  const child = (subject, issuedAt, devices, name = "Robin") => ({ subject, issuedAt, name, colour: "#123456", devices });
+  const dev = (label, platform = "android") => ({ machine: m(label), platform, name: label });
+  const rosterEv = (from, root, children, extra = {}) =>
+    signWith(from.sk, G.familyRosterTemplate({ children, approval: st.approval(root, from, { issuedAt: T0 }), createdAt: now, ...extra }));
+  const vectors = [];
+  const add = (name, description, sealer, inner, rep, want) => {
+    const r = G.mergeRoster(local, { sealAuthor: sealer.pk, inner }, rep, now);
+    const got = r.ok ? "ok" : r.reason;
+    if (got !== want) throw new Error(`roster ${name}: want ${want}, got ${got}`);
+    vectors.push({
+      name, description, inbound: { sealAuthor: sealer.pk, inner }, reported: rep, now,
+      expect: r.ok ? { ok: true, roster: r.roster, updated: r.updated } : { ok: false, reason: r.reason },
+    });
+  };
+  add("newer_replaces_keeps_confirmed", "A newer record replaces name, colour and devices, but never deletes a device paired here or seen in STATUS; new devices arrive unconfirmed; a new child is added.", W2,
+    rosterEv(W2, R2, [child(kid, T0 + 1, [dev("phone"), dev("tablet")]), child(kid2, T0 + 1, [dev("kid2-laptop", "linux")], "Sam")]), reported, "ok");
+  add("same_second_keeps_local", "A record with the same issuedAt does not replace the local one.", W2, rosterEv(W2, R2, [child(kid, T0, [dev("phone")])]), reported, "ok");
+  add("older_ignored", "An older record is ignored.", W2, rosterEv(W2, R2, [child(kid, T0 - 1, [dev("phone")])]), reported, "ok");
+  add("issued_at_at_cap", "issuedAt exactly 300 s ahead is accepted.", W2, rosterEv(W2, R2, [child(kid, now + 300, [])]), reported, "ok");
+  add("future", "A child record more than 300 s ahead refuses the whole roster.", W2, rosterEv(W2, R2, [child(kid, now + 301, [])]), reported, "future");
+  add("root_not_reported", "The approving root is not reported by the family's wards.", W3, rosterEv(W3, R3, [child(kid, T0 + 1, [])]), reported, "root_not_reported");
+  add("key_not_reported", "The sender is no longer listed under its root (withdrawn).", W2, rosterEv(W2, R2, [child(kid, T0 + 1, [])]), [{ root: R1.pk, keys: [W1.pk] }, { root: R2.pk, keys: [] }], "key_not_reported");
+  add("seal_mismatch", "The seal author must be the roster's author.", X, rosterEv(W2, R2, [child(kid, T0 + 1, [])]), reported, "seal_mismatch");
+  add("approval_names_other_key", "The carried approval must name the sender.", W2,
+    signWith(W2.sk, G.familyRosterTemplate({ children: [], approval: st.approval(R1, W1, { issuedAt: T0 }), createdAt: now })), reported, "bad_approval");
+  add("approval_missing", "A roster must carry the sender's approval.", W2,
+    signWith(W2.sk, { kind: G.CHARTER_FAMILY_ROSTER, created_at: now, tags: [MARKER], content: JSON.stringify({ v: 1, children: [] }) }), reported, "bad_approval");
+  const apW2 = st.approval(R2, W2, { issuedAt: T0 });
+  add("duplicate_key", "Content is strict JSON.", W2,
+    signWith(W2.sk, { kind: G.CHARTER_FAMILY_ROSTER, created_at: now, tags: [MARKER], content: `{"v":1,"v":1,"children":[],"approval":${JSON.stringify(apW2)}}` }), reported, "content_not_json");
+  add("bad_version", "v must be 1.", W2,
+    signWith(W2.sk, { kind: G.CHARTER_FAMILY_ROSTER, created_at: now, tags: [MARKER], content: JSON.stringify({ v: 2, children: [], approval: apW2 }) }), reported, "bad_version");
+  add("bad_children", "A device machine must be 64 lowercase hex.", W2,
+    rosterEv(W2, R2, [child(kid, T0 + 1, [{ machine: "ABC", platform: "android", name: "x" }])]), reported, "bad_children");
+  add("wrong_kind", "Kind must be 31119.", W2, signWith(W2.sk, { kind: 31118, created_at: now, tags: [MARKER], content: JSON.stringify({ v: 1, children: [], approval: apW2 }) }), reported, "wrong_kind");
+  add("bad_signature", "id and sig must verify.", W2, { ...rosterEv(W2, R2, [child(kid, T0 + 1, [])]), sig: "00".repeat(64) }, reported, "bad_signature");
+  write("roster.json", { version: 1, keys: keysJson(), local, vectors });
 }
 
 // --- pin.json --------------------------------------------------------------

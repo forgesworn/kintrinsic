@@ -626,6 +626,78 @@
         "label": null,
         "expiresAt": null
       }
+    },
+    {
+      "name": "label_surrogate_pair_and_escapes",
+      "event": {
+        "id": "d922dae6fcf39e1ca49d0e6322625b86d5fa26701811309047c2b08730684c17",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"label\":\"\\ud83d\\ude00 \\\"x\\\"\"}",
+        "sig": "38381d1938e31b29945bf3beddbc07e1d8e5f7cabfe19ce9504106e4e84c01fbb36068280363c82a435b8d8dc17b6e92897cfd26fb2bbf86d12eab74052304ee"
+      },
+      "expected": {
+        "type": "approval",
+        "d": "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "p": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "target": null,
+        "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "issuedAt": 1700000000,
+        "label": "😀 \"x\"",
+        "expiresAt": null
+      }
+    },
+    {
+      "name": "integer_beyond_2_53_in_unknown_field",
+      "event": {
+        "id": "62ee60b1c959ce41ce5f36a59ae3412e829eebf6626a4f8ed58fb13510d7e758",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"big\":123456789012345678901}",
+        "sig": "fc53586452a9397e13f528387486cf82b5c6d92df5403d86c2296ca53d906243f6814f3c31346c1965ec4a908023d50c0588ec4c2233b677a2b0a01281988420"
+      },
+      "expected": {
+        "type": "approval",
+        "d": "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "p": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+        "target": null,
+        "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "issuedAt": 1700000000,
+        "label": null,
+        "expiresAt": null
+      }
     }
   ],
   "invalid": [
@@ -1277,7 +1349,267 @@
         "content": "{\"v\":1,\"issuedAt\":1700000000.5}",
         "sig": "7d900c2003b4b21bf3b8bcad075d95ee728810cee089be09a19552b19d5ce29787972f8d5708a6378f39074d29bf9d57dd5ed17d005eee33f7186aa9e4d51d39"
       },
-      "reason": "bad_issued_at"
+      "reason": "content_not_json"
+    },
+    {
+      "name": "duplicate_issued_at",
+      "event": {
+        "id": "6e0b9fb0ddb9a3d8037aa31d52bcc2635c50d713ff36fe9c4c8e5e108f937856",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"issuedAt\":1700000099}",
+        "sig": "626f80f0192837aea48900282ef402d0f5fce9a591aa3b09512d99712a2df7be256686da1f134d0abc146d711d65156df3deaaaf8d29a47fbfd50a3a15b74028"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "duplicate_in_nested_unknown",
+      "event": {
+        "id": "a60f9cb0eb1de636ce4c4a34d77b4a2e5aa883c87b6dc35f8679303c46317ae4",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"x\":{\"a\":1,\"a\":2}}",
+        "sig": "46aa456dd9977d2a09d5b85a2ab8b2c6421810816ba962b460717b63586b261ba65ad5608fe123edf57662df722877a0809c7c80d2a62ef32fbab6cf3f72ef46"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "v_1_0",
+      "event": {
+        "id": "0df024ce66ad6e402566e98ce8fb45c5028942778edfc7c17e6d0cf1fa5ff6bd",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1.0,\"issuedAt\":1700000000}",
+        "sig": "ac9b8ad63ca432493c90a55034eb3d165d5c5f2c0d60fd228e3dd4caf132cfd594548750ff3e2af32a5363a7d054c606a0d0495f9ca6fc32c600134dec5ca16f"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "issued_at_exponent",
+      "event": {
+        "id": "1073936c641c8b3d43ea9324916ff07702da4307d190979dde65b7a736c5c7f8",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1.7e9}",
+        "sig": "1480ad9cb78860fe7661557ca84b3950f47fb3f0dfcb28bd3f9b2f6dad50e6cfc4287deff1e6586b922b06b21e5c16825d47434aa9141a93aca06a9c31ac7969"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "issued_at_exponent_integer",
+      "event": {
+        "id": "1b8f1ac2b68eedbad89c1004f236cd5a35799a786b98729358dc75c61876e700",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":17e8}",
+        "sig": "0ce8fd6bf46b29e1d8592107661be305c9b9b6b503372d9bd357931767b6d9629d4ab22e43f4204076762e5eaf856c62f9a4b8fb2bd3eb4b315f5b6e9d6d72be"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "issued_at_negative_zero",
+      "event": {
+        "id": "496cec735d2a07e9628e0963c90afd5edf54c87d14cc1e196e1827d80ec5e8ca",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":-0}",
+        "sig": "3d6000ae9310592b7b8edf3f3f7788c3383a26259e77c60dcab87c25e927ca4f677973736f90bc186fd81b64362fb17b454839f40173db41901b19803927457e"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "float_in_unknown_field",
+      "event": {
+        "id": "013006a48892543e82622751740ee08245a26e463731f9ff5192de619d92e798",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"x\":0.5}",
+        "sig": "aaaa63d35d5d9a2d6284b8dcdfedc653aa7cf77390ec659afbe79e2823a115a370c9a227eb71bef21ca36a2c8f0374307767b8b067a4ea11e07c0c168b6600e0"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "label_lone_surrogate",
+      "event": {
+        "id": "ab7dd893921fb12a92d60d8e5d7be9379de3d53916e6cb0057a9d93cfe307af5",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"label\":\"\\ud800\"}",
+        "sig": "11de877fcbac08f7a76e6212dbb37f8b79f768856b8cb1709f0ce29be5603772e5cd58df7da299644ba353b64bf794af267c5468942542957bd75b938c547e0c"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "label_lone_low_surrogate",
+      "event": {
+        "id": "f38c05cb5968dfd6ea2ebbd17af9fab758ab485df90978e348105a5637c77ed5",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,\"label\":\"a\\udc00\"}",
+        "sig": "2a8ee254ed37a6e8d8f4ad72f470e7d185068b283eee86260b072aaada8158fcf199ee95dc39cdab28faa35d69e7c579e173a198014a1a49d7eb3eef3b4ddbaf"
+      },
+      "reason": "content_not_json"
+    },
+    {
+      "name": "trailing_comma",
+      "event": {
+        "id": "296cf0af6d7fb4b9401b14a02f1d8863d678681a8f9cdbb2997e40f7065c8784",
+        "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+        "created_at": 1700000000,
+        "kind": 31120,
+        "tags": [
+          [
+            "d",
+            "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "p",
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ],
+          [
+            "t",
+            "charter-device"
+          ]
+        ],
+        "content": "{\"v\":1,\"issuedAt\":1700000000,}",
+        "sig": "894f6c307b6b2d07e2aacf12ad94d69e03bf120623de708a60a6cb30677263bd1c88661c3be887a6f7e2ac9f0c523ec3d986fb29f7e8695da34135aaed17a227"
+      },
+      "reason": "content_not_json"
     },
     {
       "name": "issued_at_negative",

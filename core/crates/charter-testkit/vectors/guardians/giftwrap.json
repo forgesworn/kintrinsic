@@ -465,7 +465,8 @@
           "statusRelays": [
             "wss://relay.one.example",
             "wss://relay.two.example"
-          ]
+          ],
+          "guardianPin": null
         }
       }
     },
@@ -563,7 +564,8 @@
           "statusRelays": [
             "wss://relay.one.example",
             "wss://relay.two.example"
-          ]
+          ],
+          "guardianPin": null
         }
       }
     },
@@ -655,7 +657,8 @@
           "statusRelays": [
             "wss://relay.one.example",
             "wss://relay.two.example"
-          ]
+          ],
+          "guardianPin": null
         }
       }
     },
@@ -737,6 +740,7 @@
               "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
               "statement": "a884749660947458622b4e6c36b444b91a67add1f89855170660ba87358dc6c8",
               "issuedAt": 1700000001,
+              "receivedAt": 1700000020,
               "expiresAt": 1700604801,
               "confirmedAt": null,
               "takesEffectAt": null
@@ -758,7 +762,8 @@
           "statusRelays": [
             "wss://relay.one.example",
             "wss://relay.two.example"
-          ]
+          ],
+          "guardianPin": null
         }
       }
     }
