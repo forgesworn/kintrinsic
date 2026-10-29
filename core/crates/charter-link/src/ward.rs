@@ -708,6 +708,12 @@ async fn pump(inner: Arc<Inner>, tx: mpsc::Sender<Vec<u8>>, closer: Arc<Closer>,
     let mut changed = inner.outbox_changed.subscribe();
     let mut cursor = 0u64;
     loop {
+        // A key that has left the signer set gets nothing more from this
+        // ward (rule 4; review 2a, Info 5): its session closes.
+        if !inner.signers.is_signer(&peer) {
+            closer.close();
+            return;
+        }
         let batch: Vec<(u64, NostrEvent)> = {
             let mut st = lock(&inner.state);
             prune_outbox(&mut st.outbox, now_unix());
@@ -761,6 +767,13 @@ async fn session(
         };
         if !rate.hit() {
             eprintln!("charter-link: guardian session over its frame rate; closing");
+            return;
+        }
+        // Checked per frame (the guardian answers every ping): a session
+        // whose key has departed since the handshake closes within one ping
+        // interval, and nothing it sends is ingested (review 2a, Info 5).
+        if !inner.signers.is_signer(&peer) {
+            eprintln!("charter-link: the guardian key of this session has left the signer set");
             return;
         }
         match frame {
