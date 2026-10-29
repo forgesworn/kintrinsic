@@ -224,6 +224,14 @@ export interface Signer {
   ): Promise<SignOutcomeAt>;
 
   /**
+   * Rule 4 (guardian keys): re-sign the latest gift, stand-down, maintenance,
+   * update and debugging clause this install sent to each of the child's
+   * devices, with a fresh `issuedAt`. Throws `QueuedForHomeNetworkError` when
+   * any of it was only held for the home network. Absent = nothing recorded.
+   */
+  resignStanding?(childId: string): Promise<SignOutcome>;
+
+  /**
    * Sign + publish a parent-gated RELEASE to a device's machine pubkey — the
    * unpair. The device drops its pairing and all enforcement. A no-op for a
    * device with no real key (nothing to release).

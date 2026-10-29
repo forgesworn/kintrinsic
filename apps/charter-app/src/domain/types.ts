@@ -406,6 +406,13 @@ export interface Device {
    * is a recipient again) clears it.
    */
   departedAt?: number;
+  /**
+   * The guardian key this device was paired to (hex): the key that offered
+   * the pairing, or named in the phone's pairing link. Recorded when it is
+   * paired, or stamped on older records when it can still be known (see
+   * `store/guardianKeysWiring.ts`, `stampPinnedKeys`). Absent = not known.
+   */
+  pinnedKey?: string;
 }
 
 /** The last `debugging` clause sent to a device — see `Device.debugging`. */

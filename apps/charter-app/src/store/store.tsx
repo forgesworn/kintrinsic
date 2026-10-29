@@ -128,7 +128,7 @@ import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
 import { isAskExpired } from "../domain/askExpiry";
 import type { GuardianKeysState, RootVia } from "../keys/state";
 import { listensWithLocalKey, useGuardianKeys, type GuardianKeysApi } from "./useGuardianKeys";
-import { applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId } from "./guardianKeysWiring";
+import { applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId, stampPinnedKeys } from "./guardianKeysWiring";
 import type { StatusFarewell } from "../wire/status";
 
 export { isSetUp, statusFor } from "./statusFor";
@@ -297,6 +297,8 @@ type Action =
        *  the current defaults just because the pairing state changed. */
       relays?: string[];
       relaysUpdatedAt?: number;
+      /** The guardian key this pairing pins (see `Device.pinnedKey`); kept across a same-key update. */
+      pinnedKey?: string;
     }
   | { type: "REMOVE_DEVICE"; childId: string; deviceId: string }
   | { type: "SET_DEVICE_LAST_SEEN"; machine: string; lastSeenAt: number }
@@ -314,7 +316,8 @@ type Action =
   | { type: "SET_SIGNER"; signer: SignerState }
   | { type: "SET_GUARDIAN_KEYS"; keys: GuardianKeysState }
   | { type: "SET_DEVICE_KEYS_VIEW"; status: DeviceStatus }
-  | { type: "DEVICE_FAREWELL"; farewell: StatusFarewell; workingKey: string };
+  | { type: "DEVICE_FAREWELL"; farewell: StatusFarewell; workingKey: string; ownRoots?: string[] }
+  | { type: "STAMP_PINNED_KEYS"; key: string; onlyUnheard?: boolean };
 
 function mapDevice(
   child: Child,
@@ -389,6 +392,9 @@ export function reducer(state: CharterState, action: Action): CharterState {
                   action.pairing === "paired" && devicePubkey === d.devicePubkey
                     ? d.debugging
                     : undefined,
+                pinnedKey:
+                  action.pinnedKey ??
+                  (action.pairing === "paired" && devicePubkey === d.devicePubkey ? d.pinnedKey : undefined),
               };
             })
             : c,
@@ -507,7 +513,11 @@ export function reducer(state: CharterState, action: Action): CharterState {
       return children === state.children ? state : { ...state, children };
     }
     case "DEVICE_FAREWELL": {
-      const children = applyFarewell(state.children, action.farewell, action.workingKey);
+      const children = applyFarewell(state.children, action.farewell, action.workingKey, action.ownRoots ?? []);
+      return children === state.children ? state : { ...state, children };
+    }
+    case "STAMP_PINNED_KEYS": {
+      const children = stampPinnedKeys(state.children, action.key, { onlyUnheard: action.onlyUnheard });
       return children === state.children ? state : { ...state, children };
     }
     default:
@@ -727,7 +737,7 @@ export interface CharterContextValue {
    * it once to approve this phone's working key. The connection stands even
    * if the approval doesn't; `approved: false` says why.
    */
-  pairSignet: (bunkerUri: string, opts?: { via?: RootVia }) => Promise<RootConnectResult>;
+  pairSignet: (bunkerUri: string, opts?: { via?: RootVia; expectRoot?: string }) => Promise<RootConnectResult>;
 
   /** Guardian roots and working keys: state and actions (see ./useGuardianKeys). */
   guardianKeys: GuardianKeysApi;
@@ -882,16 +892,41 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       save: (keys) => dispatch({ type: "SET_GUARDIAN_KEYS", keys }),
       signer: () => signer.current,
       localRoute,
+      // Rule 4: every clause this install has standing on the child's
+      // devices goes out again with a live key, and only counts once it was
+      // SENT: one held for the home network could arrive after the
+      // departure, which is the replay window the re-sign exists to close.
       resign: async (childId) => {
         const sign = signClauseRef.current;
         if (!sign) throw new Error("Rules can't be re-sent yet.");
-        const policies = stateRef.current.children.find((c) => c.id === childId)?.policies ?? [];
-        for (const policy of policies) {
+        const child = stateRef.current.children.find((c) => c.id === childId);
+        const who = child?.name ?? "your child";
+        const held = () =>
+          new Error(
+            `${who}'s current rules are still waiting to reach a device that isn't on the home network. Nothing else was sent; try again once it's back.`,
+          );
+        for (const policy of child?.policies ?? []) {
           const d = await sign(childId, policy);
-          if (d.outcome !== "sent" && d.outcome !== "queued") {
-            throw new Error("Your current rules couldn't be re-sent first, so nothing else was sent.");
+          if (d.outcome === "queued") throw held();
+          if (d.outcome !== "sent") {
+            throw new Error(`${who}'s current rules couldn't be re-sent first, so nothing else was sent.`);
           }
         }
+        const s = signer.current;
+        if (s?.resignStanding) {
+          try {
+            await s.resignStanding(childId);
+          } catch (e) {
+            if (e instanceof QueuedForHomeNetworkError) throw held();
+            throw e;
+          }
+        }
+      },
+      stampPinnedKeys: (key, opts) => {
+        const children = stampPinnedKeys(stateRef.current.children, key, opts);
+        if (children === stateRef.current.children) return;
+        stateRef.current = { ...stateRef.current, children };
+        dispatch({ type: "STAMP_PINNED_KEYS", key, ...(opts?.onlyUnheard ? { onlyUnheard: true } : {}) });
       },
       onRootMoved: (uri) => onRootMovedRef.current(uri),
       reconnect: async () => {
@@ -908,6 +943,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
   const signerKeys = guardianKeys.signerKeys;
   const keysCore = guardianKeys.keys;
+  const guardianKeysRef = guardianKeys.keysRef;
 
   // Pick the signer from persisted state: kind "local" → the local-key
   // self-signer; a paired `bunkerUri` → the REAL Signet signer (My Signet, or
@@ -1088,6 +1124,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // A NEW pairing: record the relays it actually used — the current
         // defaults, since this handshake names none of its own.
         relays: DEFAULT_RELAYS,
+        // The key the phone's pairing link named.
+        pinnedKey: keysCore.rootPubkey(),
       });
       addActivity(childId, "enacted", `You set up ${device.label}`);
       // Spend the token: it has done the one job it existed for, and a spent
@@ -1099,7 +1137,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       pendingResends.current.push({ childId, machine });
       return { ...device, pairing: "paired", pairedAt, devicePubkey: machine, relays: DEFAULT_RELAYS };
     },
-    [addDevice, addActivity],
+    [addDevice, addActivity, keysCore],
   );
 
   // "Govern this device": bind the code shown on the device as the gift-wrap
@@ -1121,6 +1159,10 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         devicePubkey,
         // A NEW pairing: record the relays it actually used.
         relays: DEFAULT_RELAYS,
+        // The key that offers the pairing: the connected signer's own.
+        pinnedKey:
+          (signer.current as (Signer & { rootOps?: () => { pubkey: string } | null }) | null)?.rootOps?.()?.pubkey ??
+          keysCore.rootPubkey(),
       });
       // Build the result from the device we were handed — it was created this
       // same tick by addDevice, so it is NOT yet in committed state (stateRef
@@ -1130,7 +1172,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       addActivity(childId, "enacted", `You connected ${device.label}`);
       return { ...device, pairing: "paired", pairedAt, devicePubkey, relays: DEFAULT_RELAYS };
     },
-    [addActivity],
+    [addActivity, keysCore],
   );
 
   // Re-connect a device that already handed us its real key — reuses the stored
@@ -1927,12 +1969,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       ingestStatus: ingestDeviceStatus,
       ingestRequest: ingestDeviceRequest,
       ingestFarewell: (farewell: StatusFarewell) =>
-        dispatch({ type: "DEVICE_FAREWELL", farewell, workingKey: getPublicKey(guardianSk) }),
+        dispatch({
+          type: "DEVICE_FAREWELL",
+          farewell,
+          workingKey: getPublicKey(guardianSk),
+          // This install's own roots: where one is still pinned, R keeps signing.
+          ownRoots: [guardianKeysRef.current.root?.pubkey, guardianKeysRef.current.nextRoot?.pubkey].filter(
+            (k): k is string => typeof k === "string",
+          ),
+        }),
       ingestRoster: (inbound: Parameters<typeof keysCore.receiveRoster>[0]) => {
         keysCore.receiveRoster(inbound);
       },
     }),
-    [ingestDeviceStatus, ingestDeviceRequest, keysCore],
+    [ingestDeviceStatus, ingestDeviceRequest, keysCore, guardianKeysRef],
   );
 
   /** One relay read: STATUS heartbeats + the children's asks. Hoisted out of
@@ -2802,9 +2852,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [syncSigner],
   );
 
+  // A family whose wards pin My Signet (or a Heartwood) as root would refuse
+  // everything this phone's own key signed as root; switching is a root move.
+  const refuseWhileSignetRoot = useCallback(() => {
+    if (guardianKeysRef.current.root) {
+      throw new Error(
+        "Your guardian identity is on My Signet, so this phone's own key can't take over from it. Disconnect My Signet first.",
+      );
+    }
+  }, [guardianKeysRef]);
+
   // Turn on the local-key signer: this phone holds the guardian key and signs
   // clauses directly (no external bunker). Idempotent — safe to call again.
   const enableLocalSigner = useCallback(async () => {
+    refuseWhileSignetRoot();
     const next: SignerState = { ...stateRef.current.signer, kind: "local", bunkerUri: undefined };
     try {
       signer.current = buildSigner(next);
@@ -2814,7 +2875,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       throw e;
     }
     dispatch({ type: "SET_SIGNER", signer: signer.current.status() });
-  }, [buildSigner]);
+  }, [buildSigner, refuseWhileSignetRoot]);
 
   // Recovery: install a restored guardian key (from an encrypted backup) and
   // switch to the local signer over it. The restored pubkey matches every
@@ -2822,6 +2883,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // no re-pairing. Returns the restored guardian pubkey (hex).
   const restoreGuardianKey = useCallback(
     async (secret: Uint8Array): Promise<string> => {
+      refuseWhileSignetRoot();
       importGuardianKey(secret);
       const next: SignerState = {
         ...stateRef.current.signer,
@@ -2833,17 +2895,31 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "SET_SIGNER", signer: signer.current.status() });
       return guardianPubkeyHex();
     },
-    [buildSigner],
+    [buildSigner, refuseWhileSignetRoot],
   );
 
   // Pair the REAL Signet bunker from a `bunker://…` URI: rebuild the signer as
   // the Signet-backed one, open the NIP-46 session, and persist the URI (so the
   // pairing survives reload). On failure the mock is restored and it rethrows.
   const pairSignet = useCallback(
-    async (bunkerUri: string, opts: { via?: RootVia } = {}): Promise<RootConnectResult> => {
+    async (bunkerUri: string, opts: { via?: RootVia; expectRoot?: string } = {}): Promise<RootConnectResult> => {
       // "Heartwood via My Signet" is this same bunker flow: the key lives on a
       // Heartwood behind My Signet. Only the wording differs.
       const kind: SignerKind = opts.via === "heartwood" ? "heartwood" : "signet";
+      // Devices paired before this, while this phone signed with its own key
+      // (or with no signer at all), pin that key: record it before the switch,
+      // so approving My Signet can't strand them (fail-closed).
+      const before = stateRef.current.signer.kind;
+      if (before !== "signet" && before !== "heartwood") {
+        const w = guardianKeys.api.workingPubkey;
+        if (w) {
+          const stamped = stampPinnedKeys(stateRef.current.children, w);
+          if (stamped !== stateRef.current.children) {
+            stateRef.current = { ...stateRef.current, children: stamped };
+            dispatch({ type: "STAMP_PINNED_KEYS", key: w });
+          }
+        }
+      }
       const next: SignerState = { ...stateRef.current.signer, kind, bunkerUri };
       try {
         signer.current = buildSigner(next);
@@ -2852,6 +2928,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         signer.current = buildSigner({ ...stateRef.current.signer, kind: "none", bunkerUri: undefined });
         throw e;
       }
+      // Joining a family: the identity the other parent invited. A different
+      // one is refused before anything is approved, and not left connected.
+      if (opts.expectRoot) {
+        const got = (signer.current as Signer & { rootOps?: () => { pubkey: string } | null }).rootOps?.()?.pubkey;
+        if (got !== opts.expectRoot) {
+          await signer.current.disconnect();
+          signer.current = buildSigner({ ...stateRef.current.signer, kind: "none", bunkerUri: undefined });
+          throw new Error(
+            `That ${kind === "heartwood" ? "Heartwood" : "My Signet"} identity isn't the one the other parent invited.`,
+          );
+        }
+      }
       // status() doesn't carry the store-only bunkerUri — merge it back in.
       const connected = { ...signer.current.status(), bunkerUri };
       stateRef.current = { ...stateRef.current, signer: connected };
@@ -2859,7 +2947,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // Guardian keys: ask the root once to approve this phone's working key.
       // Not fatal: without it the root keeps signing everything, as before.
       try {
-        await guardianKeys.api.approveInstall();
+        await guardianKeys.api.approveInstall(opts.expectRoot ? { expectRoot: opts.expectRoot } : {});
         return { approved: true };
       } catch (e) {
         return { approved: false, error: e instanceof Error ? e.message : String(e) };
@@ -2881,11 +2969,13 @@ export function CharterProvider({ children }: { children: ReactNode }) {
 
   const disconnectSigner = useCallback(async () => {
     await signer.current!.disconnect();
+    // The root goes with the signer: a later connection approves afresh.
+    keysCore.forgetRoot();
     // Drop the pairing + fall back to the mock (clears bunkerUri).
     const cleared: SignerState = { connected: false, kind: "none", autoSign: stateRef.current.signer.autoSign };
     signer.current = buildSigner(cleared);
     dispatch({ type: "SET_SIGNER", signer: cleared });
-  }, [buildSigner]);
+  }, [buildSigner, keysCore]);
 
   const setAutoSign = useCallback(
     async (on: boolean) => {

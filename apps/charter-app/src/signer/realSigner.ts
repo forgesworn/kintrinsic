@@ -17,7 +17,6 @@ import {
   giftWrapGrant,
   giftWrapPairOffer,
   giftWrapRelease,
-  giftWrapSigned,
   giftWrapUsageSync,
   type GuardianOps,
 } from "../wire/giftwrap";
@@ -33,7 +32,6 @@ import {
 import type { DecisionContext, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
-import { pairOfferInnerTemplate } from "../keys/guardianKeys";
 import { localRouteAvailable } from "../carrier/localLink";
 import {
   QueuedForHomeNetworkError,
@@ -110,12 +108,6 @@ export interface RealSignerDeps {
    * key, as before the section. Absent = always the root's.
    */
   pickOps?: (machine: string) => GuardianOps | undefined;
-  /**
-   * Scan-to-pair with a working key: the PAIR_OFFER content (carrying W's
-   * approval) and W's operations to sign and seal it, or null to offer as
-   * the root, as before.
-   */
-  pairOffer?: (token: string, relays: string[], ts: number) => { content: string; ops: GuardianOps } | null;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -158,6 +150,85 @@ export class RealSigner implements Signer {
   private lastIssuedAt = RealSigner.loadLastIssuedAt();
 
   private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
+  /** The last non-policy clause sent per child and device: what rule 4 re-signs. */
+  private static readonly STANDING_KEY = "charter.signer.standing.v1";
+
+  private static loadStanding(): Record<string, Record<string, ClausePayload>> {
+    try {
+      const raw = JSON.parse(localStorage.getItem(RealSigner.STANDING_KEY) ?? "{}") as unknown;
+      return typeof raw === "object" && raw !== null && !Array.isArray(raw)
+        ? (raw as Record<string, Record<string, ClausePayload>>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Remember a gift, stand-down, maintenance window, update or debugging
+   * clause as the latest of its kind for each device it went to. Only once it
+   * was sent or held for the home network: a send that failed outright is not
+   * standing anywhere, and re-signing it later would deliver it after all.
+   */
+  private recordStanding(childId: string, machines: string[], clause: ClausePayload): void {
+    const all = RealSigner.loadStanding();
+    const mine = { ...(all[childId] ?? {}) };
+    for (const m of machines) mine[`${clause.kind}:${m}`] = clause;
+    all[childId] = mine;
+    try {
+      localStorage.setItem(RealSigner.STANDING_KEY, JSON.stringify(all));
+    } catch {
+      // Private mode / quota: the re-sign covers what it can.
+    }
+  }
+
+  /** `settle`, recording the clause as standing when it was sent or held. */
+  private settleStanding(batch: SendBatch, childId: string, machines: string[], clause: ClausePayload): SignOutcome {
+    try {
+      const out = this.settle(batch);
+      this.recordStanding(childId, machines, clause);
+      return out;
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) this.recordStanding(childId, machines, clause);
+      throw err;
+    }
+  }
+
+  /**
+   * Rule 4: re-sign the latest gift, stand-down, maintenance window, update
+   * and debugging clause this install sent to each of the child's devices,
+   * unchanged but for a fresh `issuedAt` (and the same `id`, so a gift is
+   * never added twice). Sent before a departure, so a relay can't replay an
+   * older clause of those kinds once the departing key's own stops counting.
+   * Nothing recorded = nothing to re-sign.
+   */
+  async resignStanding(childId: string): Promise<SignOutcome> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const target = this.deps.resolveChild(childId);
+    if (!target) throw new Error(`unknown child: ${childId}`);
+    const recorded = RealSigner.loadStanding()[childId] ?? {};
+    const sends = Object.entries(recorded).flatMap(([key, clause]) => {
+      const machine = key.slice(key.indexOf(":") + 1);
+      const device = target.devices.find((d) => d.pubkey === machine);
+      return device ? [{ device, clause }] : [];
+    });
+    if (sends.length === 0) return { ok: true };
+    await this.authorize("clause", `Re-send ${target.name ?? childId}'s current rules`);
+    const issuedAt = this.nextIssuedAt();
+    const held = new SendBatch();
+    for (const { device, clause } of sends) {
+      const body = clause.body as unknown as Record<string, unknown>;
+      const fresh: ClausePayload = {
+        ...clause,
+        issuedAt,
+        body: ("issuedAt" in body ? { ...body, issuedAt } : body) as unknown as ClausePayload["body"],
+      };
+      const wrap = await giftWrapClause(fresh, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
+    }
+    return this.settle(held);
+  }
 
   private static loadLastIssuedAt(): number {
     try {
@@ -484,7 +555,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
   }
 
   /**
@@ -534,7 +605,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
   }
 
   /**
@@ -593,7 +664,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
   }
 
   async signUpdateClause(
@@ -625,7 +696,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, phones.map((d) => d.pubkey), clause);
   }
 
   async signDebUpdateClause(
@@ -661,7 +732,7 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
-    return this.settle(held);
+    return this.settleStanding(held, childId, [device.pubkey], clause);
   }
 
   /**
@@ -704,7 +775,7 @@ export class RealSigner implements Signer {
     const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     try {
-      return { ...this.settle(held), issuedAt };
+      return { ...this.settleStanding(held, childId, [device.pubkey], clause), issuedAt };
     } catch (err) {
       // A held send throws; hand the caller the value that was really signed.
       if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;
@@ -769,15 +840,11 @@ export class RealSigner implements Signer {
     if (!/^[0-9a-f]{64}$/.test(machinePubkey)) return { ok: true };
     if (!/^[0-9a-f]{32}$/.test(token)) return { ok: true };
     await this.authorize("clause", `Connect to computer ${machinePubkey.slice(0, 8)}…`);
-    const ts = this.deps.now();
-    const viaWorkingKey = this.deps.pairOffer?.(token, relays, ts);
-    if (viaWorkingKey) {
-      // Sealed by W with R's approval: the ward checks the approval names the
-      // seal author and pins R, not W (contract, *Scan-to-pair with a working key*).
-      const inner = await viaWorkingKey.ops.signEvent(pairOfferInnerTemplate(viaWorkingKey.content, ts));
-      await this.deps.publish(relays, await giftWrapSigned(inner, machinePubkey, viaWorkingKey.ops, ts));
-      return { ok: true };
-    }
+    // Always offered by the connected root, never by a working key: a ward
+    // that predates guardian keys would pin the seal author, and the app
+    // can't tell its version before pairing. W's approval follows once the
+    // ward is recorded (docs/guardian-keys-open-questions.md, "A working-key
+    // PAIR_OFFER to a ward that predates the section").
     const wrap = await giftWrapPairOffer(
       machinePubkey,
       token,

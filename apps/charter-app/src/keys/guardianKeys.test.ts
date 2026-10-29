@@ -29,6 +29,7 @@ interface Harness {
   published: { relays: string[]; wrap: NostrEvent }[];
   resigned: string[];
   setRoot: (ops: GuardianOps | null) => void;
+  setNow: (t: number) => void;
 }
 
 const rSk = generateSecretKey();
@@ -49,6 +50,7 @@ function device(machine: string, platform: "android" | "linux", extra: Partial<K
 function harness(children: KeysChild[], rootOps: GuardianOps | null = opsOf(rSk)): Harness {
   let keys = emptyGuardianKeys();
   let root = rootOps;
+  let clock = T;
   const published: Harness["published"] = [];
   const resigned: string[] = [];
   const gk = new GuardianKeys({
@@ -61,13 +63,21 @@ function harness(children: KeysChild[], rootOps: GuardianOps | null = opsOf(rSk)
     publish: async (relays, wrap) => {
       published.push({ relays, wrap });
     },
-    now: () => T,
+    now: () => clock,
     defaultRelays: ["wss://default.example"],
     resignClauses: async (id) => {
       resigned.push(id);
     },
   });
-  return { gk, keys: () => keys, children, published, resigned, setRoot: (o) => (root = o) };
+  return {
+    gk,
+    keys: () => keys,
+    children,
+    published,
+    resigned,
+    setRoot: (o) => (root = o),
+    setNow: (t) => (clock = t),
+  };
 }
 
 /** Open a wrap as the ward with `sk` would. */
@@ -126,6 +136,51 @@ describe("connecting My Signet as root", () => {
     const h = harness([], liar);
     await expect(connectSignetRoot(h)).rejects.toThrow(/other than an approval/);
     expect(h.keys().root).toBeUndefined();
+  });
+
+  it("refuses to re-approve with a different identity once a root is set (a move, not a re-approval)", async () => {
+    const h = harness([]);
+    await connectSignetRoot(h);
+    h.setRoot(opsOf(r2Sk));
+    await expect(connectSignetRoot(h)).rejects.toThrow(/different guardian identity/);
+    expect(h.keys().root?.pubkey).toBe(R);
+    h.setRoot(opsOf(rSk));
+    await expect(connectSignetRoot(h)).resolves.toMatchObject({ pubkey: R });
+  });
+
+  it("drops an approval that names a different working key (a restored key backup)", async () => {
+    const h = harness([]);
+    await connectSignetRoot(h);
+    expect(h.gk.dropStaleApproval()).toBe(false);
+    // R's approval of some other W, as a backup made on another phone would hold.
+    const otherW = getPublicKey(generateSecretKey());
+    const elsewhere = finalizeEvent(
+      {
+        kind: 31120,
+        created_at: T,
+        tags: [["d", `kintrinsic/device/${otherW}`], ["p", otherW], ["t", "charter-device"]],
+        content: JSON.stringify({ v: 1, issuedAt: T }),
+      },
+      rSk,
+    );
+    h.keys().root!.approval = elsewhere as SignedEvent;
+    expect(h.gk.dropStaleApproval()).toBe(true);
+    expect(h.keys().root).toBeUndefined();
+  });
+
+  it("forgets the root when the signer is disconnected", async () => {
+    const h = harness([]);
+    await connectSignetRoot(h);
+    h.gk.forgetRoot();
+    expect(h.keys().root).toBeUndefined();
+    expect(h.gk.rootPubkey()).toBe(W);
+  });
+
+  it("removing the other parent is refused for a family whose root is this phone's own key", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
+    await expect(h.gk.removeCoGuardian(R2)).rejects.toThrow(/kept on this phone/);
+    expect(h.resigned).toEqual([]);
+    expect(h.published).toHaveLength(0);
   });
 
   it("a local-only family names its local key as the root", () => {
@@ -215,18 +270,9 @@ describe("which key signs for a ward", () => {
     expect(h.gk.keyFor(PHONE)).toBe("working");
   });
 
-  it("PAIR_OFFER is sealed by W and carries the approval only with a Signet root", async () => {
+  it("has no working-key PAIR_OFFER: scan-to-pair is offered by the root", () => {
     const h = harness([]);
-    expect(h.gk.pairOffer("ab".repeat(16), ["wss://x.example"], T)).toBeNull();
-    await connectSignetRoot(h);
-    const offer = h.gk.pairOffer("ab".repeat(16), ["wss://x.example"], T)!;
-    expect(offer.ops.pubkey).toBe(W);
-    expect(JSON.parse(offer.content)).toEqual({
-      token: "ab".repeat(16),
-      relays: ["wss://x.example"],
-      ts: T,
-      approval: h.keys().root!.approval,
-    });
+    expect("pairOffer" in h.gk).toBe(false);
   });
 });
 
@@ -367,10 +413,34 @@ describe("statements", () => {
     }
   });
 
-  it("withdrawing this install's own W is sealed by R itself", async () => {
+  it("withdrawing this install's own W is sealed by R itself, after R re-signs the clauses", async () => {
+    let keyDuringResign: string | null = null;
+    const hh = new GuardianKeys({
+      read: () => ({ keys: h.keys(), children: [child] }),
+      write: () => {},
+      workingKey: () => wSk,
+      root: () => opsOf(rSk),
+      publish: async () => {},
+      now: () => T,
+      defaultRelays: [],
+      resignClauses: async () => {
+        keyDuringResign = hh.keyFor(PHONE);
+      },
+    });
+    expect(hh.keyFor(PHONE)).toBe("working");
+    await hh.withdrawInstall(W);
+    expect(keyDuringResign).toBe("root"); // W is the key departing: rule 4 needs R
+    expect(hh.keyFor(PHONE)).toBe("working");
     await h.gk.withdrawInstall(W);
-    expect(h.resigned).toEqual([]);
+    expect(h.resigned).toEqual(["c1"]);
     for (const o of delivered()) expect(o.sealAuthor).toBe(R);
+  });
+
+  it("withdrawing this install's own W without R connected re-signs nothing and sends nothing", async () => {
+    h.setRoot(null);
+    await expect(h.gk.withdrawInstall(W)).rejects.toThrow(/Connect/);
+    expect(h.resigned).toEqual([]);
+    expect(h.published).toHaveLength(0);
   });
 
   it("refuses to withdraw another parent's install", async () => {
@@ -422,7 +492,20 @@ describe("presence confirmation", () => {
     await h.gk.confirmPresence(`charter://presence?m=${PHONE}&t=${token}&d=kintrinsic/unguardian/${R2}&s=${stmt}`);
     const { inner } = open(h.published[0].wrap, phoneSk);
     expect(JSON.parse(inner.content)).toEqual({ v: 1, token, statement: stmt });
-    expect(h.published[0].relays.sort()).toEqual(["wss://a.example", "wss://b.example", "wss://ward.example"]);
+    expect(h.published[0].relays.sort()).toEqual([
+      "wss://a.example",
+      "wss://b.example",
+      "wss://default.example",
+      "wss://ward.example",
+    ]);
+  });
+
+  it("is refused for a family whose root is this phone's own key", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
+    await expect(
+      h.gk.confirmPresence(`charter://presence?m=${PHONE}&t=${token}&d=kintrinsic/unguardian/${R2}&s=${stmt}`),
+    ).rejects.toThrow(/kept on this phone/);
+    expect(h.published).toHaveLength(0);
   });
 });
 
@@ -463,6 +546,114 @@ describe("root move", () => {
     await connectSignetRoot(h);
     await expect(h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "x", via: "signet" })).rejects.toThrow(/Update Kintrinsic/);
     expect(h.published).toHaveLength(0);
+  });
+
+  describe("half-way through (H1)", () => {
+    const LAPTOP_SK = laptopSk;
+    let h: Harness;
+    let child: KeysChild;
+    const movedView = { roots: [{ root: R2, keys: [W] }], pending: [], tombstones: 0, relays: [] };
+
+    beforeEach(async () => {
+      child = { id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android"), readyWard(LAPTOP, "linux")] };
+      h = harness([child]);
+      await connectSignetRoot(h);
+      await h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "bunker://r2", via: "signet" });
+      h.published.length = 0;
+      // The phone confirmed the move: it pins R2 with W re-bound to R2. The laptop hasn't.
+      child.devices[0].guardians = movedView;
+      const moveD = `kintrinsic/root/${R2}`;
+      child.devices[1].guardians = { ...child.devices[1].guardians!, pending: [{ d: moveD, kind: "move", expiresAt: T + 1000 }] };
+    });
+
+    it("each ward gets the key its own STATUS trusts: W for both, bound to R2 on the phone", () => {
+      expect(h.gk.keyFor(PHONE)).toBe("working");
+      expect(h.gk.keyFor(LAPTOP)).toBe("working");
+      expect(h.gk.settleRootMove()).toBeNull();
+      expect(h.keys().nextRoot?.pubkey).toBe(R2);
+    });
+
+    it("the approval resend sends R2's approval to the moved phone only when it lacks W, never R's", async () => {
+      child.devices[0].guardians = { roots: [{ root: R2, keys: [] }], pending: [], tombstones: 0, relays: [] };
+      await h.gk.syncApprovals({ force: true });
+      expect(h.published.map((p) => recipient(p.wrap))).toEqual([PHONE]);
+      const ap = parseStatement(open(h.published[0].wrap, phoneSk).inner);
+      expect(ap.ok && ap.statement).toMatchObject({ type: "approval", signer: R2, key: W });
+      child.devices[0].guardians = movedView;
+      h.published.length = 0;
+      await h.gk.syncApprovals({ force: true });
+      expect(h.published).toHaveLength(0);
+    });
+
+    it("refuses root statements R could not deliver to the moved phone", async () => {
+      await expect(h.gk.inviteCoGuardian(getPublicKey(generateSecretKey()))).rejects.toThrow(/already uses your new guardian identity/);
+      await expect(h.gk.withdrawInstall(getPublicKey(generateSecretKey()))).rejects.toThrow(/Finish the move/);
+      await expect(h.gk.removeCoGuardian(getPublicKey(generateSecretKey()))).rejects.toThrow(/Finish the move/);
+      await expect(
+        h.gk.moveRoot({ ops: opsOf(generateSecretKey()), bunkerUri: "bunker://r3", via: "signet" }),
+      ).rejects.toThrow(/Finish that move first/);
+      expect(h.published).toHaveLength(0);
+    });
+
+    it("settles once every ward pins R2 and not R", () => {
+      child.devices[1].guardians = movedView;
+      expect(h.gk.settleRootMove()).toBe("bunker://r2");
+      expect(h.keys().root?.pubkey).toBe(R2);
+      expect(h.keys().nextRoot).toBeUndefined();
+    });
+
+    it("a lapsed move with a ward already on R2 keeps R2, so that ward isn't stranded; restarting it finishes", async () => {
+      h.setNow(T + 1001); // past the laptop's pending expiresAt
+      child.devices[1].guardians = { ...child.devices[1].guardians!, pending: [] };
+      expect(h.gk.settleRootMove()).toBeNull();
+      expect(h.keys().nextRoot?.pubkey).toBe(R2);
+      expect(h.gk.keyFor(PHONE)).toBe("working");
+      // Restarting the move to the same identity is allowed.
+      await h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "bunker://r2", via: "signet" });
+      const toLaptop = h.published.filter((p) => recipient(p.wrap) === LAPTOP);
+      expect(toLaptop).toHaveLength(1);
+      const st = parseStatement(open(toLaptop[0].wrap, LAPTOP_SK).inner);
+      expect(st.ok && st.statement).toMatchObject({ type: "move", signer: R });
+    });
+  });
+
+  describe("cleared when it lapses with no ward moved (H1)", () => {
+    let h: Harness;
+    let child: KeysChild;
+
+    beforeEach(async () => {
+      child = { id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] };
+      h = harness([child]);
+      await connectSignetRoot(h);
+      await h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "bunker://r2", via: "signet" });
+    });
+
+    it("by expiry, read from the wards' STATUS pending", () => {
+      const moveD = `kintrinsic/root/${R2}`;
+      child.devices[0].guardians = { ...child.devices[0].guardians!, pending: [{ d: moveD, kind: "move", expiresAt: T + 50 }] };
+      h.setNow(T + 49);
+      expect(h.gk.settleRootMove()).toBeNull();
+      expect(h.keys().nextRoot).toBeDefined();
+      h.setNow(T + 50);
+      expect(h.gk.settleRootMove()).toBeNull();
+      expect(h.keys().nextRoot).toBeUndefined();
+      expect(h.keys().root?.pubkey).toBe(R);
+    });
+
+    it("by expiry, from the move's own 7 days once no ward lists it", () => {
+      h.setNow(T + 7 * 24 * 3600 - 1);
+      h.gk.settleRootMove();
+      expect(h.keys().nextRoot).toBeDefined();
+      h.setNow(T + 7 * 24 * 3600);
+      h.gk.settleRootMove();
+      expect(h.keys().nextRoot).toBeUndefined();
+    });
+
+    it("by this install cancelling it", async () => {
+      await h.gk.cancelPending(`kintrinsic/root/${R2}`);
+      expect(h.keys().nextRoot).toBeUndefined();
+      expect(h.keys().root?.pubkey).toBe(R);
+    });
   });
 });
 

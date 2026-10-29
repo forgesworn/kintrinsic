@@ -82,13 +82,16 @@ export function applyDeviceKeysView(children: Child[], status: DeviceStatus): Ch
 /**
  * Take in a departed key's last STATUS. When this install's working key `w`
  * is neither a root nor any root's working key in it, the device is marked
- * departed and nothing more is sent to it. Never usage data: only the
- * guardians view and the departure are recorded. An older farewell than the
- * view already held changes nothing; the same array comes back unchanged.
+ * departed and nothing more is sent to it, unless one of this install's own
+ * roots (`ownRoots`) is still pinned there: then only the view is recorded,
+ * and the root keeps signing for it. Never usage data: only the guardians
+ * view and the departure are recorded. An older farewell than the view
+ * already held changes nothing; the same array comes back unchanged.
  */
-export function applyFarewell(children: Child[], farewell: StatusFarewell, w: string): Child[] {
+export function applyFarewell(children: Child[], farewell: StatusFarewell, w: string, ownRoots: readonly string[] = []): Child[] {
   const g = farewell.guardians;
   if (keyStanding(g, w).as !== "none") return children;
+  const rootStays = g.roots.some((r) => ownRoots.includes(r.root));
   let changed = false;
   const next = children.map((c) => {
     if (!c.devices.some((d) => d.devicePubkey === farewell.machine)) return c;
@@ -98,6 +101,11 @@ export function applyFarewell(children: Child[], farewell: StatusFarewell, w: st
         if (d.devicePubkey !== farewell.machine) return d;
         if (d.keysViewAt !== undefined && farewell.ts < d.keysViewAt) return d;
         if (d.departedAt !== undefined) return d;
+        if (rootStays) {
+          if (d.keysViewAt === farewell.ts && JSON.stringify(d.guardians ?? null) === JSON.stringify(g)) return d;
+          changed = true;
+          return { ...d, guardians: g, keysViewAt: farewell.ts };
+        }
         changed = true;
         return { ...d, guardians: g, keysViewAt: farewell.ts, departedAt: farewell.ts };
       }),
@@ -121,20 +129,55 @@ export function ensureRosterIds(children: Child[], mint: () => string = newRoste
 }
 
 /**
- * The devices that trust this phone's own key as their guardian: ones whose
- * STATUS this install has read (so they send it to the local key) and that
- * don't hold the local key as a working key under some other root. For such
- * a family, connecting My Signet as root would leave those devices refusing
- * everything R signs; moving them is a root move.
+ * Record `key` as the pinned key of every paired device that has none yet.
+ * Used only where the answer is still knowable: just before a phone that
+ * signed with its own key connects My Signet (they pin the local key), and
+ * when a family already on My Signet first approves this phone (devices not
+ * heard from were offered by the root: `onlyUnheard`). The same array when
+ * nothing changed.
+ */
+export function stampPinnedKeys(children: Child[], key: string, opts: { onlyUnheard?: boolean } = {}): Child[] {
+  let changed = false;
+  // A device this install has read a STATUS from sent it to the local key,
+  // so it can't be pinned to the root: `onlyUnheard` leaves those unrecorded.
+  const eligible = (d: Child["devices"][number]) =>
+    d.pairing === "paired" &&
+    d.pinnedKey === undefined &&
+    !(opts.onlyUnheard && (d.keysViewAt !== undefined || d.lastSeenAt !== undefined));
+  const next = children.map((c) => {
+    if (!c.devices.some(eligible)) return c;
+    return {
+      ...c,
+      devices: c.devices.map((d) => {
+        if (!eligible(d)) return d;
+        changed = true;
+        return { ...d, pinnedKey: key };
+      }),
+    };
+  });
+  return changed ? next : children;
+}
+
+/**
+ * The devices that trust this phone's own key as their guardian, so that
+ * connecting My Signet as root would leave them refusing everything R signs
+ * (moving them is a root move). Fails closed: a device counts unless it is
+ * known to hold the local key as a working key under some root (its STATUS
+ * says so), or known to be pinned to another key (its recorded `pinnedKey`).
+ * A device with no record counts whether or not it has been heard from.
  */
 export function devicesPinningLocalKey(children: Child[], localKey: string): string[] {
   const out: string[] = [];
   for (const c of children) {
     for (const d of c.devices) {
       if (d.pairing !== "paired" || typeof d.devicePubkey !== "string" || !HEX64.test(d.devicePubkey)) continue;
-      const heard = d.keysViewAt !== undefined || d.lastSeenAt !== undefined;
-      if (!heard) continue;
-      if (d.guardians && keyStanding(d.guardians, localKey).as === "working") continue;
+      const standing = d.guardians ? keyStanding(d.guardians, localKey).as : "none";
+      if (standing === "working") continue;
+      if (standing === "root") {
+        out.push(d.label);
+        continue;
+      }
+      if (d.pinnedKey !== undefined && d.pinnedKey !== localKey) continue;
       out.push(d.label);
     }
   }

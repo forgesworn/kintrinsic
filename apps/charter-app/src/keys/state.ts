@@ -29,6 +29,13 @@ export interface NextRoot extends InstallRoot {
   /** The move statement's `d` and event id. */
   moveD: string;
   moveId: string;
+  /**
+   * When the move stops being pending if not confirmed (unix s): its
+   * `issuedAt` plus 7 days. Absent on a move recorded before this field.
+   */
+  expiresAt?: number;
+  /** Set (unix s) when this install cancelled the move. */
+  cancelledAt?: number;
 }
 
 /** A statement this install sent, by its `d`: what 3b shows and cancels. */

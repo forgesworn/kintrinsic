@@ -20,7 +20,6 @@ export interface SelectSignerDeps {
     knownRoot: () => string | undefined;
     workingKey: () => Uint8Array;
     pickOps: NonNullable<RealSignerDeps["pickOps"]>;
-    pairOffer: NonNullable<RealSignerDeps["pairOffer"]>;
   };
   /** Fall back to the demo mock signer (development only). Defaults to `import.meta.env.DEV`. */
   allowMock?: boolean;
