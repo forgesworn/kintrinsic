@@ -15,6 +15,10 @@ export default defineConfig({
     },
     dedupe: ["nostr-tools"],
   },
+  // The dev server must also serve that source from outside this app.
+  server: {
+    fs: { allow: [fileURLToPath(new URL("../..", import.meta.url))] },
+  },
   plugins: [
     react(),
     VitePWA({

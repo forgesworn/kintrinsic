@@ -521,6 +521,23 @@ export function parseFarewell(json: string): StatusFarewell | null {
   return { machine: o.machine, ts: o.ts, ...(isNonNegInt(o.seq) ? { seq: o.seq } : {}), guardians };
 }
 
+/**
+ * Open a STATUS wrap once and read it as either a full STATUS or a departed
+ * key's farewell (one decryption for both; the poll pays per wrap).
+ */
+export function unwrapStatusOrFarewell(
+  wrap: NostrEvent,
+  recipientSk: Uint8Array,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): { status: DeviceStatus } | { farewell: StatusFarewell } | null {
+  const rumor = openStatusRumor(wrap, recipientSk, nowSecs);
+  if (!rumor) return null;
+  const status = parseStatus(rumor.content);
+  if (status) return status.machine === rumor.pubkey ? { status } : null;
+  const farewell = parseFarewell(rumor.content);
+  return farewell && farewell.machine === rumor.pubkey ? { farewell } : null;
+}
+
 /** Unwrap and authenticate a farewell STATUS, as `unwrapStatus` does a full one. */
 export function unwrapFarewell(
   wrap: NostrEvent,

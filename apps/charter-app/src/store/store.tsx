@@ -894,6 +894,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         }
       },
       onRootMoved: (uri) => onRootMovedRef.current(uri),
+      reconnect: async () => {
+        const cur = stateRef.current.signer;
+        if (!cur.bunkerUri || !signer.current) throw new Error("Connect My Signet first.");
+        await signer.current.connect(cur.kind === "heartwood" ? "heartwood" : "signet");
+        const connected = { ...signer.current.status(), bunkerUri: cur.bunkerUri };
+        stateRef.current = { ...stateRef.current, signer: connected };
+        dispatch({ type: "SET_SIGNER", signer: connected });
+      },
     },
     state.children,
     state.guardianKeys,

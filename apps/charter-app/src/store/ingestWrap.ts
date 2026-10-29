@@ -9,7 +9,8 @@
 
 import type { NostrEvent } from "nostr-tools";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
-import { unwrapFarewell, unwrapStatus, type DeviceStatus, type StatusFarewell } from "../wire/status";
+import { unwrapStatusOrFarewell, type DeviceStatus, type StatusFarewell } from "../wire/status";
+import { MAX_WRAP_JITTER_SECS } from "../wire/request";
 import { unwrapToWorkingKey } from "../keys/guardianKeys";
 import { CHARTER_FAMILY_ROSTER, type SignedEvent } from "../keys/sdk";
 
@@ -51,25 +52,26 @@ export type WrapIngestResult =
 export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
   // The one line that saves the battery: everything below this decrypts.
   if (ctx.handledWraps.has(w.id)) return { kind: "handled" };
-  const s = unwrapStatus(w, ctx.guardianSk);
-  if (s) {
-    ctx.ingestStatus(s);
+  const opened = unwrapStatusOrFarewell(w, ctx.guardianSk);
+  if (opened && "status" in opened) {
+    ctx.ingestStatus(opened.status);
     ctx.handledWraps.add(w.id);
     return { kind: "status" };
   }
-  if (ctx.ingestFarewell) {
-    const f = unwrapFarewell(w, ctx.guardianSk);
-    if (f) {
-      ctx.ingestFarewell(f);
-      ctx.handledWraps.add(w.id);
-      return { kind: "farewell" };
-    }
+  if (opened && ctx.ingestFarewell) {
+    // A departed key's last STATUS: never usage, only where this phone stands.
+    ctx.ingestFarewell(opened.farewell);
+    ctx.handledWraps.add(w.id);
+    return { kind: "farewell" };
   }
   const req = unwrapRequest(w, ctx.guardianSk);
-  if (!req && ctx.ingestRoster) {
-    const opened = unwrapToWorkingKey(w, ctx.guardianSk);
-    if (opened && opened.inner.kind === CHARTER_FAMILY_ROSTER) {
-      ctx.ingestRoster(opened);
+  // A roster from another guardian install, inside the same freshness window
+  // the other intakes keep.
+  const fresh = Math.abs(Math.floor(Date.now() / 1000) - w.created_at) <= MAX_WRAP_JITTER_SECS;
+  if (!req && ctx.ingestRoster && fresh) {
+    const roster = unwrapToWorkingKey(w, ctx.guardianSk);
+    if (roster && roster.inner.kind === CHARTER_FAMILY_ROSTER) {
+      ctx.ingestRoster(roster);
       ctx.handledWraps.add(w.id);
       return { kind: "roster" };
     }
