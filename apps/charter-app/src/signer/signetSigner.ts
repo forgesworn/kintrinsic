@@ -43,6 +43,23 @@ export interface SignetSignerConfig {
 }
 
 /**
+ * Open a NIP-46 session to `bunkerUri` and return the root operations it
+ * offers (used for a root move's new identity, alongside the current one).
+ */
+export async function connectBunker(bunkerUri: string, pool: SimplePool): Promise<GuardianOps> {
+  const pointer = await parseBunkerInput(bunkerUri);
+  if (!pointer) throw new Error("invalid bunker:// URI");
+  const bunker = BunkerSigner.fromBunker(generateSecretKey(), pointer, { pool });
+  await bunker.connect();
+  const pubkey = await bunker.getPublicKey();
+  return {
+    pubkey,
+    signEvent: (t: EventTemplate): Promise<NostrEvent> => bunker.signEvent(t),
+    nip44Encrypt: (recipient: string, plaintext: string): Promise<string> => bunker.nip44Encrypt(recipient, plaintext),
+  };
+}
+
+/**
  * Build a Signet-backed signer. `connect()` opens a NIP-46 session to the paired
  * bunker; `signClause()` then signs + gift-wraps + publishes via the live relay
  * pool. The guardian private key stays in Signet — only `sign_event` /
