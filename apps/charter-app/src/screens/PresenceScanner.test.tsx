@@ -40,7 +40,7 @@ describe("presence scanner", () => {
     const g = guardians({ pending: [{ d: removal, kind: "removal", takesEffectAt: 5, expiresAt: 9_999_999_999 }] });
     s = mockStore({
       children: family([device("Laptop", LAPTOP, "linux", g)]),
-      keys: { root: signetRoot(), sent: { [removal]: { id: STATEMENT, type: "removal", issuedAt: 1, key: OTHER } } },
+      keys: { root: signetRoot(), sent: { [removal]: { id: STATEMENT, type: "removal", issuedAt: 9_999_999_999 - 7 * 86400, key: OTHER } } },
     });
     store.current = s;
     scanner.onScan = null;
@@ -55,8 +55,8 @@ describe("presence scanner", () => {
   });
 
   it("explains where each kind of ward shows its code", () => {
-    expect(container.textContent).toContain("Kintrinsic → Connect → Confirm in person");
-    expect(container.textContent).toContain("About → Guardians → Guardian presence");
+    expect(container.textContent).toContain("Kintrinsic → Connect a phone → Confirm in person → Show the code to confirm");
+    expect(container.textContent).toContain("About this device → Guardians → Guardian presence");
     expect(container.textContent).toContain("guardian PIN");
   });
 

@@ -70,6 +70,10 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
             Confirm in person){wards.length > 0 ? `: ${wards.map((w) => w.device.label).join(", ")}` : ""}.
           </li>
         </ol>
+        <p className="card-sub">
+          Once they have confirmed at a device, open Kintrinsic on this phone: it shares the family (your children and
+          their devices) with their phone, so they see it too.
+        </p>
         {hasAndroid && (
           <p className="card-sub">
             A ward phone asks for the guardian PIN before it shows the code. Tell them the PIN in person, never where

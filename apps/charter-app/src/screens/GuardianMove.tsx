@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button, Card } from "../components/ui";
 import { useCharter } from "../store/store";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
-import { familyWards, moveGate, shortNpub } from "./guardiansView";
+import { familyWards, moveGate, moveNeedsFinishing, shortNpub } from "./guardiansView";
 
 /**
  * Change my identity: move this guardian's root to another My Signet or
@@ -13,7 +13,8 @@ export default function GuardianMove({ onBack, onConfirm }: { onBack: () => void
   const { state, guardianKeys } = useCharter();
   const wards = familyWards(state.children);
   const names = Object.fromEntries(wards.map((w) => [w.device.devicePubkey, w.device.label]));
-  const gate = moveGate(guardianKeys.state, guardianKeys.familyReadiness().ready);
+  const progress = guardianKeys.moveProgress();
+  const gate = moveGate(guardianKeys.state, guardianKeys.familyReadiness().ready, progress);
   const [via, setVia] = useState<"signet" | "heartwood">("signet");
   const [uri, setUri] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -34,7 +35,55 @@ export default function GuardianMove({ onBack, onConfirm }: { onBack: () => void
     }
   }
 
-  if (report || next) {
+  async function finish() {
+    setBusy(true);
+    setError(null);
+    try {
+      setReport(await guardianKeys.finishMove());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const errorLine = error && (
+    <p role="alert" className="card-sub" style={{ color: "var(--danger, #B23B30)" }}>
+      {error}
+    </p>
+  );
+
+  // Lapsed (expired or cancelled) after some devices switched: those pin the
+  // new identity and the rest the old, and nothing the old one signs reaches
+  // the switched ones. Restarting the move to the same identity finishes it.
+  if (!report && next && moveNeedsFinishing(progress)) {
+    return (
+      <Card>
+        <h2 className="card-title">Finish your identity move</h2>
+        <p className="card-sub">
+          Your move to {shortNpub(next.pubkey)} lapsed before every device switched. {progress!.moved.join(", ")}{" "}
+          {progress!.moved.length === 1 ? "already uses" : "already use"} the new identity; your other devices still use
+          the old one. Until the move is finished you can't invite, remove or leave.
+        </p>
+        <p className="card-sub">
+          Finishing sends the move again: both identities are asked to sign, then you confirm in person at the devices
+          that haven't switched, within a week. The new identity's {next.via === "heartwood" ? "Heartwood" : "My Signet"}{" "}
+          must be reachable.
+        </p>
+        {errorLine}
+        <div className="stack" style={{ marginTop: 12 }}>
+          <Button block disabled={busy} onClick={() => void finish()}>
+            {busy ? "Waiting for approval…" : "Finish the move"}
+          </Button>
+          <Button variant="ghost" block disabled={busy} onClick={onBack}>
+            Back
+          </Button>
+        </div>
+      </Card>
+    );
+  }
+
+  if (report || (next && !progress?.lapsed)) {
     return (
       <Card>
         <h2 className="card-title">Move waiting for you in person</h2>
@@ -64,6 +113,12 @@ export default function GuardianMove({ onBack, onConfirm }: { onBack: () => void
         <p className="card-sub">{gate.reason}</p>
       ) : (
         <div className="stack" style={{ marginTop: 8 }}>
+          {next && progress?.lapsed && (
+            <p className="card-sub" style={{ margin: 0 }}>
+              Your move to {shortNpub(next.pubkey)} lapsed before any device switched, so nothing changed. You can
+              start again.
+            </p>
+          )}
           <p className="card-sub" style={{ margin: 0 }}>
             Moves you to another guardian identity, for example a new My Signet or a Heartwood. Your current identity
             signs the move, the new one approves this phone, and then you confirm in person at every device. The other
@@ -115,11 +170,7 @@ export default function GuardianMove({ onBack, onConfirm }: { onBack: () => void
           )}
         </div>
       )}
-      {error && (
-        <p role="alert" className="card-sub" style={{ color: "var(--danger, #B23B30)" }}>
-          {error}
-        </p>
-      )}
+      {errorLine}
       <Button variant="ghost" block onClick={onBack} style={{ marginTop: 12 }}>
         Back
       </Button>

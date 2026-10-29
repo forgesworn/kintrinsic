@@ -13,6 +13,7 @@ import type { GuardianKeysState } from "../keys/state";
 import type { StatusGuardians } from "../keys/statusGuardians";
 import type { WardReadiness } from "../keys/versionGate";
 import { splitPendingD, type PendingType } from "../keys/sdk";
+import { PENDING_LIFETIME_SECONDS } from "../keys/guardianKeys";
 import { MIN_PIN_LENGTH } from "../keys/pin";
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -121,9 +122,18 @@ export function pendingFor(g: StatusGuardians | undefined, keys: GuardianKeysSta
   return (g?.pending ?? []).flatMap((p) => {
     const t = splitPendingD(p.d);
     if (!t) return [];
-    const sent = keys.sent[p.d];
-    const isMove = keys.nextRoot?.moveD === p.d;
-    const role: PendingRole = sent || isMove ? "mine" : t.type === "removal" && t.key === me ? "against-me" : "other";
+    // A removal of this install's root is never its own pending item: one
+    // it signed itself (leaving) applies at once. The same `d` can hold a
+    // past self-removal in `sent` and now someone else's removal of it.
+    const againstMe = t.type === "removal" && t.key === me;
+    // What this install sent under this `d` is the pending item only if it
+    // is the same type and could still be pending: a statement newer than
+    // it (another signer's, or after a rejoin) expires later than it can.
+    const own = keys.sent[p.d];
+    const sent =
+      !againstMe && own && own.type === t.type && p.expiresAt <= own.issuedAt + PENDING_LIFETIME_SECONDS + 300 ? own : undefined;
+    const isMove = !againstMe && keys.nextRoot?.moveD === p.d;
+    const role: PendingRole = againstMe ? "against-me" : sent || isMove ? "mine" : "other";
     const statement = sent?.id ?? (isMove ? keys.nextRoot?.moveId : undefined);
     return [
       {
@@ -163,13 +173,43 @@ export function removalsAgainstMe(
 /** An action and, when it can't be offered, the one line saying why. */
 export type Gate = { ok: true } | { ok: false; reason: string };
 
-/** Mirrors `leaveFamily`: every reporting device must keep another guardian. */
-export function leaveGate(wards: readonly WardRef[], me: string): Gate {
-  const reporting = wards.filter((w) => w.device.guardians);
-  if (reporting.length === 0) {
-    return { ok: false, reason: "None of your devices has reported its guardians yet, so leaving can't be checked." };
+/** Has this install read a STATUS from the device? */
+export function heardFrom(d: Device): boolean {
+  return d.keysViewAt !== undefined || d.lastSeenAt !== undefined;
+}
+
+/**
+ * A device the other guardian's roster named that has never reported to
+ * this phone: nothing shows this phone's guardian is pinned there yet.
+ */
+export function isUnconfirmed(d: Device): boolean {
+  return !!d.fromRoster && !heardFrom(d);
+}
+
+/**
+ * Mirrors `leaveFamily`: every device this phone paired or has heard from
+ * must report its guardians, and keep another guardian. A device known only
+ * from the roster and never heard from isn't counted.
+ */
+export function leaveGate(wards: readonly WardRef[], me: string, opts: { waitingForRoster?: boolean } = {}): Gate {
+  const own = wards.filter((w) => !isUnconfirmed(w.device));
+  if (own.length === 0) {
+    return {
+      ok: false,
+      reason: opts.waitingForRoster
+        ? "The other parent's phone hasn't shared the family with this one yet. Open Kintrinsic on their phone, then try again."
+        : "None of your devices has reported its guardians yet, so leaving can't be checked.",
+    };
   }
-  const alone = reporting.filter((w) => !w.device.guardians!.roots.some((r) => r.root !== me));
+  const silent = own.filter((w) => !w.device.guardians);
+  if (silent.length > 0) {
+    const names = silent.map((w) => w.device.label).join(", ");
+    return {
+      ok: false,
+      reason: `${names} ${silent.length === 1 ? "hasn't" : "haven't"} reported ${silent.length === 1 ? "its" : "their"} guardians yet, so leaving can't be checked.`,
+    };
+  }
+  const alone = own.filter((w) => !w.device.guardians!.roots.some((r) => r.root !== me));
   if (alone.length > 0) {
     return {
       ok: false,
@@ -195,15 +235,37 @@ export function removeGate(keys: GuardianKeysState): Gate {
   return { ok: true };
 }
 
-/** Mirrors `moveRoot`: only a My Signet or Heartwood identity can move. */
-export function moveGate(keys: GuardianKeysState, familyReady: boolean): Gate {
+/** What `moveProgress()` says about a move in progress. */
+export interface MoveProgress {
+  to: string;
+  lapsed: boolean;
+  expiresAt?: number;
+  /** Devices that already switched to the new identity. */
+  moved: string[];
+}
+
+/** A move that lapsed after some devices switched: only finishing it gets the family unstuck. */
+export function moveNeedsFinishing(progress: MoveProgress | null | undefined): boolean {
+  return !!progress && progress.lapsed && progress.moved.length > 0;
+}
+
+/**
+ * Mirrors `moveRoot`: only a My Signet or Heartwood identity can move, one
+ * move at a time. A lapsed move is offered again: to finish, when some
+ * devices switched, or to start afresh.
+ */
+export function moveGate(keys: GuardianKeysState, familyReady: boolean, progress?: MoveProgress | null): Gate {
   if (!keys.root) {
     return {
       ok: false,
       reason: "Your guardian identity is kept on this phone. Moving it to another identity isn't available yet.",
     };
   }
-  if (keys.nextRoot) return { ok: false, reason: "A move is already waiting to be confirmed at your devices." };
+  // A lapsed move is either finished (some devices switched) or started
+  // afresh (none did): `moveRoot` allows both.
+  if (keys.nextRoot && !progress?.lapsed) {
+    return { ok: false, reason: "A move is already waiting to be confirmed at your devices." };
+  }
   if (!familyReady) return { ok: false, reason: "Every device needs the latest Kintrinsic first." };
   return { ok: true };
 }

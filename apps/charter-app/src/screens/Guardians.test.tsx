@@ -87,7 +87,7 @@ describe("Guardians screens", () => {
     const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 9_999_999_999, expiresAt: 9_999_999_999 }] });
     const s = mockStore({
       children: family([device("Laptop", LAPTOP, "linux", g)]),
-      keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: OTHER } } },
+      keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 9_999_999_999 - 7 * 86400, key: OTHER } } },
     });
     render(s);
     expect(container.textContent).not.toContain("asked to remove you");
@@ -180,9 +180,14 @@ describe("Guardians screens", () => {
     const s = mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } });
     render(s, "join");
     await act(async () => button(container, "Connect My Signet")!.click());
-    act(() => typeInto(container.querySelector("input")!, "bunker://abc?relay=wss://one.example"));
+    const { nip19 } = await import("nostr-tools");
+    const [link, invited] = [...container.querySelectorAll("input")];
+    act(() => typeInto(link, "bunker://abc?relay=wss://one.example"));
+    // The invited identity is required here, so it is checked before anything is signed.
+    expect(button(container, "Connect")!.disabled).toBe(true);
+    act(() => typeInto(invited, nip19.npubEncode(OTHER)));
     await act(async () => button(container, "Connect")!.click());
-    expect(s.pairSignet).toHaveBeenCalledWith("bunker://abc?relay=wss://one.example", { via: "signet" });
+    expect(s.pairSignet).toHaveBeenCalledWith("bunker://abc?relay=wss://one.example", { via: "signet", expectRoot: OTHER });
   });
 
   it("joins on a connected My Signet with the invited identity as the expected root", async () => {
@@ -197,6 +202,61 @@ describe("Guardians screens", () => {
   it("after joining, shows the guardian ID and the confirm-in-person checklist", () => {
     render(mockStore({ children: [], keys: { root: signetRoot() } }), "join");
     expect(container.textContent).toContain("Now confirm in person");
-    expect(container.textContent).toContain("About → Guardians → Guardian presence");
+    expect(container.textContent).toContain("About this device → Guardians → Guardian presence");
+  });
+
+  it("a past self-removal doesn't hide someone else's removal of you (M2)", async () => {
+    const d = `kintrinsic/unguardian/${ME}`;
+    const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 9_999_999_999, expiresAt: 9_999_999_999 }] });
+    // This phone left once before: its own removal of itself is still in `sent`.
+    const s = mockStore({
+      children: family([device("Laptop", LAPTOP, "linux", g)]),
+      keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: ME } } },
+    });
+    render(s);
+    expect(container.textContent).toContain("The other parent has asked to remove you");
+    expect(button(container, "Cancel this")).toBeUndefined();
+  });
+
+  it("offers no cancel on an expired item", () => {
+    const d = `kintrinsic/unguardian/${OTHER}`;
+    const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 5, expiresAt: 10 }] });
+    render(
+      mockStore({
+        children: family([device("Laptop", LAPTOP, "linux", g)]),
+        keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: OTHER } } },
+      }),
+    );
+    expect(container.textContent).toContain("expired");
+    expect(button(container, "Cancel this")).toBeUndefined();
+  });
+
+  it("offers finishing a move that lapsed after some devices switched (M1)", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.state.nextRoot = {
+      ...signetRoot()!,
+      pubkey: OTHER,
+      bunkerUri: "bunker://next",
+      moveD: `kintrinsic/root/${OTHER}`,
+      moveId: STATEMENT,
+      cancelledAt: 5,
+    };
+    s.guardianKeys.moveProgress.mockReturnValue({ to: OTHER, lapsed: true, moved: ["Laptop"] });
+    render(s);
+    expect(button(container, "Finish my identity move")!.disabled).toBe(false);
+    render(s, "move");
+    expect(container.textContent).toContain("lapsed before every device switched");
+    await act(async () => button(container, "Finish the move")!.click());
+    expect(s.guardianKeys.finishMove).toHaveBeenCalledOnce();
+  });
+
+  it("disables confirming in person for a key kept only on this phone", () => {
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]) }));
+    expect(button(container, "Confirm in person")!.disabled).toBe(true);
+  });
+
+  it("refuses a removal route for a key no device reports", () => {
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } }), `remove/${"9".repeat(64)}`);
+    expect(container.textContent).toContain("That guardian isn't on any of your devices.");
   });
 });

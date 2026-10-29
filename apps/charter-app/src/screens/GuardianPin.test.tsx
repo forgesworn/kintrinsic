@@ -35,6 +35,12 @@ describe("guardian PIN", () => {
     act(() => typeInto(b, again));
   }
 
+  it("doesn't invite the browser to save the PIN as a password", () => {
+    for (const input of container.querySelectorAll("input")) {
+      expect(input.getAttribute("autocomplete")).toBe("off");
+    }
+  });
+
   it("says the child must not see it", () => {
     expect(container.textContent).toContain("Your child must not see it");
   });
@@ -56,7 +62,8 @@ describe("guardian PIN", () => {
   it("sends a matching PIN and reports where it went", async () => {
     enter("123456", "123456");
     await act(async () => button(container, "Set guardian PIN")!.click());
-    expect(s.guardianKeys.setGuardianPin).toHaveBeenCalledWith("123456");
+    // Only to the phones it listed (batch 3b review L4).
+    expect(s.guardianKeys.setGuardianPin).toHaveBeenCalledWith("123456", { machines: [PHONE] });
     expect(container.textContent).toContain("Sent to Robin's phone.");
     await act(async () => button(container, "Continue")!.click());
     expect(onDone).toHaveBeenCalledOnce();
