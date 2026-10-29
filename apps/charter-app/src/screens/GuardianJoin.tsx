@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { Button, Card } from "../components/ui";
+import { QRScanner } from "../components/QRScanner";
 import { useCharter } from "../store/store";
 import { parseGuardianKey } from "../keys/guardianKeys";
 import { PresenceWhere } from "./PresenceScanner";
-import { familyWards, npubOf, stripNostrPrefix } from "./guardiansView";
+import { familyWards, npubOf, shortNpub, stripNostrPrefix } from "./guardiansView";
 
 /**
  * The invited parent's side: connect My Signet (or a Heartwood through it)
- * as this phone's guardian identity, have it approve this phone once, then
- * confirm in person at each of the child's devices.
+ * as this phone's guardian identity, have it approve this phone once, scan
+ * the inviting parent's guardian code (whose family list this phone will
+ * trust), then confirm in person at each of the child's devices.
  */
 export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void; onConfirm: () => void }) {
   const { state, pairSignet, guardianKeys } = useCharter();
@@ -18,6 +20,9 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
   const [uri, setUri] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [code, setCode] = useState("");
+  const [ownSecondPhone, setOwnSecondPhone] = useState(false);
   const viaName = via === "heartwood" || signer.kind === "heartwood" ? "Heartwood" : "My Signet";
 
   /** The npub the other parent invited, if given; undefined when blank, null when unreadable. */
@@ -66,6 +71,72 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
   }
 
   const root = guardianKeys.state.root;
+  const anchors = guardianKeys.trustedRoots().filter((r) => r !== root?.pubkey && r !== guardianKeys.state.nextRoot?.pubkey);
+  if (root && anchors.length === 0 && !ownSecondPhone && familyWards(state.children).length === 0) {
+    const take = (text: string): boolean => {
+      try {
+        guardianKeys.anchorRoot(stripNostrPrefix(text));
+        setError(null);
+        setScanning(false);
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return false;
+      }
+    };
+    return (
+      <Card>
+        <h2 className="card-title">Scan the other parent's guardian code</h2>
+        <p className="card-sub">
+          This phone shares the family only with the parent who invited you. On their phone, they open Family →
+          Guardians → Show my guardian code. Scan it here, in person.
+        </p>
+        <div className="stack" style={{ marginTop: 12 }}>
+          {scanning ? (
+            <>
+              <QRScanner
+                active={scanning}
+                // A stray QR keeps the camera scanning, without an error each frame.
+                onScan={(data) => (parseGuardianKey(stripNostrPrefix(data)) ? take(data) : false)}
+              />
+              <Button variant="ghost" block onClick={() => setScanning(false)}>
+                Stop scanning
+              </Button>
+            </>
+          ) : (
+            <Button block onClick={() => setScanning(true)}>
+              Scan the other parent's guardian code
+            </Button>
+          )}
+          <label className="field">
+            <span className="field-label">Or paste their guardian code</span>
+            <input
+              className="input"
+              placeholder="npub1…"
+              value={code}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(e) => {
+                setCode(e.target.value);
+                setError(null);
+              }}
+            />
+          </label>
+          {errorLine}
+          <Button variant="secondary" block disabled={!code.trim()} onClick={() => take(code)}>
+            Use this code
+          </Button>
+          <Button variant="ghost" block onClick={() => setOwnSecondPhone(true)}>
+            This is a second phone for my own identity
+          </Button>
+          <Button variant="ghost" block onClick={onBack}>
+            Back
+          </Button>
+        </div>
+      </Card>
+    );
+  }
   if (root) {
     const roster = guardianKeys.unconfirmedRosterDevices();
     return (
@@ -79,6 +150,11 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
           Your guardian ID: <span style={{ overflowWrap: "anywhere", userSelect: "all" }}>{npubOf(root.pubkey)}</span>.
           If it isn't the one you gave the other parent, the devices won't accept you: ask them to invite this one.
         </p>
+        {anchors.length > 0 && (
+          <p className="card-sub">
+            Family list from: {anchors.map(shortNpub).join(", ")} (the guardian code you scanned).
+          </p>
+        )}
         <ol className="card-sub" style={{ paddingLeft: 20, margin: "4px 0 8px" }}>
           <li>Go to the child's device.</li>
           <li>Ask it for a presence code (below).</li>
