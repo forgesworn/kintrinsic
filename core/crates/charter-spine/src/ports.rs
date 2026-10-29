@@ -176,6 +176,11 @@ pub struct RelaysChange<'a> {
     /// The guardian PIN record it carried, if any. The port keeps it in its
     /// own `0600` state; the pairing record never holds it (review 2a, L2).
     pub pin: Option<&'a GuardianPin>,
+    /// The `paired_at` of the pairing record the change would be saved to.
+    /// A port serving another pairing refuses it: a re-pair can replace the
+    /// record while the old warden is still running (review batch 2,
+    /// platforms L5).
+    pub paired_at: u64,
 }
 
 /// What the port made of a [`RelaysChange`].

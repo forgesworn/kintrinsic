@@ -35,8 +35,8 @@ pub use broker::{Broker, LocalAudits, LocalIngestOptions, LocalIngestOutcome};
 pub use enactor::{EnactOutcome, Enactor, EnactorRegistry};
 pub use error::{BrokerError, EnactError};
 pub use guardian_keys::{
-    release_gate, scan_to_pair, GuardianKeys, MintedToken, PairDecision, PinCheck, PresenceError,
-    ReleaseRefused,
+    clean_label, release_gate, scan_to_pair, Farewell, GuardianKeys, MintedToken, PairDecision,
+    PinCheck, PresenceError, ReleaseRefused,
 };
 pub use lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
 pub use ports::{

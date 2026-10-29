@@ -1900,6 +1900,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             ts: event.created_at,
             relays: &pairing.relays,
             pin: applied.pin.as_ref(),
+            paired_at: pairing.paired_at,
         };
         match port.record_relays(&change, now) {
             RelaysRecord::Recorded | RelaysRecord::AlreadyHeld => {}

@@ -16,8 +16,8 @@ use charter_primitives::{kinds, NostrEvent, PubKey, SignerSet};
 use charter_proto::ClauseKind;
 use charter_spine::ports::NullEventSink;
 use charter_spine::{
-    Broker, CharterTransportAdapter, EnactorRegistry, GuardianKeys, GuardianStatements,
-    LocalIngestOptions, PinCheck, PresenceError,
+    clean_label, Broker, CharterTransportAdapter, EnactorRegistry, GuardianKeys,
+    GuardianStatements, LocalIngestOptions, PinCheck, PresenceError, RelaysChange, RelaysRecord,
 };
 use charter_sys::guardian_store::{GuardianStateStore, MemoryGuardianStateStore};
 use charter_sys::persistence::{ChildClauseStore, HeldSigner, MockDisk, PairingStore};
@@ -571,6 +571,77 @@ async fn a_slot_from_before_the_upgrade_keeps_its_replay_floor() {
     assert_eq!(out.result, AckResult::Applied);
 }
 
+/// A slot last written before the section, by a root that has departed
+/// before the port first judged the slot, is seeded with the departure floor
+/// (rule 4): the departed root's far-future clause can't hold it for ever
+/// (review batch 2, core L1).
+#[tokio::test]
+async fn a_slot_from_before_the_upgrade_takes_the_departure_floor_of_its_signer() {
+    let w = Ward::new();
+    // Before the upgrade the pinned root R stored a far-future clause (the
+    // ward had no 300-second refusal then): 600 minutes a day.
+    let legacy = MockSystem::over_disk(NOW, w.disk.clone());
+    legacy
+        .child_clauses()
+        .put_child_clause(
+            &SUBJECT.to_hex(),
+            ClauseKind::Budget.store_key(),
+            NOW + 1_000_000,
+            r#"{"dailyMinutes":600,"tz":"UTC"}"#,
+        )
+        .unwrap();
+    let (b, keys) = w.broker();
+    // R2 becomes a co-guardian, confirmed in person by W2.
+    approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+    let cg = statement_by(
+        ROOT_SEED,
+        format!("kintrinsic/guardian/{}", pk(ROOT2_SEED).to_hex()),
+        pk(ROOT2_SEED),
+        NOW - 50,
+        json!({}),
+    );
+    let out = b.ingest_local(&w.sealed(&cg, WORKING_SEED, 2), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    let d = keys.pending_statements(NOW)[0].d.clone();
+    let token = keys
+        .mint_presence_token(Some(&d), NOW, &mut fill(0x7e))
+        .unwrap();
+    let w2_approval = approval(ROOT2_SEED, WORKING2_SEED, NOW - 40);
+    let good = confirm(WORKING2_SEED, &token.token, &cg, Some(&w2_approval));
+    let out = b
+        .ingest_local(&w.sealed(&good, WORKING2_SEED, 4), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    // R removes itself; R2 remains.
+    let rm = statement_by(
+        ROOT_SEED,
+        format!("kintrinsic/unguardian/{}", pk(ROOT_SEED).to_hex()),
+        pk(ROOT_SEED),
+        NOW - 10,
+        json!({}),
+    );
+    let out = b.ingest_local(&w.sealed(&rm, ROOT_SEED, 5), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert!(keys.signers().is_departed(&pk(ROOT_SEED)));
+    // A replay from before the departure is still refused...
+    let out = b
+        .ingest_local(
+            &w.sealed(&clause(WORKING2_SEED, NOW - 20, 45), WORKING2_SEED, 6),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(out.result, AckResult::Superseded);
+    // ...and a clause from a current signer after it replaces R's.
+    let out = b
+        .ingest_local(
+            &w.sealed(&clause(WORKING2_SEED, NOW, 30), WORKING2_SEED, 7),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(held_minutes(&b), Some(30));
+}
+
 // ---------------------------------------------------------------------------
 // RELAYS and the guardian PIN
 // ---------------------------------------------------------------------------
@@ -710,6 +781,56 @@ async fn the_guardian_pin_backs_off_and_its_counter_survives_a_restart() {
         restarted.verify_guardian_pin(PIN, NOW + 62),
         PinCheck::Unavailable
     );
+}
+
+/// PIN entries made at once at the end of a backoff: exactly one is checked
+/// and counted, the rest wait (review batch 2, core M1).
+#[tokio::test(flavor = "multi_thread")]
+async fn pin_entries_made_at_once_pass_the_backoff_one_at_a_time() {
+    let w = Ward::new();
+    let (b, keys) = w.broker();
+    let ev = relays_event(
+        ROOT_SEED,
+        NOW,
+        json!({"machine": machine_pk(), "relays": default_relays(), "guardianPin": pin_record()}),
+    );
+    let out = b.ingest_local(&w.sealed(&ev, ROOT_SEED, 1), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    for _ in 0..5 {
+        keys.verify_guardian_pin("0000", NOW);
+    }
+    // At NOW+60 the wait is over: one try is allowed, then 120 s more.
+    const N: usize = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(N));
+    let handles: Vec<_> = (0..N)
+        .map(|i| {
+            let k = keys.clone();
+            let bar = barrier.clone();
+            std::thread::spawn(move || {
+                bar.wait();
+                k.verify_guardian_pin(&format!("{:04}", 1000 + i), NOW + 60)
+            })
+        })
+        .collect();
+    let results: Vec<PinCheck> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let checked = results
+        .iter()
+        .filter(|r| matches!(r, PinCheck::Wrong { .. }))
+        .count();
+    assert_eq!(checked, 1, "{results:?}");
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| **r
+                == PinCheck::Wait {
+                    until: NOW as i64 + 60 + 120
+                })
+            .count(),
+        N - 1,
+        "{results:?}"
+    );
+    let raw: serde_json::Value = serde_json::from_str(&w.store.raw().unwrap()).unwrap();
+    assert_eq!(raw["pinAttempts"]["failures"], 6);
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,14 +1140,18 @@ async fn a_set_with_no_recipients_sends_nothing_rather_than_fall_back() {
     assert!(w.store.load().unwrap().is_some());
 }
 
-/// A departed working key is owed one last STATUS showing its departure:
-/// `emit_status_to` with `status_recipients()` reaches it, the signer set's
-/// own recipients never do, and after `mark_status_sent` it gets nothing more.
+/// A departed working key is owed one last STATUS that shows its departure:
+/// [`GuardianKeys::farewell`] names it (the signer set's recipients never
+/// do), its body shows who the ward trusts and nothing else (no usage, no
+/// relay list), and once marked it is not owed again. A key that departs
+/// after the farewell was read stays owed (review batch 2, core L3).
 #[tokio::test]
-async fn a_departed_key_gets_one_last_status_then_nothing() {
+async fn a_departed_key_gets_one_minimal_last_status_then_nothing() {
     let w = Ward::new();
     let (b, keys) = w.broker();
     approve(&w, &b, ROOT_SEED, WORKING_SEED, 0x01).await;
+    approve(&w, &b, ROOT_SEED, WORKING2_SEED, 0x03).await;
+    assert_eq!(keys.farewell(), None, "nobody has departed");
     let out = b
         .ingest_local(
             &w.sealed(
@@ -1040,8 +1165,33 @@ async fn a_departed_key_gets_one_last_status_then_nothing() {
     assert_eq!(out.result, AckResult::Applied);
     assert!(!keys.signers().is_signer(&pk(WORKING_SEED)));
     assert!(!keys.signers().recipients().contains(&pk(WORKING_SEED)));
-    let farewell = keys.status_recipients();
-    assert!(farewell.contains(&pk(WORKING_SEED)), "owed its last STATUS");
+    let farewell = keys.farewell().expect("owed its last STATUS");
+    assert_eq!(farewell.recipients, vec![pk(WORKING_SEED)]);
+
+    let body: serde_json::Value =
+        serde_json::from_str(&farewell.to_json(&machine_pk(), NOW, Some(7))).unwrap();
+    let fields: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(fields, ["guardians", "machine", "seq", "ts", "v"]);
+    let shown: Vec<&str> = body["guardians"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    assert_eq!(shown, ["pending", "roots", "tombstones"], "no relay list");
+    assert_eq!(body["machine"], machine_pk().to_hex());
+    assert_eq!(body["seq"], 7);
+    assert_eq!(body["guardians"]["tombstones"], 1);
+    assert_eq!(
+        body["guardians"]["roots"],
+        json!([{"root": pk(ROOT_SEED).to_hex(), "keys": [pk(WORKING2_SEED).to_hex()]}]),
+        "the departure shows as the key's absence"
+    );
 
     let relay = MockRelayTransport::new();
     let mut t = CharterTransport::new(
@@ -1052,10 +1202,26 @@ async fn a_departed_key_gets_one_last_status_then_nothing() {
         vec!["wss://r".into()],
     );
     t.set_signer_set(keys.signers());
-    t.emit_status_to("{}", NOW, &farewell, &[]).await;
+    t.emit_status_to("{}", NOW, &farewell.recipients, &[]).await;
     assert_eq!(wraps_to(&relay, pk(WORKING_SEED)).await.len(), 1);
-    keys.mark_status_sent(NOW).unwrap();
-    assert!(!keys.status_recipients().contains(&pk(WORKING_SEED)));
+
+    // W2 departs while the farewell to W1 is out: marking W1 leaves W2 owed.
+    let out = b
+        .ingest_local(
+            &w.sealed(
+                &withdrawal(ROOT_SEED, WORKING2_SEED, NOW - 300),
+                ROOT_SEED,
+                0x04,
+            ),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    keys.mark_status_sent(&farewell.recipients, NOW).unwrap();
+    let next = keys.farewell().expect("W2 is still owed its own");
+    assert_eq!(next.recipients, vec![pk(WORKING2_SEED)]);
+    keys.mark_status_sent(&next.recipients, NOW).unwrap();
+    assert_eq!(keys.farewell(), None);
     // Nobody to send to: nothing is built, nothing is published.
     let none = t.emit_status_to("{}", NOW, &[], &[]).await;
     assert!(matches!(
@@ -1099,6 +1265,86 @@ async fn the_live_adapter_follows_a_changed_pairing_record() {
         keys.status_guardians(NOW).unwrap().relays,
         vec!["wss://new.example".to_string()]
     );
+}
+
+/// A document is matched to its pairing by `pairedAt` and the pinned
+/// guardian. An earlier pairing's is replaced by a migration; one with the
+/// same `pairedAt` and another guardian, or a newer one, fails closed and is
+/// left on disk (review batch 2, core L4).
+#[test]
+fn a_document_from_another_pairing_fails_closed_unless_it_is_older() {
+    let w = Ward::new();
+    let keys = w.keys();
+    assert!(keys.is_available());
+    let doc = w.store.raw().unwrap();
+
+    let mut other_guardian = pairing();
+    other_guardian.guardian_pubkey = pk(STRANGER_SEED);
+    let k = GuardianKeys::load(Arc::new(w.store.clone()), &other_guardian, NOW);
+    assert!(!k.is_available(), "same pairedAt, another guardian");
+    assert_eq!(w.store.raw().unwrap(), doc, "left on disk");
+
+    let mut older_record = pairing();
+    older_record.paired_at -= 1;
+    let k = GuardianKeys::load(Arc::new(w.store.clone()), &older_record, NOW);
+    assert!(!k.is_available(), "a document newer than the record");
+    assert_eq!(w.store.raw().unwrap(), doc, "left on disk");
+
+    let mut newer_record = other_guardian.clone();
+    newer_record.paired_at += 1;
+    let k = GuardianKeys::load(Arc::new(w.store.clone()), &newer_record, NOW);
+    assert!(k.is_available(), "a re-pair replaced the earlier pairing");
+    assert_eq!(k.signers().roots(), vec![pk(STRANGER_SEED)]);
+
+    // A document written before the guardian was recorded matches on
+    // `pairedAt` alone.
+    let mut legacy: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    legacy.as_object_mut().unwrap().remove("pairedGuardian");
+    w.store.set_raw(Some(legacy.to_string()));
+    assert!(w.keys().is_available());
+}
+
+/// A relay change bound for a pairing record the adapter does not serve (a
+/// re-pair replaced it while the warden runs) is refused (review batch 2,
+/// platforms L5).
+#[test]
+fn a_relays_change_for_another_pairing_record_is_refused() {
+    let w = Ward::new();
+    let keys = w.keys();
+    let relays = vec!["wss://new.example".to_string()];
+    let change = |paired_at| RelaysChange {
+        author: pk(ROOT_SEED),
+        seal_author: pk(ROOT_SEED),
+        ts: NOW,
+        relays: &relays,
+        pin: None,
+        paired_at,
+    };
+    assert_eq!(
+        keys.record_relays(&change(PAIRED_AT + 1), NOW),
+        RelaysRecord::Refused
+    );
+    assert_eq!(
+        keys.record_relays(&change(PAIRED_AT), NOW),
+        RelaysRecord::Recorded
+    );
+}
+
+/// A label is shown beside its root's npub: it can't carry a line of its
+/// own, a bidi override or an invisible mark (review batch 2, platforms L7).
+#[test]
+fn a_label_is_cleaned_before_it_is_shown() {
+    assert_eq!(clean_label("  Mum  "), "Mum");
+    assert_eq!(
+        clean_label("Mum (npub1abc)\n1 Kintrinsic app linked\u{2028}x"),
+        "Mum (npub1abc)1 Kintrinsic app linkedx"
+    );
+    assert_eq!(clean_label("\u{202E}muM\u{2066}\u{200B}\u{FEFF}"), "muM");
+    let long = "\u{e9}".repeat(40);
+    let cut = clean_label(&long);
+    assert_eq!(cut.len(), 64);
+    assert!(cut.chars().all(|c| c == '\u{e9}'));
+    assert_eq!(clean_label("\u{202E}\n"), "");
 }
 
 /// `peek` reads the state another process writes and never writes it.

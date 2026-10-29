@@ -1516,6 +1516,17 @@ pub fn mark_status_sent(state: &GuardianState, now: i64) -> Step {
     })
 }
 
+/// The ward's last STATUS reached `sent`: only those departed keys have had
+/// it. A key that departed after the STATUS was built stays owed (review
+/// batch 2, core L3). Ward-side only: the golden vectors and the TS oracle
+/// know [`mark_status_sent`], which forgets every farewell.
+pub fn mark_status_sent_to(state: &GuardianState, sent: &[String], now: i64) -> Step {
+    step(state, now, |s| {
+        s.farewell.retain(|k| !sent.contains(k));
+        accept(Reason::StatusSent)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Scan-to-pair with a working key
 // ---------------------------------------------------------------------------

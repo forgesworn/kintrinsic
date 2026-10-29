@@ -597,11 +597,11 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
 
     /// A STATUS to an explicit recipient list, on this transport's relays and
     /// `extra_relay_lists` (rule 11), one wrap per recipient, each offered to
-    /// the local sink. For the guardian-keys STATUS, whose recipients are the
-    /// signer set's plus the departed keys owed one last STATUS showing their
-    /// departure (`GuardianKeys::status_recipients`), which the set itself
-    /// never reports. With no recipients nothing is sent (a `Failed` outcome,
-    /// as for a wrap that could not be built).
+    /// the local sink. For the guardian-keys STATUS: the signer set's
+    /// recipients, and separately each departed key owed its last STATUS
+    /// (`GuardianKeys::farewell`), which the set itself never reports. With
+    /// no recipients nothing is sent (a `Failed` outcome, as for a wrap that
+    /// could not be built).
     pub async fn emit_status_to(
         &self,
         status_json: &str,
