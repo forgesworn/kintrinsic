@@ -54,6 +54,14 @@ impl SignerSet for NoSigners {
     }
 }
 
+/// Remove the guardian-keys state under `base` before a new pairing is
+/// written: every re-pair path starts from nothing (review batch 2, core L4).
+pub(super) fn clear_guardian_state(base: &std::path::Path) -> Result<(), String> {
+    FileGuardianStateStore::in_dir(base)
+        .clear()
+        .map_err(|e| format!("clear the earlier guardian keys: {e:?}"))
+}
+
 impl Warden {
     /// (Re)load the guardian-keys port for the current pairing from the
     /// Device Owner's private base dir. A ward paired before the section (or
@@ -372,7 +380,9 @@ fn pin_wait(failures: u64, last_failure_at: i64, now: u64) -> i64 {
     (next - now as i64).max(0)
 }
 
-/// The label a stored statement with `d` carried, if any.
+/// The label a stored statement with `d` carried, if any, made safe to
+/// show: no newline, control or bidi character can fake a line or an npub
+/// beside it (review batch 2, platforms L7).
 fn statement_label(raw: Option<&Value>, d: &str) -> Option<String> {
     raw?.get("state")?
         .get("statements")?
@@ -380,7 +390,8 @@ fn statement_label(raw: Option<&Value>, d: &str) -> Option<String> {
         .iter()
         .find(|s| s.get("d").and_then(Value::as_str) == Some(d))
         .and_then(|s| s.get("label").and_then(Value::as_str))
-        .map(str::to_owned)
+        .map(charter_spine::clean_label)
+        .filter(|l| !l.is_empty())
 }
 
 /// A PIN check's answer for Kotlin: `{ok, failures, waitSeconds}` plus
@@ -493,23 +504,29 @@ pub fn mint_presence_json(
     let Some(keys) = keys else {
         return json!({"error": "unavailable"}).to_string();
     };
+    // The ward's screen only ever offers a code for one pending statement:
+    // an open ("any statement") token is never minted here (review batch 2,
+    // platforms I1).
+    let Some(d) = d.filter(|d| !d.is_empty()) else {
+        return json!({"error": "notPending"}).to_string();
+    };
+    // The statement id the code carries, read before the mint, so a code is
+    // never shown without it (review batch 2, platforms I4); the mint itself
+    // refuses a statement that has gone since.
+    let Some(statement) = keys
+        .pending_statements(now)
+        .into_iter()
+        .find(|p| p.d == d && p.confirmed_at.is_none())
+        .map(|p| p.statement)
+    else {
+        return json!({"error": "notPending"}).to_string();
+    };
     let mut fill = |buf: &mut [u8]| {
         getrandom::getrandom(buf).expect("OS entropy unavailable: refusing a predictable token")
     };
-    match keys.mint_presence_token_with_pin(pin, d, now, &mut fill) {
+    match keys.mint_presence_token_with_pin(pin, Some(d), now, &mut fill) {
         Ok(t) => {
-            let statement = t.bound_to.as_deref().and_then(|d| {
-                keys.pending_statements(now)
-                    .into_iter()
-                    .find(|p| p.d == d)
-                    .map(|p| p.statement)
-            });
-            let code = presence_code(
-                machine,
-                &t.token,
-                t.bound_to.as_deref(),
-                statement.as_deref(),
-            );
+            let code = presence_code(machine, &t.token, Some(d), Some(&statement));
             json!({
                 "code": code,
                 "shortForm": short_form(&t.token),
@@ -984,6 +1001,106 @@ mod tests {
         assert!(w.guardian.is_some());
     }
 
+    /// A withdrawn working key gets one last STATUS of its own that shows
+    /// only who the ward trusts (no usage, no relay list), and a STATUS
+    /// parked for it while offline is dropped, never sent (review batch 2,
+    /// core L3, platforms L2 and L4).
+    #[test]
+    fn a_departed_key_gets_a_minimal_last_status_and_nothing_parked_for_it() {
+        let ward = Ward::new("farewell");
+        ward.approve_w1();
+        assert_eq!(
+            ward.deliver(&ward.approval(ROOT, W2), W2, 2),
+            AckResult::Applied
+        );
+        // Offline: a STATUS was parked for each working key.
+        let parked = |to: u8, salt: u8| {
+            let r = WrapRandomness {
+                ephemeral_secret: secret(salt | 0x40),
+                seal_nonce: [salt; 32],
+                wrap_nonce: [salt.wrapping_add(1); 32],
+                seal_created_at: ward.now,
+                wrap_created_at: ward.now,
+            };
+            let rumor = Rumor::from_signed_event(&ward.clause(ROOT, ward.now, 1));
+            nip59::wrap(&rumor, &secret(STRANGER), pk(to).as_bytes(), &r).unwrap()
+        };
+        let outbox = crate::outbox::Outbox::new(&ward.base);
+        let subject = ward.subject().to_hex();
+        outbox.put_status_for(
+            &subject,
+            Some(&pk(W1).to_hex()),
+            &parked(W1, 0x21),
+            ward.now,
+        );
+        outbox.put_status_for(
+            &subject,
+            Some(&pk(W2).to_hex()),
+            &parked(W2, 0x22),
+            ward.now,
+        );
+        // Then W2 is withdrawn.
+        let withdrawal = ward.statement(
+            ROOT,
+            format!("kintrinsic/revoke/{}", pk(W2).to_hex()),
+            pk(W2),
+            ward.now - 30,
+            json!({}),
+        );
+        assert_eq!(ward.deliver(&withdrawal, ROOT, 3), AckResult::Applied);
+
+        let Ward { w, mock, now, .. } = ward;
+        let lock = std::sync::Mutex::new(Some(w));
+        let r = super::super::poll_once_locked(&lock, now);
+        assert!(r.status_emitted, "{}", r.reason);
+        let wraps = relay_wraps(&mock);
+        let to = |k: u8| -> Vec<&NostrEvent> {
+            wraps
+                .iter()
+                .filter(|e| wrap_p(e) == Some(pk(k).to_hex()))
+                .collect()
+        };
+        assert_eq!(to(W1).len(), 2, "the parked STATUS and this round's");
+        let farewell = to(W2);
+        assert_eq!(farewell.len(), 1, "only its last STATUS, nothing parked");
+        let (rumor, _) =
+            nip59::unwrap_with_author(farewell[0], &secret(W2), now, nip59::MAX_JITTER_SECS)
+                .unwrap();
+        assert_eq!(rumor.kind, kinds::CHARTER_DEVICE_STATUS);
+        let body: Value = serde_json::from_str(&rumor.content).unwrap();
+        let fields: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(fields, ["guardians", "machine", "seq", "ts", "v"]);
+        assert!(body["guardians"].get("relays").is_none());
+        assert_eq!(body["guardians"]["tombstones"], 1);
+        // Told: nothing more is owed, and the spool is empty.
+        let g = lock.lock().unwrap();
+        let w = g.as_ref().unwrap();
+        assert_eq!(w.guardian_keys.as_ref().unwrap().farewell(), None);
+        assert!(crate::outbox::Outbox::new(&w.base).is_empty());
+    }
+
+    /// Setting the same pairing again changes nothing: the guardian-keys
+    /// state is not re-migrated (review batch 2, platforms L3).
+    #[test]
+    fn setting_the_same_pairing_again_keeps_the_guardian_keys() {
+        let mut ward = Ward::new("setpairing");
+        ward.approve_w1();
+        let subject = ward.subject().to_hex();
+        ward.w.set_pairing(&pk(ROOT).to_hex(), &subject).unwrap();
+        let keys = ward.w.guardian_keys.as_ref().unwrap();
+        assert!(keys.signers().is_signer(&pk(W1)), "W1 is still bound");
+        assert!(ward
+            .w
+            .set_pairing(&pk(ROOT).to_hex(), &pk(STRANGER).to_hex())
+            .is_err());
+        assert!(ward.w.set_pairing(&pk(ROOT2).to_hex(), &subject).is_err());
+    }
+
     #[test]
     fn a_release_from_the_one_root_unpairs_but_a_forged_seal_does_not() {
         let mut ward = Ward::new("release");
@@ -1057,46 +1174,38 @@ mod tests {
     fn no_presence_token_without_the_right_pin() {
         let ward = Ward::new("mint");
         let (keys, machine) = ward.handle();
-        let v = parse(&mint_presence_json(
-            Some(&keys),
-            &machine,
-            None,
-            PIN,
-            ward.now,
-        ));
+        ward.approve_w1();
+        let cg = ward.statement(
+            ROOT,
+            format!("kintrinsic/guardian/{}", pk(ROOT2).to_hex()),
+            pk(ROOT2),
+            ward.now - 50,
+            json!({}),
+        );
+        assert_eq!(ward.deliver(&cg, W1, 2), AckResult::Applied);
+        let d = keys.pending_statements(ward.now)[0].d.clone();
+        let mint = |d: Option<&str>, pin: &str| {
+            parse(&mint_presence_json(Some(&keys), &machine, d, pin, ward.now))
+        };
+        let v = mint(Some(&d), PIN);
         assert_eq!(v["error"], "noPin");
         assert!(v.get("code").is_none());
         ward.set_pin();
-        let v = parse(&mint_presence_json(
-            Some(&keys),
-            &machine,
-            None,
-            "654321",
-            ward.now,
-        ));
+        let v = mint(Some(&d), "654321");
         assert_eq!(v["error"], "wrongPin");
         assert_eq!(v["failures"], 1);
         assert!(v.get("code").is_none());
         // The right PIN for something that is not pending: no token.
-        let v = parse(&mint_presence_json(
-            Some(&keys),
-            &machine,
-            Some("kintrinsic/guardian/00"),
-            PIN,
-            ward.now,
-        ));
+        let v = mint(Some("kintrinsic/guardian/00"), PIN);
         assert_eq!(v["error"], "notPending");
+        // No statement named: never an open token (review batch 2, I1).
+        assert_eq!(mint(None, PIN)["error"], "notPending");
+        assert_eq!(mint(Some(""), PIN)["error"], "notPending");
         // Backing off: even the right PIN is not checked.
         for _ in 0..5 {
             let _ = pin_check_json(Some(&keys), "000000", ward.now);
         }
-        let v = parse(&mint_presence_json(
-            Some(&keys),
-            &machine,
-            None,
-            PIN,
-            ward.now,
-        ));
+        let v = mint(Some(&d), PIN);
         assert_eq!(v["error"], "wait");
         assert!(v.get("code").is_none());
     }
