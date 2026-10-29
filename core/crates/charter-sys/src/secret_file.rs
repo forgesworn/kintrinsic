@@ -10,18 +10,58 @@ use std::path::{Path, PathBuf};
 
 /// Write `body` to `path` via a fresh `0600` temp file and a rename. The mode
 /// is set AT OPEN on a file this call created: a write-then-chmod would leave
-/// the file readable under a 022 umask for the length of the write. A
-/// leftover temp file is removed first so `create_new` never inherits an old
-/// file's mode or an open reader. The temp file is fsynced before the rename.
+/// the file readable under a 022 umask for the length of the write. The
+/// temp file is unique to this call (process id and a counter), so two
+/// writers never rename each other's half-written file into place (review
+/// batch 2, core Info 8); a leftover of the same name is removed first so
+/// `create_new` never inherits an old file's mode or an open reader. The temp
+/// file is fsynced before the rename, and the directory after it, so the
+/// rename itself survives a power cut (review batch 2, core L2: a PIN counter
+/// or an applied departure must not roll back on a hard reset).
 pub fn write_secret(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = sibling(path, ".tmp");
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = sibling(path, &format!(".{}.{n}.tmp", std::process::id()));
     match std::fs::remove_file(&tmp) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
+    let written = write_tmp(&tmp, body).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // The new file is in place: a failed directory sync only weakens its
+    // durability, and reporting the write as failed would leave the caller's
+    // memory behind what is on disk.
+    if let Err(e) = sync_parent(path) {
+        eprintln!(
+            "charter: could not sync {} after a write ({e})",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Make a rename in `path`'s directory durable (Unix: fsync the directory).
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn write_tmp(tmp: &Path, body: &[u8]) -> std::io::Result<()> {
     {
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -30,7 +70,7 @@ pub fn write_secret(path: &Path, body: &[u8]) -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&tmp)?;
+        let mut f = opts.open(tmp)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -39,7 +79,7 @@ pub fn write_secret(path: &Path, body: &[u8]) -> std::io::Result<()> {
         f.write_all(body)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path)
+    Ok(())
 }
 
 /// Read `path` to a string; a missing file is `None`, any other failure an
