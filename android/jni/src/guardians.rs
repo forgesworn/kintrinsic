@@ -425,12 +425,28 @@ fn pct(s: &str) -> String {
 }
 
 /// The presence code (open question "Presence code encoding"), mirroring the
-/// scan-to-pair invite: `charter://presence?m=<machine>&t=<token>&d=<d>`.
-pub fn presence_code(machine: &PubKey, token: &str, d: Option<&str>) -> String {
+/// scan-to-pair invite:
+/// `charter://presence?m=<machine>&t=<token>&d=<d>&s=<statement id>`.
+///
+/// `s` is the pending statement's event id. The confirming install (often
+/// the new parent's) never saw the statement, and the kind 31121 confirmation
+/// content must name it (`statement: <event id>`), so the code carries it.
+/// Only a 64-hex id is written; a token for "any" has no statement.
+pub fn presence_code(
+    machine: &PubKey,
+    token: &str,
+    d: Option<&str>,
+    statement: Option<&str>,
+) -> String {
     let mut code = format!("charter://presence?m={}&t={token}", machine.to_hex());
     if let Some(d) = d {
         code.push_str("&d=");
         code.push_str(&pct(d));
+    }
+    if let Some(s) = statement.filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        code.push_str("&s=");
+        code.push_str(&s.to_ascii_lowercase());
     }
     code
 }
@@ -482,7 +498,18 @@ pub fn mint_presence_json(
     };
     match keys.mint_presence_token_with_pin(pin, d, now, &mut fill) {
         Ok(t) => {
-            let code = presence_code(machine, &t.token, t.bound_to.as_deref());
+            let statement = t.bound_to.as_deref().and_then(|d| {
+                keys.pending_statements(now)
+                    .into_iter()
+                    .find(|p| p.d == d)
+                    .map(|p| p.statement)
+            });
+            let code = presence_code(
+                machine,
+                &t.token,
+                t.bound_to.as_deref(),
+                statement.as_deref(),
+            );
             json!({
                 "code": code,
                 "shortForm": short_form(&t.token),
@@ -789,8 +816,10 @@ mod tests {
         ));
         let code = minted["code"].as_str().expect("a code").to_owned();
         assert!(code.starts_with(&format!("charter://presence?m={}&t=", machine.to_hex())));
+        let statement = keys.pending_statements(ward.now)[0].statement.clone();
+        assert_eq!(statement.len(), 64);
         assert!(code.ends_with(&format!(
-            "&d=kintrinsic%2Fguardian%2F{}",
+            "&d=kintrinsic%2Fguardian%2F{}&s={statement}",
             pk(ROOT2).to_hex()
         )));
         assert_eq!(minted["expiresAt"], ward.now + 600);
@@ -1170,12 +1199,27 @@ mod tests {
     fn the_presence_code_and_short_form() {
         let m = pk(0x22);
         assert_eq!(
-            presence_code(&m, &"ab".repeat(16), Some("kintrinsic/move/x y")),
+            presence_code(
+                &m,
+                &"ab".repeat(16),
+                Some("kintrinsic/move/x y"),
+                Some(&"CD".repeat(32))
+            ),
             format!(
-                "charter://presence?m={}&t={}&d=kintrinsic%2Fmove%2Fx%20y",
+                "charter://presence?m={}&t={}&d=kintrinsic%2Fmove%2Fx%20y&s={}",
                 m.to_hex(),
-                "ab".repeat(16)
+                "ab".repeat(16),
+                "cd".repeat(32)
             )
+        );
+        // No statement (a token for any), or not a 64-hex id: no `s`.
+        assert_eq!(
+            presence_code(&m, "tok", None, None),
+            format!("charter://presence?m={}&t=tok", m.to_hex())
+        );
+        assert_eq!(
+            presence_code(&m, "tok", Some("d"), Some("not-hex")),
+            format!("charter://presence?m={}&t=tok&d=d", m.to_hex())
         );
         assert_eq!(
             short_form("0123456789abcdef0123456789abcdef"),
