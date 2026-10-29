@@ -230,6 +230,19 @@ describe("Guardians screens", () => {
     expect(container.textContent).toContain("Now confirm in person");
   });
 
+  it("says when the other parent's family list stopped because they changed identity", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.movedAwayRoots = vi.fn(() => [OTHER]);
+    render(s);
+    expect(container.textContent).toContain("The family list from npub1");
+    expect(container.textContent).toContain("If the other parent changed identity, scan their new guardian code.");
+    await act(async () => button(container, "Scan their new guardian code")!.click());
+    expect(window.location.hash).toContain("anchor");
+    render(s, "anchor");
+    expect(button(container, "Scan the other parent's guardian code")).toBeDefined();
+    expect(button(container, "Use this code")).toBeDefined();
+  });
+
   it("shows a ward confirmed in person as waiting for the anchored parent's family list", () => {
     const s = mockStore({
       children: [],

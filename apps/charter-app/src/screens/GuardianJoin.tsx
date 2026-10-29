@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, Card } from "../components/ui";
-import { QRScanner } from "../components/QRScanner";
+import { AnchorScanFields } from "./AnchorScan";
 import { useCharter } from "../store/store";
 import { parseGuardianKey } from "../keys/guardianKeys";
 import { PresenceWhere } from "./PresenceScanner";
@@ -20,8 +20,6 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
   const [uri, setUri] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [scanning, setScanning] = useState(false);
-  const [code, setCode] = useState("");
   const [ownSecondPhone, setOwnSecondPhone] = useState(false);
   const viaName = via === "heartwood" || signer.kind === "heartwood" ? "Heartwood" : "My Signet";
 
@@ -73,17 +71,6 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
   const root = guardianKeys.state.root;
   const anchors = guardianKeys.trustedRoots().filter((r) => r !== root?.pubkey && r !== guardianKeys.state.nextRoot?.pubkey);
   if (root && anchors.length === 0 && !ownSecondPhone && familyWards(state.children).length === 0) {
-    const take = (text: string): boolean => {
-      try {
-        guardianKeys.anchorRoot(stripNostrPrefix(text));
-        setError(null);
-        setScanning(false);
-        return true;
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return false;
-      }
-    };
     return (
       <Card>
         <h2 className="card-title">Scan the other parent's guardian code</h2>
@@ -92,41 +79,7 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
           Guardians → Show my guardian code. Scan it here, in person.
         </p>
         <div className="stack" style={{ marginTop: 12 }}>
-          {scanning ? (
-            <>
-              <QRScanner
-                active={scanning}
-                // A stray QR keeps the camera scanning, without an error each frame.
-                onScan={(data) => (parseGuardianKey(stripNostrPrefix(data)) ? take(data) : false)}
-              />
-              <Button variant="ghost" block onClick={() => setScanning(false)}>
-                Stop scanning
-              </Button>
-            </>
-          ) : (
-            <Button block onClick={() => setScanning(true)}>
-              Scan the other parent's guardian code
-            </Button>
-          )}
-          <label className="field">
-            <span className="field-label">Or paste their guardian code</span>
-            <input
-              className="input"
-              placeholder="npub1…"
-              value={code}
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              onChange={(e) => {
-                setCode(e.target.value);
-                setError(null);
-              }}
-            />
-          </label>
-          {errorLine}
-          <Button variant="secondary" block disabled={!code.trim()} onClick={() => take(code)}>
-            Use this code
-          </Button>
+          <AnchorScanFields />
           <Button variant="ghost" block onClick={() => setOwnSecondPhone(true)}>
             This is a second phone for my own identity
           </Button>
