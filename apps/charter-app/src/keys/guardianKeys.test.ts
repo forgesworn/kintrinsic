@@ -603,8 +603,7 @@ describe("root move", () => {
     });
 
     it("a lapsed move with a ward already on R2 keeps R2, so that ward isn't stranded; restarting it finishes", async () => {
-      h.setNow(T + 1001); // past the laptop's pending expiresAt
-      child.devices[1].guardians = { ...child.devices[1].guardians!, pending: [] };
+      h.setNow(T + 1000); // the laptop's pending move has reached its expiresAt
       expect(h.gk.settleRootMove()).toBeNull();
       expect(h.keys().nextRoot?.pubkey).toBe(R2);
       expect(h.gk.keyFor(PHONE)).toBe("working");
