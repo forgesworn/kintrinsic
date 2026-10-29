@@ -50,19 +50,11 @@ import {
 } from "../domain/namedTimes";
 import { NamedTimesSection } from "./NamedTimes";
 import { humanLabelFor, isCmdlineIdentity } from "../domain/launchSignatures";
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
-import {
-  Banner,
-  Button,
-  Card,
-  EmptyState,
-  Pill,
-  SectionLabel,
-} from "../components/ui";
-import { Section, SectionList, SubTabs } from "../components/Section";
-import { WardHeading, WardTabs } from "../components/wards";
-import { useWardRoute } from "../domain/wardRoute";
-import { freshestStatusFor, liveStatusFor, useCharter } from "../store/store";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Banner, Button, Card, Pill, SectionLabel } from "../components/ui";
+import { RuleSaveBar, useLeaveGuard } from "../components/RuleSaveBar";
+import { wardPath } from "../domain/wardRoute";
+import { useCharter } from "../store/store";
 import { queuedSaveWarning } from "../store/clauseDelivery";
 import {
   applyToEveryDay,
@@ -138,7 +130,7 @@ export function buildSchedule(src?: Schedule): Schedule {
 }
 
 /** Normalize a saved Budget into a stable draft shape. */
-function buildBudget(src?: Budget): Budget {
+export function buildBudget(src?: Budget): Budget {
   return {
     tz: src?.tz ?? LOCAL_TZ,
     dailyMinutes: src?.dailyMinutes ?? null,
@@ -195,7 +187,7 @@ export function fromDormant(s: Schedule): Schedule {
   return { ...s, weekly, paused: false };
 }
 
-function scheduleSummary(s: Schedule, authored = true): string {
+export function scheduleSummary(s: Schedule, authored = true): string {
   // Never claim a posture over a ward whose schedule was never signed. "Off"
   // there would be the guardian's screen asserting a device is held when
   // nothing is holding it — the one failure this whole card exists to avoid.
@@ -230,13 +222,13 @@ function scheduleWindowError(s: Schedule): string | null {
   return null;
 }
 
-function budgetSummary(b: Budget): string {
+export function budgetSummary(b: Budget): string {
   if (b.paused || b.dailyMinutes == null) return "No daily limit";
   return `${fmtDuration(b.dailyMinutes)} a day`;
 }
 
 /** Normalize a saved WebPolicy into a stable draft shape (filtering off by default). */
-function buildWeb(src?: WebPolicy): WebPolicy {
+export function buildWeb(src?: WebPolicy): WebPolicy {
   return {
     enabled: src?.enabled ?? false,
     posture: src?.posture ?? "blocklist",
@@ -248,7 +240,7 @@ function buildWeb(src?: WebPolicy): WebPolicy {
   };
 }
 
-function webSummary(w: WebPolicy): string {
+export function webSummary(w: WebPolicy): string {
   if (!w.enabled) return "Web filtering off — all sites allowed";
   const bits: string[] = [w.posture === "allowlist" ? "Only allowed sites" : "All but blocked"];
   if (w.block.length) bits.push(`${w.block.length} blocked`);
@@ -301,14 +293,14 @@ export function lifelineNumberError(l: Lifeline): string | null {
 }
 
 /** Normalize a saved Tethering posture into a stable draft (blocked by default). */
-function buildTethering(src?: Tethering): Tethering {
+export function buildTethering(src?: Tethering): Tethering {
   return {
     allow: src?.allow ?? "none",
     ...(src?.until != null ? { until: src.until } : {}),
   };
 }
 
-function tetheringSummary(t: Tethering): string {
+export function tetheringSummary(t: Tethering): string {
   // "allowed", not "on": the clause is permission — the child turns the hotspot
   // on at their end when they need it (and it switches itself off after that).
   switch (t.allow) {
@@ -456,10 +448,6 @@ export function lifelineSummary(l: Lifeline): string {
 // How the nine controls are grouped
 // ---------------------------------------------------------------------------
 
-/** The second level of tabs. Was one flat run of nine always-open editors —
- *  about 2,000px of controls with Save at the very bottom. */
-export type SectionTab = "time" | "content" | "safety";
-
 export type SectionId =
   | "schedule"
   | "budget"
@@ -482,34 +470,6 @@ export const SECTION_TITLE: Record<SectionId, string> = {
   lifeline: "Lifeline",
   tethering: "Hotspot",
 };
-
-export const SECTION_TAB_OF: Record<SectionId, SectionTab> = {
-  schedule: "time",
-  budget: "time",
-  "named-times": "time",
-  listening: "time",
-  web: "content",
-  apps: "content",
-  "always-available": "content",
-  lifeline: "safety",
-  tethering: "safety",
-};
-
-export const SECTION_TABS: { id: SectionTab; label: string }[] = [
-  { id: "time", label: "Time" },
-  { id: "content", label: "Apps & web" },
-  { id: "safety", label: "Safety" },
-];
-
-/** Which tab a section lives on — so the save bar can send you to an unsaved
- *  change that is sitting on a tab you can't currently see. */
-export function tabOfSection(id: string): SectionTab {
-  return SECTION_TAB_OF[id as SectionId] ?? "time";
-}
-
-export function titleOfSection(id: string): string {
-  return SECTION_TITLE[id as SectionId] ?? id;
-}
 
 // ---------------------------------------------------------------------------
 // Tiny presentational controls (inline-styled so we touch no shared CSS)
@@ -2689,28 +2649,46 @@ function Split<V>({
   );
 }
 
-function DeviceLimits({
+/**
+ * True until the calling page unmounts. A save outlives the tap that started
+ * it (the signing sheet and the network are slow), and by the time it lands the
+ * guardian may have left: then the editor must not navigate again.
+ */
+function useMountedRef() {
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return mounted;
+}
+
+/**
+ * One rule of a child's charter, as a page: the draft state, validation, per-
+ * device split and signing for the whole device policy, rendering only the one
+ * section named by `only` (expanded, nothing else on the page) with a Cancel /
+ * Save bar pinned to the bottom. Every control is still drafted here, so a save
+ * is the same `savePolicy` call it always was; only the section on screen
+ * differs.
+ */
+export function DeviceLimits({
   child,
   policy,
-  section,
-  onDirty,
-  openSection,
-  onOpenSection,
+  only,
+  onDone,
 }: {
   child: Child;
   policy: Policy;
-  /** Which second-level tab is showing. Owned by the screen, because the
-   *  Content tab also carries the per-app policy cards, which live out here. */
-  section: SectionTab;
-  /** Comma-joined ids of the sections with unsaved changes, reported upward so
-   *  the tab strip can dot a tab you cannot currently see. */
-  onDirty: (key: string) => void;
-  /** The one open row, or null. Lifted so the save bar can open the row holding
-   *  an unsaved change. */
-  openSection: string | null;
-  onOpenSection: (id: string | null) => void;
+  /** The one section this page edits. */
+  only: SectionId;
+  /** Leave the page: back to the child's Rules. Called after a save with
+   *  nothing left to warn about, and on Cancel. */
+  onDone: () => void;
 }) {
-  const { savePolicy, state, deviceStatus } = useCharter();
+  const { savePolicy, addAppLimit, state, deviceStatus } = useCharter();
+  const mounted = useMountedRef();
   // Limits the ward's own machine is enforcing that were set ON the machine.
   // Without this the screen shows "not selected" while the device enforces two
   // hours, and gives no warning that saving here discards them wholesale.
@@ -3087,15 +3065,15 @@ function DeviceLimits({
 
   // --- app holds ---------------------------------------------------------
   //
-  // A hold counts down on screen, so the clock has to move — but only while the
-  // Apps section is actually open, and only while the tab is visible.
+  // A hold counts down on screen, so the clock has to move — but only on the
+  // Apps page, and only while the tab is visible.
   //
   // Gating this on "…and a hold is live" was wrong and worth remembering why: a
   // screen left open for an hour with nothing counting would hold a clock an
   // hour stale, and the first hold set from it would resolve to an instant in
   // the PAST — pruned on the way to the wire, so the guardian's press would
   // silently do nothing. A clock read only when it is right is not a clock.
-  const holdNow = useNowUnix(openSection === "apps");
+  const holdNow = useNowUnix(only === "apps");
   // A hold is applied through the ordinary draft, then saved by the ordinary
   // save — bumping this asks for the second half. It cannot call `save()`
   // inline: React has not yet re-rendered with the new draft, so `save` would
@@ -3104,7 +3082,8 @@ function DeviceLimits({
   const [holdSaveRequests, setHoldSaveRequests] = useState(0);
   useEffect(() => {
     if (holdSaveRequests === 0) return;
-    void save();
+    // A hold is one press and stays on the page: it never navigates away.
+    void save(false);
     // `save` is re-created every render and deliberately not a dependency: this
     // must fire once per request, on the render that carries the new draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3223,7 +3202,7 @@ function DeviceLimits({
     saving,
   };
 
-  async function save() {
+  async function save(leaveWhenDone = true) {
     if (scheduleError) {
       setSaveError(scheduleError);
       return;
@@ -3281,11 +3260,18 @@ function DeviceLimits({
             }
           : undefined,
       });
+      // Declined at the confirm sheet: nothing was signed or saved. Stay on the
+      // page with every draft intact and the save bar still showing.
+      if (delivery.outcome === "cancelled") return;
       // The intent has become a signed clause: `policy.schedule` now exists, so
       // `scheduleAuthored` carries the toggle from here and the card can settle
       // (this is what lets Save grey out again).
       setDormantIntent(false);
-      setQueuedNote(queuedSaveWarning(delivery));
+      const queued = queuedSaveWarning(delivery);
+      setQueuedNote(queued);
+      // Saved and nothing to warn about: back to the child's Rules. A save the
+      // carrier is holding stays here, so the warning is read.
+      if (leaveWhenDone && !queued && mounted.current) leave();
     } catch (e) {
       // A signer failure (bunker timeout, rejected sign, wire validation) must
       // NOT vanish — the parent would think the change applied when it didn't.
@@ -3299,53 +3285,34 @@ function DeviceLimits({
     }
   }
 
-  function discard() {
-    setDormantIntent(false);
-    setDraftSchedule(buildSchedule(policy.schedule));
-    setDraftBudget(buildBudget(policy.budget));
-    setDraftWeb(buildWeb(policy.web));
-    setDraftApps(buildApps(policy.apps));
-    {
-      const reset = decompose(
-        { learning: policy.learning, buckets: policy.buckets, apps: policy.apps },
-        policy.freeGroups,
-      );
-      setDraftGroups(reset.groups);
-      setDraftLearningEnabled(reset.learningEnabled);
-      setDraftBucketsEnabled(reset.bucketsEnabled);
-    }
-    setDraftLearningApps(policy.learning?.apps ?? []);
-    setDraftCapMinutes(policy.learning?.capMinutes ?? undefined);
-    setDraftTethering(buildTethering(policy.tethering));
-    setDraftOverrides(policy.deviceOverrides ?? {});
-    setDraftListening(buildListening(policy.listening));
-    setDraftAlwaysAvailable(buildAlwaysAvailable(policy.alwaysAvailable));
-    // The lifeline was the one draft Discard forgot: an abandoned edit stayed
-    // dirty and rode out on the NEXT save of some unrelated dimension, so a
-    // number the guardian had thought better of reached the phone anyway.
-    setDraftLifeline(buildLifeline(policy.lifeline));
-    setSaveError(null);
-    setQueuedNote(null);
+  /** Back to the child's Rules, without asking about changes that were just
+   *  saved or deliberately dropped. */
+  function leave() {
+    allowLeaving();
+    onDone();
   }
+
+  // Leaving with unsaved changes (the back arrow, Android back, any link)
+  // asks first; App consults this before it changes route.
+  const { allowLeaving } = useLeaveGuard(
+    // Once Save is pressed the guardian has decided; Back just leaves.
+    dirty && !saving,
+    `You have unsaved changes to ${child.name}’s rules. Leave them unsaved?`,
+  );
 
   const willConfirm =
     state.signer.connected && !state.signer.autoSign && dirty;
 
   const dormantOn = dormantIntent || (scheduleAuthored && isDormant(draftSchedule));
 
-  // Every control that used to be a flat `SectionLabel` heading, now as one
-  // collapsed row with a summary of what it currently says. Same editors, same
-  // props, same order within a group — only the wrapping changed.
+  // The body of every control; the page renders only the one named by `only`.
+  // The row summaries live in `ruleSummaries`, for the child page.
   const sections: {
     id: SectionId;
-    summary: string;
-    dirty: boolean;
     body: ReactNode;
   }[] = [
     {
       id: "schedule",
-      summary: scheduleSummary(draftSchedule, scheduleAuthored || dormantIntent),
-      dirty: scheduleDirty || overrideDirty("schedule"),
       body: (
         <>
           {/* The posture comes FIRST because it overrules everything under it: a
@@ -3398,8 +3365,6 @@ function DeviceLimits({
     },
     {
       id: "budget",
-      summary: budgetSummary(draftBudget),
-      dirty: budgetDirty || overrideDirty("budget"),
       body: (
         <Split
           ctx={splitCtx}
@@ -3423,8 +3388,6 @@ function DeviceLimits({
     },
     {
       id: "named-times",
-      summary: namedTimesSummary(draftGroups),
-      dirty: namedTimesDirty,
       body: (
         <>
           <NamedTimesSection
@@ -3510,8 +3473,6 @@ function DeviceLimits({
     },
     {
       id: "listening",
-      summary: listeningSummary(draftListening),
-      dirty: listeningDirty,
       body: (
         <>
           <ListeningEditor
@@ -3532,8 +3493,6 @@ function DeviceLimits({
     },
     {
       id: "always-available",
-      summary: alwaysAvailableSummary(draftAlwaysAvailable, Math.floor(Date.now() / 1000)),
-      dirty: alwaysAvailableDirty,
       body: (
         <>
           <AlwaysAvailableEditor
@@ -3559,8 +3518,6 @@ function DeviceLimits({
     },
     {
       id: "web",
-      summary: webSummary(draftWeb),
-      dirty: webDirty || overrideDirty("web"),
       body: (
         <Split
           ctx={splitCtx}
@@ -3573,10 +3530,6 @@ function DeviceLimits({
     },
     {
       id: "apps",
-      // The effective (manual + named-times on-request) count — what the
-      // device will actually block, not just what THIS editor added.
-      summary: appsSummary(effectiveApps, holdNow),
-      dirty: appsDirty || overrideDirty("apps"),
       body: (
         <>
           <Split
@@ -3624,8 +3577,6 @@ function DeviceLimits({
     },
     {
       id: "lifeline",
-      summary: lifelineSummary(draftLifeline),
-      dirty: lifelineDirty,
       body: (
         <>
           <LifelineEditor
@@ -3650,8 +3601,6 @@ function DeviceLimits({
     },
     {
       id: "tethering",
-      summary: tetheringSummary(draftTethering),
-      dirty: tetheringDirty,
       body: (
         <>
           <TetheringEditor tethering={draftTethering} onChange={setDraftTethering} />
@@ -3661,59 +3610,37 @@ function DeviceLimits({
     },
   ];
 
-  // Report unsaved changes upward, so the tab strip can dot a tab that isn't
-  // showing and the save bar can name what is waiting. Joined to a string first:
-  // a fresh array every render would loop the effect forever.
-  const dirtyKey = sections
-    .filter((s) => s.dirty)
-    .map((s) => s.id)
-    .join(",");
-  useEffect(() => {
-    onDirty(dirtyKey);
-  }, [dirtyKey, onDirty]);
-
-  const visible = sections.filter((s) => SECTION_TAB_OF[s.id] === section);
-  const changedTitles = sections
-    .filter((s) => s.dirty)
-    .map((s) => SECTION_TITLE[s.id]);
-  const firstDirty = sections.find((s) => s.dirty)?.id ?? null;
-  // `dirty` can be true with nothing to name: splitting a control per device and
-  // then un-splitting it leaves an empty `{deviceId: {}}` entry, which differs
-  // from the saved map while every control's own overrides match. Rare, but the
-  // bar must never read "0 changes:" — say the plain truth instead.
-  const savePrompt =
-    changedTitles.length === 0
-      ? "Unsaved changes"
-      : changedTitles.length === 1
-        ? `Changed: ${changedTitles[0]}`
-        : `${changedTitles.length} changes: ${changedTitles.join(", ")}`;
+  const active = sections.find((s) => s.id === only);
+  // The time rules all share one caveat about what they cover.
+  const coversWholeDevice =
+    only === "schedule" || only === "budget" || only === "named-times" || only === "listening";
+  const appPolicies = child.policies.filter((p) => p.scope.kind === "app");
 
   return (
-    <div className={dirty ? "has-save-bar" : undefined}>
-      {section === "time" && (
+    <div className="rule-page">
+      {coversWholeDevice && (
         // Says what the rules actually cover, in the family's nouns — a phone is
-        // a computer to us and not to a parent (see domain/deviceWords). Lives
-        // on Time, the tab it is about, rather than as permanent page furniture.
-        <p className="card-sub" style={{ margin: "12px 4px 12px" }}>
+        // a computer to us and not to a parent (see domain/deviceWords).
+        <p className="card-sub" style={{ margin: "0 4px 12px" }}>
           {deviceNote} The schedule and time limit cover everything on it — apps,
           games, and the web alike.
         </p>
       )}
 
-      <SectionList>
-        {visible.map((s) => (
-          <Section
-            key={s.id}
-            title={SECTION_TITLE[s.id]}
-            summary={s.summary}
-            changed={s.dirty}
-            open={openSection === s.id}
-            onToggle={() => onOpenSection(openSection === s.id ? null : s.id)}
-          >
-            {s.body}
-          </Section>
-        ))}
-      </SectionList>
+      {active && <Card>{active.body}</Card>}
+
+      {only === "apps" && (
+        <SingledOutApps
+          child={child}
+          appPolicies={appPolicies}
+          onAdd={(app) => {
+            const added = addAppLimit(child.id, app);
+            // Straight to the new app's own page: that is where its block and
+            // hours are set.
+            window.location.hash = `/${wardPath(child.id)}/rule/app/${encodeURIComponent(added.id)}`;
+          }}
+        />
+      )}
 
       {scheduleError && (
         <div style={{ marginTop: 14 }}>
@@ -3733,52 +3660,102 @@ function DeviceLimits({
         </div>
       )}
 
-      {willConfirm && !scheduleError && (
-        <div style={{ marginTop: 14 }}>
-          <Banner tone="info">
-            You’ll confirm these changes
-            {state.signer.label ? ` with ${state.signer.label}` : ""} before they
-            apply.
-          </Banner>
-        </div>
-      )}
-
-      {/* One Save for every dimension, so it cannot live inside any one tab: a
-          change on Time and a change on Safety are signed together, in a single
-          clause with a shared issuedAt, or not at all. Fixed above the tab bar
-          and only present when there is something to save. */}
-      {dirty && (
-        <div className="save-bar">
-          <button
-            type="button"
-            className="save-bar-what"
-            onClick={() => firstDirty && onOpenSection(firstDirty)}
-            aria-label={`Show unsaved changes — ${savePrompt}`}
-          >
-            {savePrompt}
-          </button>
-          <Button variant="ghost" onClick={discard} disabled={saving}>
-            Discard
-          </Button>
-          <Button
-            variant="primary"
-            onClick={save}
-            disabled={saving || scheduleError != null}
-          >
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
-      )}
+      <RuleSaveBar
+        dirty={dirty}
+        saving={saving}
+        blocked={scheduleError != null}
+        onSave={() => void save()}
+        onCancel={leave}
+        note={
+          willConfirm && !scheduleError ? (
+            <Banner tone="info">
+              You’ll confirm these changes
+              {state.signer.label ? ` with ${state.signer.label}` : ""} before they
+              apply.
+            </Banner>
+          ) : undefined
+        }
+      />
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// App-scope policy card — per-app block + allowed-hours (enforced on-device)
+// Singled-out apps — per-app block + allowed-hours (enforced on-device)
 // ---------------------------------------------------------------------------
 
-function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
+/** What a singled-out app's row says: blocked, or allowed (and when). */
+export function appRuleSummary(policy: Policy): string {
+  if (policy.blocked) return "Blocked";
+  if (policy.schedule) return "Allowed during set hours";
+  return "Allowed";
+}
+
+/** The foot of the Apps page: the games and apps held to their own rules, one
+ *  row each (opening that app's page), and the way to add another. */
+function SingledOutApps({
+  child,
+  appPolicies,
+  onAdd,
+}: {
+  child: Child;
+  appPolicies: Policy[];
+  onAdd: (app: { appId: string; label: string }) => void;
+}) {
+  return (
+    <section aria-label="Games and apps you've singled out">
+      <h2 className="rule-subhead">Games and apps you've singled out</h2>
+      <p className="card-sub" style={{ margin: "0 4px 10px" }}>
+        On top of the rules above — block one outright, or hold it to set hours.
+      </p>
+      {appPolicies.length > 0 && (
+        <div className="list">
+          {appPolicies.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className="row"
+              onClick={() => {
+                window.location.hash = `/${wardPath(child.id)}/rule/app/${encodeURIComponent(p.id)}`;
+              }}
+            >
+              <span className="row-main">
+                <span className="row-title">
+                  {p.scope.kind === "app" ? p.scope.label : "App"}
+                </span>
+                <br />
+                <span className="row-sub">{appRuleSummary(p)}</span>
+              </span>
+              <span className="row-chevron" aria-hidden="true">
+                ›
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 16 }}>
+        <AddAppLimit onAdd={onAdd} />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * One singled-out app, as a page: block it, or only allow it in set hours, with
+ * the same pinned Cancel / Save bar as the other rules. Remove sits in the page
+ * body.
+ */
+export function AppRuleEditor({
+  child,
+  policy,
+  onDone,
+}: {
+  child: Child;
+  policy: Policy;
+  onDone: () => void;
+}) {
   const { saveAppRule, removePolicy, state } = useCharter();
+  const mounted = useMountedRef();
   const label = policy.scope.kind === "app" ? policy.scope.label : "App";
 
   // Saved snapshots (normalized) — the baseline the drafts diff against.
@@ -3815,6 +3792,16 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
   // otherwise throw at sign time (or store an unreachable window).
   const scheduleError = scheduleOn ? scheduleWindowError(draftSchedule) : null;
 
+  const { allowLeaving } = useLeaveGuard(
+    // Once Save is pressed the guardian has decided; Back just leaves.
+    dirty && !saving,
+    `You have unsaved changes to ${label}. Leave them unsaved?`,
+  );
+  function leave() {
+    allowLeaving();
+    onDone();
+  }
+
   async function save() {
     if (scheduleError) {
       setSaveError(scheduleError);
@@ -3829,7 +3816,13 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
         blocked: draftBlocked,
         schedule: scheduleOn ? draftSchedule : undefined,
       });
-      if (delivery) setQueuedNote(queuedSaveWarning(delivery));
+      // Nothing came back: the guardian declined at the confirm sheet (or the
+      // rule is gone). Nothing was saved, so stay with the draft intact.
+      if (!delivery) return;
+      const queued = queuedSaveWarning(delivery);
+      setQueuedNote(queued);
+      // Saved with nothing to warn about: back where the guardian came from.
+      if (!queued && mounted.current) leave();
     } catch (e) {
       // A signer failure (bunker timeout, rejected sign, wire validation) must
       // NOT vanish — the parent would think the change applied when it didn't.
@@ -3847,65 +3840,67 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
     state.signer.connected && !state.signer.autoSign && dirty;
 
   return (
-    <Card tinted>
-      <div className="row-between">
-        <h2 className="card-title" style={{ margin: 0 }}>
-          {label}
-        </h2>
-        <Pill tone={draftBlocked ? "blocked" : "ok"}>
-          {draftBlocked ? "Blocked" : "Allowed"}
-        </Pill>
-      </div>
-      <p className="card-sub" style={{ marginTop: 4 }}>
-        Block {label} from opening, or limit it to set hours — on top of the
-        whole-computer rules. Kintrinsic enforces this on the device and never
-        reports what was played.
-      </p>
+    <div className="rule-page">
+      <Card>
+        <div className="row-between">
+          <h2 className="card-title" style={{ margin: 0 }}>
+            {label}
+          </h2>
+          <Pill tone={draftBlocked ? "blocked" : "ok"}>
+            {draftBlocked ? "Blocked" : "Allowed"}
+          </Pill>
+        </div>
+        <p className="card-sub" style={{ marginTop: 4 }}>
+          Block {label} from opening, or limit it to set hours — on top of the
+          whole-computer rules. Kintrinsic enforces this on the device and never
+          reports what was played.
+        </p>
 
-      {/* Block — a blocked app never opens, even during allowed screen time. */}
-      <div className="row-between" style={{ marginTop: 14 }}>
-        <div className="row-main">
-          <span className="row-title">Block {label}</span>
-          <br />
-          <span className="row-sub">
-            Stops it from opening on the device, even during allowed time.
-          </span>
+        {/* Block — a blocked app never opens, even during allowed screen time. */}
+        <div className="row-between" style={{ marginTop: 14 }}>
+          <div className="row-main">
+            <span className="row-title">Block {label}</span>
+            <br />
+            <span className="row-sub">
+              Stops it from opening on the device, even during allowed time.
+            </span>
+          </div>
+          <Toggle
+            checked={draftBlocked}
+            label={`Block ${label}`}
+            onChange={setDraftBlocked}
+          />
         </div>
-        <Toggle
-          checked={draftBlocked}
-          label={`Block ${label}`}
-          onChange={setDraftBlocked}
-        />
-      </div>
 
-      {/* Allowed hours — the app is usable only inside these windows. */}
-      <div
-        className="row-between"
-        style={{
-          marginTop: 14,
-          borderTop: "1px solid var(--line)",
-          paddingTop: 14,
-          opacity: draftBlocked ? 0.5 : 1,
-        }}
-      >
-        <div className="row-main">
-          <span className="row-title">Only allow during set hours</span>
-          <br />
-          <span className="row-sub">
-            Outside these times, {label} won’t open.
-          </span>
+        {/* Allowed hours — the app is usable only inside these windows. */}
+        <div
+          className="row-between"
+          style={{
+            marginTop: 14,
+            borderTop: "1px solid var(--line)",
+            paddingTop: 14,
+            opacity: draftBlocked ? 0.5 : 1,
+          }}
+        >
+          <div className="row-main">
+            <span className="row-title">Only allow during set hours</span>
+            <br />
+            <span className="row-sub">
+              Outside these times, {label} won’t open.
+            </span>
+          </div>
+          <Toggle
+            checked={scheduleOn}
+            label={`Limit ${label} to set hours`}
+            onChange={setScheduleOn}
+          />
         </div>
-        <Toggle
-          checked={scheduleOn}
-          label={`Limit ${label} to set hours`}
-          onChange={setScheduleOn}
-        />
-      </div>
-      {scheduleOn && (
-        <div style={{ marginTop: 12, opacity: draftBlocked ? 0.5 : 1 }}>
-          <ScheduleEditor schedule={draftSchedule} onChange={setDraftSchedule} />
-        </div>
-      )}
+        {scheduleOn && (
+          <div style={{ marginTop: 12, opacity: draftBlocked ? 0.5 : 1 }}>
+            <ScheduleEditor schedule={draftSchedule} onChange={setDraftSchedule} />
+          </div>
+        )}
+      </Card>
 
       {scheduleError && (
         <div style={{ marginTop: 14 }}>
@@ -3925,208 +3920,37 @@ function AppLimitCard({ child, policy }: { child: Child; policy: Policy }) {
         </div>
       )}
 
-      {willConfirm && !scheduleError && (
-        <div style={{ marginTop: 14 }}>
-          <Banner tone="info">
-            You’ll confirm these changes
-            {state.signer.label ? ` with ${state.signer.label}` : ""} before they
-            apply.
-          </Banner>
-        </div>
-      )}
-
-      <div className="row-between" style={{ marginTop: 16, gap: 10 }}>
+      <div style={{ marginTop: 20 }}>
         <Button
-          variant="ghost"
+          variant="danger"
+          block
+          className="rule-remove"
           disabled={saving}
-          onClick={() => removePolicy(child.id, policy.id)}
+          onClick={() => {
+            removePolicy(child.id, policy.id);
+            leave();
+          }}
         >
-          Remove
-        </Button>
-        <Button
-          variant="primary"
-          disabled={!dirty || saving || scheduleError != null}
-          onClick={save}
-        >
-          {saving ? "Saving…" : "Save limit"}
+          Remove {label}
         </Button>
       </div>
-    </Card>
-  );
-}
 
-// ---------------------------------------------------------------------------
-// Screen
-// ---------------------------------------------------------------------------
-
-export default function Limits() {
-  const { state, addAppLimit, deviceStatus } = useCharter();
-  const { children } = state;
-
-  // `#/limits/<childId>` — set by Home, Family, Activity and Approvals so
-  // tapping a ward anywhere opens THEIR rules, and the browser's back button
-  // returns to the ward you came from.
-  const [selectedId, selectWard] = useWardRoute(
-    "limits",
-    (id) => children.some((c) => c.id === id),
-    children[0]?.id ?? "",
-  );
-  const [section, setSection] = useState<SectionTab>("time");
-  // One row open at a time — the point of collapsing was to be able to read the
-  // whole shape of a ward's rules at a glance, which a screen with five open
-  // editors is back to not being.
-  const [openSection, setOpenSection] = useState<string | null>(null);
-  const [dirtyKey, setDirtyKey] = useState("");
-  const dirtyIds = dirtyKey ? dirtyKey.split(",") : [];
-
-  // Keep the selection valid as the family changes.
-  const selected = children.find((c) => c.id === selectedId) ?? children[0];
-
-  /** Open a row, switching to its tab first — the save bar names changes that
-   *  may be sitting on a tab you can't currently see. */
-  const openAt = (id: string | null) => {
-    if (id) setSection(tabOfSection(id));
-    setOpenSection(id);
-  };
-
-  if (children.length === 0) {
-    return (
-      <EmptyState emoji="🗓️" title="No limits yet">
-        Add a child in Family first, then set their daily schedule and time
-        limit here.
-      </EmptyState>
-    );
-  }
-
-  const devicePolicy = selected.policies.find((p) => p.scope.kind === "device");
-  const appPolicies = selected.policies.filter((p) => p.scope.kind === "app");
-  const freshest = freshestStatusFor(selected, deviceStatus, Date.now());
-  const status = liveStatusFor(selected, freshest, Date.now());
-  const hasLiveDevice = selected.devices.some(
-    (d) => d.pairing === "paired" && d.devicePubkey && /^[0-9a-f]{64}$/.test(d.devicePubkey),
-  );
-
-  /** Switching ward drops the drafts (the editor is keyed by child), so say so
-   *  rather than discarding a parent's unsaved rules silently. */
-  const switchWard = (id: string) => {
-    if (
-      dirtyKey &&
-      !window.confirm(
-        `You have unsaved changes to ${selected.name}'s rules. Leave them unsaved?`,
-      )
-    )
-      return;
-    setOpenSection(null);
-    selectWard(id);
-  };
-
-  return (
-    <>
-      {/* Whose rules, then which rules. Two levels, drawn differently on
-          purpose: a filled switcher over an underline strip reads as a
-          hierarchy where two identical strips would read as a double row. */}
-      <div className="sticky-ward-switcher">
-        <WardTabs
-          wards={children}
-          selected={selected.id}
-          onSelect={switchWard}
-          label="Whose rules"
-        />
-        {/* Only when there is no switcher to say it. A one-ward family gets the
-            name and avatar; a two-ward family already has "Sam" highlighted in
-            the switcher, and repeating it thirty pixels below is the exact
-            duplication this pass exists to remove. The status pill is NOT
-            duplication — the switcher can't say whether the rules are biting
-            right now — so it rides the tab strip instead, costing no height. */}
-        {children.length < 2 && (
-          <WardHeading child={selected} as="div" />
-        )}
-        {devicePolicy && (
-          <SubTabs
-            label="Which rules"
-            value={section}
-            options={SECTION_TABS.map((t) => ({
-              id: t.id,
-              label: t.label,
-              count: dirtyIds.filter((d) => tabOfSection(d) === t.id).length,
-            }))}
-            onChange={setSection}
-            trailing={
-              <Pill tone={status.allowedNow ? "ok" : "blocked"}>
-                {status.allowedNow ? "Allowed now" : "Locked"}
-              </Pill>
-            }
-          />
-        )}
-      </div>
-
-      {/* Honesty at the point of action: signed limits reach PAIRED devices
-          within seconds; without one there is nothing to enforce them yet. Was
-          two banners saying the same thing in different words — and neither of
-          them offered the way to fix it. */}
-      {!hasLiveDevice && (
-        <div style={{ margin: "12px 0" }}>
-          <Banner tone="info">
-            <span>
-              Nothing is enforcing these yet — they start working the moment{" "}
-              {selected.name}'s phone or computer is set up.{" "}
-              <button
-                type="button"
-                className="btn btn-ghost"
-                style={{ minHeight: "auto", padding: "0 2px" }}
-                onClick={() => {
-                  window.location.hash = "/family";
-                }}
-              >
-                Set up a device
-              </button>
-            </span>
-          </Banner>
-        </div>
-      )}
-
-      {devicePolicy ? (
-        <DeviceLimits
-          key={selected.id}
-          child={selected}
-          policy={devicePolicy}
-          section={section}
-          onDirty={setDirtyKey}
-          openSection={openSection}
-          onOpenSection={openAt}
-        />
-      ) : (
-        // Unreachable for a ward added in this app — `addChild` mints a
-        // device-scope policy — but a restored backup from an older household
-        // could arrive without one, and a blank screen would be the app quietly
-        // showing nothing where a charter should be.
-        <Banner tone="warn">
-          {selected.name} has no charter to edit yet. Setting up a device
-          creates one.
-        </Banner>
-      )}
-
-      {/* Per-app rules sit on Content, beside the app allow/block list they
-          build on — not in a fourth place further down the same long page. */}
-      {devicePolicy && section === "content" && (
-        <>
-          <SectionLabel>Single out a game or app</SectionLabel>
-          <p className="card-sub" style={{ margin: "0 4px 10px" }}>
-            On top of the rules above — block one outright, or hold it to set
-            hours.
-          </p>
-          {appPolicies.length > 0 && (
-            <div className="stack">
-              {appPolicies.map((p) => (
-                <AppLimitCard key={p.id} child={selected} policy={p} />
-              ))}
-            </div>
-          )}
-          <div style={{ marginTop: 16 }}>
-            <AddAppLimit onAdd={(app) => addAppLimit(selected.id, app)} />
-          </div>
-        </>
-      )}
-    </>
+      <RuleSaveBar
+        dirty={dirty}
+        saving={saving}
+        blocked={scheduleError != null}
+        onSave={() => void save()}
+        onCancel={leave}
+        note={
+          willConfirm && !scheduleError ? (
+            <Banner tone="info">
+              You’ll confirm these changes
+              {state.signer.label ? ` with ${state.signer.label}` : ""} before they
+              apply.
+            </Banner>
+          ) : undefined
+        }
+      />
+    </div>
   );
 }

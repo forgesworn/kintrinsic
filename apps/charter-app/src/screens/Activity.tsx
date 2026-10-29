@@ -134,9 +134,78 @@ function OutcomeIcon({ outcome }: { outcome: ActivityOutcome }) {
   );
 }
 
+/**
+ * One line of history: what happened, and how it went.
+ *
+ * Reads the delivery records itself so any page can show a row: Activity, and
+ * the child page's "last few events".
+ */
+export function ActivityEventRow({
+  ev,
+  who,
+  now,
+}: {
+  ev: ActivityEvent;
+  /** The child's name, when the list mixes children. */
+  who?: string;
+  now: number;
+}) {
+  const { state } = useCharter();
+  // "— applied on {device}" once the ward's own acknowledgement of a rule
+  // change arrives over the home network. Derived at render time from the
+  // delivery record, never written into the stored sentence.
+  const deliveries = recordsOf(state.localDeliveries);
+  const deviceLabel = (m: string): string =>
+    state.children.flatMap((c) => c.devices).find((d) => d.devicePubkey === m)?.label ??
+    "their device";
+  const applied = appliedSuffix(ruleAppliedMachines(ev.wraps, deliveries).map(deviceLabel));
+  // ...and the plain warning when a device's ACK says it did NOT take it
+  // (refused, failed, expired, superseded). Said once: a refusal already
+  // reported when the change was sent is not repeated.
+  const notes = problemNotes(ev.wraps, deliveries, deviceLabel).filter(
+    (n) => !ev.summary.includes(n),
+  );
+  const problem = notes.length > 0 ? ` — ${notes.join(" ")}` : "";
+
+  return (
+    <li className="row" style={{ cursor: "default" }}>
+      <OutcomeIcon outcome={ev.outcome} />
+      <span className="row-main">
+        <span className="row-title" style={{ fontWeight: 500 }}>
+          <span className="muted" style={{ fontWeight: 700 }}>
+            {OUTCOME_STYLE[ev.outcome].label}.{" "}
+          </span>
+          {ev.summary}
+          {applied}
+          {problem && (
+            <span className="activity-problem" style={{ color: "var(--warn, #8a5a00)" }}>
+              {problem}
+            </span>
+          )}
+        </span>
+        <br />
+        <span className="row-sub">
+          {who ? `${who} · ` : ""}
+          <time dateTime={new Date(ev.ts).toISOString()}>{relativeTime(ev.ts, now)}</time>
+        </span>
+      </span>
+    </li>
+  );
+}
+
 /** The weekly picture (design memo B1) for one child — their screen-time week,
  *  reflective not punitive. Hidden until the child has a device with a key. */
-function ChildWeek({ child, named }: { child: Child; named: boolean }) {
+export function ChildWeek({
+  child,
+  named,
+  showAdjust = true,
+}: {
+  child: Child;
+  named: boolean;
+  /** The "Adjust their limits" link under the chart. The child page has the
+   *  rules on the same page, so it drops the link. */
+  showAdjust?: boolean;
+}) {
   const { usageHistory, deviceStatus } = useCharter();
   const devices: DeviceMeta[] = child.devices
     .filter((d) => d.devicePubkey)
@@ -188,7 +257,7 @@ function ChildWeek({ child, named }: { child: Child; named: boolean }) {
           warning, not a badge, no colour change. Absent entirely for a
           family that never set the always-available clause. */}
       <WeeklyPicture days={days} devices={devices} outOfHours={outOfHours} />
-      {!named && (
+      {!named && showAdjust && (
         <div style={{ marginTop: 10, textAlign: "right" }}>
           {/* The reason to look at a week is usually to change something. */}
           <button
@@ -235,23 +304,6 @@ export default function Activity() {
 
   const childName = (id: string) =>
     state.children.find((c) => c.id === id)?.name;
-
-  // "— applied on {device}" once the ward's own acknowledgement of a rule
-  // change arrives over the home network. Derived at render time from the
-  // delivery record, never written into the stored sentence.
-  const deliveries = recordsOf(state.localDeliveries);
-  const deviceLabel = (m: string): string =>
-    state.children.flatMap((c) => c.devices).find((d) => d.devicePubkey === m)?.label ??
-    "their device";
-  const appliedNote = (ev: ActivityEvent): string =>
-    appliedSuffix(ruleAppliedMachines(ev.wraps, deliveries).map(deviceLabel));
-  // ...and the plain warning when a device's ACK says it did NOT take it
-  // (refused, failed, expired, superseded). Said once: a refusal already
-  // reported when the change was sent is not repeated.
-  const problemNote = (ev: ActivityEvent): string => {
-    const notes = problemNotes(ev.wraps, deliveries, deviceLabel).filter((n) => !ev.summary.includes(n));
-    return notes.length > 0 ? ` — ${notes.join(" ")}` : "";
-  };
 
   const shownWeeks = (
     childFilter === EVERYONE
@@ -304,32 +356,7 @@ export default function Activity() {
                   childFilter === EVERYONE && hasMultipleChildren
                     ? childName(ev.childId)
                     : undefined;
-                return (
-                  <li key={ev.id} className="row" style={{ cursor: "default" }}>
-                    <OutcomeIcon outcome={ev.outcome} />
-                    <span className="row-main">
-                      <span className="row-title" style={{ fontWeight: 500 }}>
-                        <span className="muted" style={{ fontWeight: 700 }}>
-                          {OUTCOME_STYLE[ev.outcome].label}.{" "}
-                        </span>
-                        {ev.summary}
-                        {appliedNote(ev)}
-                        {problemNote(ev) && (
-                          <span className="activity-problem" style={{ color: "var(--warn, #8a5a00)" }}>
-                            {problemNote(ev)}
-                          </span>
-                        )}
-                      </span>
-                      <br />
-                      <span className="row-sub">
-                        {who ? `${who} · ` : ""}
-                        <time dateTime={new Date(ev.ts).toISOString()}>
-                          {relativeTime(ev.ts, now)}
-                        </time>
-                      </span>
-                    </span>
-                  </li>
-                );
+                return <ActivityEventRow key={ev.id} ev={ev} who={who} now={now} />;
               })}
             </ul>
           </section>

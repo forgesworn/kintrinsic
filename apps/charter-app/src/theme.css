@@ -49,7 +49,10 @@
 
   /* Layout */
   --col-max: 480px;
-  --tabbar-h: 64px;
+  /* The bottom bar's height, set to 68px by .has-bottom-bar while it shows. It
+     is 0 where the bar is hidden (the full-screen editors), so their pinned
+     save bars sit flush with the bottom edge. */
+  --tabbar-h: 0px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -177,17 +180,6 @@ textarea {
   line-height: 1.1;
 }
 
-/* One line saying what this tab is FOR. Five screens of white cards with only a
-   noun at the top is how you lose track of which one you're on — the subtitle
-   is the cheapest possible "you are here". */
-.app-subtitle {
-  display: block;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-2);
-  margin-top: 1px;
-}
-
 .app-main {
   flex: 1;
   padding: 16px 20px calc(var(--tabbar-h) + var(--safe-bottom) + 24px);
@@ -209,58 +201,6 @@ textarea {
   font-size: 18px;
   flex: 0 0 auto;
   box-shadow: inset 0 0 0 2px var(--brand-press);
-}
-
-/* ---- Bottom tab bar (iOS style) -------------------------------------- */
-
-.tabbar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
-  max-width: var(--col-max);
-  margin: 0 auto;
-  height: calc(var(--tabbar-h) + var(--safe-bottom));
-  padding-bottom: var(--safe-bottom);
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: saturate(1.3) blur(16px);
-  border-top: 1px solid var(--line);
-}
-
-.tab {
-  appearance: none;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  padding: 6px 2px;
-  color: var(--text-2);
-  font-size: 11px;
-  font-weight: 600;
-  position: relative;
-  min-height: var(--tap);
-}
-
-.tab[aria-current="page"] {
-  color: var(--brand);
-}
-
-.tab .tab-icon {
-  font-size: 20px;
-  line-height: 1;
-}
-
-.tab .badge {
-  position: absolute;
-  top: 4px;
-  left: calc(50% + 6px);
 }
 
 /* ---- Cards ------------------------------------------------------------ */
@@ -932,4 +872,550 @@ button.row {
   clip: rect(0 0 0 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* --- guardian UX overhaul --- */
+
+/* Header: a back arrow (or the settings cog) at 48px, and a title that
+   truncates rather than pushing the button off a narrow phone. */
+.app-header-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  width: 48px;
+  height: 48px;
+  margin: -6px 0;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.app-header-btn:active {
+  background: var(--line);
+}
+
+.app-header .app-header-btn:first-child {
+  margin-left: -10px;
+}
+
+.app-title-page {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A section a route can scroll to, clear of the sticky header. */
+.scroll-anchor {
+  scroll-margin-top: calc(var(--header-h, 72px) + 8px);
+}
+
+/* A plain text link row ("Recent activity", "All activity"). */
+.home-link {
+  appearance: none;
+  border: 0;
+  background: none;
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-top: 8px;
+  padding: 0 4px;
+  text-align: right;
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--brand);
+  cursor: pointer;
+}
+
+/* A child card's header row: the whole row opens the child page. */
+.child-card-head {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0 0 14px;
+  width: 100%;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 12px;
+}
+
+.status-number {
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.child-devices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 14px 0 0;
+  font-size: var(--fs-small);
+}
+
+.child-device {
+  white-space: nowrap;
+}
+
+/* The two daily levers: equal, full-width, big enough to hit. */
+.lever-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.lever-btn,
+.lever-primary,
+.lever-preset {
+  min-height: 52px;
+}
+
+/* Rule groups on the child page. */
+.rule-group-title {
+  margin: 14px 4px 8px;
+  font-size: var(--fs-small);
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+/* The lever sheet. Everything is stacked and full width: nothing sits beside
+   the stepper, so nothing can overlap it. */
+.lever-sheet {
+  max-height: 92dvh;
+  overflow-y: auto;
+  outline: none;
+}
+
+.lever-sheet .card-title {
+  margin-bottom: 14px;
+}
+
+.lever-presets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.lever-or {
+  margin: 16px 0 8px;
+  text-align: center;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+}
+
+.lever-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.lever-step {
+  width: 56px;
+  min-height: 56px;
+  padding: 0;
+  font-size: 26px;
+  flex: 0 0 auto;
+}
+
+.lever-amount {
+  min-width: 110px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 22px;
+}
+
+/* An ask as one line plus its answers. */
+.request-compact-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.request-compact-title {
+  flex: 1;
+}
+
+.request-compact-more {
+  flex-shrink: 0;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--brand);
+}
+
+.request-compact-title {
+  margin: 0;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.request-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.request-details {
+  appearance: none;
+  border: 0;
+  background: none;
+  min-height: 48px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--brand);
+  cursor: pointer;
+}
+
+.request-details:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The quiet dismiss: a small glyph with a full-size tap target. */
+.request-dismiss {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 48px;
+  height: 48px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  line-height: 1;
+  font-size: 14px;
+}
+
+.request-actions .btn {
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+/* The bottom bar: Settings pinned at the right, the children filling the rest
+   in the family's order (and Home first, only while there are none),
+   scrolling sideways once they no longer fit. The look is the old
+   .tabbar/.tab. Each child is a pill: avatar with an online dot, name, a
+   glance at their day, and a thin meter of time left. */
+.has-bottom-bar {
+  --tabbar-h: 68px;
+}
+
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  max-width: var(--col-max);
+  margin: 0 auto;
+  height: calc(var(--tabbar-h) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  display: flex;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: saturate(1.3) blur(16px);
+  border-top: 1px solid var(--line);
+}
+
+.tab {
+  appearance: none;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex: 0 0 72px;
+  width: 72px;
+  min-height: 48px;
+  padding: 4px 2px;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  position: relative;
+}
+
+.tab[aria-current="page"] {
+  color: var(--brand);
+}
+
+.tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tab-label {
+  max-width: 100%;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The badge sits on the avatar's top-right, inside the pill. */
+.tab-badge {
+  position: absolute;
+  top: -7px;
+  left: 18px;
+}
+
+/* ---- A child's pill ---------------------------------------------------- */
+.tab.tab-child {
+  --pill-bg: var(--surface-2);
+  flex: 0 0 auto;
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 8px;
+  width: auto;
+  min-width: 108px;
+  max-width: 140px;
+  min-height: 0;
+  height: 52px;
+  align-self: center;
+  padding: 0 10px 0 8px;
+  background: var(--pill-bg);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  text-align: left;
+}
+
+/* The current child: a brand-tinted pill, in place of the old avatar ring. */
+.tab.tab-child[aria-current="page"] {
+  --pill-bg: var(--brand-bg);
+  border-color: var(--brand);
+}
+
+.tab-avatar {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+/* Online: filled green. Offline: a hollow grey ring. Ringed in the pill's own
+   colour so it reads where it overlaps the avatar. */
+.tab-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--text-2);
+  border-radius: 50%;
+  background: var(--pill-bg);
+  box-shadow: 0 0 0 2px var(--pill-bg);
+}
+
+.tab-dot[data-online] {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+.tab-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.tab-child .tab-label {
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.tab-child[aria-current="page"] .tab-label {
+  color: var(--brand);
+}
+
+.tab-glance {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.tab-glance[data-tone="low"] {
+  color: var(--warn-ink);
+}
+
+.tab-glance[data-tone="out"] {
+  color: var(--blocked-ink);
+}
+
+.tab-meter {
+  display: block;
+  height: 3px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-2) 25%, transparent);
+  overflow: hidden;
+}
+
+.tab-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.tabbar-strip {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.tabbar-children {
+  position: relative;
+  display: flex;
+  height: 100%;
+  gap: 6px;
+  padding: 0 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Centre the children while they all fit; once they overflow, auto margins
+   resolve to zero so the strip still scrolls from its true start. */
+.tabbar-children > .tab:first-child {
+  margin-left: auto;
+}
+
+.tabbar-children > .tab:last-child {
+  margin-right: auto;
+}
+
+.tabbar-children::-webkit-scrollbar {
+  display: none;
+}
+
+.tabbar-children .tab {
+  scroll-snap-align: start;
+}
+
+/* A soft fade on whichever side has more children, so the strip reads as
+   scrollable. */
+.tabbar-strip::before,
+.tabbar-strip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 18px;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tabbar-strip::before {
+  left: 0;
+  background: linear-gradient(to right, var(--surface), transparent);
+}
+
+.tabbar-strip::after {
+  right: 0;
+  background: linear-gradient(to left, var(--surface), transparent);
+}
+
+.tabbar-strip[data-more-left]::before,
+.tabbar-strip[data-more-right]::after {
+  opacity: 1;
+}
+
+/* Settings: a child's row is the link to their page plus ↑ and ↓. */
+.child-order-row {
+  gap: 4px;
+  padding: 0 6px 0 0;
+  cursor: default;
+}
+
+.child-order-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  padding: 8px 8px 8px 18px;
+  cursor: pointer;
+}
+
+.icon-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-btn:active:not(:disabled) {
+  background: var(--line);
+}
+
+.icon-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Header: a title on a top-level page has no back arrow, and a trailing
+   button (the child page's ⚙) sits flush with the right edge. */
+.app-header .app-header-btn:last-child:not(:first-child) {
+  margin-right: -10px;
 }

@@ -1,13 +1,16 @@
 import type { CSSProperties } from "react";
 import { Button, Card, SectionLabel } from "../components/ui";
 import { isSetUp, useCharter, type CharterState } from "../store/store";
+import type { Child } from "../domain/types";
+import { wardPath } from "../domain/wardRoute";
 
-// The Home "getting started" card. Onboarding lives HERE, not Family — Family is
+// The "getting started" card, on Home (no children yet) and at the top of each
+// child page (FamilyNotices). Onboarding lives HERE, not in Settings, which is
 // for ongoing management. It shows only until the child's computer is connected,
-// then it disappears and Home becomes the daily dashboard.
+// then it disappears.
 
 /** True once at least one child has a connected computer — the moment the
- *  getting-started has done its job and Home flips to the dashboard. */
+ *  getting-started has done its job. */
 export function isSetUpEnough(state: CharterState): boolean {
   return state.children.some((c) => isSetUp(c));
 }
@@ -16,18 +19,17 @@ function nav(to: string): void {
   window.location.hash = `/${to}`;
 }
 
-/** Bring the Family "add a child" area into view after navigating there. */
-function scrollToWhenReady(anchorId: string, tries = 24): void {
-  const el = document.getElementById(anchorId);
-  if (el) {
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
-    return;
-  }
-  if (tries > 0) requestAnimationFrame(() => scrollToWhenReady(anchorId, tries - 1));
+/** Settings' "Add a child" form, open. */
+function goToAddChild(): void {
+  nav("settings/add-child");
 }
-function goToFamilyChildren(): void {
-  nav("family");
-  scrollToWhenReady("setup-children");
+
+/** The set-up page for the child still waiting for a computer (the first one
+ *  without a device), or the "Add a child" form when there is no child yet. */
+function goToConnectComputer(children: Child[]): void {
+  const child = children.find((c) => !isSetUp(c)) ?? children[0];
+  if (child) nav(`${wardPath(child.id)}/add-device`);
+  else goToAddChild();
 }
 
 function StepRow({
@@ -73,7 +75,7 @@ export default function Onboarding() {
   const hasChild = state.children.length > 0;
   const connected = isSetUpEnough(state);
 
-  // Done: once a computer is connected, Home becomes the dashboard.
+  // Done: once a computer is connected, there is nothing left to start.
   if (connected) return null;
 
   const done = (hasChild ? 1 : 0) + (connected ? 1 : 0);
@@ -114,14 +116,14 @@ export default function Onboarding() {
           n={1}
           title="Add your child"
           detail="Just a name and a color — there's no account to create for them."
-          action={{ label: "Add a child", onClick: goToFamilyChildren }}
+          action={{ label: "Add a child", onClick: goToAddChild }}
         />
         <StepRow
           done={connected}
           n={2}
           title="Connect their computer"
           detail="Once Kintrinsic is installed on their computer, its “Connect a phone” screen shows a QR code — scan it here to link it. If the camera won’t scan, you can type the code instead (preview)."
-          action={{ label: "Connect a computer", onClick: goToFamilyChildren }}
+          action={{ label: "Connect a computer", onClick: () => goToConnectComputer(state.children) }}
         />
       </ol>
     </Card>

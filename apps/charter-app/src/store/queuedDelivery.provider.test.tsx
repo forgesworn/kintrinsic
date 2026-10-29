@@ -1,6 +1,6 @@
 // Home-network delivery, end to end through the real provider and the real
 // local signer, with only the relay pool and the Android bridge faked:
-//   - a rule save the carrier is holding is a visible WARNING on Limits;
+//   - a rule save the carrier is holding is a visible WARNING on the rule page;
 //   - an answer the carrier is holding is an ANSWER (recorded, no second
 //     signature possible), and its line follows the ward's ACK;
 //   - the route is read by ONE poll, not once per device row;
@@ -29,11 +29,10 @@ vi.mock("nostr-tools", async (importOriginal) => {
 
 import { CharterProvider, STORAGE_KEY, useCharter, type CharterContextValue, type CharterState } from "./store";
 import AnsweredDelivery from "../screens/AnsweredDelivery";
-import Limits from "../screens/Limits";
-import { GiveTime } from "../components/GiveTime";
-import { FinishNow } from "../components/FinishNow";
+import { AppRulePage } from "../screens/RuleEditor";
+import { ChildStatus } from "../components/ChildStatus";
 import Activity from "../screens/Activity";
-import Family from "../screens/Family";
+import { ChildDeviceSettings } from "../screens/ChildAdmin";
 import { useLocalRoute } from "../carrier/useLocalRoute";
 import type { Child, ChildRequest } from "../domain/types";
 
@@ -206,11 +205,10 @@ describe("queued home-network delivery", () => {
   // ---------------------------------------------------------------- 1 -----
   describe("a rule save the carrier is holding (decision 1)", () => {
     async function saveBlockedApp(): Promise<void> {
-      window.location.hash = "/limits/c1";
-      await mount({}, <Limits />);
-      await click(button("Apps & web"));
+      window.location.hash = "/ward/c1/rule/app/app1";
+      await mount({}, <AppRulePage childId="c1" policyId="app1" />);
       await click(button("Block Minecraft"));
-      await click(button("Save limit"));
+      await click(button("Save"));
       await tick(50);
     }
 
@@ -437,10 +435,10 @@ describe("queued home-network delivery", () => {
       sendState = (r) => (r === PHONE ? "sent" : "queued");
     };
 
-    it("GiveTime logs and shows who got it and who is waiting", async () => {
+    it("More time logs and shows who got it and who is waiting", async () => {
       phoneHome();
-      await mount(TWO(), <GiveTime child={child([laptop(), phone()])} />);
-      await click(button("Give time"));
+      await mount(TWO(), <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(50);
 
@@ -451,10 +449,10 @@ describe("queued home-network delivery", () => {
       expect(sentWraps.map((w) => w.recipient).sort()).toEqual([LAPTOP, PHONE].sort());
     });
 
-    it("FinishNow logs and shows the same split", async () => {
+    it("Stop now logs and shows the same split", async () => {
       phoneHome();
-      await mount(TWO(), <FinishNow child={child([laptop(), phone()])} />);
-      await click(button("Finish now"));
+      await mount(TWO(), <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("Stop now"));
       await click(button("Warn, then finish"));
       await tick(50);
 
@@ -464,8 +462,8 @@ describe("queued home-network delivery", () => {
     });
 
     it("when every device is away it still logs the line, naming them all as waiting", async () => {
-      await mount(TWO(), <GiveTime child={child([laptop(), phone()])} />);
-      await click(button("Give time"));
+      await mount(TWO(), <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(50);
 
@@ -475,11 +473,10 @@ describe("queued home-network delivery", () => {
 
     it("a rule save reports the split too: warning names the waiting device and who already got it", async () => {
       phoneHome();
-      window.location.hash = "/limits/c1";
-      await mount(TWO(), <Limits />);
-      await click(button("Apps & web"));
+      window.location.hash = "/ward/c1/rule/app/app1";
+      await mount(TWO(), <AppRulePage childId="c1" policyId="app1" />);
       await click(button("Block Minecraft"));
-      await click(button("Save limit"));
+      await click(button("Save"));
       await tick(50);
 
       const warn = [...container.querySelectorAll(".banner-warn")].map((b) => b.textContent);
@@ -518,8 +515,8 @@ describe("queued home-network delivery", () => {
     });
 
     it("a gift says it is held for the home network (no retry invited) and is logged once", async () => {
-      await mount({}, <GiveTime child={child([laptop()])} />);
-      await click(button("Give time"));
+      await mount({}, <ChildStatus child={child([laptop()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(3_500);
 
@@ -533,10 +530,10 @@ describe("queued home-network delivery", () => {
   describe("one device failing never abandons the others (H2)", () => {
     const TWO = (): Partial<CharterState> => ({ children: [child([laptop(), phone()])] });
 
-    it("probe A2 through GiveTime: the phone got it, the laptop didn't — logged and shown, not an error", async () => {
+    it("probe A2 through More time: the phone got it, the laptop didn't — logged and shown, not an error", async () => {
       sendState = (r) => (r === PHONE ? "sent" : "rejected");
-      await mount(TWO(), <GiveTime child={child([laptop(), phone()])} />);
-      await click(button("Give time"));
+      await mount(TWO(), <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(50);
 
@@ -546,10 +543,10 @@ describe("queued home-network delivery", () => {
       expect(sentWraps.map((w) => w.recipient).sort()).toEqual([LAPTOP, PHONE].sort());
     });
 
-    it("probe A through FinishNow: the laptop is held, the phone failed — the hold is reported", async () => {
+    it("probe A through Stop now: the laptop is held, the phone failed — the hold is reported", async () => {
       sendState = (r) => (r === LAPTOP ? "queued" : "rejected");
-      await mount(TWO(), <FinishNow child={child([laptop(), phone()])} />);
-      await click(button("Finish now"));
+      await mount(TWO(), <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("Stop now"));
       await click(button("Warn, then finish"));
       await tick(50);
 
@@ -561,11 +558,10 @@ describe("queued home-network delivery", () => {
 
     it("a rule save that reached one device and not the other is saved, with a warning naming both", async () => {
       sendState = (r) => (r === PHONE ? "sent" : "rejected");
-      window.location.hash = "/limits/c1";
-      await mount(TWO(), <Limits />);
-      await click(button("Apps & web"));
+      window.location.hash = "/ward/c1/rule/app/app1";
+      await mount(TWO(), <AppRulePage childId="c1" policyId="app1" />);
       await click(button("Block Minecraft"));
-      await click(button("Save limit"));
+      await click(button("Save"));
       await tick(50);
 
       const warn = [...container.querySelectorAll(".banner-warn")].map((b) => b.textContent);
@@ -575,8 +571,8 @@ describe("queued home-network delivery", () => {
 
     it("nothing reached anywhere is still a plain error, naming the devices", async () => {
       sendState = () => "rejected";
-      await mount(TWO(), <GiveTime child={child([laptop(), phone()])} />);
-      await click(button("Give time"));
+      await mount(TWO(), <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(50);
       expect(text()).toContain(
@@ -599,8 +595,8 @@ describe("queued home-network delivery", () => {
       expect(r).toEqual({ outcome: "queued", message: "Not sent yet — it'll reach Mia's phone when it's on the home network." });
     });
 
-    it("Family: a held window shows it is waiting, with no 'Installs are open' countdown and nothing stored", async () => {
-      await mount(PHONE_ONLY(), <Family />);
+    it("Child-wide settings: a held window shows it is waiting, with no 'Installs are open' countdown and nothing stored", async () => {
+      await mount(PHONE_ONLY(), <ChildDeviceSettings child={PHONE_ONLY().children![0]} />);
       await click(button("Allow installs"));
       await tick(50);
 
@@ -610,9 +606,9 @@ describe("queued home-network delivery", () => {
       expect(activity().some((a) => a.startsWith("You allowed installs for 30 minutes") && a.includes("Not sent yet"))).toBe(true);
     });
 
-    it("Family: a window that reached the phone opens the countdown as before", async () => {
+    it("Child-wide settings: a window that reached the phone opens the countdown as before", async () => {
       sendState = () => "sent";
-      await mount(PHONE_ONLY(), <Family />);
+      await mount(PHONE_ONLY(), <ChildDeviceSettings child={PHONE_ONLY().children![0]} />);
       await click(button("Allow installs"));
       await tick(50);
       expect(text()).toContain("Installs are open");
@@ -622,11 +618,11 @@ describe("queued home-network delivery", () => {
 
   // ---------------------------------------------------------------- M2 ----
   describe("a problem ACK is never 'reached' or 'applied' (M2)", () => {
-    it("probe C through GiveTime: a ward that refused it is an error, not 'sent to'", async () => {
+    it("probe C through More time: a ward that refused it is an error, not 'sent to'", async () => {
       sendState = () => "sent";
       wardAnswer = () => "refused";
-      await mount({}, <GiveTime child={child([laptop()])} />);
-      await click(button("Give time"));
+      await mount({}, <ChildStatus child={child([laptop()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(50);
       expect(text()).toContain("Robin's laptop didn't accept this change.");
@@ -636,8 +632,8 @@ describe("queued home-network delivery", () => {
     it("a refusing device beside one that got it is named as not getting it, never as 'Reached'", async () => {
       sendState = () => "sent";
       wardAnswer = (r) => (r === LAPTOP ? "refused" : "received");
-      await mount({ children: [child([laptop(), phone()])] }, <GiveTime child={child([laptop(), phone()])} />);
-      await click(button("Give time"));
+      await mount({ children: [child([laptop(), phone()])] }, <ChildStatus child={child([laptop(), phone()])} />);
+      await click(button("More time"));
       await click(button("Give 30 min"));
       await tick(50);
       expect(text()).toContain("Reached Mia's phone. Robin's laptop didn't accept this change.");

@@ -272,6 +272,7 @@ function persist(state: CharterState): boolean {
 type Action =
   | { type: "ADD_CHILD"; child: Child }
   | { type: "EDIT_CHILD"; childId: string; name: string; color?: string }
+  | { type: "MOVE_CHILD"; childId: string; direction: -1 | 1 }
   | { type: "REMOVE_CHILD"; childId: string }
   | { type: "ADD_DEVICE"; childId: string; device: Device }
   | {
@@ -337,6 +338,14 @@ export function reducer(state: CharterState, action: Action): CharterState {
             : c,
         ),
       };
+    case "MOVE_CHILD": {
+      const from = state.children.findIndex((c) => c.id === action.childId);
+      const to = from + action.direction;
+      if (from < 0 || to < 0 || to >= state.children.length) return state;
+      const children = [...state.children];
+      [children[from], children[to]] = [children[to], children[from]];
+      return { ...state, children };
+    }
     case "REMOVE_CHILD":
       return {
         ...state,
@@ -523,6 +532,9 @@ export interface CharterContextValue {
   // Family
   addChild: (name: string, color?: string) => Child;
   editChild: (childId: string, name: string, color?: string) => void;
+  /** Move a child one place earlier (-1) or later (1) in the family's order,
+   *  which is the order of the bottom bar's buttons. A no-op at either end. */
+  moveChild: (childId: string, direction: -1 | 1) => void;
   removeChild: (childId: string) => void;
 
   // Devices (parent-governed pairing)
@@ -942,6 +954,13 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+
+  /** Put a child one place earlier or later in the family's order. Guardian-side
+   *  display only, like `editChild`: no clause, no wire, nothing sent to a
+   *  device. The order persists with the rest of the household. */
+  const moveChild = useCallback((childId: string, direction: -1 | 1) => {
+    dispatch({ type: "MOVE_CHILD", childId, direction });
+  }, []);
 
   // --- Devices (parent-governed pairing) -------------------------------
 
@@ -2781,6 +2800,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       localRoute: localRouteView,
       addChild,
       editChild,
+      moveChild,
       removeChild,
       addDevice,
       beginPairing,
@@ -2837,6 +2857,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       localRouteView,
       addChild,
       editChild,
+      moveChild,
       removeChild,
       addDevice,
       beginPairing,

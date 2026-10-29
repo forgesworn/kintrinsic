@@ -10,7 +10,7 @@ import {
 } from "./version";
 
 /**
- * The app's own version, at the foot of Family — and a way out when it is
+ * The app's own version, at the foot of Settings — and a way out when it is
  * behind.
  *
  * This exists because the shell and the page update independently: deploying
