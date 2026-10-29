@@ -1908,7 +1908,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     if (admission === "stranger") return;
     if (admission === "presence") {
       // A ward this phone confirmed in person at, before the other parent's
-      // roster named it: what it says about its guardians lets the roster in.
+      // roster named it: what it says is kept for display only. It vouches
+      // for nothing (OQ "Anchoring a joining parent's trust").
       keysCore.notePresenceStatus(status);
       setDeviceStatus((prev) => {
         const cur = prev[status.machine];
@@ -2084,7 +2085,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // An "unlanded" ask holds the cursor open so the wide window keeps
         // coming back until it lands or ages out.
         const kind = ingestWrap(w, ctx).kind;
-        if (kind === "unlanded" || kind === "roster-waiting") unfinished = true;
+        if (kind === "unlanded") unfinished = true;
       }
       pollCursor.current = nextCursor(pollCursor.current, startedAt, unfinished);
       trimHandled(handledWraps.current);

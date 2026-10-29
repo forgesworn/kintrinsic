@@ -3,14 +3,15 @@
 // co-guardian, presence confirmation, *Family roster*, rule 7):
 //
 //   install A (root R_A, working key W_A) has a child with two wards;
-//   A invites R_B; install B approves W_B and confirms in person at the
-//   phone; the phone's STATUS to W_B is admitted from the presence code
-//   alone; A's roster reaches B (also when it arrives before that STATUS)
-//   and becomes B's family; B can then sign for the wards, object to a
-//   removal, leave and withdraw a phone of its own.
+//   A invites R_B; install B approves W_B, scans A's guardian code (its
+//   anchor) and confirms in person at the phone; the phone's STATUS to W_B
+//   is admitted from the presence code alone, for display; A's roster
+//   (trusted because R_A is anchored) becomes B's family; B can then sign
+//   for the wards, object to a removal, leave and withdraw a phone of its
+//   own.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { finalizeEvent, generateSecretKey, getPublicKey, nip44, type NostrEvent } from "nostr-tools";
+import { finalizeEvent, generateSecretKey, getPublicKey, nip19, nip44, type NostrEvent } from "nostr-tools";
 import { GuardianKeys, unwrapToWorkingKey } from "./guardianKeys";
 import { emptyGuardianKeys, type GuardianKeysState } from "./state";
 import { parseStatement, type SignedEvent } from "./sdk";
@@ -160,6 +161,11 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     const inviteD = `kintrinsic/guardian/${R_B}`;
     await B.gk.approveThisInstall({ via: "signet", label: "B's phone", expectRoot: R_B });
 
+    // A invited R_B, so A trusts B's root; B scans A's guardian code.
+    expect(A.gk.trustedRoots()).toEqual([R_A, R_B].sort());
+    await expect(B.gk.confirmPresence(presenceCode(PHONE, inviteD, invite.event.id))).rejects.toThrow(/guardian code/);
+    expect(B.gk.anchorRoot(`nostr:${nip19.npubEncode(R_A)}`)).toBe(R_A);
+
     // B confirms in person at the phone: the code is all B knows of it.
     await B.gk.confirmPresence(presenceCode(PHONE, inviteD, invite.event.id));
     expect(Object.keys(B.keys().presenceWards)).toEqual([PHONE]);
@@ -171,25 +177,24 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     ]);
     const phoneStatus = status(PHONE, T + 60, both, "android");
 
-    // A's roster can reach B before that STATUS does: it waits, unhandled.
-    A.setChildren(applyDeviceKeysView(A.children(), phoneStatus));
-    const roster = await A.gk.sendRoster();
-    expect(roster.sent).toContain(W_B);
-    const toB = A.published.filter((p) => p.wrap.tags.some((t) => t[0] === "p" && t[1] === W_B)).at(-1)!.wrap;
-    const ctx = intakeFor(B);
-    expect(ingestWrap(toB, ctx)).toEqual({ kind: "roster-waiting" });
-    expect(ctx.handledWraps.has(toB.id)).toBe(false);
-
-    // The STATUS to W_B is admitted from the presence code alone; a stranger isn't.
+    // The STATUS to W_B is admitted from the presence code alone (for
+    // display: it vouches for nothing); a stranger isn't.
     const isPresence = (m: string) => B.gk.isPresenceWard(m);
     expect(admitStatus(phoneStatus, B.children(), new Set(), isPresence)).toBe("presence");
     expect(admitStatus(status(getPublicKey(generateSecretKey()), T, both, "android"), B.children(), new Set(), isPresence)).toBe(
       "stranger",
     );
     B.gk.notePresenceStatus(phoneStatus);
+    expect(B.gk.reportedRoots()).toEqual([]);
 
-    // Now the retried roster lands and becomes B's family.
+    // A's roster reaches B and becomes B's family.
+    A.setChildren(applyDeviceKeysView(A.children(), phoneStatus));
+    const roster = await A.gk.sendRoster();
+    expect(roster.sent).toContain(W_B);
+    const toB = A.published.filter((p) => p.wrap.tags.some((t) => t[0] === "p" && t[1] === W_B)).at(-1)!.wrap;
+    const ctx = intakeFor(B);
     expect(ingestWrap(toB, ctx)).toEqual({ kind: "roster" });
+    expect(ctx.handledWraps.has(toB.id)).toBe(true);
     const kids = B.children();
     expect(kids).toHaveLength(1);
     expect(kids[0]).toMatchObject({ name: "Sam", color: "#3B6FB2", rosterId: SUBJECT });
@@ -203,6 +208,10 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     // Only the laptop is still to confirm; the phone has reported.
     expect(B.gk.unconfirmedRosterDevices().map((d) => d.machine)).toEqual([LAPTOP]);
     expect(admitStatus(phoneStatus, B.children(), new Set(), isPresence)).toBe("claimed");
+    // B can sign for the phone with W at once: the laptop, known only from
+    // the roster and not heard from, doesn't hold the child back (N-L1).
+    expect(B.gk.keyFor(PHONE)).toBe("working");
+    expect(B.gk.familyReadiness().ready).toBe(true);
 
     // B confirms at the laptop too (now a known device: no presence ward).
     await B.gk.confirmPresence(presenceCode(LAPTOP, inviteD, invite.event.id));

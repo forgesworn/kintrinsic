@@ -30,8 +30,10 @@ export interface WrapIngestContext {
   ingestFarewell?: (farewell: StatusFarewell) => void;
   /**
    * A family roster (31119) from another guardian install's working key.
-   * Returns "ok", or why it was refused: a roster whose sender's root or
-   * key no ward has reported yet may be let in by a later STATUS.
+   * Returns "ok", or why it was refused. Every refusal is final: a roster is
+   * accepted only on the strength of a root this install already trusts, so
+   * nothing a later STATUS says can let it in (and a sender nobody vouches
+   * for can't make this phone decrypt its rosters on every poll).
    */
   ingestRoster?: (inbound: { sealAuthor: string; inner: SignedEvent }) => string | void;
 }
@@ -40,8 +42,9 @@ export type WrapIngestResult =
   /** Already handled earlier this session; nothing was decrypted. */
   | { kind: "handled" }
   | { kind: "status" }
-  /** A departed key's last STATUS, or a family roster. */
+  /** A departed key's last STATUS. */
   | { kind: "farewell" }
+  /** A family roster, taken in or refused (either way, for good). */
   | { kind: "roster" }
   /** Not ours, or not readable. Neither will change with time. */
   | { kind: "unreadable" }
@@ -51,11 +54,7 @@ export type WrapIngestResult =
   | { kind: "request"; reqId: string }
   /** An ask from a phone this guardian has not recorded yet: left unhandled so
    *  a later pass can land it. */
-  | { kind: "unlanded"; reqId: string }
-  /** A roster whose sender no ward has vouched for yet: the wards' STATUS
-   *  naming it can arrive after it (the inviting phone sends it the moment
-   *  they do), so it is left unhandled and retried, like an unlanded ask. */
-  | { kind: "roster-waiting" };
+  | { kind: "unlanded"; reqId: string };
 
 export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
   // The one line that saves the battery: everything below this decrypts.
@@ -79,8 +78,7 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
   if (!req && ctx.ingestRoster && fresh) {
     const roster = unwrapToWorkingKey(w, ctx.guardianSk);
     if (roster && roster.inner.kind === CHARTER_FAMILY_ROSTER) {
-      const outcome = ctx.ingestRoster(roster);
-      if (outcome === "root_not_reported" || outcome === "key_not_reported") return { kind: "roster-waiting" };
+      ctx.ingestRoster(roster);
       ctx.handledWraps.add(w.id);
       return { kind: "roster" };
     }

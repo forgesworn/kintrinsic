@@ -95,7 +95,7 @@ export function drainLocalInbox(deps: {
       // Intake never throws on bad input; if something else did, retry later.
       continue;
     }
-    if (result.kind === "unlanded" || result.kind === "roster-waiting") continue;
+    if (result.kind === "unlanded") continue;
     // A duplicate waits for its ask too: the copy that landed it may have been
     // recorded this tick and not yet written to storage.
     deps.queue.add(
