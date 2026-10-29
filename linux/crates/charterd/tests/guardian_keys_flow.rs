@@ -411,7 +411,7 @@ async fn a_two_root_family_is_accepted_and_every_working_key_hears_status() {
     t.emit_status_to(
         &status.to_string(),
         NOW,
-        &keys.status_recipients(),
+        &keys.signers().recipients(),
         &keys.status_relays(NOW),
     )
     .await;

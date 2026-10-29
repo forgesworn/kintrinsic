@@ -71,6 +71,10 @@ fn pending(pairing: &charter_transport::Pairing) -> Vec<Pending> {
     }
     keys.pending_statements(now())
         .into_iter()
+        // A removal already confirmed is only waiting out its notice: there
+        // is nothing left to confirm (as on Android; review batch 2,
+        // platforms I2).
+        .filter(|p| p.confirmed_at.is_none())
         .map(|p| Pending {
             key: charter_guardians::split_pending_d(&p.d)
                 .and_then(|(_, k)| PubKey::from_hex(k).ok())
@@ -177,6 +181,20 @@ fn main() {
             1,
             "only an administrator can show a presence code. Run it from the Kintrinsic app, \
              or with sudo.",
+        );
+    }
+    // Belt and braces, as `charter-recovery`: the polkit rule already denies
+    // pkexec to a managed child, but if it is missing a child with an admin
+    // credential path is refused by name (review batch 2, platforms L6).
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let pkexec_uid = std::env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    if charterd::managed_guard::caller_is_managed_child(&passwd, &group, pkexec_uid) {
+        fail(
+            1,
+            "a presence code is for the computer's administrator only, not a child it manages.",
         );
     }
     let Some(pairing) = std::fs::read_to_string(PAIRING)

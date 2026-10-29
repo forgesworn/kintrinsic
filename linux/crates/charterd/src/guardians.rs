@@ -317,10 +317,11 @@ pub fn short_npub(key: &PubKey) -> String {
 // The world-readable view (rule 5)
 // ---------------------------------------------------------------------------
 
-/// Guardian-chosen text, safe to print: no control characters, at most 64
-/// characters (the contract caps a label at 64 bytes).
+/// Guardian-chosen text, safe to print: no control or invisible format
+/// characters (bidi overrides included), at most 64 bytes (review batch 2,
+/// platforms L7).
 fn clean_label(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(64).collect()
+    charter_spine::clean_label(s)
 }
 
 /// Who the ward trusts and who set each rule it holds, for the CLI and the
@@ -444,6 +445,7 @@ mod tests {
     fn labels_lose_control_characters_and_are_capped() {
         assert_eq!(clean_label("Mum\u{1b}[2J's\nphone"), "Mum[2J'sphone");
         assert_eq!(clean_label(&"x".repeat(100)).len(), 64);
+        assert_eq!(clean_label("\u{202E}Mum\u{2066}"), "Mum");
     }
 
     #[test]
