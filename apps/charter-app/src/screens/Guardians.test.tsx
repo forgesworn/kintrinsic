@@ -200,9 +200,47 @@ describe("Guardians screens", () => {
   });
 
   it("after joining, shows the guardian ID and the confirm-in-person checklist", () => {
-    render(mockStore({ children: [], keys: { root: signetRoot() } }), "join");
+    render(
+      mockStore({ children: [], keys: { root: signetRoot(), anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } } }),
+      "join",
+    );
     expect(container.textContent).toContain("Now confirm in person");
     expect(container.textContent).toContain("About this device → Guardians → Guardian presence");
+    expect(container.textContent).toContain("Family list from: npub1");
+  });
+
+  it("after approval, asks for the inviting parent's guardian code before confirming in person", async () => {
+    const s = mockStore({ children: [], keys: { root: signetRoot() } });
+    render(s, "join");
+    expect(container.textContent).toContain("Scan the other parent's guardian code");
+    expect(container.textContent).not.toContain("Now confirm in person");
+    expect(button(container, "Scan the other parent's guardian code")).toBeDefined();
+    // A wrong or garbled code: the reason is shown and nothing moves on.
+    s.guardianKeys.anchorRoot = vi.fn(() => {
+      throw new Error("That isn't a guardian code. It starts with npub1.");
+    });
+    const input = container.querySelector<HTMLInputElement>('input[placeholder="npub1…"]')!;
+    act(() => typeInto(input, "npub1garbage"));
+    await act(async () => button(container, "Use this code")!.click());
+    expect(s.guardianKeys.anchorRoot).toHaveBeenCalledWith("npub1garbage");
+    expect(container.textContent).toContain("That isn't a guardian code. It starts with npub1.");
+    expect(container.textContent).not.toContain("Now confirm in person");
+    // A second phone of the parent's own identity skips it.
+    await act(async () => button(container, "This is a second phone for my own identity")!.click());
+    expect(container.textContent).toContain("Now confirm in person");
+  });
+
+  it("shows a ward confirmed in person as waiting for the anchored parent's family list", () => {
+    const s = mockStore({
+      children: [],
+      keys: { root: signetRoot(), anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } },
+    });
+    s.guardianKeys.waitingPresenceWards = vi.fn(() => [{ machine: PHONE, confirmedAt: 1, ts: 2 }]);
+    render(s);
+    expect(container.textContent).toContain("Waiting for npub1");
+    expect(container.textContent).toContain("'s family list");
+    expect(container.textContent).toContain("this phone sends it nothing: no limits, no PIN, no family list.");
+    expect(button(container, "Show my guardian code")).toBeDefined();
   });
 
   it("a past self-removal doesn't hide someone else's removal of you (M2)", async () => {

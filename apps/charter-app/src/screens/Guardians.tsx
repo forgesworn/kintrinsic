@@ -7,6 +7,8 @@ import GuardianJoin from "./GuardianJoin";
 import GuardianMove from "./GuardianMove";
 import GuardianLostPhone from "./GuardianLostPhone";
 import PresenceScanner from "./PresenceScanner";
+import GuardianCode from "./GuardianCode";
+import { familyGateReason } from "../keys/guardianKeys";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
   androidWardsWithoutPin,
@@ -97,6 +99,8 @@ export default function Guardians({ sub }: { sub: string }) {
       );
     case "join":
       return <GuardianJoin onBack={back} onConfirm={() => goGuardians("presence")} />;
+    case "code":
+      return <GuardianCode onBack={back} />;
     case "presence":
       return (
         <PinGate wards={wards} multiRoot={multiRoot}>
@@ -149,7 +153,13 @@ function Overview() {
   const roster = guardianKeys
     .unconfirmedRosterDevices()
     .filter((d) => !wards.some((w) => w.device.devicePubkey === d.machine));
-  const presenceOnly = Object.keys(guardianKeys.state.presenceWards ?? {}).length;
+  // Confirmed in person here, and waiting for an anchored parent's family list.
+  const waiting = guardianKeys.waitingPresenceWards();
+  const presenceOnly = waiting.length;
+  const anchors = guardianKeys
+    .trustedRoots()
+    .filter((r) => r !== me && r !== guardianKeys.state.nextRoot?.pubkey);
+  const waitingFor = anchors.length > 0 ? `${anchors.map(shortNpub).join(" or ")}'s family list` : "the inviting parent's family list";
   const departed = departedWards(state.children);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -170,15 +180,9 @@ function Overview() {
     }
   }
 
-  const notReady = readiness.children.flatMap((c) => c.readiness.wards.filter((w) => !w.readiness.ready));
   const inviteGate: Gate = readiness.ready
     ? { ok: true }
-    : readiness.children.length === 0
-      ? { ok: false, reason: "Pair a device first, then invite another parent." }
-      : {
-          ok: false,
-          reason: `Update Kintrinsic on ${[...new Set(notReady.map((w) => names[w.machine] ?? "a device"))].join(", ")} first, then invite another parent.`,
-        };
+    : { ok: false, reason: familyGateReason(readiness, (m) => names[m], "invite another parent") };
   const leave = leaveGate(wards, me, { waitingForRoster: presenceOnly > 0 });
   const remove = removeGate(keys);
   const progress = guardianKeys.moveProgress();
@@ -245,7 +249,7 @@ function Overview() {
           <p className="card-sub" style={{ margin: 0 }}>
             {wards.length === 0
               ? presenceOnly > 0
-                ? `You've confirmed in person at ${presenceOnly === 1 ? "a device" : `${presenceOnly} devices`}. The family appears here once the other parent's phone shares it: ask them to open Kintrinsic.`
+                ? `You've confirmed in person at ${presenceOnly === 1 ? "a device" : `${presenceOnly} devices`}. Waiting for ${waitingFor}: the family appears here once their phone shares it, so ask them to open Kintrinsic.`
                 : "No device is connected to this phone yet."
               : "None of your devices has reported its guardians yet. They do once they have the latest Kintrinsic."}
           </p>
@@ -278,7 +282,26 @@ function Overview() {
         )}
       </Card>
 
-      {(wards.length > 0 || departed.length > 0 || roster.length > 0) && <SectionLabel>Devices</SectionLabel>}
+      {(wards.length > 0 || departed.length > 0 || roster.length > 0 || waiting.length > 0) && (
+        <SectionLabel>Devices</SectionLabel>
+      )}
+      {waiting.length > 0 && (
+        <Card style={{ marginBottom: 12 }}>
+          <div className="stack" style={{ gap: 6 }}>
+            {waiting.map((p) => (
+              <div key={p.machine} className="row-between">
+                <span>Device {p.machine.slice(0, 8)}</span>
+                <Pill tone="warn">unconfirmed</Pill>
+              </div>
+            ))}
+            <p className="card-sub" style={{ margin: 0 }}>
+              You confirmed in person at {waiting.length === 1 ? "this device" : "these devices"}. Waiting for{" "}
+              {waitingFor}. Until it names {waiting.length === 1 ? "it" : "them"}, this phone sends{" "}
+              {waiting.length === 1 ? "it" : "them"} nothing: no limits, no PIN, no family list.
+            </p>
+          </div>
+        </Card>
+      )}
       {wards.length > 0 && (
         <div className="stack">
           {wards.map((w) => (
@@ -316,6 +339,12 @@ function Overview() {
             Invite a parent
           </Button>
           <Reason gate={inviteGate} />
+
+          {keys.root && (
+            <Button variant="secondary" block onClick={() => goGuardians("code")}>
+              Show my guardian code
+            </Button>
+          )}
 
           <Button variant="secondary" block disabled={!confirmGate.ok} onClick={() => goGuardians("presence")}>
             Confirm in person

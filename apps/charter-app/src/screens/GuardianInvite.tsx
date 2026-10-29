@@ -5,6 +5,7 @@ import { QRScanner } from "../components/QRScanner";
 import { useCharter } from "../store/store";
 import { parseGuardianKey } from "../keys/guardianKeys";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
+import { GuardianCodeCard } from "./GuardianCode";
 import { familyWards, myRootOf, stripNostrPrefix } from "./guardiansView";
 
 /**
@@ -65,6 +66,7 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
         <ol className="card-sub" style={{ paddingLeft: 20, margin: "4px 0 0" }}>
           <li>opens Kintrinsic on their phone and chooses Family → Guardians → Join a family;</li>
           <li>connects their My Signet (the identity you just invited);</li>
+          <li>scans your guardian code (below) with their phone, so it trusts your family list and no one else's;</li>
           <li>
             visits each device, asks it for a presence code, and scans it with Kintrinsic (Family → Guardians →
             Confirm in person){wards.length > 0 ? `: ${wards.map((w) => w.device.label).join(", ")}` : ""}.
@@ -74,6 +76,9 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
           Once they have confirmed at a device, open Kintrinsic on this phone: it shares the family (your children and
           their devices) with their phone, so they see it too.
         </p>
+        <div style={{ fontWeight: 600, marginTop: 8 }}>Your guardian code</div>
+        <GuardianCodeCard />
+        <p className="card-sub">You can show it again later: Family → Guardians → Show my guardian code.</p>
         {hasAndroid && (
           <p className="card-sub">
             A ward phone asks for the guardian PIN before it shows the code. Tell them the PIN in person, never where
