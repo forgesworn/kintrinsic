@@ -333,3 +333,62 @@ fn exit_code_mapping_covers_all() {
     assert_eq!(exit_code(&IpcError::Offline), EXIT_OFFLINE);
     assert_eq!(exit_code(&IpcError::Invalid("x".into())), EXIT_USAGE);
 }
+
+/// Rule 5: `charter status` says who set each rule, each label next to its
+/// root's short npub; a label's control characters never reach the terminal.
+#[tokio::test]
+async fn status_names_who_set_each_rule() {
+    use charter_ipc::{GuardiansView, PendingStatementView, RuleSetterView};
+    let view = GuardiansView {
+        roots: vec!["npub1aaaa…zzzz".into()],
+        rules: vec![
+            RuleSetterView {
+                subject: "bb".repeat(32),
+                kind: "budget".into(),
+                root: "npub1aaaa…zzzz".into(),
+                label: Some("Mum's \u{1b}[2Jphone".into()),
+            },
+            RuleSetterView {
+                subject: "bb".repeat(32),
+                kind: "schedule".into(),
+                root: "npub1aaaa…zzzz".into(),
+                label: None,
+            },
+        ],
+        pending: vec![PendingStatementView {
+            d: "kintrinsic/guardian/cc".into(),
+            kind: "coguardian".into(),
+            key: "npub1cccc…yyyy".into(),
+            takes_effect_at: None,
+            expires_at: 1,
+        }],
+    };
+    let out = dispatch(
+        &MockCharterdClient::new(),
+        &MockPairingSink::new(true).with_guardians(view),
+        &MockExecProbe::new(),
+        &argv(&["status"]),
+    )
+    .await;
+    assert_eq!(out.code, EXIT_OK);
+    assert!(
+        out.rendered.contains("Guardians: npub1aaaa…zzzz"),
+        "{}",
+        out.rendered
+    );
+    assert!(out
+        .rendered
+        .contains("budget     Mum's [2Jphone (npub1aaaa…zzzz)"));
+    assert!(out.rendered.contains("schedule   npub1aaaa…zzzz"));
+    assert!(out.rendered.contains("coguardian npub1cccc…yyyy"));
+    assert!(!out.rendered.contains('\u{1b}'));
+    // The JSON form is the request rows alone, as before.
+    let json = dispatch(
+        &MockCharterdClient::new(),
+        &MockPairingSink::new(true),
+        &MockExecProbe::new(),
+        &argv(&["status", "--json"]),
+    )
+    .await;
+    assert!(!json.rendered.contains("Guardians"));
+}
