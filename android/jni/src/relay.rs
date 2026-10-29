@@ -70,7 +70,11 @@ pub trait WardenRelay: Send + Sync {
     /// A parked wrap addressed to a key no longer among the signer set's
     /// recipients is dropped, never re-addressed (review batch 2, platforms
     /// L4); with the guardian-keys state unreadable nothing is published.
-    fn drain_outbox(&self, now: u64) -> (usize, usize);
+    /// A dropped REQUEST wrap is not lost with it: while `is_open` says the
+    /// request is still waiting, it is built afresh, one wrap per current
+    /// recipient (a root that approved its first working key stops being a
+    /// recipient while still pinned).
+    fn drain_outbox(&self, now: u64, is_open: &dyn Fn(&str) -> bool) -> (usize, usize);
     /// Gift-wrap (without publishing) a device AUDIT (kind 31000), one wrap
     /// per recipient in the signer set (rule 9) — tags only, content always
     /// empty. Used by the break-glass override so an emergency unlock is LOUD
@@ -300,7 +304,7 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
             .any(|(_, o)| matches!(o, PublishOutcome::Ok))
     }
 
-    fn drain_outbox(&self, now: u64) -> (usize, usize) {
+    fn drain_outbox(&self, now: u64, is_open: &dyn Fn(&str) -> bool) -> (usize, usize) {
         let Some(outbox) = &self.outbox else {
             return (0, 0);
         };
@@ -315,21 +319,62 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
             ),
             None => None,
         };
+        let entries = outbox.entries(now);
+        // Requests whose wrap to a departed key was dropped, to be built
+        // afresh for the current recipients below.
+        let mut rebuild: Vec<(crate::outbox::ParkedRequest, u64)> = Vec::new();
         let mut sent = 0;
-        for (path, wrap) in outbox.entries(now) {
+        for parked in &entries {
             if let Some(live) = &live {
-                if !wrap_recipient(&wrap).is_some_and(|p| live.contains(&p)) {
-                    outbox.remove(&path);
+                if !wrap_recipient(&parked.wrap).is_some_and(|p| live.contains(&p)) {
+                    outbox.remove(&parked.path);
+                    if let Some(req) = &parked.request {
+                        if !rebuild.iter().any(|(r, _)| r.req_id == req.req_id) {
+                            rebuild.push((req.clone(), parked.at));
+                        }
+                    }
                     continue;
                 }
             }
-            let outcomes = self.rt.block_on(self.transport.publish_prebuilt(wrap));
+            let outcomes = self
+                .rt
+                .block_on(self.transport.publish_prebuilt(parked.wrap.clone()));
             if outcomes
                 .iter()
                 .any(|(_, o)| matches!(o, PublishOutcome::Ok))
             {
-                outbox.remove(&path);
+                outbox.remove(&parked.path);
                 sent += 1;
+            }
+        }
+        for (req, at) in rebuild {
+            // Settled or expired: nothing more to ask.
+            if !is_open(&req.req_id) {
+                continue;
+            }
+            // A current recipient that had this ask parked (and has it still,
+            // or was just sent it) gets no second wrap.
+            let held = |p: &str| {
+                entries.iter().any(|e| {
+                    e.request.as_ref().is_some_and(|r| r.req_id == req.req_id)
+                        && wrap_recipient(&e.wrap).as_deref() == Some(p)
+                })
+            };
+            for wrap in self.transport.build_request_wraps(&req.json, now) {
+                if wrap_recipient(&wrap).is_some_and(|p| held(&p)) {
+                    continue;
+                }
+                let outcomes = self
+                    .rt
+                    .block_on(self.transport.publish_prebuilt(wrap.clone()));
+                if outcomes
+                    .iter()
+                    .any(|(_, o)| matches!(o, PublishOutcome::Ok))
+                {
+                    sent += 1;
+                } else {
+                    outbox.put_request(&wrap, &req.json, at);
+                }
             }
         }
         (sent, outbox.len())
@@ -526,7 +571,7 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
                 .any(|(_, o)| matches!(o, charter_sys::relay::PublishOutcome::Ok));
             if !accepted {
                 if let Some(outbox) = &self.outbox {
-                    outbox.put_request(&wrap, now);
+                    outbox.put_request(&wrap, request_json, now);
                 }
             }
         }
