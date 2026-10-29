@@ -51,6 +51,7 @@ import {
   familyWards,
   goGuardians,
   guardiansSubroute,
+  myRootOf,
   removalsAgainstMe,
   rootsView,
 } from "./guardiansView";
@@ -142,7 +143,7 @@ function useGuardiansSubroute(): string | null {
 function GuardiansCard() {
   const { state, guardianKeys } = useCharter();
   const wards = familyWards(state.children);
-  const me = guardianKeys.rootPubkey();
+  const me = myRootOf(guardianKeys);
   const roots = rootsView(wards, me);
   const againstMe = removalsAgainstMe(wards, guardianKeys.state, me);
   const others = roots.filter((r) => !r.you).length;

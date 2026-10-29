@@ -5,7 +5,7 @@ import { QRScanner } from "../components/QRScanner";
 import { useCharter } from "../store/store";
 import { parseGuardianKey } from "../keys/guardianKeys";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
-import { familyWards, stripNostrPrefix } from "./guardiansView";
+import { familyWards, myRootOf, stripNostrPrefix } from "./guardiansView";
 
 /**
  * Invite the other parent: their guardian ID (npub), scanned from their My
@@ -31,7 +31,7 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
       setError("That isn't a guardian ID. It starts with npub1.");
       return false;
     }
-    if (k === guardianKeys.rootPubkey() || k === guardianKeys.workingPubkey) {
+    if (k === myRootOf(guardianKeys) || k === guardianKeys.workingPubkey) {
       setError("That's your own guardian ID. Use the other parent's.");
       return false;
     }

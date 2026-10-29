@@ -13,6 +13,7 @@ import {
   departedWards,
   durationWords,
   familyWards,
+  myRootOf,
   goGuardians,
   leaveGate,
   moveGate,
@@ -80,7 +81,7 @@ function PinGate({ wards, children, multiRoot }: { wards: WardRef[]; children: R
 export default function Guardians({ sub }: { sub: string }) {
   const { state, guardianKeys } = useCharter();
   const wards = familyWards(state.children);
-  const me = guardianKeys.rootPubkey();
+  const me = myRootOf(guardianKeys);
   const multiRoot = rootsView(wards, me).length > 1;
   const back = () => goGuardians();
   const [page, arg] = sub.split("/");
@@ -137,7 +138,7 @@ function Overview() {
   const now = useNowUnix();
   const wards = familyWards(state.children);
   const names = Object.fromEntries(wards.map((w) => [w.device.devicePubkey, w.device.label]));
-  const me = guardianKeys.rootPubkey();
+  const me = myRootOf(guardianKeys);
   const roots = rootsView(wards, me);
   const keys = guardianKeys.state;
   const readiness = guardianKeys.familyReadiness();
@@ -420,7 +421,7 @@ function DeviceCard({
   act: (what: string, fn: () => Promise<ReportLike>) => Promise<void>;
 }) {
   const { guardianKeys } = useCharter();
-  const me = guardianKeys.rootPubkey();
+  const me = myRootOf(guardianKeys);
   const r = guardianKeys.childReadiness(ward.childId).wards.find((w) => w.machine === ward.device.devicePubkey);
   const line = r ? readinessLine(r.readiness) : null;
   const pending = pendingFor(ward.device.guardians, guardianKeys.state, me);

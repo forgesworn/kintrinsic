@@ -52,6 +52,15 @@ export function shortNpub(hex: string): string {
   }
 }
 
+/**
+ * This install's root, without minting a key: the api's `rootPubkey()`
+ * creates the local key when there is none, which merely opening Family
+ * must not do. "" on a fresh install (nothing matches it).
+ */
+export function myRootOf(keys: { state: GuardianKeysState; workingPubkey: string | null }): string {
+  return keys.state.root?.pubkey ?? keys.workingPubkey ?? "";
+}
+
 /** The full npub for a hex key. */
 export function npubOf(hex: string): string {
   return nip19.npubEncode(hex);
