@@ -15,7 +15,15 @@
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
-    "types": ["vite/client", "vite-plugin-pwa/client", "vitest/globals", "w3c-web-usb"]
+    "types": ["vite/client", "vite-plugin-pwa/client", "vitest/globals", "w3c-web-usb"],
+    // The guardian-keys reference (`@forgesworn/charter/guardians`) is read
+    // from the monorepo source, not a published package. Its one bare import
+    // (`nostr-tools/pure`) must resolve to THIS app's copy: CI installs only
+    // apps/charter-app, so the repo root has no node_modules there.
+    "paths": {
+      "@forgesworn/charter/guardians": ["../../src/guardians/index.ts"],
+      "nostr-tools/pure": ["./node_modules/nostr-tools/lib/types/pure.d.ts"]
+    }
   },
   "include": ["src"]
 }
