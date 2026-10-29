@@ -1400,10 +1400,12 @@ family's wards report" is not enough on its own for a joining install.
   invitation anchors the invited root; older installs count the co-guardian
   statements they sent). STATUS reports never make a root trusted.
 - **Roster acceptance.** A roster is accepted only if the approval it
-  carries is signed by a trusted root and names the sender. Where the
-  family's wards report that root, the sender must also be listed under it
-  (so a withdrawn W is refused); a joining install whose wards don't report
-  it yet relies on the approval alone. Every refusal is final: the wrap is
+  carries is signed by a trusted root and names the sender, and the
+  family's wards report that root and list the sender under it (so a
+  withdrawn W, or a parent who has left or been removed, is refused). Only
+  an install none of whose devices reports its guardians yet (a joining
+  one, or a second install whose device hasn't reported) relies on the
+  approval alone. Every refusal is final: the wrap is
   marked handled, not retried on every poll. Merge rules are unchanged.
 - **Roster recipients.** Only working keys that the family's own devices
   (not presence wards) list under a trusted root.
@@ -1421,6 +1423,9 @@ family's wards report" is not enough on its own for a joining install.
   only if it invited or anchored them; a parent invited by the other parent
   reaches it through that parent's roster merge, not directly. Leaving or
   removing a parent doesn't un-anchor them: their rosters are then refused
-  because no ward reports their root.
+  because no ward reports their root, and the approval alone counts only
+  before any device reports its guardians. A withdrawn W of a trusted root
+  could still send a roster to an install none of whose devices has
+  reported yet.
 
 **Raised by:** batch 3 re-review.

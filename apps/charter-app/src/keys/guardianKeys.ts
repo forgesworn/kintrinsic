@@ -1254,9 +1254,10 @@ export class GuardianKeys {
    * Take in a roster another install sent (already unwrapped by
    * `unwrapRoster`): merged with `mergeRoster`, accepted only from a W that
    * a trusted root approved (`trustedRoots`; the approval travels in the
-   * roster). Where the family's wards report that root, W must also be
-   * listed under it there, so a withdrawn W is refused; a joining install
-   * whose wards don't report it yet relies on the approval alone. Returns
+   * roster). The family's wards must also report that root and list W
+   * under it, so a withdrawn W, or a parent who has left or been removed, is
+   * refused; only an install none of whose devices reports its guardians
+   * yet (a joining one) relies on the approval alone. Returns
    * the subjects that changed. Every refusal is final.
    */
   receiveRoster(inbound: { sealAuthor: string; inner: SignedEvent }):
@@ -1266,7 +1267,13 @@ export class GuardianKeys {
     const signer = rosterApprovalSigner(inbound.inner);
     if (signer !== null && !this.trustedRoots().includes(signer)) return { ok: false, reason: "root_not_trusted" };
     const reported = this.reportedRoots();
-    if (signer !== null && !reported.some((r) => r.root === signer)) {
+    // The approval alone counts only while no device of this family reports
+    // its guardians at all (a joining install, or a second install whose
+    // device hasn't reported yet). Once any does, the root must be reported:
+    // a parent who left or was removed is trusted still, but no ward lists
+    // them, so their rosters are refused.
+    const nothingReports = !this.allDevices().some((d) => d.guardians);
+    if (signer !== null && nothingReports && !reported.some((r) => r.root === signer)) {
       reported.push({ root: signer, keys: [inbound.inner.pubkey] });
     }
     const { keys } = this.deps.read();
