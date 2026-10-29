@@ -24,7 +24,7 @@ use charter_spine::enforcer_runtime::EnforcerRuntime as SpineEnforcerRuntime;
 use charter_spine::lifecycle::RequestRecord;
 use charter_spine::multi_child::ExtensionInbox;
 use charter_spine::ports::NullEventSink;
-use charter_spine::{Broker, EnactorRegistry};
+use charter_spine::{Broker, EnactorRegistry, GuardianKeys, GuardianStatements};
 use charter_sys::persistence::{
     ChildClauseStore, ClauseStore, CuratorListStore, ExtensionStore, PairingStore,
     RealChildClauseStore, RealClauseStore, RealConsumedIdStore, RealCuratorListStore,
@@ -36,6 +36,12 @@ use charter_transport::pairing::{pin_from_connect, Pairing, PairingError};
 use crate::dto;
 use crate::relay::{AndroidTransportFacade, OsEntropy, WardenRelay};
 use crate::system::AndroidSystem;
+
+/// The guardian-keys wiring (contract, *Guardian roots and working keys
+/// (v1)*): the port's lifecycle, the clause gate the direct ingest shares
+/// with the broker, the guardian PIN, presence tokens and the guardian list.
+#[path = "guardians.rs"]
+pub(crate) mod guardians;
 
 /// The Android broker: the SAME spine as charterd, over Android's system
 /// composition and the shared relay transport.
@@ -268,6 +274,17 @@ pub struct Warden {
     /// The request/grant broker (None until paired with relays). Arc so the
     /// poll orchestrator drives it with the warden lock RELEASED.
     broker: Option<std::sync::Arc<AndroidBroker>>,
+    /// The guardian-keys port for the current pairing: the live signer set,
+    /// the guardian PIN and presence tokens. Loaded whenever a pairing is
+    /// known (a ward paired before the section is migrated in place), so
+    /// once there is a state file every broker and every direct clause
+    /// ingest goes through it (charter-spine `guardian_keys`, *Invariant*).
+    /// `None` only while unpaired or while the pairing will not read.
+    guardian_keys: Option<GuardianKeys>,
+    /// A gift-wrapped RELAYS change landed over the local link: the next
+    /// slow poll re-reads the pairing and rebuilds the transports on the new
+    /// list (not from inside the link's own ingest).
+    relays_reload_due: bool,
     /// Verified time-extensions the enactor deposits; the tick drains them
     /// into the ONE enforcing ledger (I13).
     inbox: ExtensionInbox,
@@ -385,6 +402,8 @@ impl Warden {
             pair_token,
             boot_watch,
             broker: None,
+            guardian_keys: None,
+            relays_reload_due: false,
             inbox: std::sync::Arc::new(Mutex::new(Vec::new())),
             installs: std::sync::Arc::new(crate::install::InstallQueue::new(Path::new(base_dir))),
             break_glass: crate::breakglass::BreakGlass::new(Path::new(base_dir)),
@@ -417,6 +436,7 @@ impl Warden {
             ever_configured: false,
             announced_denials: None,
         };
+        w.load_guardian_keys(guardians::wall_now());
         w.rebuild_relay();
         Ok(w)
     }
@@ -440,8 +460,15 @@ impl Warden {
                 // The link first: both transports take its sink.
                 self.start_link();
                 let sink = self.link.as_ref().map(|l| l.sink());
-                self.relay =
-                    crate::relay::real_relay(sk, g, self.relays.clone(), &self.base, sink).ok();
+                self.relay = crate::relay::real_relay(
+                    sk,
+                    g,
+                    self.relays.clone(),
+                    &self.base,
+                    sink,
+                    self.guardian_keys.as_ref(),
+                )
+                .ok();
                 self.broker = self
                     .build_broker(Box::new(
                         charter_sys::relay::RealRelayTransport::default().with_auth_signer(
@@ -470,8 +497,7 @@ impl Warden {
     )]
     fn start_link(&mut self) {
         self.retire_link(std::time::Duration::ZERO, false);
-        let (Some(guardian), Some(sk)) = (self.guardian, self.machine_sk.as_deref().copied())
-        else {
+        let (Some(_), Some(sk)) = (self.guardian, self.machine_sk.as_deref().copied()) else {
             return;
         };
         self.link_gen = LINK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -479,7 +505,7 @@ impl Warden {
             self.link_home,
             self.link_gen,
             sk,
-            guardian,
+            self.signer_set(),
             self.base.clone(),
             self.link_allow_loopback,
         ) {
@@ -518,6 +544,11 @@ impl Warden {
     ) -> charter_link::AckResult {
         use charter_link::AckResult;
         let live = matches!(&self.link, Some(l) if l.gen() == gen);
+        if out.relays_changed && live {
+            // The pairing record now holds the new list; the transports are
+            // rebuilt on it by the next slow poll, not under this ingest.
+            self.relays_reload_due = true;
+        }
         let mut result = out.result;
         if let Some(release) = out.release {
             result = if !live {
@@ -584,9 +615,16 @@ impl Warden {
             .as_deref()
             .copied()
             .ok_or("machine key unavailable")?;
+        // The invariant: a paired ward's broker always carries the port. No
+        // port, no broker (and so no clause from the relays at all).
+        let keys = self
+            .guardian_keys
+            .clone()
+            .ok_or("guardian-keys state not loaded")?;
         let sys = AndroidSystem::with_base(&self.base).map_err(|e| format!("system: {e:?}"))?;
         let facade = AndroidTransportFacade::new(relay, machine_sk, guardian, self.relays.clone())?
             .with_outbox(&self.base)
+            .with_signer_set(keys.signers())
             .with_local_sink(self.link.as_ref().map(|l| l.sink()));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -606,14 +644,17 @@ impl Warden {
         // registered so an allowed ask reaches `Enacted` instead of stalling
         // as `Failed` with no enactor at all (see `AppOpenEnactor`'s doc).
         registry.register(Box::new(AppOpenEnactor));
-        Ok(std::sync::Arc::new(Broker::new(
-            sys,
-            facade,
-            OsEntropy,
-            registry,
-            Box::new(NullEventSink),
-            subject,
-        )))
+        Ok(std::sync::Arc::new(
+            Broker::new(
+                sys,
+                facade,
+                OsEntropy,
+                registry,
+                Box::new(NullEventSink),
+                subject,
+            )
+            .with_guardians(std::sync::Arc::new(keys)),
+        ))
     }
 
     /// Verify each polled RELEASE against the pinned guardian + this machine;
@@ -642,34 +683,36 @@ impl Warden {
         releases: &[(charter_primitives::NostrEvent, PubKey)],
         now: u64,
     ) -> (bool, String) {
-        let Some(guardian) = self.guardian else {
+        if self.guardian.is_none() {
             return (false, "release(s) seen but already unpaired".into());
-        };
+        }
         let machine = self.signer.pubkey();
         let mut detail = format!(
             "release check: {} candidate(s), paired_at={}",
             releases.len(),
             self.paired_at
         );
-        for (event, _seal_author) in releases {
-            if let Err(e) = charter_verify::verify_release(event, &guardian, &machine, now) {
-                detail.push_str(&format!(" | verify_release failed: {e:?}"));
-                continue;
-            }
-            let payload = match charter_proto::ReleasePayload::from_json(&event.content) {
+        // The broker's decision, shared (review 2a, L3): sealed by its own
+        // author, signed by a key in the signer set, refused while more than
+        // one root is pinned (one parent's remote unpair would remove the
+        // other's control), bound to this machine, fresh, and not older than
+        // the current pairing.
+        let signers = self.signer_set();
+        for (event, seal_author) in releases {
+            let payload = match charter_spine::guardian_keys::release_gate(
+                event,
+                seal_author,
+                &*signers,
+                &machine,
+                self.paired_at,
+                now,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
-                    detail.push_str(&format!(" | payload parse failed: {e:?}"));
+                    detail.push_str(&format!(" | REJECTED: {e:?}"));
                     continue;
                 }
             };
-            if payload.issued_at < self.paired_at {
-                detail.push_str(&format!(
-                    " | REJECTED stale: issued_at={} < paired_at={}",
-                    payload.issued_at, self.paired_at
-                ));
-                continue;
-            }
             self.apply_release();
             return (
                 true,
@@ -702,6 +745,14 @@ impl Warden {
         // place, a released phone re-paired to anyone would keep enforcing the
         // previous guardian's web rules.
         let _ = std::fs::remove_dir_all(self.base.join("clauses"));
+        // The guardian-keys state (roots, working keys, the guardian PIN,
+        // tombstones) belongs to this pairing: cleared before the pairing
+        // record, as the broker does.
+        if let Some(keys) = self.guardian_keys.take() {
+            if let Err(e) = keys.clear() {
+                eprintln!("charter: could not clear the guardian-keys state on release ({e})");
+            }
+        }
         let _ = self.pairing.clear();
         self.guardian = None;
         self.subject = None;
@@ -1890,6 +1941,7 @@ impl Warden {
                 self.relays.clone(),
             )?
             .with_outbox(&self.base)
+            .with_guardians(self.guardian_keys.as_ref())
             .with_local_sink(self.link.as_ref().map(|l| l.sink())),
         ));
         self.broker = Some(self.build_broker(Box::new(mock))?);
@@ -1968,6 +2020,7 @@ impl Warden {
                 self.relays = relays;
                 self.paired_at = paired_at;
                 self.pairing_error = None;
+                self.load_guardian_keys(guardians::wall_now());
                 self.rebuild_relay();
             }
             Err(e) => self.pairing_error = Some(e),
@@ -2053,13 +2106,17 @@ impl Warden {
             .ok_or("Pair this device first.")?;
         let mut pairing: Pairing =
             serde_json::from_str(&json).map_err(|_| "Pairing cannot be read.")?;
-        charter_transport::relay_config::apply_signed_config(&mut pairing, code, now)?;
+        self.apply_pasted_relays(&mut pairing, code, now)?;
         let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
         self.pairing
             .save(&json)
             .map_err(|e| format!("save relay change: {e:?}"))?;
         self.relays = pairing.relays;
         self.last_status = None;
+        // The guardian-keys state follows the pairing record's relay list
+        // when it loads (rule 11's previous-relays window covers a pasted
+        // change too).
+        self.load_guardian_keys(now);
         self.rebuild_relay();
         Ok(self.pairing_state())
     }
@@ -2103,6 +2160,10 @@ impl Warden {
         self.subject = Some(pairing.subject_pubkey);
         self.relays = pairing.relays;
         self.paired_at = pairing.paired_at;
+        // The key the link names is the root R (open question "Android
+        // pairing has no PAIR_OFFER"): the guardian-keys state starts with R
+        // as the one root, and each working key sends its own approval.
+        self.load_guardian_keys(now);
         // QR onboarding: a `token` param in the scanned URI is echoed on
         // STATUS for a short window so the guardian app can bind this machine
         // without anyone typing the device code. Survives a restart (file).
@@ -2151,6 +2212,7 @@ impl Warden {
         // 0 already persisted above; 0 disables the release-staleness guard
         // for this pairing, which is fine off the production `pair()` route.
         self.paired_at = 0;
+        self.load_guardian_keys(guardians::wall_now());
         Ok(())
     }
 
@@ -2223,7 +2285,10 @@ impl Warden {
         let mut accepted = 0;
         for rc in received {
             seen += 1;
-            if self.ingest_clause_event(&rc.clause, now).accepted {
+            if self
+                .ingest_clause_event(&rc.clause, rc.seal_author, now)
+                .accepted
+            {
                 accepted += 1;
             }
         }
@@ -2463,6 +2528,13 @@ impl Warden {
         // and the phone comes back enforcing as though the holiday never
         // happened. This is the one line that says otherwise.
         status.enforcement_gap = self.enforcement_gap();
+        // Who this ward trusts, as it sees it (contract STATUS `guardians`):
+        // roots and their working keys, pending statements, the tombstone
+        // count and the relay list.
+        status.guardians = self
+            .guardian_keys
+            .as_ref()
+            .and_then(|k| k.status_guardians(now));
         Some(status)
     }
 
@@ -2490,12 +2562,22 @@ impl Warden {
                 }
             }
         };
-        self.ingest_clause_event(&event, now)
+        // An unsealed entry: the event's own author stands in for the seal.
+        let seal_author = event.pubkey;
+        self.ingest_clause_event(&event, seal_author, now)
     }
 
     /// The shared verify+store path — fed by both the JNI test/onboarding entry
-    /// (`ingest_clause`) and the relay poll (`poll_once`).
-    fn ingest_clause_event(&mut self, event: &NostrEvent, now: u64) -> dto::ClauseResult {
+    /// (`ingest_clause`) and the relay poll (`poll_once`) when no broker runs.
+    /// Once the guardian-keys state is loaded, every clause goes through its
+    /// gate exactly as the broker's does (signer set, rules 4 and 5); the
+    /// pinned-guardian path below is only for a warden with no pairing state.
+    fn ingest_clause_event(
+        &mut self,
+        event: &NostrEvent,
+        seal_author: PubKey,
+        now: u64,
+    ) -> dto::ClauseResult {
         let reject = |reason: &str| dto::ClauseResult {
             accepted: false,
             kind: None,
@@ -2522,6 +2604,9 @@ impl Warden {
         let kind = payload.kind;
         let store_key = kind.store_key();
         let subject_hex = subject.to_hex();
+        if let Some(keys) = self.guardian_keys.clone() {
+            return self.judged_clause(&keys, event, seal_author, kind, &subject_hex, now);
+        }
 
         // A floor we cannot read is not "no floor". Collapsing the `Err` into
         // `None` handed `verify_clause` nothing to compare against, so on a
@@ -3776,6 +3861,11 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
                 // and an unreadable pairing (F2) with it.
                 w.retry_machine_key();
                 w.retry_pairing();
+                // A RELAYS change that came over the local link: rebuild the
+                // transports on the pairing's new list before this round.
+                if w.relays_reload_due {
+                    w.reload_relays();
+                }
                 match w.poll_prepare(now) {
                     Ok(x) => x,
                     Err(reason) => {
@@ -3848,7 +3938,7 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
 
     // Phase 3 (locked): authenticate + store (legacy path); mirror the ward's
     // clauses for the broker's EOD cap; decide whether STATUS is due.
-    let status_due = {
+    let (status_due, status_extra_relays) = {
         match guard(lock).as_mut() {
             None => {
                 out.reason = "warden shut down mid-poll".into();
@@ -3870,7 +3960,20 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
                 // Level-triggered: a freshly absorbed (or long-stored) update
                 // clause parks its install directive within this same poll.
                 w.check_self_update(now);
-                due
+                // Rule 11: for 7 days after a RELAYS change, a ward with more
+                // than one root also sends STATUS on its previous relays.
+                let extra = w
+                    .guardian_keys
+                    .as_ref()
+                    .map(|k| k.status_relays(now))
+                    .unwrap_or_default();
+                // A gift-wrapped RELAYS change applied this round: the next
+                // round runs on the new list (this STATUS goes out on the old
+                // one, which the guardian is still listening on).
+                if broker_counts.relays_changed {
+                    w.relays_reload_due = true;
+                }
+                (due, extra)
             }
         }
     };
@@ -3891,7 +3994,7 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
             .map(|w| {
                 w.break_glass.wraps_to_publish(
                     now,
-                    |tags| relay.build_audit_wrap(tags.to_vec(), now),
+                    |tags| relay.build_audit_wraps(tags.to_vec(), now),
                     |wrap| relay.offer_audit_local(wrap),
                 )
             })
@@ -3914,12 +4017,19 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
     // Phase 4 (unlocked): publish the STATUS heartbeat.
     if let Some(status) = status_due {
         match serde_json::to_string(&status) {
-            Ok(json) => match relay.emit_status(&json, now) {
+            Ok(json) => match relay.emit_status(&json, now, &status_extra_relays) {
                 Ok(accepted) if accepted > 0 => {
                     out.status_emitted = true;
                     // Phase 5 (locked): record it for the throttle.
                     if let Some(w) = guard(lock).as_mut() {
                         w.mark_status_emitted(status);
+                        // Every STATUS recipient had it, departed keys
+                        // included: they have had their last one.
+                        if let Some(k) = &w.guardian_keys {
+                            if let Err(e) = k.mark_status_sent(now) {
+                                eprintln!("charter: could not record the STATUS farewell ({e})");
+                            }
+                        }
                     }
                 }
                 Ok(_) => {
@@ -5987,11 +6097,14 @@ mod tests {
 
         // Guardian-side: sign a PAUSED schedule (locks immediately), subject
         // ABSENT — exactly what the deployed PWA emits for a Stage-0 child —
-        // and gift-wrap it to the machine on the shared in-memory relay.
-        let ev = ClauseBuilder::schedule(1)
+        // and gift-wrap it to the machine on the shared in-memory relay. Issued
+        // after the pairing: the guardian-keys state refuses a clause from
+        // before the current pairing (contract, *Who may sign what*).
+        let issued = IN_WINDOW as u64 - 50;
+        let ev = ClauseBuilder::schedule(issued)
             .body(json!({
                 "v": 1, "tz": "Europe/London", "paused": true,
-                "weekly": {}, "issuedAt": 1
+                "weekly": {}, "issuedAt": issued
             }))
             .build(&guardian);
         let rumor = Rumor::from_signed_event(&ev);
@@ -6145,7 +6258,7 @@ mod tests {
         };
         assert_eq!(spooled.len(), 1, "still journaled: no relay took it");
         assert_eq!(
-            spooled[0].wrap.as_ref().map(|w| w.id),
+            spooled[0].wraps.first().map(|w| w.id),
             Some(offered[0].wrap.id),
             "the journaled wrap is the one the link was offered"
         );
