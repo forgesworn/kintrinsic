@@ -151,9 +151,9 @@ export default function SignerCard() {
           <div className="stack" style={{ marginTop: 12 }}>
             {/* This used to end "it links that laptop to this phone", which a
                 second parent reasonably read as the way to add THEMSELVES —
-                when the laptop being paired is a ward's device. Kintrinsic has one
-                pinned guardian key by contract, so naming whose computer this
-                is matters more than the mechanics. */}
+                when the laptop being paired is a ward's device. A second parent
+                joins with their own identity (Guardians), so naming whose
+                computer this is matters more than the mechanics. */}
             <p className="card-sub" style={{ margin: 0 }}>
               To connect a computer your child uses: on that computer open
               Kintrinsic, go to “Connect a phone” and press “Show the pairing
@@ -162,9 +162,8 @@ export default function SignerCard() {
               rules you set here.
             </p>
             <p className="card-sub" style={{ margin: 0 }}>
-              This isn’t how another parent joins — Kintrinsic has one guardian key,
-              held on this phone. Sharing the household today means sharing that
-              key, through Back up key below.
+              This isn’t how another parent joins. They join with their own
+              identity: Settings → Guardians → Invite a parent.
             </p>
             <p className="card-sub" style={{ margin: 0 }}>
               No internet on either device? Copy this link instead and paste it

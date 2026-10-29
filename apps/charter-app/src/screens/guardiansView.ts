@@ -260,12 +260,12 @@ export function pinProblem(pin: string, again: string): string | null {
 
 /** Go to a Guardians sub-screen (`""` is the overview). */
 export function goGuardians(sub = ""): void {
-  window.location.hash = sub ? `/family/guardians/${sub}` : "/family/guardians";
+  window.location.hash = sub ? `/settings/guardians/${sub}` : "/settings/guardians";
 }
 
-/** The Guardians sub-route in `#/family/guardians/<sub>`, or null when not on Guardians. */
+/** The Guardians sub-route in `#/settings/guardians/<sub>`, or null when not on Guardians. */
 export function guardiansSubroute(hash = window.location.hash): string | null {
   const parts = hash.replace(/^#\/?/, "").split("/");
-  if (parts[0] !== "family" || parts[1] !== "guardians") return null;
+  if (parts[0] !== "settings" || parts[1] !== "guardians") return null;
   return parts.slice(2).join("/");
 }
