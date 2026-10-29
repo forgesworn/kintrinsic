@@ -183,13 +183,17 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
               onChange={(e) => setUri(e.target.value)}
             />
           </label>
+          <InvitedField value={invited} onChange={setInvited} disabled={busy} />
           {errorLine}
           <Button
             block
             disabled={busy || !uri.trim().startsWith("bunker://")}
             onClick={() =>
               run(async () => {
-                const r = await pairSignet(uri.trim(), { via });
+                const want = expected();
+                if (want === null) throw new Error("That isn't a guardian ID. It starts with npub1.");
+                // Checked before anything is approved: a different identity is refused and not left connected.
+                const r = await pairSignet(uri.trim(), { via, ...(want ? { expectRoot: want } : {}) });
                 if (!r.approved) throw new Error(`Connected, but this phone isn't approved yet: ${r.error}`);
               })
             }
