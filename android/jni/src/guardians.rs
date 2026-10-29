@@ -1090,6 +1090,13 @@ mod tests {
             .update_relays(&serde_json::to_string(&stranger).unwrap(), ward.now)
             .is_err());
         ward.approve_w1();
+        // A poll in flight holds a clone of the live instance; clones share
+        // one state, so the pasted change must reach it (no second instance).
+        let (in_flight, _) = ward.handle();
+        assert_eq!(
+            in_flight.status_guardians(ward.now).unwrap().relays.len(),
+            1
+        );
         let by_w1 = ward.relays_event(W1, ward.now - 3, false);
         let state = ward
             .w
@@ -1099,6 +1106,10 @@ mod tests {
         // The guardian-keys state followed the pairing's list.
         let g = ward.w.guardian_keys.as_ref().unwrap();
         assert_eq!(g.status_guardians(ward.now).unwrap().relays.len(), 2);
+        assert_eq!(
+            in_flight.status_guardians(ward.now).unwrap().relays.len(),
+            2
+        );
     }
 
     #[test]

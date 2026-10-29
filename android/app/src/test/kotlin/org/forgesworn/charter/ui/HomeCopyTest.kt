@@ -51,15 +51,32 @@ class HomeCopyTest {
             "Not paired with a guardian yet.",
             HomeCopy.guardianLine(CharterCore.PairingState(paired = false, guardianShort = null, subject = null)),
         )
+        val root = "a".repeat(64)
+        val other = "b".repeat(64)
+        fun summary(vararg roots: CharterCore.GuardianRoot, available: Boolean = true) = CharterCore.GuardiansSummary(
+            available = available, paired = true, roots = roots.toList(),
+            pending = 0, pinSet = false, pinFailures = 0, pinWaitSeconds = 0,
+        )
+        fun guardian(hex: String, label: String?) =
+            CharterCore.GuardianRoot(root = hex, label = label, keys = 1, keyLabels = emptyList(), rules = emptyList())
+        val paired = CharterCore.PairingState(paired = true, guardianShort = "legacy", subject = "s", relays = listOf("wss://relay.example"))
+        // One root: named by its label and short npub, not the legacy pin.
         assertEquals(
-            "Paired with guardian npub1ab…cd\nListening on wss://relay.example",
-            HomeCopy.guardianLine(
-                CharterCore.PairingState(paired = true, guardianShort = "npub1ab…cd", subject = "s", relays = listOf("wss://relay.example")),
-            ),
+            "Paired with guardian Mum (${GuardianCopy.shortNpub(root)})\nListening on wss://relay.example",
+            HomeCopy.guardianLine(paired, summary(guardian(root, "Mum"))),
         )
         assertEquals(
-            "Paired with a guardian",
-            HomeCopy.guardianLine(CharterCore.PairingState(paired = true, guardianShort = null, subject = "s")),
+            "Paired with guardian A guardian (${GuardianCopy.shortNpub(root)})",
+            HomeCopy.guardianLine(paired.copy(relays = emptyList()), summary(guardian(root, null))),
         )
+        // Several roots: counted.
+        assertEquals(
+            "Paired with 2 guardians\nListening on wss://relay.example",
+            HomeCopy.guardianLine(paired, summary(guardian(root, "Mum"), guardian(other, "Dad"))),
+        )
+        // No usable summary: the plain fallback, never the legacy pin.
+        assertEquals("Paired with a guardian\nListening on wss://relay.example", HomeCopy.guardianLine(paired, null))
+        assertEquals("Paired with a guardian", HomeCopy.guardianLine(paired.copy(relays = emptyList()), summary(available = false)))
+        assertEquals("Paired with a guardian", HomeCopy.guardianLine(paired.copy(relays = emptyList()), summary()))
     }
 }
