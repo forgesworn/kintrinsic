@@ -47,12 +47,20 @@ fn default_pair_relays() -> Vec<RelayUrl> {
     DEFAULT_PAIR_RELAYS.iter().map(|r| r.to_string()).collect()
 }
 
-/// One pass: given the offers polled this tick, pin a guardian if exactly one
-/// proves the live token.
+/// One pass: given the offers polled this tick, pin a guardian root if
+/// exactly one key proves the live token.
 ///
-/// Returns the pinned key, or `None` to keep waiting. A refused commit is
-/// logged and swallowed — a ward that cannot pair must keep enforcing the
-/// limits it already has, never fall over.
+/// The key that sealed the winning offer is NOT necessarily the one pinned
+/// (contract, *Scan-to-pair with a working key*; review 2a, L4): an offer
+/// sealed by a working key W carries R's approval of W, and the ward pins
+/// **R** and holds the approval, so W signs from the start. The decision is
+/// the guardian-keys state machine's (`scan_to_pair`); its state is written
+/// FIRST, and the pairing record then carries the decision's `paired_at`, so
+/// the next start loads that state instead of migrating afresh.
+///
+/// Returns the pinned root, or `None` to keep waiting. A refused offer or
+/// commit is logged and swallowed — a ward that cannot pair must keep
+/// enforcing the limits it already has, never fall over.
 pub fn try_pair_once(
     paths: &PinPaths,
     machine: PubKey,
@@ -60,25 +68,71 @@ pub fn try_pair_once(
     subject_random: [u8; 32],
     now: u64,
 ) -> Option<PubKey> {
-    let token = crate::pair_token::current(&paths.token, now)?;
-    let guardian = choose_offer(offers, &token, now)?;
+    let (token, minted_at) = crate::pair_token::current_with_mint(&paths.token, now)?;
+    // Token, age and the contested-token refusal: two distinct keys
+    // presenting one token pin nobody, whatever their offers carry.
+    let sealer = choose_offer(offers, &token, now)?;
+    let pair_token = charter_guardians::PairToken {
+        token: &token,
+        minted_at: i64::try_from(minted_at).unwrap_or(i64::MAX),
+    };
+    let mut refusal = None;
+    let decided = offers
+        .iter()
+        .filter(|o| o.seal_author == sealer)
+        .find_map(|o| match charter_spine::scan_to_pair(o, &pair_token, now) {
+            Ok(d) => Some((d, o)),
+            Err(r) => {
+                refusal = Some(r);
+                None
+            }
+        });
+    let Some((decision, offer)) = decided else {
+        eprintln!("charterd: pairing offer refused — {refusal:?}");
+        return None;
+    };
+    let state_dir = std::path::Path::new(&paths.state_dir);
+    if let Err(e) = charter_spine::GuardianKeys::from_paired(
+        std::sync::Arc::new(charter_sys::guardian_store::FileGuardianStateStore::in_dir(
+            state_dir,
+        )),
+        decision.clone(),
+    ) {
+        eprintln!("charterd: pairing offer refused — could not write the guardian state: {e}");
+        return None;
+    }
     // Listen on the relays the winning offer actually named, so a self-hosted
     // guardian keeps working after the pin.
-    let relays: Vec<RelayUrl> = offers
-        .iter()
-        .find(|o| o.seal_author == guardian)
-        .map(|o| o.offer.relays.clone())
-        .unwrap_or_else(pair_relays);
-
-    match commit_pin(paths, guardian, &relays, machine, subject_random, now) {
+    let relays: Vec<RelayUrl> = if offer.offer.relays.is_empty() {
+        pair_relays()
+    } else {
+        offer.offer.relays.clone()
+    };
+    match commit_pin(
+        paths,
+        decision.root,
+        &relays,
+        machine,
+        subject_random,
+        decision.paired_at(),
+    ) {
         Ok(()) => {
-            eprintln!(
-                "charterd: paired by scan — pinned guardian {}",
-                &guardian.to_hex()[..8]
-            );
-            Some(guardian)
+            match decision.working_key {
+                Some(w) => eprintln!(
+                    "charterd: paired by scan — pinned guardian root {} (working key {} approved)",
+                    &decision.root.to_hex()[..8],
+                    &w.to_hex()[..8]
+                ),
+                None => eprintln!(
+                    "charterd: paired by scan — pinned guardian {}",
+                    &decision.root.to_hex()[..8]
+                ),
+            }
+            Some(decision.root)
         }
         Err(e) => {
+            // Nothing pinned: the state written above belongs to no pairing.
+            let _ = crate::guardians::clear_state(state_dir);
             eprintln!("charterd: pairing offer refused — {e}");
             None
         }
@@ -128,6 +182,7 @@ mod tests {
             limits_dir: d.join("limits.d").to_string_lossy().into_owned(),
             token: d.join("pair-token.json").to_string_lossy().into_owned(),
             children_base: d.to_string_lossy().into_owned(),
+            state_dir: d.to_string_lossy().into_owned(),
         }
     }
 
