@@ -485,7 +485,7 @@ fn ward_pinned_to_another_guardian_never_reveals_its_machine_key() {
     assert!(wait_until(3, || ward
         .snapshot()
         .last_error
-        .is_some_and(|e| e.contains("pinned"))));
+        .is_some_and(|e| e.contains("not a guardian key"))));
 
     // Against a real guardian too: no session on either side.
     let gdir = tempfile::tempdir().unwrap();
@@ -1993,4 +1993,80 @@ fn connections_on_addresses_outside_the_accept_set_close() {
         let (mut s, _) = raw_ward_ready(port, "m").await;
         barrier(&mut s, 2).await;
     });
+}
+
+// ---------------------------------------------------------------------------
+// A key that leaves the signer set (review 2a, Info 5)
+// ---------------------------------------------------------------------------
+
+/// A signer set one test can shrink while a session is up.
+struct Switchable {
+    key: PubKey,
+    on: std::sync::atomic::AtomicBool,
+}
+
+impl charter_primitives::SignerSet for Switchable {
+    fn is_signer(&self, k: &PubKey) -> bool {
+        *k == self.key && self.on.load(Ordering::SeqCst)
+    }
+    fn root_of(&self, k: &PubKey) -> Option<PubKey> {
+        self.is_signer(k).then_some(self.key)
+    }
+    fn is_departed(&self, k: &PubKey) -> bool {
+        *k == self.key && !self.on.load(Ordering::SeqCst)
+    }
+    fn recipients(&self) -> Vec<PubKey> {
+        if self.on.load(Ordering::SeqCst) {
+            vec![self.key]
+        } else {
+            Vec::new()
+        }
+    }
+    fn roots(&self) -> Vec<PubKey> {
+        self.recipients()
+    }
+}
+
+#[test]
+fn a_session_whose_key_departs_closes_and_ingests_nothing_more() {
+    let rt = rt();
+    let wdir = tempfile::tempdir().unwrap();
+    let set = Arc::new(Switchable {
+        key: pk("g"),
+        on: std::sync::atomic::AtomicBool::new(true),
+    });
+    let rec = Recorder::new(AckResult::Applied);
+    let ward = WardLink::spawn(
+        WardLinkConfig {
+            machine_sk: zsk("m"),
+            signers: set.clone(),
+            state_dir: wdir.path().to_path_buf(),
+            allow_loopback: true,
+            prepare_socket: None,
+        },
+        rec.clone(),
+        rt.handle(),
+    )
+    .unwrap();
+    let l = rt.block_on(TcpListener::bind(lo(0))).unwrap();
+    ward.set_discovered(vec![lo(l.local_addr().unwrap().port())]);
+    rt.block_on(async {
+        let mut s = fake_guardian_ready(&l, "g").await;
+        send(&mut s, &Frame::Ping(1)).await;
+        assert!(matches!(recv(&mut s, 3).await, Recv::Frame(Frame::Pong(1))));
+        // The key departs while the session is up.
+        set.on.store(false, Ordering::SeqCst);
+        send(&mut s, &Frame::Event(wrap(&pk("m"), 1))).await;
+        loop {
+            match recv(&mut s, 3).await {
+                Recv::Closed => break,
+                Recv::Frame(Frame::Ping(_)) => {}
+                other => panic!("expected the session to close, got {other:?}"),
+            }
+        }
+    });
+    assert!(
+        rec.ids().is_empty(),
+        "nothing from a departed key is ingested"
+    );
 }

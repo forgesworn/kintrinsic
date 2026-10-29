@@ -17,6 +17,7 @@
 pub mod clock;
 pub mod effects;
 pub mod error;
+pub mod file_lock;
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
 pub(crate) mod fsutil;
 pub mod guardian_store;

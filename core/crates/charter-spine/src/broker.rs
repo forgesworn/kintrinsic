@@ -1852,6 +1852,15 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         let Some(port) = self.statement_port() else {
             return AckResult::Ignored;
         };
+        // Held to the save below: another process (Linux `charter-pair`) also
+        // rewrites the record (review 2a, Info 2).
+        let _record_lock = match self.sys.pairing().lock_for_update() {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("charter: could not lock the pairing record for a relay change ({e})");
+                return AckResult::Failed;
+            }
+        };
         let Ok(Some(json)) = self.sys.pairing().load() else {
             return AckResult::Refused;
         };

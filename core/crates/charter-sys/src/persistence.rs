@@ -283,6 +283,14 @@ pub trait PairingStore: Send + Sync {
     fn load(&self) -> SysResult<Option<String>>;
     /// Forget the pairing entirely (a parent-gated release / unpair).
     fn clear(&self) -> SysResult<()>;
+    /// Hold an exclusive lock across a load-change-save of the record, so a
+    /// writer in another process (Linux `charter-pair`) cannot lose this
+    /// change or have its own lost (review 2a, Info 2). `None`: this store
+    /// has no other writer to order against (in-memory stores, a platform
+    /// whose record only its own process writes).
+    fn lock_for_update(&self) -> SysResult<Option<crate::file_lock::FileLock>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,6 +1548,11 @@ mod real {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(io_err("remove pairing", e)),
             }
+        }
+        fn lock_for_update(&self) -> SysResult<Option<crate::file_lock::FileLock>> {
+            crate::file_lock::lock_exclusive(&self.base.join(crate::file_lock::PAIRING_LOCK_FILE))
+                .map(Some)
+                .map_err(|e| io_err("lock pairing", e))
         }
     }
 

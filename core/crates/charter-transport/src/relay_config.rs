@@ -156,12 +156,25 @@ pub struct RelaysApplied {
 /// [`apply_signed_relays`] and the open question "How a guardian PIN reaches
 /// an Android ward").
 pub fn apply_signed_config(pairing: &mut Pairing, json: &str, now: u64) -> Result<(), String> {
+    let pinned = pairing.guardian_pubkey;
+    apply_signed_config_from(pairing, json, &pinned, now)
+}
+
+/// [`apply_signed_config`] with the author checked against `signers` rather
+/// than the pinned guardian alone: on a ward with the guardian-keys section,
+/// "a RELAYS change from any signer applies as usual" (rule 11; review 2a,
+/// Info 6). The pasted-code rules are unchanged, a `guardianPin` included.
+pub fn apply_signed_config_from(
+    pairing: &mut Pairing,
+    json: &str,
+    signers: &dyn SignerSet,
+    now: u64,
+) -> Result<(), String> {
     if json.len() > 16_384 {
         return Err("Relay code is too long.".into());
     }
     let event: NostrEvent = serde_json::from_str(json).map_err(|_| "Invalid signed relay code.")?;
-    let pinned = pairing.guardian_pubkey;
-    let config = check_relays_event(pairing, &event, &pinned, now)?;
+    let config = check_relays_event(pairing, &event, signers, now)?;
     if config.guardian_pin.is_some() {
         return Err("A guardian PIN can't be set from a pasted code.".into());
     }
@@ -459,6 +472,34 @@ mod tests {
                 "guardianPin": {"v": 1, "salt": "AB", "hash": "cd"}}),
         );
         assert!(apply_signed_relays(&mut q, &bad, &set, 200).is_err());
+        assert_eq!(q, original);
+    }
+
+    /// Review 2a, Info 6: a pasted code from a working key in the signer set
+    /// applies; a stranger's does not; a PIN is refused whoever signed it.
+    #[test]
+    fn a_pasted_code_from_any_signer_applies_but_never_a_pin() {
+        let mut p = pairing();
+        let working = PubKey::from_bytes(charter_crypto::xonly_pubkey(&[5; 32]).unwrap());
+        let set = charter_primitives::SinglePinned(working);
+        let signed = code(&p, [5; 32], 200, default_relays());
+        // Against the pinned guardian alone (the old reading) it is refused.
+        assert!(apply_signed_config(&mut p.clone(), &signed, 200).is_err());
+        apply_signed_config_from(&mut p, &signed, &set, 200).unwrap();
+        assert_eq!(p.relays, default_relays());
+        assert_eq!(p.relays_updated_at, Some(200));
+        let original = pairing();
+        let mut q = original.clone();
+        let stranger = code(&q, [9; 32], 200, default_relays());
+        assert!(apply_signed_config_from(&mut q, &stranger, &set, 200).is_err());
+        let with_pin = event_with(
+            &q,
+            [5; 32],
+            200,
+            serde_json::json!({"machine": q.machine, "relays": default_relays(), "guardianPin": pin()}),
+        );
+        let with_pin = serde_json::to_string(&with_pin).unwrap();
+        assert!(apply_signed_config_from(&mut q, &with_pin, &set, 200).is_err());
         assert_eq!(q, original);
     }
 
