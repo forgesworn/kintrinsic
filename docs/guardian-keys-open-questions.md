@@ -577,7 +577,10 @@ Android presence screen, the guardian app's scanner.
 
 **Build's interim reading:** mirror the scan-to-pair invite
 (`charter://pair?m=<64hex>&t=<32hex>`):
-`charter://presence?m=<machine 64hex>&t=<token 32hex>&d=<pending d, percent-encoded>`.
+`charter://presence?m=<machine 64hex>&t=<token 32hex>&d=<pending d, percent-encoded>&s=<pending statement event id 64hex>`.
+The code carries the statement's event id because the confirmation must name
+it (`statement: <event id>`), and a new parent's install has never seen the
+statement.
 The short form to type is the token alone, 32 hex shown as four groups of 8;
 the guardian app asks which device and which pending statement it is for.
 The code is not a secret beyond its 600-second, single-use life, and is

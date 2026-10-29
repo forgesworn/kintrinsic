@@ -52,6 +52,8 @@ fn fail(code: i32, msg: &str) -> ! {
 
 struct Pending {
     d: String,
+    /// The pending statement's event id (64 hex).
+    statement: String,
     kind: &'static str,
     key: String,
     takes_effect_at: Option<i64>,
@@ -77,6 +79,7 @@ fn pending(pairing: &charter_transport::Pairing) -> Vec<Pending> {
             kind: pending_kind(p.kind),
             takes_effect_at: p.takes_effect_at,
             expires_at: p.expires_at,
+            statement: p.statement,
             d: p.d,
         })
         .collect()
@@ -98,6 +101,7 @@ fn list_json(items: &[Pending]) -> String {
             .map(|p| {
                 serde_json::json!({
                     "d": p.d,
+                    "statement": p.statement,
                     "kind": p.kind,
                     "key": p.key,
                     "takesEffectAt": p.takes_effect_at,
@@ -225,7 +229,7 @@ fn main() {
     };
 
     let token = mint(&chosen.d);
-    let payload = presence_payload(&machine, &token.token, &chosen.d);
+    let payload = presence_payload(&machine, &token.token, &chosen.d, &chosen.statement);
     let short = presence_short_form(&token.token);
     let expires_at = token.minted_at + charter_sys::presence_token::PRESENCE_TOKEN_TTL_SECS;
     if json {
@@ -235,6 +239,7 @@ fn main() {
                 "payload": payload,
                 "short": short,
                 "d": chosen.d,
+                "statement": chosen.statement,
                 "kind": chosen.kind,
                 "key": chosen.key,
                 "expiresAt": expires_at,
