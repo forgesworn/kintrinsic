@@ -2405,7 +2405,22 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                         // Re-stamped, never copied: the frozen payload's seq
                         // is the one already published.
                         cur.seq = Some(crate::status_seq::next_durable(&mut status_seq));
-                        let delivered = stx.emit_status(&cur.to_json(), now as u64).await;
+                        // The same recipients and previous relays (rule 11)
+                        // as an unpaused STATUS (review batch 2, platforms
+                        // I5); a departed key's last one waits for the pause
+                        // to end.
+                        let delivered = match &guardian_keys {
+                            Some(k) => {
+                                stx.emit_status_to(
+                                    &cur.to_json(),
+                                    now as u64,
+                                    &k.signers().recipients(),
+                                    &k.status_relays(now as u64),
+                                )
+                                .await
+                            }
+                            None => stx.emit_status(&cur.to_json(), now as u64).await,
+                        };
                         if delivered && cur.enforcement_gap_secs.is_some() {
                             gap_delivered = true;
                         }
@@ -3632,21 +3647,25 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // waiting (04-G5), which is why it is not awaited here.
                 let stx = stx.clone();
                 let at = now as u64;
-                // Rule 9 and the departed keys' last STATUS: recipients and
-                // the previous relays (rule 11) are read once for the batch.
+                // Rule 9: the signer set's recipients and the previous relays
+                // (rule 11), read once for the batch.
                 let keys = guardian_keys.clone();
+                let sent = keys
+                    .as_ref()
+                    .map(|k| (k.signers().recipients(), k.status_relays(at)));
+                // The departed keys owed one last STATUS get a separate,
+                // minimal one that shows their departure (open question "A
+                // departed key's last STATUS"), each on its own wrap.
+                let farewell = keys.as_ref().and_then(|k| k.farewell()).map(|f| {
+                    let seq = crate::status_seq::next_durable(&mut status_seq);
+                    let json = f.to_json(&machine, at, Some(seq));
+                    (f.recipients, json)
+                });
                 let handle = tokio::spawn(async move {
                     let mut outcomes = Vec::with_capacity(batch.len());
-                    let sent = keys.as_ref().map(|k| {
-                        (
-                            k.status_recipients(),
-                            k.status_relays(at),
-                            k.status_guardians(at),
-                        )
-                    });
                     for (uid, json, carried_gap, stepped_from) in batch {
                         let delivered = match &sent {
-                            Some((recipients, extra, _)) => {
+                            Some((recipients, extra)) => {
                                 stx.emit_status_to(&json, at, recipients, extra).await
                             }
                             None => stx.emit_status(&json, at).await,
@@ -3658,14 +3677,22 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                             stepped_from,
                         });
                     }
-                    // The departed keys have had their last STATUS, unless
-                    // who the ward trusts changed while it was publishing
-                    // (then the next STATUS carries the change, to them too).
-                    if let (Some(k), Some((_, _, guardians))) = (&keys, &sent) {
-                        if outcomes.iter().any(|o| o.delivered)
-                            && k.status_guardians(at) == *guardians
-                        {
-                            if let Err(e) = k.mark_status_sent(at) {
+                    // A departed key is told only once a relay took the wrap
+                    // addressed to it (review batch 2, platforms L1); a key
+                    // that departed since the farewell was read stays owed.
+                    if let (Some(k), Some((departed, json))) = (&keys, farewell) {
+                        let extra = sent.map(|(_, extra)| extra).unwrap_or_default();
+                        let mut told = Vec::new();
+                        for key in departed {
+                            if stx
+                                .emit_status_to(&json, at, std::slice::from_ref(&key), &extra)
+                                .await
+                            {
+                                told.push(key);
+                            }
+                        }
+                        if !told.is_empty() {
+                            if let Err(e) = k.mark_status_sent(&told, at) {
                                 eprintln!("charterd: could not record the last STATUS sent: {e}");
                             }
                         }

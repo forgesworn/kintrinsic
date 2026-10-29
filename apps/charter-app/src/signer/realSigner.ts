@@ -17,6 +17,7 @@ import {
   giftWrapGrant,
   giftWrapPairOffer,
   giftWrapRelease,
+  giftWrapSigned,
   giftWrapUsageSync,
   type GuardianOps,
 } from "../wire/giftwrap";
@@ -32,6 +33,7 @@ import {
 import type { DecisionContext, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
+import { pairOfferInnerTemplate } from "../keys/guardianKeys";
 import { localRouteAvailable } from "../carrier/localLink";
 import {
   QueuedForHomeNetworkError,
@@ -101,6 +103,19 @@ export interface RealSignerDeps {
    * whose bunker approves out-of-band).
    */
   confirmGate?: ConfirmGate;
+  /**
+   * Guardian roots and working keys: the key that signs and seals for one
+   * ward. Returns this install's working key where the ward holds it (and the
+   * child passes the versioning gate); undefined keeps the connected root's
+   * key, as before the section. Absent = always the root's.
+   */
+  pickOps?: (machine: string) => GuardianOps | undefined;
+  /**
+   * Scan-to-pair with a working key: the PAIR_OFFER content (carrying W's
+   * approval) and W's operations to sign and seal it, or null to offer as
+   * the root, as before.
+   */
+  pairOffer?: (token: string, relays: string[], ts: number) => { content: string; ops: GuardianOps } | null;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -183,6 +198,16 @@ export class RealSigner implements Signer {
 
   status(): SignerState {
     return this.state;
+  }
+
+  /** The connected root's operations (R over NIP-46, or the local key), or null. */
+  rootOps(): GuardianOps | null {
+    return this.guardian;
+  }
+
+  /** Who signs and seals for `machine`: its working key where that applies, else the root. */
+  private sealerFor(machine: string, root: GuardianOps): GuardianOps {
+    return this.deps.pickOps?.(machine) ?? root;
   }
 
   async connect(kind: SignerKind): Promise<SignerState> {
@@ -374,7 +399,7 @@ export class RealSigner implements Signer {
       const clauses = this.appRulesClauses(childId, policy, target.subject, issuedAt);
       for (const clause of clauses) {
         for (const device of target.devices) {
-          const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+          const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
           await this.send(target.relays, wrap, CLAUSE_META, held);
         }
       }
@@ -390,7 +415,7 @@ export class RealSigner implements Signer {
       const effective = effectivePolicyForDevice(policy, device.id);
       const clauses = policyToClauses(target.subject, effective, issuedAt);
       for (const clause of clauses) {
-        const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+        const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
         await this.send(target.relays, wrap, CLAUSE_META, held);
       }
     }
@@ -415,7 +440,7 @@ export class RealSigner implements Signer {
     const createdAt = this.deps.now();
     for (const [devicePubkey, payload] of Object.entries(payloadsByDevice)) {
       if (!target.devices.some((d) => d.pubkey === devicePubkey)) continue;
-      const wrap = await giftWrapUsageSync(payload, devicePubkey, guardian, createdAt);
+      const wrap = await giftWrapUsageSync(payload, devicePubkey, this.sealerFor(devicePubkey, guardian), createdAt);
       await this.deps.publish(target.relays, wrap);
     }
     return { ok: true };
@@ -456,7 +481,7 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "maintenance", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
@@ -506,7 +531,7 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "gift", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
@@ -565,7 +590,7 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "standdown", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
@@ -597,7 +622,7 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of phones) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
@@ -634,7 +659,7 @@ export class RealSigner implements Signer {
     const body = debUpdateToGrant(deb, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     return this.settle(held);
   }
@@ -676,7 +701,7 @@ export class RealSigner implements Signer {
     const body = debuggingToGrant(grant, issuedAt);
     const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     try {
       return { ...this.settle(held), issuedAt };
@@ -728,7 +753,7 @@ export class RealSigner implements Signer {
         ? `Disconnect ${label} — it stops following your rules`
         : `Release device ${machinePubkey.slice(0, 8)}…`,
     );
-    const wrap = await giftWrapRelease(machinePubkey, guardian, this.deps.now());
+    const wrap = await giftWrapRelease(machinePubkey, this.sealerFor(machinePubkey, guardian), this.deps.now());
     await this.deps.publish(relays, wrap);
     return { ok: true };
   }
@@ -744,6 +769,15 @@ export class RealSigner implements Signer {
     if (!/^[0-9a-f]{64}$/.test(machinePubkey)) return { ok: true };
     if (!/^[0-9a-f]{32}$/.test(token)) return { ok: true };
     await this.authorize("clause", `Connect to computer ${machinePubkey.slice(0, 8)}…`);
+    const ts = this.deps.now();
+    const viaWorkingKey = this.deps.pairOffer?.(token, relays, ts);
+    if (viaWorkingKey) {
+      // Sealed by W with R's approval: the ward checks the approval names the
+      // seal author and pins R, not W (contract, *Scan-to-pair with a working key*).
+      const inner = await viaWorkingKey.ops.signEvent(pairOfferInnerTemplate(viaWorkingKey.content, ts));
+      await this.deps.publish(relays, await giftWrapSigned(inner, machinePubkey, viaWorkingKey.ops, ts));
+      return { ok: true };
+    }
     const wrap = await giftWrapPairOffer(
       machinePubkey,
       token,
@@ -791,7 +825,7 @@ export class RealSigner implements Signer {
         source: install.source,
         ts,
       });
-      const wrap = await giftWrapGrant(payload, install.machine, guardian, ts);
+      const wrap = await giftWrapGrant(payload, install.machine, this.sealerFor(install.machine, guardian), ts);
       await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: install.reqId });
       return { ok: true };
     }
@@ -815,7 +849,7 @@ export class RealSigner implements Signer {
         minutesGranted: ctx?.minutesGranted ?? 0,
         ts,
       });
-      const wrap = await giftWrapGrant(payload, appOpen.machine, guardian, ts);
+      const wrap = await giftWrapGrant(payload, appOpen.machine, this.sealerFor(appOpen.machine, guardian), ts);
       await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: appOpen.reqId });
       return { ok: true };
     }
@@ -864,7 +898,7 @@ export class RealSigner implements Signer {
       budgetTz: ctx.budgetTz,
     });
     // The GRANT answers exactly ONE device — the machine that brokered the ask.
-    const wrap = await giftWrapGrant(payload, wire.machine, guardian, ts);
+    const wrap = await giftWrapGrant(payload, wire.machine, this.sealerFor(wire.machine, guardian), ts);
     await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: wire.reqId });
     return { ok: true };
   }
