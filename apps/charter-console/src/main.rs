@@ -31,6 +31,17 @@ static INVITE: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::syn
 /// offer past it, so a QR shown any longer is a lie.
 const TOKEN_TTL_SECS: u64 = 600;
 
+/// The presence code on screen ("Confirm in person"): what `charter-presence
+/// --mint <d> --json` printed, and when. In memory only, like the invite; the
+/// token itself stays root-only on disk. A code lives as long as a pairing
+/// code (`charter_sys::presence_token::PRESENCE_TOKEN_TTL_SECS`).
+static PRESENCE: std::sync::Mutex<Option<(Value, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Who the ward trusts, who set each rule, and what is waiting to be confirmed
+/// in person, as charterd publishes it (world-readable, no secrets).
+const GUARDIANS_VIEW: &str = "/run/charter/guardians.json";
+
 const LIMITS_DIR: &str = "/etc/charter/limits.d";
 const DEVICE_PUB: &str = "/var/lib/charter/device.pub";
 const PAIRING: &str = "/var/lib/charter/pairing.json";
@@ -269,6 +280,13 @@ fn handle_command(body: &str, proxy: &tao::event_loop::EventLoopProxy<UserEvent>
         // Mint a fresh scan-to-pair token and show its QR. Asks for the admin
         // password, which is the point: only the parent may invite a guardian.
         "invite" => Some(run_invite().map(|_| "Scan this with your phone.")),
+        // Show the one-time code a guardian standing here scans to confirm a
+        // pending co-guardian, removal or root move. Admin password, like the
+        // pairing code: only a parent can confirm anything in person.
+        "presence" => {
+            let d = msg.get("d").and_then(|v| v.as_str()).unwrap_or("");
+            Some(run_presence(d).map(|_| "Ask the guardian to scan this code."))
+        }
         "learning" => {
             let user = msg.get("user").and_then(|v| v.as_str()).unwrap_or("");
             let khan = msg.get("khan").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -393,6 +411,26 @@ fn run_invite() -> Result<(), String> {
         return Err("Couldn't prepare a pairing code. Please try again.".into());
     }
     *INVITE.lock().expect("invite lock") = Some((payload, std::time::Instant::now()));
+    Ok(())
+}
+
+/// Ask charterd (through the privileged helper) for a presence code bound to
+/// the pending statement `d`, and hold it for the QR.
+fn run_presence(d: &str) -> Result<(), String> {
+    if d.is_empty() {
+        return Err("Nothing to confirm.".into());
+    }
+    let out = pkexec_capture("charter-presence", &["--mint", d, "--json"])?;
+    let v: Value = serde_json::from_str(&out)
+        .map_err(|_| "Couldn't prepare a code. Please try again.".to_string())?;
+    if !v
+        .get("payload")
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| p.starts_with("charter://presence?"))
+    {
+        return Err("Couldn't prepare a code. Please try again.".into());
+    }
+    *PRESENCE.lock().expect("presence lock") = Some((v, std::time::Instant::now()));
     Ok(())
 }
 
@@ -781,6 +819,27 @@ fn collect_status() -> String {
         .as_ref()
         .map(|(_, m)| TOKEN_TTL_SECS.saturating_sub(m.elapsed().as_secs()));
     let qr = invite.as_ref().and_then(|(p, _)| qr_svg(p));
+    // The presence code, dropped once expired, exactly like the invite.
+    let mut guard = PRESENCE.lock().expect("presence lock");
+    if let Some((_, minted)) = guard.as_ref() {
+        if minted.elapsed().as_secs() >= TOKEN_TTL_SECS {
+            *guard = None;
+        }
+    }
+    let presence = guard.as_ref().map(|(v, minted)| {
+        json!({
+            "qr": v.get("payload").and_then(|p| p.as_str()).and_then(qr_svg),
+            "short": v.get("short"),
+            "kind": v.get("kind"),
+            "key": v.get("key"),
+            "d": v.get("d"),
+            "secsLeft": TOKEN_TTL_SECS.saturating_sub(minted.elapsed().as_secs()),
+        })
+    });
+    drop(guard);
+    let guardians = std::fs::read_to_string(GUARDIANS_VIEW)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
 
     let me = current_username();
     let viewer_is_ward = me.as_deref().is_some_and(is_managed_user);
@@ -802,6 +861,8 @@ fn collect_status() -> String {
         "version": option_env!("KINTRINSIC_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
         "qr": qr,
         "invited": invite.is_some(),
+        "presence": presence,
+        "guardians": guardians,
         "secsLeft": secs_left,
         // Who is sitting here. The ward gets the SAME numbers as the guardian
         // — Kintrinsic's standing rule is that a ward can always see what is

@@ -285,6 +285,17 @@ fn build_deb() -> Result<(), String> {
         &stage_dir.join("usr/sbin/charter-pair-invite"),
         true,
     )?;
+    // Presence confirmation (guardian roots and working keys): asks charterd
+    // for the one-time code a guardian standing at this computer scans to
+    // confirm a co-guardian, root removal or root move. Privileged for the
+    // same reason as the pairing invite — the code is the proof that a
+    // guardian was physically here — so only a parent can show one.
+    // charter-console runs it through pkexec ("Confirm in person").
+    stage(
+        &rel.join("charter-presence"),
+        &stage_dir.join("usr/sbin/charter-presence"),
+        true,
+    )?;
     // Give / take back a ward's time at the computer itself. Privileged
     // because it moves what is enforced: 49-charter.rules denies the managed
     // account pkexec, so a ward cannot hand themselves an extra hour. This is
