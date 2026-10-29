@@ -1084,6 +1084,176 @@ mod tests {
         assert!(crate::outbox::Outbox::new(&w.base).is_empty());
     }
 
+    // ---- A parked REQUEST follows the recipient set (review batch 2, N1) ----
+
+    /// The ward's network goes down: every publish to the pinned relay fails.
+    fn go_offline(ward: &mut Ward) {
+        ward.mock = MockRelayTransport::new().with_failing_relay("wss://relay.example");
+        ward.w.wire_test_relay(ward.mock.clone()).unwrap();
+    }
+
+    /// The network returns (a fresh relay over the same disk).
+    fn go_online(ward: &mut Ward) {
+        ward.mock = MockRelayTransport::new();
+        ward.w.wire_test_relay(ward.mock.clone()).unwrap();
+    }
+
+    /// The child asks for more time while offline; returns the reqId.
+    fn ask_offline(ward: &Ward) -> String {
+        ward.w
+            .submit_request(
+                "time.extend",
+                "{\"minutesRequested\":30,\"reason\":\"\",\"limitHit\":\"budget\"}",
+            )
+            .expect("the ask persists and parks even offline")
+    }
+
+    /// One round of the ward's slow poll, which drains the spool.
+    fn poll_round(ward: &mut Ward) {
+        let (mock, now) = (ward.mock.clone(), ward.now);
+        let w = std::mem::replace(
+            &mut ward.w,
+            Warden::init(ward.base.to_str().unwrap(), "enforce", 20).unwrap(),
+        );
+        let lock = std::sync::Mutex::new(Some(w));
+        let r = super::super::poll_once_locked(&lock, now);
+        assert!(r.polled, "{}", r.reason);
+        ward.w = lock.into_inner().unwrap().unwrap();
+        ward.mock = mock;
+    }
+
+    /// The REQUEST wraps on the relay as (recipient hex, reqId).
+    fn request_wraps(ward: &Ward) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for wrap in relay_wraps(&ward.mock) {
+            let Some(p) = wrap_p(&wrap) else { continue };
+            for k in [ROOT, W1, W2, ROOT2] {
+                if pk(k).to_hex() != p {
+                    continue;
+                }
+                let (rumor, _) =
+                    nip59::unwrap_with_author(&wrap, &secret(k), ward.now, nip59::MAX_JITTER_SECS)
+                        .unwrap();
+                if rumor.kind == kinds::CHARTER_DEVICE_REQUEST {
+                    let body: Value = serde_json::from_str(&rumor.content).unwrap();
+                    out.push((p.clone(), body["reqId"].as_str().unwrap().to_owned()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The parked REQUEST wraps as recipient hex.
+    fn parked_requests(ward: &Ward) -> Vec<String> {
+        let mut out: Vec<String> = crate::outbox::Outbox::new(&ward.base)
+            .entries(ward.now)
+            .iter()
+            .filter(|e| e.request.is_some())
+            .filter_map(|e| wrap_p(&e.wrap))
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn revoke(ward: &Ward, key: u8, salt: u8) {
+        let withdrawal = ward.statement(
+            ROOT,
+            format!("kintrinsic/revoke/{}", pk(key).to_hex()),
+            pk(key),
+            ward.now - 30,
+            json!({}),
+        );
+        assert_eq!(ward.deliver(&withdrawal, ROOT, salt), AckResult::Applied);
+    }
+
+    /// The normal onboarding order: the child asks while offline (the wrap is
+    /// parked to the pinned root), then the root approves its first working
+    /// key. The root is still pinned but is no longer a recipient (rule 9),
+    /// so the wrap to it is dropped and the ask is built afresh for W1.
+    #[test]
+    fn a_parked_request_follows_its_root_to_its_first_working_key() {
+        let mut ward = Ward::new("req-follow");
+        go_offline(&mut ward);
+        let req_id = ask_offline(&ward);
+        assert_eq!(parked_requests(&ward), vec![pk(ROOT).to_hex()]);
+
+        ward.approve_w1();
+        go_online(&mut ward);
+        poll_round(&mut ward);
+
+        assert_eq!(
+            request_wraps(&ward),
+            vec![(pk(W1).to_hex(), req_id)],
+            "delivered to W1, never to the root"
+        );
+        assert!(parked_requests(&ward).is_empty());
+    }
+
+    /// A working key withdrawn while the ask waits: its wrap is dropped and
+    /// the ask reaches whoever is a recipient now (the root again, with no
+    /// working key left).
+    #[test]
+    fn a_parked_request_to_a_withdrawn_key_is_rebuilt_for_who_is_left() {
+        let mut ward = Ward::new("req-withdrawn");
+        ward.approve_w1();
+        go_offline(&mut ward);
+        let req_id = ask_offline(&ward);
+        assert_eq!(parked_requests(&ward), vec![pk(W1).to_hex()]);
+
+        revoke(&ward, W1, 3);
+        go_online(&mut ward);
+        poll_round(&mut ward);
+
+        assert_eq!(
+            request_wraps(&ward),
+            vec![(pk(ROOT).to_hex(), req_id)],
+            "the withdrawn key gets nothing; the root, a recipient again, does"
+        );
+        assert!(parked_requests(&ward).is_empty());
+    }
+
+    /// Two working keys, one withdrawn: the other's own parked wrap goes out
+    /// once, and no second copy is built for it.
+    #[test]
+    fn a_remaining_recipient_is_not_sent_the_ask_twice() {
+        let mut ward = Ward::new("req-once");
+        ward.approve_w1();
+        assert_eq!(
+            ward.deliver(&ward.approval(ROOT, W2), W2, 2),
+            AckResult::Applied
+        );
+        go_offline(&mut ward);
+        let req_id = ask_offline(&ward);
+        let mut both = vec![pk(W1).to_hex(), pk(W2).to_hex()];
+        both.sort();
+        assert_eq!(parked_requests(&ward), both);
+
+        revoke(&ward, W2, 4);
+        go_online(&mut ward);
+        poll_round(&mut ward);
+
+        assert_eq!(request_wraps(&ward), vec![(pk(W1).to_hex(), req_id)]);
+        assert!(parked_requests(&ward).is_empty());
+    }
+
+    /// An ask that is no longer waiting (withdrawn by the child) is not
+    /// re-emitted; the wrap to the departed key is simply dropped.
+    #[test]
+    fn a_settled_request_is_not_re_emitted() {
+        let mut ward = Ward::new("req-settled");
+        go_offline(&mut ward);
+        let req_id = ask_offline(&ward);
+        assert!(ward.w.cancel_request(&req_id), "it was Pending");
+
+        ward.approve_w1();
+        go_online(&mut ward);
+        poll_round(&mut ward);
+
+        assert!(request_wraps(&ward).is_empty(), "nothing is sent");
+        assert!(parked_requests(&ward).is_empty(), "nothing is parked");
+    }
+
     /// Setting the same pairing again changes nothing: the guardian-keys
     /// state is not re-migrated (review batch 2, platforms L3).
     #[test]

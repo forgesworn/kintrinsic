@@ -3911,7 +3911,20 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
 
     // Phase 2 (unlocked): network. First retry anything parked in the offline
     // spool (§2.2 — REQUESTs queued while offline, stale-but-unsent STATUS).
-    let (spool_sent, _spool_left) = relay.drain_outbox(now);
+    // A parked REQUEST whose recipient has left the signer set is rebuilt
+    // for the current ones while the broker still has it waiting.
+    let request_open = |req_id: &str| {
+        broker.as_ref().is_some_and(|b| {
+            b.status(req_id).iter().any(|r| {
+                matches!(
+                    r.state,
+                    charter_spine::lifecycle::RequestState::Pending
+                        | charter_spine::lifecycle::RequestState::Enacting
+                )
+            })
+        })
+    };
+    let (spool_sent, _spool_left) = relay.drain_outbox(now, &request_open);
     if spool_sent > 0 {
         out.reason = format!("spool: {spool_sent} retried");
     }
