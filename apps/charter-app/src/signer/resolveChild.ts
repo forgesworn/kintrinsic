@@ -34,6 +34,7 @@ export function resolveChildTarget(
     id: d.id,
     pubkey: d.devicePubkey as string,
     platform: d.platform,
+    ...(d.debugging ? { debugging: { allow: d.debugging.allow, ...(d.debugging.until !== undefined ? { until: d.debugging.until } : {}) } } : {}),
   }));
   // Each device's OWN relays (from its pairing), unioned with the defaults —
   // never just the current defaults, so a device paired under an older

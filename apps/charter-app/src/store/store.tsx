@@ -128,7 +128,7 @@ import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
 import { isAskExpired } from "../domain/askExpiry";
 import type { GuardianKeysState, RootVia } from "../keys/state";
 import { listensWithLocalKey, useGuardianKeys, type GuardianKeysApi } from "./useGuardianKeys";
-import { applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId, stampPinnedKeys } from "./guardianKeysWiring";
+import { adoptRoster, applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId, stampPinnedKeys } from "./guardianKeysWiring";
 import type { StatusFarewell } from "../wire/status";
 
 export { isSetUp, statusFor } from "./statusFor";
@@ -317,7 +317,15 @@ type Action =
   | { type: "SET_GUARDIAN_KEYS"; keys: GuardianKeysState }
   | { type: "SET_DEVICE_KEYS_VIEW"; status: DeviceStatus }
   | { type: "DEVICE_FAREWELL"; farewell: StatusFarewell; workingKey: string; ownRoots?: string[] }
-  | { type: "STAMP_PINNED_KEYS"; key: string; onlyUnheard?: boolean };
+  | { type: "STAMP_PINNED_KEYS"; key: string; onlyUnheard?: boolean }
+  | {
+      type: "ADOPT_ROSTER";
+      roster: GuardianKeysState["roster"];
+      updated: string[];
+      presenceWards: GuardianKeysState["presenceWards"];
+      /** Ids minted outside the reducer, used in order. */
+      ids: { child: string[]; device: string[]; policy: string[] };
+    };
 
 function mapDevice(
   child: Child,
@@ -518,6 +526,19 @@ export function reducer(state: CharterState, action: Action): CharterState {
     }
     case "STAMP_PINNED_KEYS": {
       const children = stampPinnedKeys(state.children, action.key, { onlyUnheard: action.onlyUnheard });
+      return children === state.children ? state : { ...state, children };
+    }
+    case "ADOPT_ROSTER": {
+      const take = (xs: string[], prefix: string) => {
+        let i = 0;
+        return () => xs[i++] ?? `${prefix}_${action.updated.length}_${i}`;
+      };
+      const children = adoptRoster(state.children, action.roster, action.updated, {
+        presenceWards: action.presenceWards,
+        mintChildId: take(action.ids.child, "child"),
+        mintDeviceId: take(action.ids.device, "dev"),
+        mintPolicyId: take(action.ids.policy, "pol"),
+      });
       return children === state.children ? state : { ...state, children };
     }
     default:
@@ -1881,8 +1902,21 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const ingestDeviceStatus = useCallback((status: DeviceStatus) => {
     // Gate BEFORE anything is recorded: an authentic wrap is not proof of
     // pairing (see ./statusAdmission), and everything below is persisted.
-    const admission = admitStatus(status, stateRef.current.children, livePairTokens());
+    const admission = admitStatus(status, stateRef.current.children, livePairTokens(), (m) =>
+      keysCore.isPresenceWard(m),
+    );
     if (admission === "stranger") return;
+    if (admission === "presence") {
+      // A ward this phone confirmed in person at, before the other parent's
+      // roster named it: what it says about its guardians lets the roster in.
+      keysCore.notePresenceStatus(status);
+      setDeviceStatus((prev) => {
+        const cur = prev[status.machine];
+        const merged = mergeDeviceStatus(cur, status);
+        return merged === cur ? prev : { ...prev, [status.machine]: merged };
+      });
+      return;
+    }
     if (admission === "pairing") {
       // Live status only — what the pairing flow and the unclaimed-device
       // recovery read. No usage history for a machine no child claims yet.
@@ -1922,7 +1956,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     if (pending && status.pairToken === pending.token && !pending.foundMachine) {
       setPhonePairing({ ...pending, foundMachine: status.machine });
     }
-  }, []);
+  }, [keysCore]);
 
   // POLLED, not pushed: a long-lived relay subscription dies silently in a
   // browser (proxies idle-drop websockets after ~60s and nostr-tools does not
@@ -1979,7 +2013,28 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           ),
         }),
       ingestRoster: (inbound: Parameters<typeof keysCore.receiveRoster>[0]) => {
-        keysCore.receiveRoster(inbound);
+        const r = keysCore.receiveRoster(inbound);
+        if (!r.ok) return r.reason;
+        if (r.updated.length > 0) {
+          // The roster's children and devices join the family: a joining
+          // parent's phone gets the family it now looks after.
+          const keys = guardianKeysRef.current;
+          const n = keys.roster.children.reduce((a, c) => a + c.devices.length, 0) + r.updated.length;
+          const mint = (prefix: string, count: number) => Array.from({ length: count }, () => uid(prefix));
+          const ids = { child: mint("child", r.updated.length), device: mint("dev", n), policy: mint("pol", r.updated.length) };
+          const children = adoptRoster(stateRef.current.children, keys.roster, r.updated, {
+            presenceWards: keys.presenceWards,
+            mintChildId: (() => { let i = 0; return () => ids.child[i++]; })(),
+            mintDeviceId: (() => { let i = 0; return () => ids.device[i++]; })(),
+            mintPolicyId: (() => { let i = 0; return () => ids.policy[i++]; })(),
+          });
+          if (children !== stateRef.current.children) {
+            stateRef.current = { ...stateRef.current, children };
+            dispatch({ type: "ADOPT_ROSTER", roster: keys.roster, updated: r.updated, presenceWards: keys.presenceWards, ids });
+            keysCore.prunePresenceWards();
+          }
+        }
+        return "ok";
       },
     }),
     [ingestDeviceStatus, ingestDeviceRequest, keysCore, guardianKeysRef],
@@ -2028,7 +2083,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // The same intake the home-network drain uses (./ingestWrap).
         // An "unlanded" ask holds the cursor open so the wide window keeps
         // coming back until it lands or ages out.
-        if (ingestWrap(w, ctx).kind === "unlanded") unfinished = true;
+        const kind = ingestWrap(w, ctx).kind;
+        if (kind === "unlanded" || kind === "roster-waiting") unfinished = true;
       }
       pollCursor.current = nextCursor(pollCursor.current, startedAt, unfinished);
       trimHandled(handledWraps.current);
@@ -2911,7 +2967,10 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // so approving My Signet can't strand them (fail-closed).
       const before = stateRef.current.signer.kind;
       if (before !== "signet" && before !== "heartwood") {
-        const w = guardianKeys.api.workingPubkey;
+        // After My Signet was disconnected, devices paired under it (and
+        // not since) still pin that root, not this phone's key: record the
+        // forgotten root for them, or they would block approval for good.
+        const w = guardianKeysRef.current.forgottenRoot ?? guardianKeys.api.workingPubkey;
         if (w) {
           const stamped = stampPinnedKeys(stateRef.current.children, w);
           if (stamped !== stateRef.current.children) {
@@ -2953,7 +3012,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         return { approved: false, error: e instanceof Error ? e.message : String(e) };
       }
     },
-    [buildSigner, guardianKeys.api],
+    [buildSigner, guardianKeys.api, guardianKeysRef],
   );
 
   // A root move landed on every ward: the new identity's bunker becomes the signer.

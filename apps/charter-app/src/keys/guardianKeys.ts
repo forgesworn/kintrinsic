@@ -67,7 +67,7 @@ import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } f
 import { keyStanding } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
 import { makeGuardianPinRecord, relaysWithPinTemplate } from "./pin";
-import type { GuardianKeysState, InstallRoot, NextRoot, RootVia } from "./state";
+import type { GuardianKeysState, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
 export interface KeysDevice {
@@ -82,6 +82,8 @@ export interface KeysDevice {
   guardians?: StatusGuardians;
   /** A STATUS from it has been read by this install. */
   statusSeen: boolean;
+  /** Known only from another guardian's roster: never paired here. */
+  fromRoster?: boolean;
 }
 
 export interface KeysChild {
@@ -311,9 +313,52 @@ export class GuardianKeys {
     const moved = this.movedWards();
     if (moved.length === 0) return;
     const names = [...new Set(moved.map((d) => d.name))].join(", ");
+    const lapsed = this.moveProgress()?.lapsed ?? false;
     throw new Error(
-      `${names} already use${moved.length === 1 ? "s" : ""} your new guardian identity. Finish the move by confirming it in person at your other devices, then ${what}.`,
+      lapsed
+        ? `${names} already use${moved.length === 1 ? "s" : ""} your new guardian identity, but the move lapsed before your other devices switched. Finish it first (Guardians → Finish my identity move), then ${what}.`
+        : `${names} already use${moved.length === 1 ? "s" : ""} your new guardian identity. Finish the move by confirming it in person at your other devices, then ${what}.`,
     );
+  }
+
+  /**
+   * Wards this install paired itself or has heard from. A device known only
+   * from another guardian's roster that has never reported here isn't
+   * counted where "every device" must agree (leaving, finishing a move):
+   * nothing shows this install's root is pinned there. OQ "A joining
+   * parent's devices".
+   */
+  private ownWards(): (KeysDevice & { childId: string })[] {
+    return this.allDevices().filter((d) => !d.fromRoster || d.statusSeen);
+  }
+
+  /** The move in progress, as the screens need it; null when there is none. */
+  moveProgress(): { to: string; lapsed: boolean; expiresAt?: number; moved: string[] } | null {
+    const { keys } = this.deps.read();
+    const next = keys.nextRoot;
+    if (!next) return null;
+    const expiresAt = this.moveExpiresAt();
+    const lapsed = next.cancelledAt !== undefined || (expiresAt !== undefined && this.deps.now() >= expiresAt);
+    return {
+      to: next.pubkey,
+      lapsed,
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      moved: [...new Set(this.movedWards().map((d) => d.name))],
+    };
+  }
+
+  /** When the move stops being pending: the wards' STATUS `pending`, else its own 7 days. */
+  private moveExpiresAt(): number | undefined {
+    const { keys } = this.deps.read();
+    const next = keys.nextRoot;
+    if (!next) return undefined;
+    const fromStatus = this.allDevices().flatMap((d) =>
+      (d.guardians?.pending ?? []).filter((p) => p.d === next.moveD).map((p) => p.expiresAt),
+    );
+    const sentAt = keys.sent[next.moveD]?.issuedAt;
+    return fromStatus.length > 0
+      ? Math.max(...fromStatus)
+      : (next.expiresAt ?? (sentAt !== undefined ? sentAt + PENDING_LIFETIME_SECONDS : undefined));
   }
 
   /** A family whose root is this phone's own key can't take part in presence or removal (OQ "Moving a phone-held root"). */
@@ -360,18 +405,32 @@ export class GuardianKeys {
     }
     const w = this.workingPubkey();
     if (ops.pubkey === w) throw new Error("This phone's own key can't approve itself.");
-    const current = this.deps.read().keys.root;
-    if (current && current.pubkey !== ops.pubkey) {
-      // A different identity is a root move (rule 11), never a re-approval.
-      throw new Error(
+    const { keys: current } = this.deps.read();
+    const differentIdentity = () =>
+      new Error(
         "This phone is already approved by a different guardian identity. To change identity, move your guardian identity instead.",
       );
+    if (current.root && current.root.pubkey !== ops.pubkey) {
+      // A different identity is a root move (rule 11), never a re-approval.
+      throw differentIdentity();
+    }
+    // Once the root was forgotten (My Signet disconnected), the devices still
+    // say who their guardians are: an identity none of them lists would sign
+    // for wards that drop it. With none reporting, the forgotten root is the
+    // record of who they were paired to.
+    const reported = this.reportedRoots();
+    if (reported.length > 0 ? !reported.some((r) => r.root === ops.pubkey) : current.forgottenRoot !== undefined && current.forgottenRoot !== ops.pubkey) {
+      throw differentIdentity();
     }
     const label = truncateLabel(opts.label) || "Kintrinsic";
     const approval = await buildApproval(signerOf(ops), w, { issuedAt: this.deps.now(), label });
     this.requireApproval(approval, ops.pubkey, w);
     const root: InstallRoot = { pubkey: ops.pubkey, approval: plain(approval), via: opts.via };
-    this.deps.write((k) => ({ ...k, root, installLabel: label, approvalSentAt: {} }));
+    this.deps.write((k) => {
+      const { forgottenRoot: _f, ...rest } = k;
+      void _f;
+      return { ...rest, root, installLabel: label, approvalSentAt: {} };
+    });
     return root;
   }
 
@@ -448,9 +507,23 @@ export class GuardianKeys {
   private async fanOut(event: SignedEvent, seal: "root" | "working-or-root"): Promise<SendReport> {
     const report: SendReport = { event, sent: [], held: [], failed: [] };
     const devices = this.allDevices();
-    if (devices.length === 0) throw new Error("No paired device to send this to yet.");
+    if (devices.length === 0) {
+      throw new Error(
+        Object.keys(this.deps.read().keys.presenceWards).length > 0
+          ? "The other parent's phone hasn't shared the family with this one yet. Open Kintrinsic on their phone, then try again."
+          : "No paired device to send this to yet.",
+      );
+    }
     const now = this.deps.now();
+    // A ward half-way through this install's root move pins R2 and no longer
+    // R: a statement R signs would be dropped there, so it isn't reported as sent.
+    const root = this.deps.read().keys.root;
+    const moved = new Set(root && event.pubkey === root.pubkey ? this.movedWards().map((d) => d.machine) : []);
     for (const d of devices) {
+      if (moved.has(d.machine)) {
+        report.failed.push({ to: d.machine, error: `${d.name} already uses your new guardian identity.` });
+        continue;
+      }
       try {
         const sealer =
           seal === "working-or-root" && this.holdsWorkingKey(d.machine, event.pubkey)
@@ -489,8 +562,14 @@ export class GuardianKeys {
   /** The roots the family's wards report, merged (keys unioned per root). */
   reportedRoots(): { root: string; keys: string[] }[] {
     const out = new Map<string, Set<string>>();
-    for (const d of this.allDevices()) {
-      for (const r of d.guardians?.roots ?? []) {
+    const views: (StatusGuardians | undefined)[] = this.allDevices().map((d) => d.guardians);
+    // A ward confirmed in person here, before a roster named it: its STATUS
+    // is what lets this install accept the roster at all.
+    for (const [m, p] of Object.entries(this.deps.read().keys.presenceWards)) {
+      if (HEX64.test(m) && !this.findDevice(m)) views.push(p.guardians);
+    }
+    for (const g of views) {
+      for (const r of g?.roots ?? []) {
         const set = out.get(r.root) ?? new Set<string>();
         for (const k of r.keys) set.add(k);
         out.set(r.root, set);
@@ -566,12 +645,26 @@ export class GuardianKeys {
    */
   async leaveFamily(): Promise<SendReport> {
     const me = this.rootPubkey();
-    const reporting = this.allDevices().filter((d) => d.guardians);
-    if (reporting.length === 0) {
-      throw new Error("None of your devices has reported its guardians yet, so leaving can't be checked.");
+    const wards = this.ownWards();
+    if (wards.length === 0) {
+      throw new Error(
+        Object.keys(this.deps.read().keys.presenceWards).length > 0
+          ? "The other parent's phone hasn't shared the family with this one yet. Open Kintrinsic on their phone, then try again."
+          : "None of your devices has reported its guardians yet, so leaving can't be checked.",
+      );
     }
-    if (reporting.some((d) => !d.guardians!.roots.some((r) => r.root !== me))) {
-      throw new Error("You're the only guardian on at least one device. Unpair it instead.");
+    // Every ward must say who else looks after it: one that hasn't could
+    // have this install as its only guardian, and would refuse (or, if it
+    // predates the section, drop) the removal while the app said it left.
+    const silent = wards.filter((d) => !d.guardians);
+    if (silent.length > 0) {
+      throw new Error(
+        `${[...new Set(silent.map((d) => d.name))].join(", ")} ${silent.length === 1 ? "hasn't" : "haven't"} reported ${silent.length === 1 ? "its" : "their"} guardians yet, so leaving can't be checked.`,
+      );
+    }
+    const alone = wards.filter((d) => !d.guardians!.roots.some((r) => r.root !== me));
+    if (alone.length > 0) {
+      throw new Error(`You're the only guardian on ${[...new Set(alone.map((d) => d.name))].join(", ")}. Unpair it instead.`);
     }
     this.requireNoMovedWards("leave");
     const event = await this.signAsRoot((s) => buildRootRemoval(s, me, { issuedAt: this.deps.now() }));
@@ -733,11 +826,17 @@ export class GuardianKeys {
     const { keys } = this.deps.read();
     const next = keys.nextRoot;
     if (!next || !keys.root) return null;
-    const reporting = this.allDevices().filter((d) => d.guardians);
+    // Every ward counts, not only those that report: one paired under R and
+    // not heard from since would otherwise be signed for by R2, which it
+    // doesn't pin.
+    const wards = this.ownWards();
     const done =
-      reporting.length > 0 &&
-      reporting.every(
-        (d) => d.guardians!.roots.some((r) => r.root === next.pubkey) && !d.guardians!.roots.some((r) => r.root === keys.root!.pubkey),
+      wards.length > 0 &&
+      wards.every(
+        (d) =>
+          !!d.guardians &&
+          d.guardians.roots.some((r) => r.root === next.pubkey) &&
+          !d.guardians.roots.some((r) => r.root === keys.root!.pubkey),
       );
     if (!done) {
       this.dropLapsedMove();
@@ -762,12 +861,7 @@ export class GuardianKeys {
     const next = keys.nextRoot;
     if (!next) return;
     const reporting = this.allDevices().filter((d) => d.guardians);
-    const fromStatus = reporting.flatMap((d) => d.guardians!.pending.filter((p) => p.d === next.moveD).map((p) => p.expiresAt));
-    const sentAt = keys.sent[next.moveD]?.issuedAt;
-    const expiresAt =
-      fromStatus.length > 0
-        ? Math.max(...fromStatus)
-        : (next.expiresAt ?? (sentAt !== undefined ? sentAt + PENDING_LIFETIME_SECONDS : undefined));
+    const expiresAt = this.moveExpiresAt();
     const lapsed = next.cancelledAt !== undefined || (expiresAt !== undefined && this.deps.now() >= expiresAt);
     if (!lapsed) return;
     if (reporting.some((d) => d.guardians!.roots.some((r) => r.root === next.pubkey))) return;
@@ -787,9 +881,8 @@ export class GuardianKeys {
     if (!keys.root && !keys.nextRoot) return;
     this.deps.write((k) => {
       const { root: _r, nextRoot: _n, ...rest } = k;
-      void _r;
       void _n;
-      return { ...rest, approvalSentAt: {} };
+      return { ...rest, ...(_r ? { forgottenRoot: _r.pubkey } : {}), approvalSentAt: {} };
     });
   }
 
@@ -849,6 +942,15 @@ export class GuardianKeys {
         throw new Error("This move is to a guardian ID this phone hasn't connected.");
       }
       approval = keys.nextRoot.approval;
+    } else if (code.kind === "removal") {
+      // Only the install that sent a removal is bound to its signer here;
+      // the ward drops anyone else's confirmation (`confirmer_not_bound`).
+      if (code.key === this.rootPubkey()) {
+        throw new Error("This is a request to remove you. Object to it from Guardians instead.");
+      }
+      if (keys.sent[code.d]?.type !== "removal") {
+        throw new Error("This removal wasn't started from this phone, so it can't be confirmed here.");
+      }
     }
     const w = this.workingOps();
     const event = await buildPresenceConfirm(signerOf(w), {
@@ -870,7 +972,53 @@ export class GuardianKeys {
       if (e instanceof QueuedForHomeNetworkError) report.held.push(code.machine);
       else throw e;
     }
+    // A joining parent learns the ward's machine key here, before any roster:
+    // remember it so the STATUS it now sends this install is admitted.
+    if (!known && code.kind === "coguardian") {
+      const at = this.deps.now();
+      this.deps.write((k) => ({
+        ...k,
+        presenceWards: { ...k.presenceWards, [code.machine]: { ...k.presenceWards[code.machine], confirmedAt: at } },
+      }));
+    }
     return report;
+  }
+
+  /** Is `machine` a ward confirmed in person here that no child has yet? */
+  isPresenceWard(machine: string): boolean {
+    return Object.prototype.hasOwnProperty.call(this.deps.read().keys.presenceWards, machine) && !this.findDevice(machine);
+  }
+
+  /**
+   * Keep what a presence ward's STATUS says about its guardians and version
+   * (newest `ts` wins). Nothing else from it is recorded until a roster
+   * names the device.
+   */
+  notePresenceStatus(status: { machine: string; ts: number; appVersionCode?: number; guardians?: StatusGuardians }): void {
+    if (!this.isPresenceWard(status.machine)) return;
+    const cur = this.deps.read().keys.presenceWards[status.machine];
+    if (cur.ts !== undefined && status.ts < cur.ts) return;
+    const next: PresenceWard = {
+      confirmedAt: cur.confirmedAt,
+      ts: status.ts,
+      ...(status.appVersionCode !== undefined ? { appVersionCode: status.appVersionCode } : {}),
+      ...(status.guardians ? { guardians: status.guardians } : {}),
+    };
+    if (JSON.stringify(next) === JSON.stringify(cur)) return;
+    this.deps.write((k) => ({ ...k, presenceWards: { ...k.presenceWards, [status.machine]: next } }));
+  }
+
+  /** Forget presence wards a child now has (the roster named them). */
+  prunePresenceWards(): void {
+    const { keys } = this.deps.read();
+    const known = new Set(this.allDevices().map((d) => d.machine));
+    const drop = Object.keys(keys.presenceWards).filter((m) => known.has(m));
+    if (drop.length === 0) return;
+    this.deps.write((k) => {
+      const presenceWards = { ...k.presenceWards };
+      for (const m of drop) delete presenceWards[m];
+      return { ...k, presenceWards };
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -884,10 +1032,13 @@ export class GuardianKeys {
    * a pasted code. A ward below the versioning threshold is skipped (it
    * refuses an unknown RELAYS field outright) and reported as failed.
    */
-  async setGuardianPin(pin: string, opts: { childId?: string } = {}): Promise<Omit<SendReport, "event">> {
+  async setGuardianPin(pin: string, opts: { childId?: string; machines?: readonly string[] } = {}): Promise<Omit<SendReport, "event">> {
     const record = await makeGuardianPinRecord(pin);
     const wards = this.allDevices().filter(
-      (d) => d.platform === "android" && (!opts.childId || d.childId === opts.childId),
+      (d) =>
+        d.platform === "android" &&
+        (!opts.childId || d.childId === opts.childId) &&
+        (!opts.machines || opts.machines.includes(d.machine)),
     );
     if (wards.length === 0) throw new Error("No Android device to set a PIN on.");
     const report: Omit<SendReport, "event"> = { sent: [], held: [], failed: [] };
@@ -937,7 +1088,7 @@ export class GuardianKeys {
       if (!c.rosterId || !HEX64.test(c.rosterId)) continue;
       const devices = c.devices
         .filter((d) => HEX64.test(d.machine))
-        .map((d) => ({ machine: d.machine, platform: d.platform, name: d.name, pairedHere: true, statusSeen: d.statusSeen }))
+        .map((d) => ({ machine: d.machine, platform: d.platform, name: d.name, pairedHere: !d.fromRoster, statusSeen: d.statusSeen }))
         .sort((a, b) => (a.machine < b.machine ? -1 : a.machine > b.machine ? 1 : 0));
       const held = keys.roster.children.find((x) => x.subject === c.rosterId);
       const same =
@@ -1014,6 +1165,7 @@ export class GuardianKeys {
     const { keys } = this.deps.read();
     let local: LocalRoster = keys.roster;
     for (const d of this.allDevices()) if (d.statusSeen) local = markDeviceStatusSeen(local, d.machine);
+    for (const [m, p] of Object.entries(keys.presenceWards)) if (p.ts !== undefined) local = markDeviceStatusSeen(local, m);
     const merged = mergeRoster(local, inbound, this.reportedRoots(), this.deps.now());
     if (!merged.ok) return merged;
     this.deps.write((k) => ({ ...k, roster: merged.roster }));
@@ -1022,11 +1174,26 @@ export class GuardianKeys {
 
   /** Roster devices not yet confirmed here (never paired here, no STATUS yet). */
   unconfirmedRosterDevices(): { subject: string; machine: string; name: string; platform: string }[] {
-    return this.deps
-      .read()
-      .keys.roster.children.flatMap((c) =>
-        c.devices.filter((d) => !isDeviceConfirmed(d)).map((d) => ({ subject: c.subject, ...d })),
-      );
+    const { keys, children } = this.deps.read();
+    const out = new Map<string, { subject: string; machine: string; name: string; platform: string }>();
+    // Adopted into the family: known only from a roster and not heard from.
+    for (const c of children) {
+      for (const d of c.devices) {
+        if (d.fromRoster && !d.statusSeen && HEX64.test(d.machine)) {
+          out.set(d.machine, { subject: c.rosterId ?? "", machine: d.machine, name: d.name, platform: d.platform });
+        }
+      }
+    }
+    // Held in the merged roster only (not adopted, or adopted elsewhere).
+    const known = new Set(children.flatMap((c) => c.devices.map((d) => d.machine)));
+    for (const c of keys.roster.children) {
+      for (const d of c.devices) {
+        if (!isDeviceConfirmed(d) && !known.has(d.machine) && !out.has(d.machine)) {
+          out.set(d.machine, { subject: c.subject, machine: d.machine, name: d.name, platform: d.platform });
+        }
+      }
+    }
+    return [...out.values()];
   }
 }
 

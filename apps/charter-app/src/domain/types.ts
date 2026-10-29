@@ -413,6 +413,13 @@ export interface Device {
    * `store/guardianKeysWiring.ts`, `stampPinnedKeys`). Absent = not known.
    */
   pinnedKey?: string;
+  /**
+   * Known to this install only from another guardian's family roster: it was
+   * never paired here. Shown as unconfirmed until a STATUS from it arrives
+   * (`keysViewAt`), and dropped when a newer roster no longer lists it and it
+   * has never reported here.
+   */
+  fromRoster?: boolean;
 }
 
 /** The last `debugging` clause sent to a device — see `Device.debugging`. */

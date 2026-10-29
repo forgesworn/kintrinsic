@@ -134,6 +134,21 @@ describe("rule 4: re-signing standing clauses", () => {
     await expect(ok.resignStanding("c1")).resolves.toEqual({ ok: true });
     expect(published).toHaveLength(0);
   });
+
+  it("re-signs a debugging clause sent before the standing record existed, from the device's own record (L6)", async () => {
+    const published: NostrEvent[] = [];
+    const withDebugging: ChildTarget = {
+      ...target,
+      devices: [target.devices[0], { ...target.devices[1], debugging: { allow: true, until: 1_800_003_600 } }],
+    };
+    const s = signer(published, { resolveChild: () => withDebugging });
+    await s.connect("signet");
+    await s.resignStanding("c-upgraded");
+    expect(published).toHaveLength(1);
+    const out = unwrapToWorkingKey(published[0], bSk)!;
+    const c = JSON.parse(out.inner.content);
+    expect(c).toMatchObject({ kind: "debugging", issuedAt: 1_800_000_000, body: { allow: true, until: 1_800_003_600, issuedAt: 1_800_000_000 } });
+  });
 });
 
 describe("selectSigner without a signer set up", () => {

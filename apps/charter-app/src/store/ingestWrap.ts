@@ -28,8 +28,12 @@ export interface WrapIngestContext {
   ingestRequest: (request: DeviceRequest) => boolean;
   /** A departed key's last STATUS (guardian keys). Never usage data. */
   ingestFarewell?: (farewell: StatusFarewell) => void;
-  /** A family roster (31119) from another guardian install's working key. */
-  ingestRoster?: (inbound: { sealAuthor: string; inner: SignedEvent }) => void;
+  /**
+   * A family roster (31119) from another guardian install's working key.
+   * Returns "ok", or why it was refused: a roster whose sender's root or
+   * key no ward has reported yet may be let in by a later STATUS.
+   */
+  ingestRoster?: (inbound: { sealAuthor: string; inner: SignedEvent }) => string | void;
 }
 
 export type WrapIngestResult =
@@ -47,7 +51,11 @@ export type WrapIngestResult =
   | { kind: "request"; reqId: string }
   /** An ask from a phone this guardian has not recorded yet: left unhandled so
    *  a later pass can land it. */
-  | { kind: "unlanded"; reqId: string };
+  | { kind: "unlanded"; reqId: string }
+  /** A roster whose sender no ward has vouched for yet: the wards' STATUS
+   *  naming it can arrive after it (the inviting phone sends it the moment
+   *  they do), so it is left unhandled and retried, like an unlanded ask. */
+  | { kind: "roster-waiting" };
 
 export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
   // The one line that saves the battery: everything below this decrypts.
@@ -71,7 +79,8 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
   if (!req && ctx.ingestRoster && fresh) {
     const roster = unwrapToWorkingKey(w, ctx.guardianSk);
     if (roster && roster.inner.kind === CHARTER_FAMILY_ROSTER) {
-      ctx.ingestRoster(roster);
+      const outcome = ctx.ingestRoster(roster);
+      if (outcome === "root_not_reported" || outcome === "key_not_reported") return { kind: "roster-waiting" };
       ctx.handledWraps.add(w.id);
       return { kind: "roster" };
     }

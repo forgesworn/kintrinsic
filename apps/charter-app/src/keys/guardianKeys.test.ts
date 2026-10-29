@@ -176,6 +176,24 @@ describe("connecting My Signet as root", () => {
     expect(h.gk.rootPubkey()).toBe(W);
   });
 
+  it("after a disconnect, only an identity the devices list (or, with none reporting, the forgotten one) approves again (L2)", async () => {
+    const silent = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [device(PHONE, "android")] }]);
+    await connectSignetRoot(silent);
+    silent.gk.forgetRoot();
+    expect(silent.keys().forgottenRoot).toBe(R);
+    silent.setRoot(opsOf(r2Sk));
+    await expect(connectSignetRoot(silent)).rejects.toThrow(/different guardian identity/);
+    silent.setRoot(opsOf(rSk));
+    await expect(connectSignetRoot(silent)).resolves.toMatchObject({ pubkey: R });
+    expect(silent.keys().forgottenRoot).toBeUndefined();
+
+    const reporting = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }]);
+    await connectSignetRoot(reporting);
+    reporting.gk.forgetRoot();
+    reporting.setRoot(opsOf(r2Sk));
+    await expect(connectSignetRoot(reporting)).rejects.toThrow(/different guardian identity/);
+  });
+
   it("removing the other parent is refused for a family whose root is this phone's own key", async () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
     await expect(h.gk.removeCoGuardian(R2)).rejects.toThrow(/kept on this phone/);
@@ -263,7 +281,14 @@ describe("which key signs for a ward", () => {
       id: "c1",
       name: "Sam",
       colour: "#000",
-      devices: [{ ...readyWard(PHONE, "android"), guardians: { roots: [{ root: W, keys: [] }], pending: [], tombstones: 0, relays: [] } }],
+      // The local key pinned as a root, beside R (connecting a root the
+      // wards don't list is refused: batch 3b review L2).
+      devices: [
+        {
+          ...readyWard(PHONE, "android"),
+          guardians: { roots: [{ root: W, keys: [] }, { root: R, keys: [] }], pending: [], tombstones: 0, relays: [] },
+        },
+      ],
     };
     const h = harness([child]);
     await connectSignetRoot(h);
@@ -336,6 +361,21 @@ describe("statements", () => {
   it("leaving is refused when no ward reports its guardians", async () => {
     child.devices = [device(PHONE, "android")];
     await expect(h.gk.leaveFamily()).rejects.toThrow(/reported its guardians/);
+  });
+
+  it("leaving is refused while any ward of this phone's hasn't reported, naming it (M3)", async () => {
+    child.devices[1] = device(LAPTOP, "linux", { statusSeen: true });
+    await expect(h.gk.leaveFamily()).rejects.toThrow(/Sam's laptop hasn't reported its guardians/);
+    expect(h.published).toHaveLength(0);
+    // A device known only from the other parent's roster, never heard from, isn't counted.
+    child.devices[1] = device(LAPTOP, "linux", { fromRoster: true });
+    await expect(h.gk.leaveFamily()).resolves.toMatchObject({ sent: expect.arrayContaining([PHONE, LAPTOP]) });
+  });
+
+  it("a removal of this phone's own identity can't be confirmed here (L1)", async () => {
+    const code = `charter://presence?m=${PHONE}&t=${"ab".repeat(16)}&d=kintrinsic/unguardian/${R}&s=${"ef".repeat(32)}`;
+    await expect(h.gk.confirmPresence(code)).rejects.toThrow(/request to remove you/);
+    expect(h.published).toHaveLength(0);
   });
 
   it("removing the other parent re-signs the clauses first (rule 4)", async () => {
@@ -489,10 +529,15 @@ describe("presence confirmation", () => {
   it("removal: no approval; sent on the ward's known relays", async () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }]);
     await connectSignetRoot(h);
-    await h.gk.confirmPresence(`charter://presence?m=${PHONE}&t=${token}&d=kintrinsic/unguardian/${R2}&s=${stmt}`);
-    const { inner } = open(h.published[0].wrap, phoneSk);
+    // Only the install that started a removal can confirm it (batch 3b review L1).
+    const code = `charter://presence?m=${PHONE}&t=${token}&d=kintrinsic/unguardian/${R2}&s=${stmt}`;
+    await expect(h.gk.confirmPresence(code)).rejects.toThrow(/wasn't started from this phone/);
+    await h.gk.removeCoGuardian(R2);
+    const before = h.published.length;
+    await h.gk.confirmPresence(code);
+    const { inner } = open(h.published[before].wrap, phoneSk);
     expect(JSON.parse(inner.content)).toEqual({ v: 1, token, statement: stmt });
-    expect(h.published[0].relays.sort()).toEqual([
+    expect(h.published[before].relays.sort()).toEqual([
       "wss://a.example",
       "wss://b.example",
       "wss://default.example",
@@ -595,6 +640,26 @@ describe("root move", () => {
       expect(h.published).toHaveLength(0);
     });
 
+    it("says the move has lapsed and which devices switched, and points at finishing it (M1)", async () => {
+      expect(h.gk.moveProgress()).toMatchObject({ to: R2, lapsed: false, moved: ["Sam's phone"] });
+      h.setNow(T + 1000);
+      expect(h.gk.moveProgress()).toMatchObject({ lapsed: true, moved: ["Sam's phone"] });
+      await expect(h.gk.removeCoGuardian(getPublicKey(generateSecretKey()))).rejects.toThrow(/Finish my identity move/);
+    });
+
+    it("a cancel or objection R signs isn't reported as sent to the moved phone (L5)", async () => {
+      const report = await h.gk.cancelPending(`kintrinsic/root/${R2}`);
+      expect(report.sent).toEqual([LAPTOP]);
+      expect(report.failed).toEqual([{ to: PHONE, error: "Sam's phone already uses your new guardian identity." }]);
+      expect(h.published.map((p) => recipient(p.wrap))).toEqual([LAPTOP]);
+    });
+
+    it("doesn't settle while a ward hasn't reported (L7)", () => {
+      child.devices[1] = device(LAPTOP, "linux", { statusSeen: true });
+      expect(h.gk.settleRootMove()).toBeNull();
+      expect(h.keys().root?.pubkey).toBe(R);
+    });
+
     it("settles once every ward pins R2 and not R", () => {
       child.devices[1].guardians = movedView;
       expect(h.gk.settleRootMove()).toBe("bunker://r2");
@@ -686,6 +751,12 @@ describe("guardian PIN", () => {
     expect(body.relays).toEqual(["wss://ward.example", "wss://b.example"]);
     expect(await guardianPinHash("123456", body.guardianPin.salt)).toBe(body.guardianPin.hash);
     expect(h.keys().pinSentAt).toEqual({ [PHONE]: T });
+    // Only the phones named, when the screen names them (L4).
+    h.published.length = 0;
+    const named = await h.gk.setGuardianPin("123456", { machines: [old] });
+    expect(named.sent).toEqual([]);
+    expect(named.failed.map((f) => f.to)).toEqual([old]);
+    expect(h.published).toHaveLength(0);
     expect(JSON.stringify(h.keys())).not.toContain("123456");
   }, 30_000);
 });
@@ -731,7 +802,7 @@ describe("family roster", () => {
       defaultRelays: [],
     });
     expect(other.receiveRoster(opened)).toEqual({ ok: true, updated: [subject] });
-    expect(other.unconfirmedRosterDevices()).toEqual([{ subject, machine: PHONE, name: "Sam's phone", platform: "android", pairedHere: false, statusSeen: false }]);
+    expect(other.unconfirmedRosterDevices()).toEqual([{ subject, machine: PHONE, name: "Sam's phone", platform: "android" }]);
     // A roster from a key the wards don't list is refused.
     const strangerSk = generateSecretKey();
     const forged = { sealAuthor: getPublicKey(strangerSk), inner: finalizeEvent({ ...opened.inner, created_at: T }, strangerSk) as SignedEvent };
