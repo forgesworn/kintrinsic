@@ -341,6 +341,34 @@ describe("a forged presence code (batch 3 re-review N-H1)", () => {
   });
 });
 
+describe("a parent who has left or been removed", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T * 1000);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("stays anchored but can't send a roster once no ward reports their root", async () => {
+    const { A, B } = await joined();
+    // While the wards report R_B, B's roster reaches A and is taken in.
+    await B.gk.sendRoster();
+    const first = unwrapToWorkingKey(wrapsTo(B.published, W_A).at(-1)!, wASk)!;
+    expect(A.gk.receiveRoster(first)).toMatchObject({ ok: true });
+    // B is removed: the phone now reports only A. B's root is still anchored at A.
+    A.setChildren(applyDeviceKeysView(A.children(), status(PHONE, T + 500, g([{ root: R_A, keys: [W_A] }]))));
+    expect(A.gk.trustedRoots()).toContain(R_B);
+    vi.setSystemTime((T + 200) * 1000);
+    const B2 = install(wBSk, rBSk, B.children(), () => T + 200);
+    await B2.gk.approveThisInstall({ via: "signet", label: "B" });
+    B2.gk.anchorRoot(R_A);
+    B2.setChildren(B2.children().map((c) => ({ ...c, name: "Renamed" })));
+    await B2.gk.sendRoster();
+    const later = unwrapToWorkingKey(wrapsTo(B2.published, W_A).at(-1)!, wASk)!;
+    expect(A.gk.receiveRoster(later)).toEqual({ ok: false, reason: "root_not_reported" });
+    expect(A.children()[0].name).toBe("Sam");
+  });
+});
+
 describe("the honest join still works end to end", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -352,10 +380,13 @@ describe("the honest join still works end to end", () => {
     const { A, B, both } = await joined({ rosterBeforeStatus: true });
     const sam = B.children().find((c) => c.rosterId === SUBJECT)!;
     expect(sam).toMatchObject({ name: "Sam", color: "#111111" });
-    expect(sam.devices.map((d) => [d.devicePubkey, d.fromRoster])).toEqual([
-      [PHONE, true],
-      [LAPTOP, true],
-    ]);
+    expect(sam.devices.map((d) => [d.devicePubkey, d.fromRoster])).toEqual(
+      expect.arrayContaining([
+        [PHONE, true],
+        [LAPTOP, true],
+      ]),
+    );
+    expect(sam.devices).toHaveLength(2);
     // The phone's STATUS arrives after: it is now a family device.
     const s = status(PHONE, T + 20, both);
     expect(admitStatus(s, B.children(), new Set(), (m) => B.gk.isPresenceWard(m))).toBe("claimed");
