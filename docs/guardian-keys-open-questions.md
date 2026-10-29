@@ -584,3 +584,52 @@ The code is not a secret beyond its 600-second, single-use life, and is
 worthless without a working key bound to the right root.
 
 **Raised by:** batch 2c (planning).
+
+## A clause that arrives with no seal
+
+**Where:** *Who may sign what*; Android `charterIngestClause` (a bare signed
+CLAUSE, no gift wrap), `Warden::ingest_clause`.
+
+**Question:** the guardian-keys rules check a clause's seal author against
+its signer. The Android JNI entry `charterIngestClause` takes a bare signed
+event (a test and onboarding path with no production caller). What is its
+seal author?
+
+**Build's interim reading:** the event's own author stands in for the seal,
+and the clause then goes through the same guardian-keys gate as a polled
+one (signer set, rules 4 and 5, the 300-second refusal, the pairing floor).
+Nothing reaches the clause store around the gate.
+
+**Raised by:** batch 2c-C.
+
+## Labels for roots
+
+**Where:** rule 5 ("Each label is shown next to the signer's root identity");
+Android About's guardian list, `charterGuardiansSummary`.
+
+**Question:** labels ride approvals (a working key's) and co-guardian
+statements (the new root's). A root pinned at pairing has no label of its
+own. What does the ward show for it?
+
+**Build's interim reading:** a root is shown as its label from the
+co-guardian statement that pinned it, if any, else "A guardian", always
+beside its short npub; its working keys' labels are listed beneath. A label
+is never shown without the npub.
+
+**Raised by:** batch 2c-C.
+
+## Which pending statement the Android presence screen offers
+
+**Where:** *Presence confirmation*; open question "Presence confirmation
+details" (a token may be bound to one pending statement or left open);
+Android Guardian presence screen.
+
+**Question:** the core can mint an open token (`d` = none) that confirms any
+pending statement. Should a ward's screen ever show one?
+
+**Build's interim reading:** no. The Android screen lists the unconfirmed
+pending statements and mints a token bound to the one the guardian picks;
+with nothing pending it mints nothing. A removal already confirmed and
+waiting out its notice is not offered again.
+
+**Raised by:** batch 2c-C.
