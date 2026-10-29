@@ -79,38 +79,50 @@ Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
 1. Phone A: Family → **Guardians** → **Invite a parent** → **Scan their QR
    code** (or paste B's npub) → **Next** → **Send the invitation**.
    **Expect:** the ward's About this device → Guardians says "1 change is
-   waiting for a guardian to confirm it at this device."
+   waiting for a guardian to confirm it at this device." The **Invitation
+   sent** screen shows *Your guardian code*: a QR and A's npub. (It is also
+   at Family → Guardians → **Show my guardian code**.) Keep it on screen.
 2. Phone B, test build (its own `adb reverse`): Family → **Join a family** →
    **Connect My Signet** → paste identity B's connection link and B's npub
    (*The guardian ID you were invited as*, required) → **Connect**. My Signet
    signs once (this phone's kind-31120 approval).
    **Expect:** if B connects with an identity other than the npub given, the
    app refuses with a readable error, disconnects and signs nothing.
-3. At the Android ward: About this device → Guardians → **Guardian presence**
+3. Phone B now shows **Scan the other parent's guardian code**. First the
+   refusals: paste `hello` into *Or paste their guardian code* → **Use this
+   code**. **Expect:** "That isn't a guardian code. It starts with npub1."
+   Paste B's own npub → **Use this code**. **Expect:** "That's your own
+   guardian code. …". Then tap **Scan the other parent's guardian code** and
+   scan the QR on phone A (step 1).
+   **Expect:** the screen moves on to **Now confirm in person**, showing
+   "Family list from: npub1…" with A's short npub.
+4. At the Android ward: About this device → Guardians → **Guardian presence**
    → **Show a code for this** on "Add … as a guardian" → Guardian PIN 123456 →
    **Show code** → a QR and short code appear with a 10-minute countdown.
    - A wrong PIN 5 times in a row, then a 6th try: **expect** a 1-minute wait
      that survives a reboot.
    - Rotate the screen: it returns to the list (known; mint again).
-4. Phone B: **Confirm in person** (on the join screen, or Family →
+5. Phone B: **Confirm in person** (on the join screen, or Family →
    Guardians) → scan the ward's QR.
    **Expect:** within a minute, ward About this device lists two guardians
    (A and B). Phone A's Guardians screen lists B as "Other parent".
-   Phone B's Guardians screen says it has confirmed at a device and waits for
-   the family. Open Kintrinsic on phone A: within a minute phone B's Family
-   shows the child and its devices, the ward ready and any device B hasn't
-   confirmed at marked *unconfirmed*.
-5. Linux ward: as administrator, Kintrinsic → **Connect a phone** → under
+   Phone B's Guardians screen lists the ward as "Device …" marked
+   *unconfirmed*, and says it is waiting for A's family list (A's short
+   npub) and sends it nothing meanwhile. Open Kintrinsic on phone A: within a
+   minute phone B's Family shows the child and its devices, the ward ready
+   and any device B hasn't confirmed at marked *unconfirmed*. **Invite a
+   parent** on phone B isn't held back by a device B hasn't confirmed at.
+6. Linux ward: as administrator, Kintrinsic → **Connect a phone** → under
    *Confirm in person*, **Show the code to confirm** (asks for the
    administrator password) → phone B scans the code. In a terminal,
    `sudo charter-presence --list` lists what is pending.
    **Expect:** `charter status` lists roots A and B, and phone B no longer
    marks the computer *unconfirmed*.
-6. Phone B changes a rule. **Expect:** the ward enforces it and shows B as
+7. Phone B changes a rule. **Expect:** the ward enforces it and shows B as
    the guardian who set it. Phone A sees what the ward now enforces in the
    ward's own report within a minute (rosters carry names and devices, not
    rules).
-7. Objection: phone A → Guardians → **Remove the other parent (npub1…)** →
+8. Objection: phone A → Guardians → **Remove the other parent (npub1…)** →
    **Start removing them**. Confirm it in person at the Android ward
    (presence code, PIN 123456, phone A → Guardians → **Confirm in person**).
    **Expect:** STATUS shows a pending removal with "takes effect" 72 hours
@@ -118,21 +130,24 @@ Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
    a guardian", and its Guardians screen an **Object** button. Tap it (My
    Signet signs and seals it). **Expect:** the pending removal disappears on
    the ward; both guardians remain.
-8. Phone B: Guardians → **Leave the family**, then **Leave the family**
+9. Phone B: Guardians → **Leave the family**, then **Leave the family**
    again in the warning.
    **Expect:** B disappears from the ward at once. Phone B shows "This phone
-   no longer has access to …". The rule B set in step 6 **stays enforced**
+   no longer has access to …". The rule B set in step 7 **stays enforced**
    until phone A changes that rule.
-9. Phone A: Guardians. **Expect:** **Leave the family** is disabled with
+10. Phone A: Guardians. **Expect:** **Leave the family** is disabled with
    "You're the only guardian on … Unpair it instead."
 
 ## Gate 3: a lost phone
 
 1. Give identity A a second install: a second browser on phone A (or phone
    B), test build → Family → **Join a family** → **Connect My Signet** →
-   identity A's connection link and A's own npub → **Connect**. Nothing is
-   pending for a second install of the same identity, so it connects one
-   device by its device code: Family → add the child → **Set up a device** →
+   identity A's connection link and A's own npub → **Connect**. On **Scan
+   the other parent's guardian code**, tap **This is a second phone for my
+   own identity** (no scan: the same identity trusts itself; scanning A's
+   own code is refused as "your own guardian code"). Nothing is pending for
+   a second install of the same identity, so it connects one device by its
+   device code: Family → add the child → **Set up a device** →
    **📱 Phone** → **Type the device code** → the ward's code → name it.
    **Expect:** ward About this device shows root A with two working keys.
    With phone A's Kintrinsic open, the second install's Family then shows
