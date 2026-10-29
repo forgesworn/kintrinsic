@@ -3,7 +3,6 @@ import QRCode from "qrcode";
 import { Banner, Button, SectionLabel } from "../components/ui";
 import { useCharter } from "../store/store";
 import type { Child, Device } from "../domain/types";
-import { guardianPubkeyHex } from "../signer/guardianKey";
 import { pairingSas } from "../domain/pairingSas";
 import { guardianPairingBunkerUri, guardianPairingQrContent } from "../signer/guardianPairing";
 import { DEFAULT_RELAYS } from "../signer/config";
@@ -30,6 +29,7 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
     beginPhonePairing,
     cancelPhonePairing,
     sendPairOffer,
+    guardianKeys,
   } = useCharter();
   const [step, setStep] = useState<"scan" | "name">("scan");
   const [kind, setKind] = useState<Device["platform"]>("linux");
@@ -91,7 +91,9 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
       return;
     }
     const token = beginPhonePairing(child.id);
-    const pk = guardianPubkeyHex();
+    // The key the ward pins: this family's root (R with My Signet as root,
+    // else this phone's key). The SAS covers it and the token, as before.
+    const pk = guardianKeys.rootPubkey();
     const content = guardianPairingQrContent(pk, DEFAULT_RELAYS, token);
     setQrContent(content);
     let alive = true;
@@ -494,7 +496,7 @@ function SetupPhoneCable({
   onBack: () => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
-  const { phonePairing, beginPhonePairing, cancelPhonePairing, addDevice, confirmPairing } =
+  const { phonePairing, beginPhonePairing, cancelPhonePairing, addDevice, confirmPairing, guardianKeys } =
     useCharter();
   const [phase, setPhase] = useState<CablePhase>("intro");
   const [detail, setDetail] = useState("");
@@ -556,7 +558,7 @@ function SetupPhoneCable({
       );
 
       const token = beginPhonePairing(child.id);
-      const bunkerUri = guardianPairingBunkerUri(guardianPubkeyHex(), DEFAULT_RELAYS, token);
+      const bunkerUri = guardianPairingBunkerUri(guardianKeys.rootPubkey(), DEFAULT_RELAYS, token);
 
       await runProvision(session, bytes, bunkerUri, (p) => setDetail(p.detail));
 
