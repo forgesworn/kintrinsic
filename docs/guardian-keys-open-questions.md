@@ -816,3 +816,213 @@ root. A design session may prefer to hide removals from the ward's own
 screen.
 
 **Raised by:** batch 2c-B.
+
+## The roster's subject for a child with no dependant key
+
+**Where:** *Family roster* (`subject` per child); `mergeRoster`'s 64-hex
+`subject` check; the guardian app's `Child.dependantPubkey` (always null) and
+`Child.rosterId`.
+
+**Question:** a guardian app child has no dependant pubkey, and each ward
+mints its own subject. What does a roster record use as `subject`?
+
+**Build's interim reading:** each child gets a random 32-byte `rosterId`
+(64 hex), minted once by the install that created the child and kept. It is
+not a Nostr key and never goes to a ward. An install that adopts a child from
+a roster keeps the sender's `rosterId`, so records for the same child merge.
+
+**Raised by:** batch 3a.
+
+## The objection's p when STATUS doesn't name the remover
+
+**Where:** statement table (objection `p` = the removal's signer); STATUS
+`pending` (`{ d, kind, takesEffectAt?, expiresAt }`, no signer); guardian app
+`objectToRemoval`.
+
+**Question:** a removed parent's install learns of a pending removal only
+from STATUS, which doesn't say who signed it. Which key goes in `p`?
+
+**Build's interim reading:** the caller may name the remover. Otherwise the
+app takes the one root other than its own that the wards reporting that
+pending `d` list, and refuses when there is more than one (fail closed: an
+objection with the wrong `p` would be held, not applied). A STATUS `signer`
+on pending entries would remove the guess.
+
+**Raised by:** batch 3a.
+
+## Rule 4 when a parent leaves
+
+**Where:** rule 4 ("A guardian app re-signs the current clause set with a
+live key before it sends a departure"); guardian app `leaveFamily`.
+
+**Question:** a parent removing their own root departs with every key their
+install holds, so it has no live key to re-sign with.
+
+**Build's interim reading:** `leaveFamily` does not re-sign. The clauses it
+set stay enforced (rule 4) until the remaining parent sends a clause of the
+same kind. Removing another parent, withdrawing another install and a root
+move do re-sign first, and abort if the re-sign can't be sent.
+
+**Raised by:** batch 3a.
+
+## A working-key PAIR_OFFER to a ward that predates the section
+
+**Where:** *Scan-to-pair with a working key*; `charter-transport`
+`PairOffer` (an older build has no `approval` field and doesn't refuse unknown
+fields); guardian app `sendPairOffer`.
+
+**Question:** with a Signet root, the app seals the offer with W and adds the
+approval. A Linux ward older than the section ignores `approval` and pins W
+as its guardian, not R; the app then signs that ward's events with R (no
+`guardians` in its STATUS) and the ward refuses them.
+
+**Build's interim reading:** the app follows the contract and always sends the
+W-sealed offer with the approval once it has a Signet root. The scan-to-pair
+QR doesn't carry the ward's version, so the app can't tell. Releases should
+ship the scanner only with section-implementing wards; the design session may
+want a version marker in the `charter://pair` code.
+
+**Raised by:** batch 3a.
+
+## Presence code carries no relays
+
+**Where:** *Presence confirmation*; the build-defined presence code; guardian
+app `confirmPresence`.
+
+**Question:** a joining parent's install has never paired the ward and isn't
+yet one of its STATUS recipients. Where does it send the confirmation?
+
+**Build's interim reading:** to its default relays, plus every relay it knows
+for that machine (its pairing and the ward's reported `guardians.relays`),
+and over the home network where the carrier has a route. A ward on custom
+relays only can't be confirmed from a new install until the code carries a
+relay hint.
+
+**Raised by:** batch 3a.
+
+## Connecting My Signet over devices that trust this phone's key
+
+**Where:** *Versioning*, rule 8; guardian app `approveInstall`.
+
+**Question:** a local-only family's wards pin the phone's own key. If that
+install then connects My Signet as root, R's approval is for a root that
+isn't pinned (dropped) and anything R signs is refused.
+
+**Build's interim reading:** the app refuses to approve the working key while
+any paired device it has read a STATUS from doesn't hold the local key as a
+working key, naming those devices. Moving them to My Signet is a root move.
+
+**Raised by:** batch 3a.
+
+## Moving a phone-held root
+
+**Where:** rule 8; open question "Presence confirmation details" (the
+confirming key must be a working key, `key_role_conflict`); guardian app
+`moveRoot`.
+
+**Question:** in a local-only family the install's key is the root. After a
+move to R2 it would have to become R2's working key, a role change the
+reference refuses.
+
+**Build's interim reading:** `moveRoot` is refused for a local-only family.
+Only an install with a My Signet or Heartwood root can move it. A local
+family that wants My Signet waits for a design decision (a fresh working key
+on the phone, or a re-pair).
+
+**Raised by:** batch 3a.
+
+## Android pairing under a Signet root
+
+**Where:** open question "Android pairing has no PAIR_OFFER"; guardian app
+phone pairing (STATUS `pairToken` auto-claim).
+
+**Question:** the bunker link names R, so the new ward sends STATUS only to R
+until W's approval lands, and W can't send its approval until it knows the
+machine key. The guardian app never sees the `pairToken` echo.
+
+**Build's interim reading:** the app names R in the link and SAS as the
+interim reading says, but it only shows the phone QR while it holds a local
+signer, as before. Under a Signet root, a ward phone is claimed by its device
+code (the existing manual path); the approval goes out as soon as the device
+is recorded. A carried W (or approval) in the link, covered by the SAS, would
+close the gap.
+
+**Raised by:** batch 3a.
+
+## A phone-held root has no approval for the roster
+
+**Where:** *Family roster* ("carries the sender's approval"); `mergeRoster`
+(`bad_approval`); guardian app `sendRoster`.
+
+**Question:** an install whose key is itself the root signs directly and has
+no approval. What does its roster carry?
+
+**Build's interim reading:** it sends no roster. Only an install with a
+My Signet or Heartwood root shares the roster. The other parent's install
+learns the family from its own pairings and STATUS.
+
+**Raised by:** batch 3a.
+
+## The key backup copies the working key
+
+**Where:** *Terms* ("Working key (W): one per guardian install, generated
+there and never copied"); guardian app key backup and restore.
+
+**Question:** the app's encrypted key backup restores the local key, which is
+now W, onto another phone, so two installs share one W.
+
+**Build's interim reading:** unchanged for now: the backup exists so a
+local-only family (whose key is its root) survives a lost phone. With a
+Signet root, a restored phone should instead get a fresh W approved by R, and
+the lost W withdrawn. Design session.
+
+**Raised by:** batch 3a.
+
+## When the guardian app sends W's approval
+
+**Where:** *Delivery and the two seal exceptions* ("A W sends its own
+approval to a ward before its first signed event"); guardian app
+`syncApprovals`, `keyFor`.
+
+**Question:** an old ward refuses kind 31120, and a new ward's STATUS goes to
+R until the approval lands, so the app can't tell which is which first.
+
+**Build's interim reading:** the app sends the approval (sealed by W) to every
+paired ward that doesn't list W under R: at once on connecting the root, and
+again at most every 6 hours while the ward doesn't list it. W signs a ward's
+events only once that ward's STATUS lists W under R and every ward of the
+child passes the versioning gate (thresholds Android 49, Linux 713, keyed on
+the platform the device was paired as); until then R signs, so W never signs
+before its approval has landed.
+
+**Raised by:** batch 3a.
+
+## A departed key's farewell in the guardian app
+
+**Where:** open question "A departed key's last STATUS"; guardian app
+`unwrapFarewell`, `applyFarewell`.
+
+**Question:** what the guardian install does with the farewell.
+
+**Build's interim reading:** it is authenticated like a STATUS (machine
+seal, rumor author = `machine`) and never read as usage. When this install's
+W is neither a root nor any root's working key in it, the device is marked
+departed ("This phone no longer has access to …") and nothing more is sent to
+it. A farewell older than the view already held, or one that still lists W,
+changes nothing. A later full STATUS to this install clears the mark.
+
+**Raised by:** batch 3a.
+
+## The guardian PIN's length in the app
+
+**Where:** *Presence confirmation*, the Android guardian PIN; open question
+"How a guardian PIN reaches an Android ward" (review M5).
+
+**Question:** the contract sets no length.
+
+**Build's interim reading:** the guardian app asks for at least 6 digits and
+sends only to Android wards at or above the versioning threshold (an older
+ward refuses an unknown RELAYS field outright). The derivation matches
+`vectors/guardians/pin.json`, including its 4-digit vector.
+
+**Raised by:** batch 3a.
