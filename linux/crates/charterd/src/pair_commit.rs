@@ -23,6 +23,9 @@ pub struct PinPaths {
     /// `<children_base>/children/<subject_hex>/clauses`, the same tree
     /// `RealChildClauseStore` writes (`/var/lib/charter` in production).
     pub children_base: String,
+    /// The warden's state directory, where the new pairing's guardian-keys
+    /// state is written before the pin (`/var/lib/charter` in production).
+    pub state_dir: String,
 }
 
 impl PinPaths {
@@ -33,6 +36,7 @@ impl PinPaths {
             limits_dir: "/etc/charter/limits.d".into(),
             token: "/var/lib/charter/pair-token.json".into(),
             children_base: CHILD_CLAUSE_STORE_BASE.into(),
+            state_dir: crate::guardians::STATE_DIR.into(),
         }
     }
 }
@@ -155,6 +159,7 @@ mod tests {
             limits_dir: d.join("limits.d").to_string_lossy().into_owned(),
             token: d.join("pair-token.json").to_string_lossy().into_owned(),
             children_base: d.to_string_lossy().into_owned(),
+            state_dir: d.to_string_lossy().into_owned(),
         };
         (paths, child.to_string_lossy().into_owned())
     }

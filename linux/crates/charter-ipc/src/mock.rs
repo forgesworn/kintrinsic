@@ -226,8 +226,15 @@ impl MockPairingSink {
             state: Mutex::new(PairingStateView {
                 paired,
                 guardian_short: paired.then(|| "npub1guardian".to_string()),
+                guardians: None,
             }),
         }
+    }
+
+    /// The warden's published guardians view (rule 5).
+    pub fn with_guardians(self, g: crate::dto::GuardiansView) -> Self {
+        self.state.lock().expect("lock").guardians = Some(g);
+        self
     }
 }
 
