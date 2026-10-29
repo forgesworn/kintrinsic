@@ -324,6 +324,39 @@ impl GuardianKeys {
         Ok(Self::new(store, paired_at, Held::Ready(doc)))
     }
 
+    /// Make THIS adapter follow a changed pairing record (a pasted relay code
+    /// applied to the record while the ward runs): the relay list and
+    /// `relays_updated_at`, recording the replaced list for rule 11's
+    /// previous-relays window, as [`Self::load`] does at start. Under the
+    /// adapter's own lock, persisted before it is swapped in, so a platform
+    /// never builds a second adapter for the same ward (two instances would
+    /// overwrite each other's writes).
+    ///
+    /// `Ok(false)`: nothing to follow, or the record belongs to another
+    /// pairing (`paired_at` differs; that is a re-pair, which needs a new
+    /// adapter after an unpair, not this). `Err`: unavailable, or the write
+    /// failed and nothing changed.
+    pub fn follow_pairing(&self, pairing: &Pairing, now: u64) -> SysResult<bool> {
+        if secs(pairing.paired_at) != self.inner.paired_at {
+            return Ok(false);
+        }
+        self.commit(|d| {
+            let mut next = d.clone();
+            let mut changed = follow_pairing_relays(&mut next.state, pairing, now);
+            // The same list re-applied by a newer code still moves the floor.
+            let updated = secs(pairing.relays_updated_at.unwrap_or(0));
+            if updated > next.state.relays_updated_at {
+                next.state.relays_updated_at = updated;
+                changed = true;
+            }
+            if changed {
+                (Some(next), true)
+            } else {
+                (None, false)
+            }
+        })
+    }
+
     /// Also show the presence token from `file` (a `0600` file another
     /// process may display). The adapter's own state stays the gate.
     pub fn set_token_file(&self, file: PresenceTokenStore) {

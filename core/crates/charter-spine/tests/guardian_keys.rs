@@ -1064,6 +1064,43 @@ async fn a_departed_key_gets_one_last_status_then_nothing() {
     ));
 }
 
+/// A pasted relay code changes the pairing record while the ward runs: the
+/// LIVE adapter follows it (no second instance), persists it, and opens the
+/// previous-relays window; a record from another pairing is not followed.
+#[tokio::test]
+async fn the_live_adapter_follows_a_changed_pairing_record() {
+    let w = Ward::new();
+    let keys = w.keys();
+    let mut changed = pairing();
+    changed.relays = vec!["wss://new.example".into()];
+    changed.relays_updated_at = Some(NOW - 10);
+    let saves = w.store.saves();
+    assert_eq!(keys.follow_pairing(&changed, NOW), Ok(true));
+    assert_eq!(w.store.saves(), saves + 1, "persisted");
+    let g = keys.status_guardians(NOW).unwrap();
+    assert_eq!(g.relays, vec!["wss://new.example".to_string()]);
+    // Following the same record again changes nothing.
+    assert_eq!(keys.follow_pairing(&changed, NOW), Ok(false));
+    // A restart reads what was followed, with no relay change to record.
+    let restarted = GuardianKeys::load(Arc::new(w.store.clone()), &changed, NOW);
+    let p = restarted.project(NOW).unwrap();
+    assert_eq!(p.relays, vec!["wss://new.example".to_string()]);
+    // Another pairing's record is a re-pair, not a relay change.
+    let mut other = changed.clone();
+    other.paired_at += 1;
+    other.relays = vec!["wss://other.example".into()];
+    assert_eq!(keys.follow_pairing(&other, NOW), Ok(false));
+    // A write failure changes nothing.
+    w.store.break_writes(true);
+    let mut third = changed.clone();
+    third.relays = vec!["wss://third.example".into()];
+    assert!(keys.follow_pairing(&third, NOW).is_err());
+    assert_eq!(
+        keys.status_guardians(NOW).unwrap().relays,
+        vec!["wss://new.example".to_string()]
+    );
+}
+
 /// `peek` reads the state another process writes and never writes it.
 #[tokio::test]
 async fn a_peek_reads_the_signer_set_and_labels_and_never_writes() {
