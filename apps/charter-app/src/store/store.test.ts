@@ -277,3 +277,50 @@ describe("reducer — SET_DEVICE_DEBUGGING (last-sent USB debugging, per device)
     expect(next.children[0].devices[0].debugging).not.toHaveProperty("held");
   });
 });
+
+/**
+ * Batch 3b review, H1: a roster taken in becomes the family through the
+ * real reducer, with the ids minted outside it and a presence ward's
+ * guardians view carried onto its device.
+ */
+describe("reducer — ADOPT_ROSTER", () => {
+  it("adds the roster's child and devices, using the minted ids in order", () => {
+    const subject = "ab".repeat(32);
+    const phone = "c1".repeat(32);
+    const laptop = "d2".repeat(32);
+    const guardians = { roots: [{ root: "e3".repeat(32), keys: ["f4".repeat(32)] }], pending: [], tombstones: 0, relays: [] };
+    const adopt = {
+      type: "ADOPT_ROSTER" as const,
+      roster: {
+        children: [
+          {
+            subject,
+            issuedAt: 10,
+            name: "Sam",
+            colour: "#3B6FB2",
+            devices: [
+              { machine: laptop, platform: "linux", name: "Sam's laptop", pairedHere: false, statusSeen: false },
+              { machine: phone, platform: "android", name: "Sam's phone", pairedHere: false, statusSeen: true },
+            ],
+          },
+        ],
+      },
+      updated: [subject],
+      presenceWards: { [phone]: { confirmedAt: 5, ts: 20, appVersionCode: 49, guardians } },
+      ids: { child: ["child-x"], device: ["dev-1", "dev-2"], policy: ["pol-x"] },
+    };
+    const next = reducer(emptyState(), adopt);
+    expect(next.children).toHaveLength(1);
+    const child = next.children[0];
+    expect(child).toMatchObject({ id: "child-x", name: "Sam", color: "#3B6FB2", rosterId: subject, dependantPubkey: null });
+    expect(child.policies).toEqual([{ id: "pol-x", scope: { kind: "device" } }]);
+    expect(child.devices.map((d) => [d.id, d.devicePubkey, d.platform, d.pairing, d.fromRoster])).toEqual([
+      ["dev-1", laptop, "linux", "paired", true],
+      ["dev-2", phone, "android", "paired", true],
+    ]);
+    expect(child.devices[1]).toMatchObject({ keysViewAt: 20, appVersionCode: 49, guardians });
+    expect(child.devices[0].keysViewAt).toBeUndefined();
+    // The same roster again changes nothing.
+    expect(reducer(next, { ...adopt, presenceWards: {}, ids: { child: ["y"], device: ["z"], policy: ["w"] } })).toBe(next);
+  });
+});
