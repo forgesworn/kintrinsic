@@ -3330,12 +3330,17 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             }
             let view = crate::guardians::build_view(keys, now as u64);
             if view != guardians_view_last {
-                if let Some(v) = &view {
-                    if let Err(e) = crate::guardians::publish_view(
-                        std::path::Path::new(crate::guardians::GUARDIANS_VIEW_PATH),
-                        v,
-                    ) {
-                        eprintln!("charterd: could not publish the guardians view: {e}");
+                let path = std::path::Path::new(crate::guardians::GUARDIANS_VIEW_PATH);
+                match &view {
+                    Some(v) => {
+                        if let Err(e) = crate::guardians::publish_view(path, v) {
+                            eprintln!("charterd: could not publish the guardians view: {e}");
+                        }
+                    }
+                    // The state became unreadable: show nothing rather than
+                    // a stale list of who governs this ward.
+                    None => {
+                        let _ = std::fs::remove_file(path);
                     }
                 }
                 guardians_view_last = view;

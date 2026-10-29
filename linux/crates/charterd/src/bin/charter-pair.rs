@@ -344,29 +344,33 @@ fn main() {
                 .take(16_385)
                 .read_to_string(&mut code)
                 .map_err(|e| e.to_string())?;
-            // Held across the read and the write: the warden rewrites this
-            // record too (review 2a, Info 2).
-            let _lock = lock_pairing().map_err(|e| format!("lock pairing: {e}"))?;
-            let json =
-                std::fs::read_to_string(PAIRING).map_err(|e| format!("read pairing: {e}"))?;
-            let mut pairing: charter_transport::Pairing =
-                serde_json::from_str(&json).map_err(|e| format!("read pairing: {e}"))?;
-            // Any key in the guardian-keys signer set may sign it (rule 11;
-            // review 2a, Info 6), read without writing: the warden is the
-            // state's one writer. An unreadable state has no signers, so the
-            // code is refused (fail closed).
-            let signers = {
-                use charter_spine::GuardianStatements as _;
-                charterd::guardians::peek_keys(Path::new(STATE_DIR), &pairing, now()).signers()
-            };
-            charter_transport::relay_config::apply_signed_config_from(
-                &mut pairing,
-                code.trim(),
-                &*signers,
-                now(),
-            )?;
-            let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
-            write_pairing_locked(&json).map_err(|e| format!("save relay change: {e}"))?;
+            // Released before the restart below: the warden being stopped
+            // may itself be waiting on it.
+            {
+                // Held across the read and the write: the warden rewrites this
+                // record too (review 2a, Info 2).
+                let _lock = lock_pairing().map_err(|e| format!("lock pairing: {e}"))?;
+                let json =
+                    std::fs::read_to_string(PAIRING).map_err(|e| format!("read pairing: {e}"))?;
+                let mut pairing: charter_transport::Pairing =
+                    serde_json::from_str(&json).map_err(|e| format!("read pairing: {e}"))?;
+                // Any key in the guardian-keys signer set may sign it (rule 11;
+                // review 2a, Info 6), read without writing: the warden is the
+                // state's one writer. An unreadable state has no signers, so the
+                // code is refused (fail closed).
+                let signers = {
+                    use charter_spine::GuardianStatements as _;
+                    charterd::guardians::peek_keys(Path::new(STATE_DIR), &pairing, now()).signers()
+                };
+                charter_transport::relay_config::apply_signed_config_from(
+                    &mut pairing,
+                    code.trim(),
+                    &*signers,
+                    now(),
+                )?;
+                let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
+                write_pairing_locked(&json).map_err(|e| format!("save relay change: {e}"))?;
+            }
             let status = Command::new("systemctl")
                 .args(["try-restart", "charterd.service"])
                 .status()
