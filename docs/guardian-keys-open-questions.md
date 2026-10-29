@@ -860,10 +860,20 @@ install holds, so it has no live key to re-sign with.
 
 **Build's interim reading:** `leaveFamily` does not re-sign. The clauses it
 set stay enforced (rule 4) until the remaining parent sends a clause of the
-same kind. Removing another parent, withdrawing another install and a root
-move do re-sign first, and abort if the re-sign can't be sent.
+same kind. Removing another parent, withdrawing an install and a root move
+do re-sign first, and abort if the re-sign can't be sent:
+- withdrawing this install's own working key re-signs with the root R, never
+  with W (W is the key departing);
+- the re-sign covers every clause kind the install sends to the child's
+  devices: the policy clauses, and the latest gift, stand-down, maintenance
+  window, update and debugging clause per device (a gift keeps its `id`, so
+  it is never added twice);
+- it counts only once sent: a clause held for the home network aborts the
+  departure, which could otherwise apply before the re-sign arrives;
+- a kind this install never sent is not re-signed; a departed key's clause
+  of that kind stays enforced until someone sends one.
 
-**Raised by:** batch 3a.
+**Raised by:** batch 3a; widened by the batch 3a review.
 
 ## A working-key PAIR_OFFER to a ward that predates the section
 
@@ -876,13 +886,23 @@ approval. A Linux ward older than the section ignores `approval` and pins W
 as its guardian, not R; the app then signs that ward's events with R (no
 `guardians` in its STATUS) and the ward refuses them.
 
-**Build's interim reading:** the app follows the contract and always sends the
-W-sealed offer with the approval once it has a Signet root. The scan-to-pair
-QR doesn't carry the ward's version, so the app can't tell. Releases should
-ship the scanner only with section-implementing wards; the design session may
-want a version marker in the `charter://pair` code.
+**Build's interim reading:** the app never sends a W-sealed offer. Under a
+Signet root, scan-to-pair is signed and sealed by R over NIP-46 with no
+approval, so an old ward and a new one both pin R, exactly as before the
+section. W's approval then follows as for any other ward ("When the guardian
+app sends W's approval"): at once, because the app can't read the new ward's
+STATUS (it goes to R) until the approval has landed; an old ward drops it
+harmlessly. W signs that ward's events only once its STATUS lists W under R
+and the child passes the versioning gate.
 
-**Raised by:** batch 3a.
+The earlier reading (send the W-sealed offer and rely on releases shipping
+the scanner only with section-implementing wards) failed open: nothing in
+the code stopped it, and an old Linux ward then pinned W while the app
+signed it with R, so it refused everything. *Scan-to-pair with a working
+key* stays unused until the pairing code carries a version marker (design
+session).
+
+**Raised by:** batch 3a; reading changed after the batch 3a review.
 
 ## Presence code carries no relays
 
@@ -909,10 +929,19 @@ install then connects My Signet as root, R's approval is for a root that
 isn't pinned (dropped) and anything R signs is refused.
 
 **Build's interim reading:** the app refuses to approve the working key while
-any paired device it has read a STATUS from doesn't hold the local key as a
-working key, naming those devices. Moving them to My Signet is a root move.
+any paired device may trust the local key, naming those devices. Moving them
+to My Signet is a root move. Each device records the key it was paired to
+(`pinnedKey`). Older records are stamped when the answer is still known:
+- before a phone that signed with its own key (or had no signer) connects
+  My Signet, every device without a record is stamped with the local key;
+- when a family already on My Signet first approves this phone, devices it
+  has never heard from are stamped with R (their STATUS goes to R).
+A device counts unless its STATUS lists the local key as a working key, or
+its record names another key. A device with no record counts whether or not
+it has been heard from (fail-closed).
 
-**Raised by:** batch 3a.
+**Raised by:** batch 3a; tightened after the batch 3a review (it skipped
+devices not heard from).
 
 ## Moving a phone-held root
 
@@ -1128,3 +1157,62 @@ confirm" once a roster has arrived. The inviting parent's checklist tells
 them to name the devices.
 
 **Raised by:** batch 3b.
+
+## A root move that lapses half-way
+
+**Where:** rule 8; *Pending statements*; guardian app `moveRoot`,
+`settleRootMove`.
+
+**Question:** a move to R2 takes effect per ward, on presence. If it is
+confirmed at some wards and then expires or is cancelled, those wards pin R2
+and the rest still pin R. The contract has no state for "half moved".
+
+**Build's interim reading:** each ward is judged by its own STATUS:
+- a ward that pins R2 and lists W under it gets W (and R2's approval if it
+  lacks W); a ward still on R gets W under R or R itself, as before;
+- the move is forgotten once it has expired (by the wards' STATUS `pending`,
+  else 7 days after `issuedAt`) or this install cancelled it, but only when
+  no ward pins R2; otherwise R2 is kept, so the moved wards aren't stranded;
+- while any ward is half-way, statements signed by R (co-guardian, removal,
+  withdrawal, leaving, a move elsewhere) are refused, since the moved wards
+  would drop them. Restarting the move to the same identity finishes it.
+Signing those statements with R2 for the moved wards needs R2's bunker as a
+second live signer; design session.
+
+**Raised by:** batch 3a review.
+
+## Who decides which roots may send a roster
+
+**Where:** *Family roster* ("An install accepts a roster only from a W
+approved by a root that the family's wards report in STATUS"); guardian app
+`reportedRoots`, `sendRoster`.
+
+**Question:** the roots are the union of every ward's STATUS. One tampered
+ward (a rooted phone, root on a laptop) can report an extra root and working
+key; the app then sends every child's name, colour and device list to that
+key and accepts its rosters. Roster data never reaches the family itself
+(`children`), but the names leave the family.
+
+**Build's interim reading:** unchanged, matching the contract's wording.
+Possible hardening for the design session: count a root only when more than
+one ward reports it, or when a ward this install paired reports it and an
+approval for its working key has been seen; or ask the guardian before the
+first roster goes to a new key.
+
+**Raised by:** batch 3a review.
+
+## A departed working key whose root is still pinned
+
+**Where:** *STATUS* ("a departed key receives one last STATUS"); rule 9;
+guardian app `applyFarewell`.
+
+**Question:** when this install's own W is withdrawn, the ward sends W a last
+STATUS. Its root R is still pinned there, so the install can still sign with
+R, but the ward's later STATUS goes to R, which the app never reads.
+
+**Build's interim reading:** the device is marked departed only when none of
+this install's roots is pinned in the farewell. Otherwise the view is
+recorded and R signs for it from then on; the app shows what it last heard.
+Hearing from it again needs a fresh approval of a new working key.
+
+**Raised by:** batch 3a review.
