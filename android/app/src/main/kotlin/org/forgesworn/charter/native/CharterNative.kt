@@ -244,4 +244,33 @@ object CharterNative {
     /** `{running, connected, sessions, candidates, remembered, outbox,
      *  lastError, appliedSeq}`; `{"running":false,…}` while there is no link. */
     external fun charterLinkState(): String
+
+    // ---- guardian roots and working keys (ABI 5) ----------------------------
+
+    /** 1 when a guardian has set this ward's PIN, else 0. */
+    external fun charterHasGuardianPin(): Int
+
+    /**
+     * Check an entered guardian PIN: `{ok, failures, waitSeconds}` (plus
+     * `noPin` / `unavailable`). Runs scrypt (slow): worker thread only. Every
+     * attempt counts toward the backoff, which survives restarts.
+     */
+    external fun charterVerifyGuardianPin(pin: String, nowUnix: Long): String
+
+    /** The pending co-guardian / removal / move statements: a JSON list of
+     *  `{d, kind, signer, key, label, issuedAt, expiresAt, takesEffectAt,
+     *  confirmed}`. */
+    external fun charterPendingStatements(nowUnix: Long): String
+
+    /**
+     * Mint a presence token for the pending statement [d] (null: any), only
+     * with a correct guardian PIN in this same call: `{code, shortForm,
+     * expiresAt, qr: {size, modules}}` or `{error, waitSeconds, failures}`.
+     * Runs scrypt: worker thread only.
+     */
+    external fun charterMintPresenceToken(d: String?, pin: String, nowUnix: Long): String
+
+    /** `{available, paired, roots: [{root, label, keys, keyLabels, rules}],
+     *  pending, pin: {set, failures, waitSeconds}}`. */
+    external fun charterGuardiansSummary(nowUnix: Long): String
 }
