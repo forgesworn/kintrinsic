@@ -67,7 +67,7 @@ import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } f
 import { keyStanding } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
 import { makeGuardianPinRecord, relaysWithPinTemplate } from "./pin";
-import type { GuardianKeysState, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
+import type { AnchoredRoot, GuardianKeysState, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
 export interface KeysDevice {
@@ -135,6 +135,13 @@ export const APPROVAL_RESEND_SECONDS = 6 * 60 * 60;
 
 /** A pending statement with no `expiresAt` expires this long after `issuedAt` (contract, *Pending statements*). */
 export const PENDING_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * A presence ward is forgotten this long after this install confirmed there,
+ * if no roster from an anchored root has named it by then: an invitation
+ * can't stay pending longer (OQ "Anchoring a joining parent's trust").
+ */
+export const PRESENCE_WARD_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -242,21 +249,31 @@ export class GuardianKeys {
     };
   }
 
-  /** The versioning gate for one child: every ward must be new enough. */
+  /**
+   * Does the versioning gate count this device? Not one known only from
+   * another guardian's roster and never heard from here: nothing shows this
+   * install's root is pinned there, so it can't hold this install back (it
+   * isn't this install's to update), and it is shown as unconfirmed instead.
+   */
+  private gated(d: KeysDevice): boolean {
+    return HEX64.test(d.machine) && (!d.fromRoster || d.statusSeen);
+  }
+
+  /** The versioning gate for one child: every ward this install has paired or heard from must be new enough. */
   childReadiness(childId: string): ChildReadiness {
     const child = this.deps.read().children.find((c) => c.id === childId);
-    return childReadiness((child?.devices ?? []).filter((d) => HEX64.test(d.machine)).map((d) => this.gateOf(d)));
+    return childReadiness((child?.devices ?? []).filter((d) => this.gated(d)).map((d) => this.gateOf(d)));
   }
 
   /**
    * The gate across the family: co-guardians and root moves are offered only
    * when every ward of every child is ready. Children with no paired ward
-   * don't block.
+   * (or only unconfirmed roster devices) don't block.
    */
   familyReadiness(): { ready: boolean; children: { childId: string; readiness: ChildReadiness }[] } {
     const children = this.deps
       .read()
-      .children.filter((c) => c.devices.some((d) => HEX64.test(d.machine)))
+      .children.filter((c) => c.devices.some((d) => this.gated(d)))
       .map((c) => ({ childId: c.id, readiness: this.childReadiness(c.id) }));
     return { ready: children.length > 0 && children.every((c) => c.readiness.ready), children };
   }
@@ -559,15 +576,15 @@ export class GuardianKeys {
     return build(signerOf(this.rootOps()));
   }
 
-  /** The roots the family's wards report, merged (keys unioned per root). */
+  /**
+   * The roots the family's wards report, merged (keys unioned per root).
+   * Only devices of the family count: a presence ward's STATUS is signed by
+   * a machine key that anyone can put in a presence code, so it can claim
+   * any roots (OQ "Anchoring a joining parent's trust").
+   */
   reportedRoots(): { root: string; keys: string[] }[] {
     const out = new Map<string, Set<string>>();
     const views: (StatusGuardians | undefined)[] = this.allDevices().map((d) => d.guardians);
-    // A ward confirmed in person here, before a roster named it: its STATUS
-    // is what lets this install accept the roster at all.
-    for (const [m, p] of Object.entries(this.deps.read().keys.presenceWards)) {
-      if (HEX64.test(m) && !this.findDevice(m)) views.push(p.guardians);
-    }
     for (const g of views) {
       for (const r of g?.roots ?? []) {
         const set = out.get(r.root) ?? new Set<string>();
@@ -581,13 +598,48 @@ export class GuardianKeys {
   private requireFamilyReady(what: string): void {
     const gate = this.familyReadiness();
     if (gate.ready) return;
-    const waiting = gate.children.flatMap((c) => c.readiness.wards.filter((w) => !w.readiness.ready));
-    const names = waiting.map((w) => this.findDevice(w.machine)?.name ?? "a device");
-    throw new Error(
-      gate.children.length === 0
-        ? `Pair a device first, then ${what}.`
-        : `Update Kintrinsic on ${[...new Set(names)].join(", ")} first, then ${what}.`,
-    );
+    throw new Error(familyGateReason(gate, (m) => this.findDevice(m)?.name, what));
+  }
+
+  // ---------------------------------------------------------------------
+  // Which other parents this install trusts
+  // ---------------------------------------------------------------------
+
+  /**
+   * The roots whose working keys may send this install a roster and receive
+   * one from it: this install's own root (and the root a move is going to),
+   * the roots it has anchored (a scanned guardian code, an invitation), and
+   * any root it invited before anchors were kept. A ward's STATUS never adds
+   * one.
+   */
+  trustedRoots(): string[] {
+    const { keys } = this.deps.read();
+    const out = new Set<string>([this.rootPubkey()]);
+    if (keys.nextRoot) out.add(keys.nextRoot.pubkey);
+    for (const r of Object.keys(keys.anchoredRoots ?? {})) out.add(r);
+    for (const st of Object.values(keys.sent)) if (st.type === "coguardian" && HEX64.test(st.key)) out.add(st.key);
+    return [...out].sort();
+  }
+
+  /**
+   * Trust the inviting parent's root: the guardian code (their npub) shown on
+   * their phone, scanned or pasted on this one. Returns the root (hex).
+   */
+  anchorRoot(input: string): string {
+    const key = parseGuardianKey(input.trim().replace(/^nostr:/i, ""));
+    if (!key) throw new Error("That isn't a guardian code. It starts with npub1.");
+    if (key === this.workingPubkey()) throw new Error("That's this phone's own key, not the other parent's guardian code.");
+    if (key === this.signetRoot()?.pubkey) {
+      throw new Error(
+        "That's your own guardian code. Scan the code on the phone of the parent who invited you. (For a second phone of your own, skip this step.)",
+      );
+    }
+    this.addAnchor(key, { anchoredAt: this.deps.now(), how: "scanned" });
+    return key;
+  }
+
+  private addAnchor(root: string, anchor: AnchoredRoot): void {
+    this.deps.write((k) => ({ ...k, anchoredRoots: { ...(k.anchoredRoots ?? {}), [root]: anchor } }));
   }
 
   /**
@@ -630,6 +682,12 @@ export class GuardianKeys {
     );
     const report = await this.fanOut(event, "working-or-root");
     this.remember(event);
+    // The parent this install invites is one it trusts to share the family.
+    this.addAnchor(key, {
+      anchoredAt: this.deps.now(),
+      how: "invited",
+      ...(opts.label ? { label: truncateLabel(opts.label) } : {}),
+    });
     return report;
   }
 
@@ -952,6 +1010,16 @@ export class GuardianKeys {
         throw new Error("This removal wasn't started from this phone, so it can't be confirmed here.");
       }
     }
+    const known = this.findDevice(code.machine);
+    // A joining parent trusts the family only through the inviting parent's
+    // guardian code: without it, nothing this ward later says, and no roster,
+    // can be checked (OQ "Anchoring a joining parent's trust").
+    const own = new Set([this.rootPubkey(), keys.nextRoot?.pubkey]);
+    if (!known && code.kind === "coguardian" && !this.trustedRoots().some((r) => !own.has(r))) {
+      throw new Error(
+        "Scan the guardian code of the parent who invited you first (Guardians → Join a family), then confirm here.",
+      );
+    }
     const w = this.workingOps();
     const event = await buildPresenceConfirm(signerOf(w), {
       token: code.token,
@@ -959,7 +1027,6 @@ export class GuardianKeys {
       ...(approval ? { approval } : {}),
       createdAt: this.deps.now(),
     });
-    const known = this.findDevice(code.machine);
     // A joining install may not know this ward yet: its own defaults, plus
     // anything it does know. OQ: "Presence code carries no relays".
     const relays = [...new Set([...(known ? this.relaysFor(known) : []), ...this.deps.defaultRelays])];
@@ -973,7 +1040,9 @@ export class GuardianKeys {
       else throw e;
     }
     // A joining parent learns the ward's machine key here, before any roster:
-    // remember it so the STATUS it now sends this install is admitted.
+    // remember it so the STATUS it now sends this install is admitted and
+    // shown. It gets nothing else from this install (no clauses, PIN or
+    // roster) until a roster from an anchored root names it.
     if (!known && code.kind === "coguardian") {
       const at = this.deps.now();
       this.deps.write((k) => ({
@@ -984,9 +1053,28 @@ export class GuardianKeys {
     return report;
   }
 
-  /** Is `machine` a ward confirmed in person here that no child has yet? */
+  /** Is `machine` a ward confirmed in person here, not expired, that no child has yet? */
   isPresenceWard(machine: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.deps.read().keys.presenceWards, machine) && !this.findDevice(machine);
+    const p = Object.prototype.hasOwnProperty.call(this.deps.read().keys.presenceWards, machine)
+      ? this.deps.read().keys.presenceWards[machine]
+      : undefined;
+    return !!p && !this.presenceExpired(p) && !this.findDevice(machine);
+  }
+
+  private presenceExpired(p: PresenceWard): boolean {
+    return this.deps.now() >= p.confirmedAt + PRESENCE_WARD_LIFETIME_SECONDS;
+  }
+
+  /**
+   * Wards confirmed in person here and waiting for a roster from an anchored
+   * root to name them (oldest first), with what their STATUS said, for
+   * display only.
+   */
+  waitingPresenceWards(): ({ machine: string } & PresenceWard)[] {
+    return Object.entries(this.deps.read().keys.presenceWards)
+      .filter(([m]) => this.isPresenceWard(m))
+      .map(([machine, p]) => ({ machine, ...p }))
+      .sort((a, b) => a.confirmedAt - b.confirmedAt);
   }
 
   /**
@@ -1008,11 +1096,13 @@ export class GuardianKeys {
     this.deps.write((k) => ({ ...k, presenceWards: { ...k.presenceWards, [status.machine]: next } }));
   }
 
-  /** Forget presence wards a child now has (the roster named them). */
+  /** Forget presence wards a child now has (the roster named them), and expired ones. */
   prunePresenceWards(): void {
     const { keys } = this.deps.read();
     const known = new Set(this.allDevices().map((d) => d.machine));
-    const drop = Object.keys(keys.presenceWards).filter((m) => known.has(m));
+    const drop = Object.entries(keys.presenceWards)
+      .filter(([m, p]) => known.has(m) || this.presenceExpired(p))
+      .map(([m]) => m);
     if (drop.length === 0) return;
     this.deps.write((k) => {
       const presenceWards = { ...k.presenceWards };
@@ -1109,17 +1199,24 @@ export class GuardianKeys {
   }
 
   /**
-   * Send the family roster to every other working key the wards report
-   * (other parents' installs and this root's other installs), signed and
-   * sealed by W and carrying W's approval. An install with no Signet root
-   * has no approval to carry and sends none (OQ "A phone-held root has no
-   * approval for the roster").
+   * Send the family roster to every other working key the family's wards
+   * report under a trusted root (this root's other installs, and anchored
+   * parents' installs), signed and sealed by W and carrying W's approval. An
+   * install with no Signet root has no approval to carry and sends none (OQ
+   * "A phone-held root has no approval for the roster").
    */
   async sendRoster(): Promise<Omit<SendReport, "event"> & { event?: SignedEvent }> {
     const root = this.signetRoot();
     if (!root) return { sent: [], held: [], failed: [] };
     const me = this.workingPubkey();
-    const recipients = [...new Set(this.reportedRoots().flatMap((r) => r.keys))].filter((k) => k !== me);
+    const trusted = new Set(this.trustedRoots());
+    const recipients = [
+      ...new Set(
+        this.reportedRoots()
+          .filter((r) => trusted.has(r.root))
+          .flatMap((r) => r.keys),
+      ),
+    ].filter((k) => k !== me);
     const children = this.localRosterChildren();
     // Record what was shared, so the next roster keeps the same issuedAt.
     this.deps.write((k) => {
@@ -1155,18 +1252,28 @@ export class GuardianKeys {
 
   /**
    * Take in a roster another install sent (already unwrapped by
-   * `unwrapRoster`): merged with `mergeRoster`, accepted only from a W the
-   * wards list under a root they report. Returns the subjects that changed.
+   * `unwrapRoster`): merged with `mergeRoster`, accepted only from a W that
+   * a trusted root approved (`trustedRoots`; the approval travels in the
+   * roster). Where the family's wards report that root, W must also be
+   * listed under it there, so a withdrawn W is refused; a joining install
+   * whose wards don't report it yet relies on the approval alone. Returns
+   * the subjects that changed. Every refusal is final.
    */
   receiveRoster(inbound: { sealAuthor: string; inner: SignedEvent }):
     | { ok: true; updated: string[] }
-    | { ok: false; reason: RosterReason | "own" } {
+    | { ok: false; reason: RosterReason | "own" | "root_not_trusted" } {
     if (inbound.inner.pubkey === this.workingPubkey()) return { ok: false, reason: "own" };
+    const signer = rosterApprovalSigner(inbound.inner);
+    if (signer !== null && !this.trustedRoots().includes(signer)) return { ok: false, reason: "root_not_trusted" };
+    const reported = this.reportedRoots();
+    if (signer !== null && !reported.some((r) => r.root === signer)) {
+      reported.push({ root: signer, keys: [inbound.inner.pubkey] });
+    }
     const { keys } = this.deps.read();
     let local: LocalRoster = keys.roster;
     for (const d of this.allDevices()) if (d.statusSeen) local = markDeviceStatusSeen(local, d.machine);
     for (const [m, p] of Object.entries(keys.presenceWards)) if (p.ts !== undefined) local = markDeviceStatusSeen(local, m);
-    const merged = mergeRoster(local, inbound, this.reportedRoots(), this.deps.now());
+    const merged = mergeRoster(local, inbound, reported, this.deps.now());
     if (!merged.ok) return merged;
     this.deps.write((k) => ({ ...k, roster: merged.roster }));
     return { ok: true, updated: merged.updated };
@@ -1195,6 +1302,42 @@ export class GuardianKeys {
     }
     return [...out.values()];
   }
+}
+
+/**
+ * The root that signed the approval a roster carries, before anything else
+ * is checked; null when there is none to read (`mergeRoster` refuses it).
+ */
+function rosterApprovalSigner(inner: SignedEvent): string | null {
+  try {
+    const c = JSON.parse(inner.content) as { approval?: unknown };
+    const pa = parseStatement(c?.approval);
+    return pa.ok && pa.statement.type === "approval" && pa.statement.key === inner.pubkey ? pa.statement.signer : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One line for why the family isn't ready for guardian keys: devices that
+ * haven't checked in, and devices that need an update, each named.
+ */
+export function familyGateReason(
+  gate: { children: { readiness: ChildReadiness }[] },
+  nameOf: (machine: string) => string | undefined,
+  what: string,
+): string {
+  if (gate.children.length === 0) return `Pair a device first, then ${what}.`;
+  const waiting = gate.children.flatMap((c) => c.readiness.wards.filter((w) => !w.readiness.ready));
+  const names = (ws: typeof waiting) => [...new Set(ws.map((w) => nameOf(w.machine) ?? "a device"))];
+  const silent = names(waiting.filter((w) => !w.readiness.ready && w.readiness.reason === "silent"));
+  const old = names(waiting.filter((w) => !w.readiness.ready && w.readiness.reason !== "silent"));
+  if (silent.length === 0) return `Update Kintrinsic on ${old.join(", ")} first, then ${what}.`;
+  const heard = `${silent.join(", ")} ${silent.length === 1 ? "hasn't" : "haven't"} checked in with this phone yet`;
+  if (old.length === 0) {
+    return `${heard}. Open Kintrinsic on ${silent.length === 1 ? "it" : "them"}, connected to the internet, then ${what}.`;
+  }
+  return `${heard}, and ${old.join(", ")} ${old.length === 1 ? "needs" : "need"} a Kintrinsic update. Then ${what}.`;
 }
 
 /**

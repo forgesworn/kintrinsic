@@ -506,6 +506,10 @@ describe("presence confirmation", () => {
     const h = harness([]);
     await connectSignetRoot(h);
     const code = `charter://presence?m=${PHONE}&t=${token}&d=${encodeURIComponent(`kintrinsic/guardian/${R}`)}&s=${stmt}`;
+    // Not before the inviting parent's guardian code has been scanned.
+    await expect(h.gk.confirmPresence(code)).rejects.toThrow(/Scan the guardian code of the parent who invited you/);
+    expect(h.published).toHaveLength(0);
+    h.gk.anchorRoot(nip19.npubEncode(R2));
     const report = await h.gk.confirmPresence(code);
     expect(report.sent).toEqual([PHONE]);
     expect(h.published[0].relays).toEqual(["wss://default.example"]); // an unknown ward: defaults
@@ -589,7 +593,10 @@ describe("root move", () => {
     await expect(local.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "x", via: "signet" })).rejects.toThrow(/isn't available/);
     const h = harness([child]);
     await connectSignetRoot(h);
-    await expect(h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "x", via: "signet" })).rejects.toThrow(/Update Kintrinsic/);
+    // The device has never reported: it hasn't checked in, rather than needing an update (N-L1).
+    await expect(h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "x", via: "signet" })).rejects.toThrow(
+      /Sam's phone hasn't checked in with this phone yet/,
+    );
     expect(h.published).toHaveLength(0);
   });
 
@@ -776,6 +783,10 @@ describe("family roster", () => {
     };
     const h = harness([child]);
     await connectSignetRoot(h);
+    // R2's working key is reported by the ward, but R2 isn't trusted yet: nothing goes to it.
+    expect((await h.gk.sendRoster()).sent).toEqual([]);
+    h.gk.anchorRoot(R2);
+    h.published.length = 0;
     const report = await h.gk.sendRoster();
     expect(report.sent).toEqual([W2]);
     const opened = unwrapToWorkingKey(h.published[0].wrap, W2sk)!;
@@ -801,6 +812,9 @@ describe("family roster", () => {
       now: () => T,
       defaultRelays: [],
     });
+    // Not until the other install trusts R (its scanned guardian code).
+    expect(other.receiveRoster(opened)).toEqual({ ok: false, reason: "root_not_trusted" });
+    other.anchorRoot(`nostr:${nip19.npubEncode(R)}`);
     expect(other.receiveRoster(opened)).toEqual({ ok: true, updated: [subject] });
     expect(other.unconfirmedRosterDevices()).toEqual([{ subject, machine: PHONE, name: "Sam's phone", platform: "android" }]);
     // A roster from a key the wards don't list is refused.
@@ -819,5 +833,119 @@ describe("family roster", () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", rosterId: "aa".repeat(32), devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
     expect(await h.gk.sendRoster()).toEqual({ sent: [], held: [], failed: [] });
     expect(h.published).toHaveLength(0);
+  });
+});
+
+describe("anchoring the other parent's root (batch 3 re-review N-H1)", () => {
+  it("takes a scanned or pasted guardian code, and refuses anything else", async () => {
+    const h = harness([]);
+    await connectSignetRoot(h);
+    expect(() => h.gk.anchorRoot("hello")).toThrow(/isn't a guardian code/);
+    expect(() => h.gk.anchorRoot("npub1qqqqqqqq")).toThrow(/isn't a guardian code/);
+    expect(() => h.gk.anchorRoot(nip19.npubEncode(R))).toThrow(/your own guardian code/);
+    expect(() => h.gk.anchorRoot(W)).toThrow(/this phone's own key/);
+    expect(h.keys().anchoredRoots).toEqual({});
+    expect(h.gk.trustedRoots()).toEqual([R]);
+    expect(h.gk.anchorRoot(` nostr:${nip19.npubEncode(R2)} `)).toBe(R2);
+    expect(h.keys().anchoredRoots[R2]).toEqual({ anchoredAt: T, how: "scanned" });
+    expect(h.gk.trustedRoots()).toEqual([R, R2].sort());
+  });
+
+  it("an invitation anchors the invited root, so the two installs share the family", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }]);
+    await connectSignetRoot(h);
+    await h.gk.inviteCoGuardian(R2, { label: "Dad" });
+    expect(h.keys().anchoredRoots[R2]).toEqual({ anchoredAt: T, how: "invited", label: "Dad" });
+    expect(h.gk.trustedRoots()).toContain(R2);
+  });
+
+  it("a roster whose approval an untrusted root signed is refused for good", async () => {
+    const h = harness([]);
+    await connectSignetRoot(h);
+    const xSk = generateSecretKey();
+    const wxSk = generateSecretKey();
+    // An attacker's own install: its root approves its own W, which it can always do.
+    let xKeys = emptyGuardianKeys();
+    const X = new GuardianKeys({
+      read: () => ({ keys: xKeys, children: [] }),
+      write: (f) => {
+        xKeys = f(xKeys);
+      },
+      workingKey: () => wxSk,
+      root: () => opsOf(xSk),
+      publish: async () => {},
+      now: () => T,
+      defaultRelays: [],
+    });
+    await X.approveThisInstall({ via: "signet", label: "X" });
+    const approval = xKeys.root!.approval;
+    const inner = finalizeEvent(
+      {
+        kind: CHARTER_FAMILY_ROSTER,
+        created_at: T,
+        tags: [],
+        content: JSON.stringify({ v: 1, children: [{ subject: "cd".repeat(32), issuedAt: T, name: "Fake kid", colour: "#f00", devices: [] }], approval }),
+      },
+      wxSk,
+    ) as SignedEvent;
+    expect(h.gk.receiveRoster({ sealAuthor: getPublicKey(wxSk), inner })).toEqual({ ok: false, reason: "root_not_trusted" });
+    expect(h.keys().roster.children).toEqual([]);
+  });
+
+  it("presence wards expire a week after the confirmation, and never widen the roster's recipients", async () => {
+    const h = harness([]);
+    await connectSignetRoot(h);
+    h.gk.anchorRoot(R2);
+    const code = `charter://presence?m=${PHONE}&t=${"0".repeat(32)}&d=${encodeURIComponent(`kintrinsic/guardian/${R}`)}&s=${"1".repeat(64)}`;
+    await h.gk.confirmPresence(code);
+    const W_X = getPublicKey(generateSecretKey());
+    h.gk.notePresenceStatus({
+      machine: PHONE,
+      ts: T + 10,
+      appVersionCode: 49,
+      // A presence ward can claim anything, even keys under a trusted root.
+      guardians: { roots: [{ root: R2, keys: [W_X] }], pending: [], tombstones: 0, relays: [] },
+    });
+    expect(h.gk.isPresenceWard(PHONE)).toBe(true);
+    expect(h.gk.waitingPresenceWards().map((p) => p.machine)).toEqual([PHONE]);
+    expect(h.gk.reportedRoots()).toEqual([]);
+    h.setNow(T + 7 * 86400 - 1);
+    expect(h.gk.isPresenceWard(PHONE)).toBe(true);
+    h.setNow(T + 7 * 86400);
+    expect(h.gk.isPresenceWard(PHONE)).toBe(false);
+    expect(h.gk.waitingPresenceWards()).toEqual([]);
+    h.gk.prunePresenceWards();
+    expect(h.keys().presenceWards).toEqual({});
+  });
+});
+
+describe("readiness and roster-only devices (batch 3 re-review N-L1)", () => {
+  it("a roster-only device never heard from doesn't hold back inviting or W signing", () => {
+    const child: KeysChild = {
+      id: "c1",
+      name: "Sam",
+      colour: "#000",
+      devices: [readyWard(PHONE, "android"), device(LAPTOP, "linux", { fromRoster: true })],
+    };
+    const h = harness([child]);
+    expect(h.gk.familyReadiness().ready).toBe(true);
+    expect(h.gk.childReadiness("c1").wards.map((w) => w.machine)).toEqual([PHONE]);
+    // Once it has reported here, it counts again.
+    child.devices[1] = { ...child.devices[1], statusSeen: true, appVersionCode: 700 };
+    expect(h.gk.familyReadiness().ready).toBe(false);
+  });
+
+  it("names a silent device as not checked in, and an old one as needing an update", async () => {
+    const child: KeysChild = {
+      id: "c1",
+      name: "Sam",
+      colour: "#000",
+      devices: [device(PHONE, "android"), device(LAPTOP, "linux", { statusSeen: true, appVersionCode: 700 })],
+    };
+    const h = harness([child]);
+    await connectSignetRoot(h);
+    await expect(h.gk.inviteCoGuardian(R2)).rejects.toThrow(
+      "Sam's phone hasn't checked in with this phone yet, and Sam's laptop needs a Kintrinsic update. Then invite another parent.",
+    );
   });
 });

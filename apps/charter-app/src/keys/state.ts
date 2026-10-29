@@ -51,10 +51,11 @@ export interface SentStatement {
 /**
  * A ward this install confirmed in person at (its machine key came from the
  * presence code) before it knew the device from a pairing or a roster: a
- * joining parent. Its STATUS is admitted and its guardians view kept here
- * until a roster names the device, so that view can vouch for the roster's
- * sender. See docs/guardian-keys-open-questions.md, "A joining parent's
- * devices".
+ * joining parent. Its STATUS is admitted and its guardians view kept here,
+ * for display only, until a roster from an anchored root names the device or
+ * the entry expires. It vouches for nothing: anyone can make a presence code
+ * name any machine. See docs/guardian-keys-open-questions.md, "A joining
+ * parent's devices" and "Anchoring a joining parent's trust".
  */
 export interface PresenceWard {
   /** When this install confirmed in person there (unix s). */
@@ -63,6 +64,15 @@ export interface PresenceWard {
   ts?: number;
   appVersionCode?: number;
   guardians?: StatusGuardians;
+}
+
+/** A root this install was told to trust, in person (a scanned guardian code) or by inviting it. */
+export interface AnchoredRoot {
+  /** When it was anchored (unix s). */
+  anchoredAt: number;
+  how: "scanned" | "invited";
+  /** What this install calls them (the invitation's label), if anything. */
+  label?: string;
 }
 
 export interface GuardianKeysState {
@@ -84,6 +94,15 @@ export interface GuardianKeysState {
   /** Wards confirmed in person here that no child of this install has yet, by machine. */
   presenceWards: Record<string, PresenceWard>;
   /**
+   * Other parents' roots this install trusts, by root (64 hex): the one whose
+   * guardian code a joining parent scanned, and any this install invited.
+   * With this install's own root, the only roots whose working keys may send
+   * it a roster or receive one from it. A ward's STATUS never adds to it:
+   * any machine key can claim any roots. docs/guardian-keys-open-questions.md,
+   * "Anchoring a joining parent's trust".
+   */
+  anchoredRoots: Record<string, AnchoredRoot>;
+  /**
    * The root this install last used, kept when My Signet is disconnected
    * (`root` is cleared then): the key devices paired under it still pin, and
    * the only identity that may approve this phone again while no device
@@ -93,7 +112,7 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {} };
+  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -114,5 +133,10 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
         : empty.roster,
     sent: rec(o.sent) as Record<string, SentStatement>,
     presenceWards: rec(o.presenceWards) as Record<string, PresenceWard>,
+    anchoredRoots: Object.fromEntries(
+      Object.entries(rec(o.anchoredRoots) as Record<string, AnchoredRoot>).filter(
+        ([k, v]) => /^[0-9a-f]{64}$/.test(k) && typeof v === "object" && v !== null,
+      ),
+    ),
   };
 }

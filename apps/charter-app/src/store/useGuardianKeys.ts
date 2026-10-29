@@ -74,6 +74,15 @@ export interface GuardianKeysApi {
   sendRoster(): ReturnType<GuardianKeys["sendRoster"]>;
   /** Roster devices this install has neither paired nor heard from. */
   unconfirmedRosterDevices(): ReturnType<GuardianKeys["unconfirmedRosterDevices"]>;
+  /**
+   * Trust the inviting parent's root: their guardian code (npub), scanned or
+   * pasted. Throws a readable sentence for anything else. Returns the root.
+   */
+  anchorRoot(code: string): string;
+  /** The roots this install shares the family with: its own, and those it anchored or invited. */
+  trustedRoots(): string[];
+  /** Wards confirmed in person here that wait for an anchored parent's family list. */
+  waitingPresenceWards(): ReturnType<GuardianKeys["waitingPresenceWards"]>;
 }
 
 export interface UseGuardianKeysDeps {
@@ -176,6 +185,11 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
     keys.dropStaleApproval();
   }, [keys, rootKey]);
 
+  // Presence wards expire: one a roster never named stops being admitted.
+  useEffect(() => {
+    keys.prunePresenceWards();
+  }, [keys, children]);
+
   // Share the roster when what it says changes and another working key exists.
   const lastRoster = useRef<string | null>(null);
   useEffect(() => {
@@ -183,6 +197,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
     const sig = JSON.stringify([
       keysChildren(children, DEFAULT_RELAYS).map((c) => [c.rosterId, c.name, c.colour, c.devices.map((d) => [d.machine, d.name])]),
       keys.reportedRoots(),
+      keys.trustedRoots(),
     ]);
     if (sig === lastRoster.current) return;
     lastRoster.current = sig;
@@ -270,6 +285,9 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       setGuardianPin: (pin, opts) => keys.setGuardianPin(pin, opts),
       sendRoster: () => keys.sendRoster(),
       unconfirmedRosterDevices: () => keys.unconfirmedRosterDevices(),
+      anchorRoot: (code) => keys.anchorRoot(code),
+      trustedRoots: () => keys.trustedRoots(),
+      waitingPresenceWards: () => keys.waitingPresenceWards(),
     }),
     [keys, keysState, workingPubkey, approveInstall, moveRoot, finishMove],
   );

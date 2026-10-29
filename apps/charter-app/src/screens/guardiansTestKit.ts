@@ -97,6 +97,9 @@ export function mockStore(opts: {
       setGuardianPin: vi.fn(async () => ({ sent: machines, held: [] as string[], failed: [] as { to: string; error: string }[] })),
       sendRoster: vi.fn(async () => ({ sent: [OTHER_W], held: [] as string[], failed: [] as { to: string; error: string }[] })),
       unconfirmedRosterDevices: vi.fn(() => [] as { subject: string; machine: string; name: string; platform: string }[]),
+      anchorRoot: vi.fn((code: string) => code),
+      trustedRoots: vi.fn(() => [keys.root?.pubkey ?? MY_W, ...Object.keys(keys.anchoredRoots ?? {})]),
+      waitingPresenceWards: vi.fn(() => [] as { machine: string; confirmedAt: number; ts?: number }[]),
     },
   };
 }
