@@ -62,27 +62,47 @@ async function giftWrapSignedInner(
     content,
   };
   const inner = await guardian.signEvent(innerTemplate);
+  return giftWrapSigned(inner, devicePubkey, guardian, createdAt);
+}
 
-  // 2) Seal (13) — guardian-authored, nip44(inner) → device.
+/**
+ * Seal an ALREADY-SIGNED inner event with `sealer` and gift-wrap it to
+ * `recipientPubkey`:
+ *   seal   13     = sealer-authored, nip44(inner) → recipient
+ *   wrap   1059   = ephemeral-authored, nip44(seal) → recipient, p-tagged
+ *
+ * Normally the sealer is the inner author. Guardian statements are the
+ * exception (contract, *Delivery and the two seal exceptions*): a working key
+ * seals its own approval, and may seal a statement its root signed, so a
+ * root held in My Signet or on a Heartwood signs once and its working keys
+ * carry the statement to every ward.
+ */
+export async function giftWrapSigned(
+  inner: NostrEvent,
+  recipientPubkey: string,
+  sealer: GuardianOps,
+  createdAt: number,
+): Promise<NostrEvent> {
+  // Seal (13) — sealer-authored, nip44(inner) → recipient.
   const sealTemplate: EventTemplate = {
     kind: SEAL,
     created_at: createdAt,
     tags: [],
-    content: await guardian.nip44Encrypt(devicePubkey, JSON.stringify(inner)),
+    content: await sealer.nip44Encrypt(recipientPubkey, JSON.stringify(inner)),
   };
-  const seal = await guardian.signEvent(sealTemplate);
+  const seal = await sealer.signEvent(sealTemplate);
 
-  // 3) Gift wrap (1059) — ephemeral-authored, nip44(seal) → device, p-tagged.
+  // Gift wrap (1059) — ephemeral-authored, nip44(seal) → recipient, p-tagged.
   const ephemeral = generateSecretKey();
   const wrapContent = nip44.encrypt(
     JSON.stringify(seal),
-    nip44.getConversationKey(ephemeral, devicePubkey),
+    nip44.getConversationKey(ephemeral, recipientPubkey),
   );
   return finalizeEvent(
     {
       kind: GIFT_WRAP,
       created_at: createdAt,
-      tags: [["p", devicePubkey]],
+      tags: [["p", recipientPubkey]],
       content: wrapContent,
     },
     ephemeral,
