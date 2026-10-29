@@ -389,6 +389,23 @@ export interface Device {
    * and this record is only the intention it is compared with.
    */
   debugging?: DeviceDebugging;
+  /**
+   * Guardian roots and working keys: what this device's latest STATUS read
+   * here said, kept so the versioning gate and the per-ward key choice
+   * survive a reload. `keysViewAt` is that STATUS's `ts` (newer replaces
+   * older); absent = no STATUS read here yet, which the gate treats as an old
+   * ward.
+   */
+  appVersionCode?: number;
+  guardians?: import("../keys/statusGuardians").StatusGuardians;
+  keysViewAt?: number;
+  /**
+   * Set (to the farewell STATUS's `ts`) when the device told this install it
+   * no longer holds its key: "This phone no longer has access to <device>".
+   * Nothing is sent to a departed device; a later full STATUS (this install
+   * is a recipient again) clears it.
+   */
+  departedAt?: number;
 }
 
 /** The last `debugging` clause sent to a device — see `Device.debugging`. */
@@ -419,6 +436,13 @@ export interface Child {
   /** One or more governed devices. Replaces the old `devicePaired` flag. */
   devices: Device[];
   policies: Policy[];
+  /**
+   * The child's identity in the family roster other guardians' installs
+   * share (64 lowercase hex, random). Not a Nostr key and never sent to a
+   * ward; minted once and kept. See docs/guardian-keys-open-questions.md,
+   * "The roster's subject for a child with no dependant key".
+   */
+  rosterId?: string;
 }
 
 /**

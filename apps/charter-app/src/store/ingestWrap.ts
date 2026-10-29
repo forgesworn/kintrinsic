@@ -9,7 +9,9 @@
 
 import type { NostrEvent } from "nostr-tools";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
-import { unwrapStatus, type DeviceStatus } from "../wire/status";
+import { unwrapFarewell, unwrapStatus, type DeviceStatus, type StatusFarewell } from "../wire/status";
+import { unwrapToWorkingKey } from "../keys/guardianKeys";
+import { CHARTER_FAMILY_ROSTER, type SignedEvent } from "../keys/sdk";
 
 export interface WrapIngestContext {
   guardianSk: Uint8Array;
@@ -23,12 +25,19 @@ export interface WrapIngestContext {
   ingestStatus: (status: DeviceStatus) => void;
   /** Take in a ward ask; false = nobody to attribute it to yet (retry later). */
   ingestRequest: (request: DeviceRequest) => boolean;
+  /** A departed key's last STATUS (guardian keys). Never usage data. */
+  ingestFarewell?: (farewell: StatusFarewell) => void;
+  /** A family roster (31119) from another guardian install's working key. */
+  ingestRoster?: (inbound: { sealAuthor: string; inner: SignedEvent }) => void;
 }
 
 export type WrapIngestResult =
   /** Already handled earlier this session; nothing was decrypted. */
   | { kind: "handled" }
   | { kind: "status" }
+  /** A departed key's last STATUS, or a family roster. */
+  | { kind: "farewell" }
+  | { kind: "roster" }
   /** Not ours, or not readable. Neither will change with time. */
   | { kind: "unreadable" }
   /** An ask we already hold (this session or persisted). */
@@ -48,7 +57,23 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
     ctx.handledWraps.add(w.id);
     return { kind: "status" };
   }
+  if (ctx.ingestFarewell) {
+    const f = unwrapFarewell(w, ctx.guardianSk);
+    if (f) {
+      ctx.ingestFarewell(f);
+      ctx.handledWraps.add(w.id);
+      return { kind: "farewell" };
+    }
+  }
   const req = unwrapRequest(w, ctx.guardianSk);
+  if (!req && ctx.ingestRoster) {
+    const opened = unwrapToWorkingKey(w, ctx.guardianSk);
+    if (opened && opened.inner.kind === CHARTER_FAMILY_ROSTER) {
+      ctx.ingestRoster(opened);
+      ctx.handledWraps.add(w.id);
+      return { kind: "roster" };
+    }
+  }
   if (!req) {
     // Not ours, or not readable. Neither will change with time.
     ctx.handledWraps.add(w.id);

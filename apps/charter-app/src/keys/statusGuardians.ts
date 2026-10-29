@@ -20,9 +20,15 @@ function isUint(x: unknown): x is number {
 }
 
 /** Parse a STATUS payload's `guardians` field; undefined when absent or malformed. */
-export function parseStatusGuardians(x: unknown): StatusGuardians | undefined {
+export function parseStatusGuardians(
+  x: unknown,
+  opts: { relaysOptional?: boolean } = {},
+): StatusGuardians | undefined {
   if (typeof x !== "object" || x === null || Array.isArray(x)) return undefined;
-  const o = x as Record<string, unknown>;
+  const o = { ...(x as Record<string, unknown>) };
+  // A departed key's last STATUS carries no relay list (OQ "A departed key's
+  // last STATUS"); everywhere else it is required.
+  if (opts.relaysOptional && o.relays === undefined) o.relays = [];
   if (!Array.isArray(o.roots) || !Array.isArray(o.pending) || !Array.isArray(o.relays)) return undefined;
   if (!isUint(o.tombstones)) return undefined;
   // The contract caps roots at 4 and keys at 16 per root; a little headroom

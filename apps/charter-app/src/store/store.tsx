@@ -126,6 +126,10 @@ import {
 import { buildUsageSyncForDevice } from "../wire/usageSync";
 import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
 import { isAskExpired } from "../domain/askExpiry";
+import type { GuardianKeysState, RootVia } from "../keys/state";
+import { listensWithLocalKey, useGuardianKeys, type GuardianKeysApi } from "./useGuardianKeys";
+import { applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId } from "./guardianKeysWiring";
+import type { StatusFarewell } from "../wire/status";
 
 export { isSetUp, statusFor } from "./statusFor";
 export type { StatusForResult } from "./statusFor";
@@ -145,6 +149,10 @@ export interface CharterState {
   /** Wraps handed to the carrier for home-network delivery, with what the
    *  ward's ACK said (see ./localDelivery). Bounded; absent in older saves. */
   localDeliveries?: LocalWrapRecord[];
+  /** Guardian roots and working keys: this install's root, its approval of
+   *  the working key, statements sent, the merged roster (see keys/state.ts).
+   *  Absent in older saves and for a local-only family that never used it. */
+  guardianKeys?: GuardianKeysState;
 }
 
 // v2: the production default is now an empty (clean) state, so bump the key —
@@ -194,8 +202,11 @@ function loadState(): CharterState {
       // Recover legacy Trotters pairings once, matching the wardens' upgrade
       // migration. Persist immediately so a later manual relay choice survives
       // reloads even if nothing else in the household changes.
-      const { children, changed } = backfillLegacyRelays(revived.state.children);
-      if (!changed) return revived.state;
+      const backfilled = backfillLegacyRelays(revived.state.children);
+      // Every child gets a roster id once (guardian keys' family roster).
+      const withIds = ensureRosterIds(backfilled.children);
+      const { children } = withIds;
+      if (!backfilled.changed && !withIds.changed) return revived.state;
       const migrated = { ...revived.state, children };
       persist(migrated);
       return migrated;
@@ -300,7 +311,10 @@ type Action =
   | { type: "RECORD_LOCAL_WRAP"; record: LocalWrapRecord }
   | { type: "APPLY_LOCAL_DELIVERY"; states: Parameters<typeof applyStates>[1] }
   | { type: "LINK_LOCAL_WRAPS"; wraps: string[]; reqId: string }
-  | { type: "SET_SIGNER"; signer: SignerState };
+  | { type: "SET_SIGNER"; signer: SignerState }
+  | { type: "SET_GUARDIAN_KEYS"; keys: GuardianKeysState }
+  | { type: "SET_DEVICE_KEYS_VIEW"; status: DeviceStatus }
+  | { type: "DEVICE_FAREWELL"; farewell: StatusFarewell; workingKey: string };
 
 function mapDevice(
   child: Child,
@@ -486,6 +500,16 @@ export function reducer(state: CharterState, action: Action): CharterState {
     }
     case "SET_SIGNER":
       return { ...state, signer: action.signer };
+    case "SET_GUARDIAN_KEYS":
+      return { ...state, guardianKeys: action.keys };
+    case "SET_DEVICE_KEYS_VIEW": {
+      const children = applyDeviceKeysView(state.children, action.status);
+      return children === state.children ? state : { ...state, children };
+    }
+    case "DEVICE_FAREWELL": {
+      const children = applyFarewell(state.children, action.farewell, action.workingKey);
+      return children === state.children ? state : { ...state, children };
+    }
     default:
       return state;
   }
@@ -513,6 +537,9 @@ type DecisionSent =
   | { status: "sent" }
   | { status: "cancelled" }
   | { status: "queued"; devices: string[] };
+
+/** What connecting a root reports: whether it approved this phone's working key. */
+export type RootConnectResult = { approved: true } | { approved: false; error: string };
 
 export interface CharterContextValue {
   state: CharterState;
@@ -694,8 +721,16 @@ export interface CharterContextValue {
   enableLocalSigner: () => Promise<void>;
   /** Recovery: install a restored guardian secret; returns its pubkey (hex). */
   restoreGuardianKey: (secret: Uint8Array) => Promise<string>;
-  /** Pair the real Signet bunker from a `bunker://…` URI. */
-  pairSignet: (bunkerUri: string) => Promise<void>;
+  /**
+   * Connect My Signet (or, with `via: "heartwood"`, a Heartwood behind My
+   * Signet) from a `bunker://…` URI as this install's guardian root, then ask
+   * it once to approve this phone's working key. The connection stands even
+   * if the approval doesn't; `approved: false` says why.
+   */
+  pairSignet: (bunkerUri: string, opts?: { via?: RootVia }) => Promise<RootConnectResult>;
+
+  /** Guardian roots and working keys: state and actions (see ./useGuardianKeys). */
+  guardianKeys: GuardianKeysApi;
   disconnectSigner: () => Promise<void>;
   setAutoSign: (on: boolean) => Promise<void>;
 
@@ -837,13 +872,43 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [localRoute],
   );
 
+  // Guardian roots and working keys (./useGuardianKeys). Rule 4's re-sign
+  // goes through the ordinary clause path, defined further down.
+  const signClauseRef = useRef<((childId: string, policy: Policy) => Promise<ClauseDelivery>) | null>(null);
+  const onRootMovedRef = useRef<(bunkerUri: string) => void>(() => {});
+  const guardianKeys = useGuardianKeys(
+    {
+      stateRef,
+      save: (keys) => dispatch({ type: "SET_GUARDIAN_KEYS", keys }),
+      signer: () => signer.current,
+      localRoute,
+      resign: async (childId) => {
+        const sign = signClauseRef.current;
+        if (!sign) throw new Error("Rules can't be re-sent yet.");
+        const policies = stateRef.current.children.find((c) => c.id === childId)?.policies ?? [];
+        for (const policy of policies) {
+          const d = await sign(childId, policy);
+          if (d.outcome !== "sent" && d.outcome !== "queued") {
+            throw new Error("Your current rules couldn't be re-sent first, so nothing else was sent.");
+          }
+        }
+      },
+      onRootMoved: (uri) => onRootMovedRef.current(uri),
+    },
+    state.children,
+    state.guardianKeys,
+  );
+  const signerKeys = guardianKeys.signerKeys;
+  const keysCore = guardianKeys.keys;
+
   // Pick the signer from persisted state: kind "local" → the local-key
-  // self-signer; a paired `bunkerUri` → the REAL Signet signer; otherwise the
-  // local mock (the demo default). Rebuilt on (un)pair.
+  // self-signer; a paired `bunkerUri` → the REAL Signet signer (My Signet, or
+  // a Heartwood behind it); otherwise nothing is set up (the demo mock only in
+  // development). Rebuilt on (un)pair.
   const buildSigner = useCallback(
     (signerState: SignerState): Signer =>
-      selectSigner(signerState, { resolveChild, childPolicies, confirmGate, localRoute }),
-    [resolveChild, childPolicies, confirmGate, localRoute],
+      selectSigner(signerState, { resolveChild, childPolicies, confirmGate, localRoute, keys: signerKeys }),
+    [resolveChild, childPolicies, confirmGate, localRoute, signerKeys],
   );
 
   // Created once for the provider lifetime; reassigned by pair/disconnect.
@@ -862,6 +927,16 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         .catch(() => {
           dispatch({ type: "SET_SIGNER", signer: { connected: false, kind: "none", autoSign: stateRef.current.signer.autoSign } });
         });
+    }
+    // A My Signet / Heartwood root that has approved this install's working
+    // key re-opens without the network: the bunker is dialled only when the
+    // root itself must sign.
+    if (state.signer.bunkerUri && state.guardianKeys?.root && !signer.current!.status().connected) {
+      const kind = state.signer.kind === "heartwood" ? "heartwood" : "signet";
+      signer.current!
+        .connect(kind)
+        .then(() => dispatch({ type: "SET_SIGNER", signer: { ...signer.current!.status(), bunkerUri: stateRef.current.signer.bunkerUri } }))
+        .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -917,6 +992,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       color: color ?? CHILD_COLORS[idCounter % CHILD_COLORS.length],
       // Stage 0: a child is a local label — no Signet account.
       dependantPubkey: null,
+      rosterId: newRosterId(),
       // Devices are added later via the scan/pair flow.
       devices: [],
       policies: [
@@ -1776,6 +1852,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       machine: status.machine,
       lastSeenAt: status.ts * 1000,
     });
+    // Guardian keys: what the ward reports about its guardians and version,
+    // for the versioning gate and the per-ward key choice.
+    dispatch({ type: "SET_DEVICE_KEYS_VIEW", status });
     // Record the day's usage for the weekly picture (B1) + the device's minute
     // journal (B3 union rule). recordUsage keeps the max seen / unions the
     // journal and returns the same ref on a no-op, so repeat polls don't churn.
@@ -1824,6 +1903,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * session has no cursor and sweeps the full day, so a reload always heals.
    */
   const pollCursor = useRef<number | null>(null);
+  // The local key reads ward traffic: a local signer, or any install whose
+  // working key a My Signet / Heartwood root has approved.
+  const listening = listensWithLocalKey(state);
   const handledWraps = useRef<Set<string>>(new Set());
 
   /** The intake's view of this provider — shared by the relay poll and the
@@ -1836,15 +1918,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       hasRequest: (reqId: string) => stateRef.current.requests.some((r) => r.reqId === reqId),
       ingestStatus: ingestDeviceStatus,
       ingestRequest: ingestDeviceRequest,
+      ingestFarewell: (farewell: StatusFarewell) =>
+        dispatch({ type: "DEVICE_FAREWELL", farewell, workingKey: getPublicKey(guardianSk) }),
+      ingestRoster: (inbound: Parameters<typeof keysCore.receiveRoster>[0]) => {
+        keysCore.receiveRoster(inbound);
+      },
     }),
-    [ingestDeviceStatus, ingestDeviceRequest],
+    [ingestDeviceStatus, ingestDeviceRequest, keysCore],
   );
 
   /** One relay read: STATUS heartbeats + the children's asks. Hoisted out of
    *  the interval so a focus event and a pull-to-refresh can run exactly the
    *  same fetch the timer does. */
   const pollRelayOnce = useCallback(async () => {
-    if (stateRef.current.signer.kind !== "local") return;
+    if (!listensWithLocalKey(stateRef.current)) return;
     let guardianSk: Uint8Array;
     try {
       guardianSk = loadOrCreateGuardianKey();
@@ -1896,7 +1983,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   }, [wrapContext]);
 
   useEffect(() => {
-    if (state.signer.kind !== "local") return;
+    if (!listening) return;
     let stopped = false;
     const tick = () => {
       if (stopped) return;
@@ -1914,7 +2001,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       stopped = true;
       clearInterval(id);
     };
-  }, [state.signer.kind, pollRelayOnce, phonePairingWaiting]);
+  }, [listening, pollRelayOnce, phonePairingWaiting]);
 
   /**
    * One drain of the carrier's home-network inbox: wraps wards sent over their
@@ -1925,7 +2012,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * effect) — rejected, unreadable and duplicate wraps are consumed too.
    */
   const drainLocalOnce = useCallback(() => {
-    if (stateRef.current.signer.kind !== "local") return;
+    if (!listensWithLocalKey(stateRef.current)) return;
     // Feature-detect before doing any work: a browser or older shell has no inbox.
     if (typeof window.CharterCarrier?.localInbox !== "function") return;
     let guardianSk: Uint8Array;
@@ -1946,7 +2033,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   }, [wrapContext, consumeQueue, flushLocalConsume]);
 
   useEffect(() => {
-    if (state.signer.kind !== "local") return;
+    if (!listening) return;
     const run = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       drainLocalOnce();
@@ -1961,7 +2048,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onVisible);
       clearInterval(id);
     };
-  }, [state.signer.kind, drainLocalOnce]);
+  }, [listening, drainLocalOnce]);
 
   // The home-network route (live sessions, or why there is none), read ONCE
   // per poll below and shared with every screen through the context — device
@@ -2078,6 +2165,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     },
     [resolveChild, queuedDelivery],
   );
+  signClauseRef.current = signClauseIfConnected;
 
   // Close the claim loop: a just-claimed phone has never been a target of any
   // rule save, so the guardian's standing charter goes to it by itself the
@@ -2744,20 +2832,44 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // the Signet-backed one, open the NIP-46 session, and persist the URI (so the
   // pairing survives reload). On failure the mock is restored and it rethrows.
   const pairSignet = useCallback(
-    async (bunkerUri: string) => {
-      const next: SignerState = { ...stateRef.current.signer, kind: "signet", bunkerUri };
+    async (bunkerUri: string, opts: { via?: RootVia } = {}): Promise<RootConnectResult> => {
+      // "Heartwood via My Signet" is this same bunker flow: the key lives on a
+      // Heartwood behind My Signet. Only the wording differs.
+      const kind: SignerKind = opts.via === "heartwood" ? "heartwood" : "signet";
+      const next: SignerState = { ...stateRef.current.signer, kind, bunkerUri };
       try {
         signer.current = buildSigner(next);
-        await signer.current.connect("signet");
+        await signer.current.connect(kind);
       } catch (e) {
         signer.current = buildSigner({ ...stateRef.current.signer, kind: "none", bunkerUri: undefined });
         throw e;
       }
       // status() doesn't carry the store-only bunkerUri — merge it back in.
-      dispatch({ type: "SET_SIGNER", signer: { ...signer.current.status(), bunkerUri } });
+      const connected = { ...signer.current.status(), bunkerUri };
+      stateRef.current = { ...stateRef.current, signer: connected };
+      dispatch({ type: "SET_SIGNER", signer: connected });
+      // Guardian keys: ask the root once to approve this phone's working key.
+      // Not fatal: without it the root keeps signing everything, as before.
+      try {
+        await guardianKeys.api.approveInstall();
+        return { approved: true };
+      } catch (e) {
+        return { approved: false, error: e instanceof Error ? e.message : String(e) };
+      }
     },
-    [buildSigner],
+    [buildSigner, guardianKeys.api],
   );
+
+  // A root move landed on every ward: the new identity's bunker becomes the signer.
+  onRootMovedRef.current = (bunkerUri: string) => {
+    const cur = stateRef.current.signer;
+    const next: SignerState = { ...cur, bunkerUri, connected: false };
+    signer.current = buildSigner(next);
+    void signer.current
+      .connect(cur.kind)
+      .then(() => dispatch({ type: "SET_SIGNER", signer: { ...signer.current!.status(), bunkerUri } }))
+      .catch(() => dispatch({ type: "SET_SIGNER", signer: next }));
+  };
 
   const disconnectSigner = useCallback(async () => {
     await signer.current!.disconnect();
@@ -2827,6 +2939,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       enableLocalSigner,
       restoreGuardianKey,
       pairSignet,
+      guardianKeys: guardianKeys.api,
       disconnectSigner,
       setAutoSign,
       pendingSignature,
@@ -2883,6 +2996,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       enableLocalSigner,
       restoreGuardianKey,
       pairSignet,
+      guardianKeys.api,
       disconnectSigner,
       setAutoSign,
       pendingSignature,
