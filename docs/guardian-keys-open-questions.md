@@ -1461,3 +1461,32 @@ R_A2 automatically from a confirmed move signed by the anchored R_A (the
 move statement names R2) is left for the design session.
 
 **Raised by:** batch 3 re-review.
+
+## A forged presence code is still a trust boundary
+
+**Where:** *Presence confirmation*, *Family roster*; guardian app join flow
+(self-vouched wards, held rosters).
+
+**Question:** a ward the joining install confirmed presence on counts as
+self-vouched: its STATUS may vouch for a roster sender. That is right for a
+code scanned at the real child's device, but a guardian who scans a forged
+code (an attacker's machine key) makes that machine self-vouched. Two
+residual effects, both needing a forged code scanned in person:
+- its STATUS can omit the inviting parent's working keys, so a real
+  roster held for re-evaluation is refused and the family never arrives
+  (fails closed: a denial of service on the join);
+- combined with a stolen, already-withdrawn working key of an anchored root,
+  it lists that key as current, the thief's roster is accepted and adopts the
+  forged machine, and the foothold lasts: withdrawing the key again does not
+  remove it, because the forged machine keeps vouching.
+
+Should a presence-confirmed machine vouch only after an anchored parent's
+own roster names it (so presence alone never vouches), or should the presence
+code itself be authenticated (e.g. the ward signs it, and the inviting
+parent's install shares the ward's machine key with the invitation)?
+
+**Build's interim reading:** presence-confirmed machines vouch, as above.
+The residual risk is recorded here, not fixed; both effects need the guardian
+to scan an attacker's code in person.
+
+**Raised by:** batch 3 final re-review (N3-L1, N3-L2).
