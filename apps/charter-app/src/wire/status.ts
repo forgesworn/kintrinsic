@@ -14,6 +14,7 @@
 import { nip44, verifyEvent, type NostrEvent } from "nostr-tools";
 import { decodeMinutes } from "../insights/minuteSet";
 import { MAX_WRAP_JITTER_SECS } from "./request";
+import { parseStatusGuardians, type StatusGuardians } from "../keys/statusGuardians";
 
 export const CHARTER_DEVICE_STATUS = 31114;
 const SEAL = 13;
@@ -242,6 +243,13 @@ export interface DeviceStatus {
    * `domain/debugging.ts`).
    */
   debuggingOpen?: boolean;
+  /**
+   * Who the ward trusts, as it sees it (contract, *Guardian roots and working
+   * keys*, STATUS): its roots and their working keys, pending statements,
+   * tombstone count and relay list. Absent on a ward that predates the
+   * section, or when malformed (parsed strictly, all or nothing).
+   */
+  guardians?: StatusGuardians;
 }
 
 /** One installed launchable app on a device. */
@@ -417,6 +425,7 @@ export function parseStatus(json: string): DeviceStatus | null {
     appLockArmed: typeof o.appLockArmed === "boolean" ? o.appLockArmed : undefined,
     // Same posture as appLockArmed: a non-boolean is absent, never `false`.
     debuggingOpen: typeof o.debuggingOpen === "boolean" ? o.debuggingOpen : undefined,
+    guardians: parseStatusGuardians(o.guardians),
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)
