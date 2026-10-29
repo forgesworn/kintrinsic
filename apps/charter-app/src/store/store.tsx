@@ -1993,6 +1993,36 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const listening = listensWithLocalKey(state);
   const handledWraps = useRef<Set<string>>(new Set());
 
+  /** A roster's changed records join the family: a joining parent's phone gets the family it now looks after. */
+  const adoptRosterUpdate = useCallback(
+    (updated: string[]) => {
+      if (updated.length === 0) return;
+      const keys = guardianKeysRef.current;
+      const n = keys.roster.children.reduce((a, c) => a + c.devices.length, 0) + updated.length;
+      const mint = (prefix: string, count: number) => Array.from({ length: count }, () => uid(prefix));
+      const ids = { child: mint("child", updated.length), device: mint("dev", n), policy: mint("pol", updated.length) };
+      const children = adoptRoster(stateRef.current.children, keys.roster, updated, {
+        presenceWards: keys.presenceWards,
+        mintChildId: (() => { let i = 0; return () => ids.child[i++]; })(),
+        mintDeviceId: (() => { let i = 0; return () => ids.device[i++]; })(),
+        mintPolicyId: (() => { let i = 0; return () => ids.policy[i++]; })(),
+      });
+      if (children !== stateRef.current.children) {
+        stateRef.current = { ...stateRef.current, children };
+        dispatch({ type: "ADOPT_ROSTER", roster: keys.roster, updated, presenceWards: keys.presenceWards, ids });
+        keysCore.prunePresenceWards();
+      }
+    },
+    [keysCore, guardianKeysRef],
+  );
+
+  // A roster held because no ward this phone vouches for had reported yet:
+  // re-checked when one reports (its view lands in the children, or in a
+  // presence ward), never by polling.
+  useEffect(() => {
+    adoptRosterUpdate(keysCore.releaseHeldRosters());
+  }, [state.children, state.guardianKeys, keysCore, adoptRosterUpdate]);
+
   /** The intake's view of this provider — shared by the relay poll and the
    *  home-network drain, so a wrap arriving by both is handled once. */
   const wrapContext = useCallback(
@@ -2016,29 +2046,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       ingestRoster: (inbound: Parameters<typeof keysCore.receiveRoster>[0]) => {
         const r = keysCore.receiveRoster(inbound);
         if (!r.ok) return r.reason;
-        if (r.updated.length > 0) {
-          // The roster's children and devices join the family: a joining
-          // parent's phone gets the family it now looks after.
-          const keys = guardianKeysRef.current;
-          const n = keys.roster.children.reduce((a, c) => a + c.devices.length, 0) + r.updated.length;
-          const mint = (prefix: string, count: number) => Array.from({ length: count }, () => uid(prefix));
-          const ids = { child: mint("child", r.updated.length), device: mint("dev", n), policy: mint("pol", r.updated.length) };
-          const children = adoptRoster(stateRef.current.children, keys.roster, r.updated, {
-            presenceWards: keys.presenceWards,
-            mintChildId: (() => { let i = 0; return () => ids.child[i++]; })(),
-            mintDeviceId: (() => { let i = 0; return () => ids.device[i++]; })(),
-            mintPolicyId: (() => { let i = 0; return () => ids.policy[i++]; })(),
-          });
-          if (children !== stateRef.current.children) {
-            stateRef.current = { ...stateRef.current, children };
-            dispatch({ type: "ADOPT_ROSTER", roster: keys.roster, updated: r.updated, presenceWards: keys.presenceWards, ids });
-            keysCore.prunePresenceWards();
-          }
-        }
+        adoptRosterUpdate(r.updated);
         return "ok";
       },
     }),
-    [ingestDeviceStatus, ingestDeviceRequest, keysCore, guardianKeysRef],
+    [ingestDeviceStatus, ingestDeviceRequest, keysCore, guardianKeysRef, adoptRosterUpdate],
   );
 
   /** One relay read: STATUS heartbeats + the children's asks. Hoisted out of

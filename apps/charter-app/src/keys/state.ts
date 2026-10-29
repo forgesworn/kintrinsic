@@ -75,6 +75,14 @@ export interface AnchoredRoot {
   label?: string;
 }
 
+/** A roster waiting for a self-vouched ward's STATUS. */
+export interface HeldRoster {
+  sealAuthor: string;
+  inner: SignedEvent;
+  /** When it was held (unix s). */
+  heldAt: number;
+}
+
 export interface GuardianKeysState {
   v: 1;
   /** This install's root and its approval of W; absent for a local-only family. */
@@ -103,6 +111,18 @@ export interface GuardianKeysState {
    */
   anchoredRoots: Record<string, AnchoredRoot>;
   /**
+   * Machines this install confirmed in person at (the key came from a code it
+   * scanned at the device), by machine: when. With the devices it paired
+   * itself, the only wards whose STATUS may vouch for a roster's sender.
+   */
+  presenceConfirmed: Record<string, number>;
+  /**
+   * Rosters from a trusted root's working key that arrived before any ward
+   * this install vouches for itself had reported, by sender (newest kept, a
+   * few at most). Re-checked when such a ward reports; dropped after a week.
+   */
+  heldRosters: Record<string, HeldRoster>;
+  /**
    * The root this install last used, kept when My Signet is disconnected
    * (`root` is cleared then): the key devices paired under it still pin, and
    * the only identity that may approve this phone again while no device
@@ -112,7 +132,7 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {} };
+  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -138,5 +158,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
         ([k, v]) => /^[0-9a-f]{64}$/.test(k) && typeof v === "object" && v !== null,
       ),
     ),
+    presenceConfirmed: rec(o.presenceConfirmed) as Record<string, number>,
+    heldRosters: rec(o.heldRosters) as Record<string, HeldRoster>,
   };
 }

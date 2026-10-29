@@ -67,7 +67,7 @@ import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } f
 import { keyStanding } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
 import { makeGuardianPinRecord, relaysWithPinTemplate } from "./pin";
-import type { AnchoredRoot, GuardianKeysState, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
+import type { AnchoredRoot, GuardianKeysState, HeldRoster, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
 export interface KeysDevice {
@@ -142,6 +142,12 @@ export const PENDING_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
  * can't stay pending longer (OQ "Anchoring a joining parent's trust").
  */
 export const PRESENCE_WARD_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
+
+/** At most this many senders' rosters are held for a self-vouched ward's report. */
+export const MAX_HELD_ROSTERS = 4;
+
+/** A held roster is dropped this long after it arrived. */
+export const HELD_ROSTER_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -1039,6 +1045,10 @@ export class GuardianKeys {
       if (e instanceof QueuedForHomeNetworkError) report.held.push(code.machine);
       else throw e;
     }
+    // This install was at that device: its STATUS may vouch for a roster's
+    // sender from now on (`vouchedRoots`).
+    const confirmedAt = this.deps.now();
+    this.deps.write((k) => ({ ...k, presenceConfirmed: { ...(k.presenceConfirmed ?? {}), [code.machine]: confirmedAt } }));
     // A joining parent learns the ward's machine key here, before any roster:
     // remember it so the STATUS it now sends this install is admitted and
     // shown. It gets nothing else from this install (no clauses, PIN or
@@ -1199,9 +1209,9 @@ export class GuardianKeys {
   }
 
   /**
-   * Send the family roster to every other working key the family's wards
-   * report under a trusted root (this root's other installs, and anchored
-   * parents' installs), signed and sealed by W and carrying W's approval. An
+   * Send the family roster to every other working key that a ward this
+   * install vouches for itself (`vouchedRoots`) lists under a trusted root
+   * (this root's other installs, and anchored parents' installs), signed and sealed by W and carrying W's approval. An
    * install with no Signet root has no approval to carry and sends none (OQ
    * "A phone-held root has no approval for the roster").
    */
@@ -1212,7 +1222,9 @@ export class GuardianKeys {
     const trusted = new Set(this.trustedRoots());
     const recipients = [
       ...new Set(
-        this.reportedRoots()
+        // Not a presence ward's view: until a roster names it, it is a
+        // machine key from a code, and the family goes nowhere on its word.
+        this.vouchedRoots({ presenceWards: false })
           .filter((r) => trusted.has(r.root))
           .flatMap((r) => r.keys),
       ),
@@ -1251,39 +1263,152 @@ export class GuardianKeys {
   }
 
   /**
+   * The roots and working keys that the wards this install vouches for itself
+   * report: devices it paired, and devices it confirmed in person at
+   * (including presence wards a roster hasn't named yet, unless
+   * `presenceWards: false`). A device known only from a roster never
+   * vouches, so a roster can't vouch for its own sender (OQ "Anchoring a
+   * joining parent's trust").
+   */
+  vouchedRoots(opts: { presenceWards?: boolean } = {}): { root: string; keys: string[] }[] {
+    const { keys } = this.deps.read();
+    const confirmed = keys.presenceConfirmed ?? {};
+    const views: (StatusGuardians | undefined)[] = this.allDevices()
+      .filter((d) => !d.fromRoster || confirmed[d.machine] !== undefined)
+      .map((d) => d.guardians);
+    if (opts.presenceWards !== false) for (const p of this.waitingPresenceWards()) views.push(p.guardians);
+    const out = new Map<string, Set<string>>();
+    for (const g of views) {
+      for (const r of g?.roots ?? []) {
+        const set = out.get(r.root) ?? new Set<string>();
+        for (const k of r.keys) set.add(k);
+        out.set(r.root, set);
+      }
+    }
+    return [...out].map(([root, ks]) => ({ root, keys: [...ks].sort() }));
+  }
+
+  /** Has any ward this install vouches for itself reported its guardians? */
+  private anyVouchedReport(): boolean {
+    const { keys } = this.deps.read();
+    const confirmed = keys.presenceConfirmed ?? {};
+    return (
+      this.allDevices().some((d) => (!d.fromRoster || confirmed[d.machine] !== undefined) && !!d.guardians) ||
+      this.waitingPresenceWards().some((p) => !!p.guardians)
+    );
+  }
+
+  /**
    * Take in a roster another install sent (already unwrapped by
-   * `unwrapRoster`): merged with `mergeRoster`, accepted only from a W that
-   * a trusted root approved (`trustedRoots`; the approval travels in the
-   * roster). The family's wards must also report that root and list W
-   * under it, so a withdrawn W, or a parent who has left or been removed, is
-   * refused; only an install none of whose devices reports its guardians
-   * yet (a joining one) relies on the approval alone. Returns
-   * the subjects that changed. Every refusal is final.
+   * `unwrapRoster`), merged with `mergeRoster`. Accepted only when:
+   * - the approval it carries is signed by a trusted root (`trustedRoots`)
+   *   and names the sender; and
+   * - a ward this install vouches for itself currently lists the sender
+   *   under that root (`vouchedRoots`), so a withdrawn W, or a parent who has
+   *   left or been removed, is refused.
+   * While no such ward has reported at all (a joining install, a second
+   * install whose device hasn't reported), a roster that passes every other
+   * check is held, and re-checked by `releaseHeldRosters` once one reports.
+   * Returns the subjects that changed. Every other refusal is final.
    */
   receiveRoster(inbound: { sealAuthor: string; inner: SignedEvent }):
     | { ok: true; updated: string[] }
-    | { ok: false; reason: RosterReason | "own" | "root_not_trusted" } {
+    | { ok: false; reason: RosterReason | "own" | "root_not_trusted" | "held" } {
     if (inbound.inner.pubkey === this.workingPubkey()) return { ok: false, reason: "own" };
     const signer = rosterApprovalSigner(inbound.inner);
     if (signer !== null && !this.trustedRoots().includes(signer)) return { ok: false, reason: "root_not_trusted" };
-    const reported = this.reportedRoots();
-    // The approval alone counts only while no device of this family reports
-    // its guardians at all (a joining install, or a second install whose
-    // device hasn't reported yet). Once any does, the root must be reported:
-    // a parent who left or was removed is trusted still, but no ward lists
-    // them, so their rosters are refused.
-    const nothingReports = !this.allDevices().some((d) => d.guardians);
-    if (signer !== null && nothingReports && !reported.some((r) => r.root === signer)) {
-      reported.push({ root: signer, keys: [inbound.inner.pubkey] });
+    if (signer !== null && !this.anyVouchedReport()) {
+      // Everything but the vouching is checked now, so only a roster that
+      // would land is kept.
+      const dry = mergeRoster(this.localRoster(), inbound, [{ root: signer, keys: [inbound.inner.pubkey] }], this.deps.now());
+      if (!dry.ok) return dry;
+      this.hold(inbound);
+      return { ok: false, reason: "held" };
     }
+    return this.mergeVouched(inbound);
+  }
+
+  private localRoster(): LocalRoster {
     const { keys } = this.deps.read();
     let local: LocalRoster = keys.roster;
     for (const d of this.allDevices()) if (d.statusSeen) local = markDeviceStatusSeen(local, d.machine);
     for (const [m, p] of Object.entries(keys.presenceWards)) if (p.ts !== undefined) local = markDeviceStatusSeen(local, m);
-    const merged = mergeRoster(local, inbound, reported, this.deps.now());
+    return local;
+  }
+
+  private mergeVouched(inbound: { sealAuthor: string; inner: SignedEvent }):
+    | { ok: true; updated: string[] }
+    | { ok: false; reason: RosterReason } {
+    const merged = mergeRoster(this.localRoster(), inbound, this.vouchedRoots(), this.deps.now());
     if (!merged.ok) return merged;
     this.deps.write((k) => ({ ...k, roster: merged.roster }));
     return { ok: true, updated: merged.updated };
+  }
+
+  /** Keep the newest roster per sender, a few senders at most (the oldest go first). */
+  private hold(inbound: { sealAuthor: string; inner: SignedEvent }): void {
+    const now = this.deps.now();
+    this.deps.write((k) => {
+      const held: Record<string, HeldRoster> = { ...(k.heldRosters ?? {}) };
+      const sender = inbound.inner.pubkey;
+      const cur = held[sender];
+      if (cur && cur.inner.created_at > inbound.inner.created_at) return k;
+      held[sender] = { sealAuthor: inbound.sealAuthor, inner: inbound.inner, heldAt: now };
+      const order = Object.entries(held).sort((a, b) => b[1].heldAt - a[1].heldAt);
+      return { ...k, heldRosters: Object.fromEntries(order.slice(0, MAX_HELD_ROSTERS)) };
+    });
+  }
+
+  /**
+   * Re-check held rosters once a ward this install vouches for itself has
+   * reported: each is merged if that ward lists its sender, and dropped
+   * either way (and when it has aged out). Returns the subjects that changed.
+   */
+  releaseHeldRosters(): string[] {
+    const held = this.deps.read().keys.heldRosters ?? {};
+    const entries = Object.entries(held);
+    if (entries.length === 0) return [];
+    const now = this.deps.now();
+    const ready = this.anyVouchedReport();
+    const drop: string[] = [];
+    const updated = new Set<string>();
+    for (const [sender, h] of entries.sort((a, b) => a[1].inner.created_at - b[1].inner.created_at)) {
+      if (now >= h.heldAt + HELD_ROSTER_LIFETIME_SECONDS) {
+        drop.push(sender);
+        continue;
+      }
+      if (!ready) continue;
+      drop.push(sender);
+      if (!this.trustedRoots().includes(rosterApprovalSigner(h.inner) ?? "")) continue;
+      const r = this.mergeVouched({ sealAuthor: h.sealAuthor, inner: h.inner });
+      if (r.ok) for (const u of r.updated) updated.add(u);
+    }
+    if (drop.length > 0) {
+      this.deps.write((k) => {
+        const rest = { ...(k.heldRosters ?? {}) };
+        for (const m of drop) delete rest[m];
+        return { ...k, heldRosters: rest };
+      });
+    }
+    return [...updated].sort();
+  }
+
+  /**
+   * Other parents whose roster sharing has stopped because they appear to
+   * have changed identity: a scanned or invited root that none of the wards
+   * this install vouches for reports any more, while they report a root this
+   * install doesn't trust. Shared only once their new guardian code is
+   * scanned (OQ "A co-guardian's identity move stops the family list").
+   */
+  movedAwayRoots(): string[] {
+    const views = this.vouchedRoots();
+    if (views.length === 0) return [];
+    const trusted = new Set(this.trustedRoots());
+    if (!views.some((r) => !trusted.has(r.root))) return [];
+    const own = new Set([this.rootPubkey(), this.deps.read().keys.nextRoot?.pubkey]);
+    return Object.keys(this.deps.read().keys.anchoredRoots ?? {})
+      .filter((r) => !own.has(r) && !views.some((v) => v.root === r))
+      .sort();
   }
 
   /** Roster devices not yet confirmed here (never paired here, no STATUS yet). */

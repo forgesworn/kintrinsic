@@ -52,6 +52,10 @@ const R_B = getPublicKey(rBSk);
 const W_B = getPublicKey(wBSk);
 const R_X = getPublicKey(rXSk);
 const W_X = getPublicKey(wXSk);
+const wOldSk = generateSecretKey(); // A's withdrawn (lost, stolen) working key
+const W_OLD = getPublicKey(wOldSk);
+const rA2Sk = generateSecretKey(); // A's new identity after a move
+const R_A2 = getPublicKey(rA2Sk);
 const PHONE = getPublicKey(generateSecretKey());
 const LAPTOP = getPublicKey(generateSecretKey());
 const evilSk = generateSecretKey();
@@ -173,7 +177,20 @@ async function joined(opts: { rosterBeforeStatus?: boolean } = {}) {
   const sent = await A.gk.sendRoster();
   expect(sent.sent).toEqual([W_B]);
   expect(ingestWrap(wrapsTo(A.published, W_B).at(-1)!, ctx).kind).toBe("roster");
-  expect(ctx.outcomes.at(-1)).toBe("ok");
+  if (opts.rosterBeforeStatus) {
+    // No ward B vouches for has reported yet: the roster is held, not adopted.
+    expect(ctx.outcomes.at(-1)).toBe("held");
+    expect(B.children()).toEqual([]);
+    B.gk.notePresenceStatus(status(PHONE, T + 10, both));
+    const updated = B.gk.releaseHeldRosters();
+    expect(updated).toEqual([SUBJECT]);
+    const k = B.keys();
+    B.setChildren(adoptRoster(B.children(), k.roster, updated, { presenceWards: k.presenceWards, ...mint() }));
+    B.gk.prunePresenceWards();
+    expect(B.keys().heldRosters).toEqual({});
+  } else {
+    expect(ctx.outcomes.at(-1)).toBe("ok");
+  }
   return { A, B, ctx, both };
 }
 
@@ -357,13 +374,9 @@ describe("a parent who has left or been removed", () => {
     // B is removed: the phone now reports only A. B's root is still anchored at A.
     A.setChildren(applyDeviceKeysView(A.children(), status(PHONE, T + 500, g([{ root: R_A, keys: [W_A] }]))));
     expect(A.gk.trustedRoots()).toContain(R_B);
-    vi.setSystemTime((T + 200) * 1000);
-    const B2 = install(wBSk, rBSk, B.children(), () => T + 200);
-    await B2.gk.approveThisInstall({ via: "signet", label: "B" });
-    B2.gk.anchorRoot(R_A);
-    B2.setChildren(B2.children().map((c) => ({ ...c, name: "Renamed" })));
-    await B2.gk.sendRoster();
-    const later = unwrapToWorkingKey(wrapsTo(B2.published, W_A).at(-1)!, wASk)!;
+    B.setChildren(B.children().map((c) => ({ ...c, name: "Renamed" })));
+    await B.gk.sendRoster();
+    const later = unwrapToWorkingKey(wrapsTo(B.published, W_A).at(-1)!, wASk)!;
     expect(A.gk.receiveRoster(later)).toEqual({ ok: false, reason: "root_not_reported" });
     expect(A.children()[0].name).toBe("Sam");
   });
@@ -400,5 +413,173 @@ describe("the honest join still works end to end", () => {
     expect(back.sent).toEqual([W_A]);
     const opened = unwrapToWorkingKey(wrapsTo(B.published, W_A).at(-1)!, wASk)!;
     expect(A.gk.receiveRoster(opened)).toMatchObject({ ok: true });
+  });
+});
+
+describe("a withdrawn working key of a trusted root (re-review N2-M1, probe P3)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T * 1000);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("can't plant a device in the join window, or ever have a roster accepted", async () => {
+    const B = install(wBSk, rBSk, []);
+    await B.gk.approveThisInstall({ via: "signet", label: "B", expectRoot: R_B });
+    B.gk.anchorRoot(R_A);
+    // The thief holds A's withdrawn W_OLD and its never-expiring approval by R_A.
+    const evilView = g([
+      { root: R_A, keys: [W_A, W_OLD] },
+      { root: R_B, keys: [W_B] },
+    ]);
+    const thief = install(wOldSk, rASk, [
+      { id: "t1", name: "Fake", color: "#ff0000", dependantPubkey: null, rosterId: "cd".repeat(32), policies: [], devices: [ward(EVIL, "android", "Fake phone", evilView, R_A)] },
+    ]);
+    await thief.gk.approveThisInstall({ via: "signet", label: "lost" });
+    thief.gk.anchorRoot(R_B);
+    await thief.gk.sendRoster();
+    const ctx = intakeFor(B);
+    // Before any ward B vouches for has reported: held, not adopted.
+    expect(ingestWrap(wrapsTo(thief.published, W_B).at(-1)!, ctx).kind).toBe("roster");
+    expect(ctx.outcomes.at(-1)).toBe("held");
+    expect(B.children()).toEqual([]);
+    expect(admitStatus(status(EVIL, T + 30, evilView), B.children(), new Set(), (m) => B.gk.isPresenceWard(m))).toBe("stranger");
+
+    // B confirms in person at the real phone, which lists only A's live key.
+    const both = g([
+      { root: R_A, keys: [W_A] },
+      { root: R_B, keys: [W_B] },
+    ]);
+    await B.gk.confirmPresence(code(PHONE, `kintrinsic/guardian/${R_B}`, "3".repeat(64)));
+    B.gk.notePresenceStatus(status(PHONE, T + 40, both));
+    // The held roster is re-checked now and dropped: no ward B vouches for lists W_OLD.
+    expect(B.gk.releaseHeldRosters()).toEqual([]);
+    expect(B.keys().heldRosters).toEqual({});
+    expect(B.children()).toEqual([]);
+
+    // A's real roster lands.
+    const A = install(wASk, rASk, [
+      {
+        id: "a1",
+        name: "Sam",
+        color: "#111111",
+        dependantPubkey: null,
+        rosterId: SUBJECT,
+        policies: [],
+        devices: [ward(PHONE, "android", "Sam's phone", both, R_A), ward(LAPTOP, "linux", "Sam's laptop", both, R_A)],
+      },
+    ]);
+    await A.gk.approveThisInstall({ via: "signet", label: "A" });
+    A.gk.anchorRoot(R_B);
+    await A.gk.sendRoster();
+    expect(ingestWrap(wrapsTo(A.published, W_B).at(-1)!, ctx).kind).toBe("roster");
+    expect(ctx.outcomes.at(-1)).toBe("ok");
+    expect(B.children().map((c) => c.name)).toEqual(["Sam"]);
+
+    // B's roster never goes to the withdrawn key.
+    const out = await B.gk.sendRoster();
+    expect(out.sent).toEqual([W_A]);
+    expect(wrapsTo(B.published, W_OLD)).toEqual([]);
+
+    // A later roster from the thief, with the leaked subject, is refused for good.
+    vi.setSystemTime((T + 200) * 1000);
+    const thief2 = install(
+      wOldSk,
+      rASk,
+      [
+        {
+          id: "t2",
+          name: "Renamed",
+          color: "#000000",
+          dependantPubkey: null,
+          rosterId: SUBJECT,
+          policies: [],
+          devices: [ward(PHONE, "android", "Sam's phone", evilView, R_A), ward(EVIL2, "android", "Sam's tablet", evilView, R_A)],
+        },
+      ],
+      () => T + 200,
+    );
+    await thief2.gk.approveThisInstall({ via: "signet", label: "lost" });
+    thief2.gk.anchorRoot(R_B);
+    await thief2.gk.sendRoster();
+    expect(ingestWrap(wrapsTo(thief2.published, W_B).at(-1)!, ctx).kind).toBe("roster");
+    expect(ctx.outcomes.at(-1)).toBe("key_not_reported");
+    const sam = B.children().find((c) => c.rosterId === SUBJECT)!;
+    expect(sam.name).toBe("Sam");
+    expect(sam.devices.map((d) => d.devicePubkey)).not.toContain(EVIL2);
+    expect(resolveChildTarget(B.children(), sam.id, [])!.devices.map((d) => d.pubkey)).not.toContain(EVIL2);
+  });
+
+  it("a device a roster introduced never vouches for a roster sender", async () => {
+    const { B, ctx } = await joined();
+    // The laptop came from A's roster and B never confirmed there. Even if it
+    // reports W_OLD under R_A, it doesn't vouch for W_OLD.
+    const laptopView = g([
+      { root: R_A, keys: [W_A, W_OLD] },
+      { root: R_B, keys: [W_B] },
+    ]);
+    B.setChildren(applyDeviceKeysView(B.children(), status(LAPTOP, T + 50, laptopView)));
+    expect(B.gk.vouchedRoots().flatMap((r) => r.keys)).not.toContain(W_OLD);
+    expect((await B.gk.sendRoster()).sent).not.toContain(W_OLD);
+    const thief = install(wOldSk, rASk, [
+      { id: "t1", name: "Renamed", color: "#000000", dependantPubkey: null, rosterId: SUBJECT, policies: [], devices: [] },
+    ]);
+    await thief.gk.approveThisInstall({ via: "signet", label: "lost" });
+    thief.gk.anchorRoot(R_B);
+    thief.setChildren(thief.children().map((c) => ({ ...c, devices: [ward(LAPTOP, "linux", "Sam's laptop", laptopView, R_A)] })));
+    await thief.gk.sendRoster();
+    expect(ingestWrap(wrapsTo(thief.published, W_B).at(-1)!, ctx).kind).toBe("roster");
+    expect(ctx.outcomes.at(-1)).toBe("key_not_reported");
+    expect(B.children()[0].name).toBe("Sam");
+  });
+});
+
+describe("the inviting parent changes identity (re-review N2-L1, probe P4)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T * 1000);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("says the family list stopped, and resumes once their new guardian code is scanned", async () => {
+    const { B } = await joined();
+    expect(B.gk.movedAwayRoots()).toEqual([]);
+    // A's move to R_A2 completes: the wards report W_A under R_A2.
+    const moved = g([
+      { root: R_A2, keys: [W_A] },
+      { root: R_B, keys: [W_B] },
+    ]);
+    for (const m of [PHONE, LAPTOP]) B.setChildren(applyDeviceKeysView(B.children(), status(m, T + 50, moved)));
+    const A2 = install(
+      wASk,
+      rA2Sk,
+      [
+        {
+          id: "a1",
+          name: "Sam (new name)",
+          color: "#111111",
+          dependantPubkey: null,
+          rosterId: SUBJECT,
+          policies: [],
+          devices: [ward(PHONE, "android", "Sam's phone", moved, R_A2), ward(LAPTOP, "linux", "Sam's laptop", moved, R_A2)],
+        },
+      ],
+      () => T + 60,
+    );
+    await A2.gk.approveThisInstall({ via: "signet", label: "A" });
+    A2.gk.anchorRoot(R_B);
+    await A2.gk.sendRoster();
+    const fromA2 = unwrapToWorkingKey(wrapsTo(A2.published, W_B).at(-1)!, wBSk)!;
+    // Fail closed: refused, and B's roster no longer goes to W_A...
+    expect(B.gk.receiveRoster(fromA2)).toEqual({ ok: false, reason: "root_not_trusted" });
+    expect((await B.gk.sendRoster()).sent).not.toContain(W_A);
+    // ...but the app can say so.
+    expect(B.gk.movedAwayRoots()).toEqual([R_A]);
+    // B scans A's new guardian code: sharing resumes.
+    B.gk.anchorRoot(nip19.npubEncode(R_A2));
+    expect(B.gk.movedAwayRoots()).toEqual([]);
+    vi.setSystemTime((T + 60) * 1000);
+    expect(B.gk.receiveRoster(fromA2)).toMatchObject({ ok: true, updated: [SUBJECT] });
+    expect((await B.gk.sendRoster()).sent).toContain(W_A);
   });
 });
