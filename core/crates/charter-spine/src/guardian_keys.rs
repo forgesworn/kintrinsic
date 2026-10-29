@@ -22,10 +22,12 @@
 //!   [`GuardianKeys::mint_presence_token_with_pin`] (Android), and the
 //!   confirmation arrives as a kind-31121 wrap through the broker.
 //! - The Android guardian PIN: [`GuardianKeys::verify_guardian_pin`].
-//! - STATUS: [`GuardianStatements::status_guardians`],
-//!   [`GuardianStatements::status_relays`],
-//!   [`GuardianKeys::status_recipients`] (with the departed keys owed one
-//!   last STATUS) and [`GuardianKeys::mark_status_sent`].
+//! - STATUS: [`GuardianStatements::status_guardians`] and
+//!   [`GuardianStatements::status_relays`] for the STATUS every recipient
+//!   in the signer set gets; [`GuardianKeys::farewell`] for the departed
+//!   keys owed one last STATUS (a separate, minimal body, sent to each
+//!   separately) and [`GuardianKeys::mark_status_sent`] with the keys it
+//!   reached.
 //!
 //! # Persistence (rule 10)
 //!
@@ -72,7 +74,7 @@
 //! by an administrator, or restoring the file. Each timer advance retries
 //! the read, so a transient read error heals itself.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use charter_guardians::{self as cg, GuardianState, Reason, Verdict};
 use charter_link::AckResult;
@@ -114,7 +116,42 @@ struct Doc {
     state: GuardianState,
     #[serde(default)]
     pin_attempts: PinAttempts,
+    /// The guardian the pairing record pinned when this document was made
+    /// (hex), so a document is matched to its pairing by more than
+    /// `pairedAt` (review batch 2, core L4). Absent in a document written
+    /// before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_guardian: Option<String>,
 }
+
+/// Whose a stored document is, against the pairing record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocPairing {
+    /// This pairing's.
+    Same,
+    /// An earlier pairing's: the record was replaced by a newer pairing (an
+    /// administrator's re-pair, which clears the state; a stale write by the
+    /// warden it replaced can still land after the clear).
+    Earlier,
+    /// Neither: same `pairedAt` with another guardian, or a document newer
+    /// than the record. Nothing legitimate writes that; fail closed.
+    Other,
+}
+
+fn doc_pairing(doc: &Doc, paired_at: i64, guardian: &str) -> DocPairing {
+    let same_guardian = doc.paired_guardian.as_deref().is_none_or(|g| g == guardian);
+    if doc.state.paired_at == paired_at && same_guardian {
+        DocPairing::Same
+    } else if doc.state.paired_at < paired_at {
+        DocPairing::Earlier
+    } else {
+        DocPairing::Other
+    }
+}
+
+/// One guardian-PIN check at a time in the process: the scrypt (32 MiB) runs
+/// once per entry, and entries are judged one after another.
+static PIN_CHECK: Mutex<()> = Mutex::new(());
 
 // One per adapter, behind a mutex: the size difference costs nothing.
 #[allow(clippy::large_enum_variant)]
@@ -126,9 +163,11 @@ enum Held {
 
 struct Inner {
     store: Arc<dyn GuardianStateStore>,
-    /// The pairing this adapter serves: a document read back later (a read
-    /// error healing) must belong to it.
+    /// The pairing this adapter serves (`paired_at`, and the pinned
+    /// guardian's hex): a document read back later (a read error healing)
+    /// must belong to it.
     paired_at: i64,
+    paired_guardian: String,
     held: Mutex<Held>,
     /// The outcome `persist` computed, for `apply` to report.
     staged: Mutex<Option<(charter_primitives::EventId, GuardianApplied)>>,
@@ -172,6 +211,16 @@ fn ack(outcome: &cg::Outcome) -> AckResult {
     }
 }
 
+/// The document a ward paired before the section starts from.
+fn migrated_doc(pairing: &Pairing) -> Doc {
+    Doc {
+        v: DOC_VERSION,
+        state: migrated(pairing),
+        pin_attempts: PinAttempts::default(),
+        paired_guardian: Some(hex(&pairing.guardian_pubkey)),
+    }
+}
+
 /// The state a ward paired before the section starts from: the pinned
 /// guardian is its one root, as of the pairing; its relays are the pairing's.
 fn migrated(pairing: &Pairing) -> GuardianState {
@@ -189,11 +238,17 @@ fn migrated(pairing: &Pairing) -> GuardianState {
 }
 
 impl GuardianKeys {
-    fn new(store: Arc<dyn GuardianStateStore>, paired_at: i64, held: Held) -> Self {
+    fn new(
+        store: Arc<dyn GuardianStateStore>,
+        paired_at: i64,
+        paired_guardian: String,
+        held: Held,
+    ) -> Self {
         GuardianKeys {
             inner: Arc::new(Inner {
                 store,
                 paired_at,
+                paired_guardian,
                 held: Mutex::new(held),
                 staged: Mutex::new(None),
                 token_file: Mutex::new(None),
@@ -209,11 +264,15 @@ impl GuardianKeys {
     ///   the pairing's `paired_at` and relays, and written. Clause floors are
     ///   not copied: the clause store seeds each slot the first time a clause
     ///   for it arrives ([`SlotSeed`]).
-    /// - A document from a different pairing (its `pairedAt` is not the
+    /// - A document from an earlier pairing (its `pairedAt` is below the
     ///   record's): replaced the same way. The record's `paired_at` and the
     ///   state's must therefore agree: after [`Self::from_paired`], the
-    ///   pairing record MUST carry `PairDecision::paired_at()`, or the next
-    ///   load re-migrates and the working key bound at pairing is lost.
+    ///   pairing record MUST carry `PairDecision::paired_at()`.
+    /// - A document that is neither (the same `pairedAt` with another
+    ///   pinned guardian, or a `pairedAt` above the record's): unavailable,
+    ///   fail closed, left on disk. Re-migrating it would re-pin the
+    ///   record's guardian over a confirmed root move or removal (review
+    ///   batch 2, core L4). Every re-pair path clears the state first.
     /// - Once loaded, every broker built for this ward must carry the port
     ///   (module docs, *Invariant*).
     /// - A document that cannot be read or parsed: unavailable, fail closed
@@ -242,23 +301,28 @@ impl GuardianKeys {
         now: u64,
         persist: bool,
     ) -> Self {
+        let paired_at = secs(pairing.paired_at);
+        let guardian = hex(&pairing.guardian_pubkey);
         let held = match store.load() {
             Err(e) => {
                 eprintln!("charter: guardian-keys state unreadable ({e}): failing closed");
                 Held::Unavailable("unreadable")
             }
-            Ok(text) => {
-                let parsed = text.map(|t| serde_json::from_str::<Doc>(&t));
-                match parsed {
-                    Some(Err(e)) => {
-                        eprintln!("charter: guardian-keys state corrupt ({e}): failing closed");
-                        Held::Unavailable("corrupt")
-                    }
-                    Some(Ok(doc))
-                        if doc.v == DOC_VERSION
-                            && doc.state.paired_at == secs(pairing.paired_at) =>
-                    {
-                        let mut doc = doc;
+            Ok(None) => Held::Ready(Self::migrate(&*store, pairing, persist)),
+            Ok(Some(text)) => match serde_json::from_str::<Doc>(&text) {
+                Err(e) => {
+                    eprintln!("charter: guardian-keys state corrupt ({e}): failing closed");
+                    Held::Unavailable("corrupt")
+                }
+                Ok(doc) if doc.v != DOC_VERSION => {
+                    eprintln!(
+                        "charter: guardian-keys state version {} unknown: failing closed",
+                        doc.v
+                    );
+                    Held::Unavailable("unknown version")
+                }
+                Ok(mut doc) => match doc_pairing(&doc, paired_at, &guardian) {
+                    DocPairing::Same => {
                         if follow_pairing_relays(&mut doc.state, pairing, now) && persist {
                             if let Err(e) = store.save(&to_json(&doc)) {
                                 eprintln!(
@@ -269,42 +333,40 @@ impl GuardianKeys {
                         }
                         Held::Ready(doc)
                     }
-                    Some(Ok(doc)) if doc.v != DOC_VERSION => {
+                    DocPairing::Earlier => {
                         eprintln!(
-                            "charter: guardian-keys state version {} unknown: failing closed",
-                            doc.v
+                            "charter: guardian-keys state belongs to an earlier pairing; \
+                             starting afresh from the pairing record"
                         );
-                        Held::Unavailable("unknown version")
+                        Held::Ready(Self::migrate(&*store, pairing, persist))
                     }
-                    stale_or_absent => {
-                        if stale_or_absent.is_some() {
-                            eprintln!(
-                                "charter: guardian-keys state belongs to an earlier pairing; \
-                                 starting afresh from the pairing record"
-                            );
-                        }
-                        let doc = Doc {
-                            v: DOC_VERSION,
-                            state: migrated(pairing),
-                            pin_attempts: PinAttempts::default(),
-                        };
-                        if !persist {
-                            return Self::new(store, secs(pairing.paired_at), Held::Ready(doc));
-                        }
-                        if let Err(e) = store.save(&to_json(&doc)) {
-                            // Derived from the pairing record alone, so the
-                            // next load derives it again.
-                            eprintln!(
-                                "charter: could not write the migrated guardian-keys state \
-                                 ({e}); retrying on the next write"
-                            );
-                        }
-                        Held::Ready(doc)
+                    DocPairing::Other => {
+                        eprintln!(
+                            "charter: guardian-keys state belongs to another pairing \
+                             than the record's: failing closed"
+                        );
+                        Held::Unavailable("another pairing")
                     }
-                }
-            }
+                },
+            },
         };
-        Self::new(store, secs(pairing.paired_at), held)
+        Self::new(store, paired_at, guardian, held)
+    }
+
+    /// The migrated document for `pairing`, written when `persist`.
+    fn migrate(store: &dyn GuardianStateStore, pairing: &Pairing, persist: bool) -> Doc {
+        let doc = migrated_doc(pairing);
+        if persist {
+            if let Err(e) = store.save(&to_json(&doc)) {
+                // Derived from the pairing record alone, so the next load
+                // derives it again.
+                eprintln!(
+                    "charter: could not write the migrated guardian-keys state \
+                     ({e}); retrying on the next write"
+                );
+            }
+        }
+        doc
     }
 
     /// Persist the state a scan-to-pair produced ([`scan_to_pair`]) and build
@@ -314,14 +376,16 @@ impl GuardianKeys {
         store: Arc<dyn GuardianStateStore>,
         paired: PairDecision,
     ) -> SysResult<Self> {
+        let guardian = hex(&paired.root);
         let doc = Doc {
             v: DOC_VERSION,
             state: paired.state,
             pin_attempts: PinAttempts::default(),
+            paired_guardian: Some(guardian.clone()),
         };
         store.save(&to_json(&doc))?;
         let paired_at = doc.state.paired_at;
-        Ok(Self::new(store, paired_at, Held::Ready(doc)))
+        Ok(Self::new(store, paired_at, guardian, Held::Ready(doc)))
     }
 
     /// Make THIS adapter follow a changed pairing record (a pasted relay code
@@ -337,7 +401,7 @@ impl GuardianKeys {
     /// adapter after an unpair, not this). `Err`: unavailable, or the write
     /// failed and nothing changed.
     pub fn follow_pairing(&self, pairing: &Pairing, now: u64) -> SysResult<bool> {
-        if secs(pairing.paired_at) != self.inner.paired_at {
+        if !self.serves(pairing) {
             return Ok(false);
         }
         self.commit(|d| {
@@ -361,6 +425,12 @@ impl GuardianKeys {
     /// process may display). The adapter's own state stays the gate.
     pub fn set_token_file(&self, file: PresenceTokenStore) {
         *self.inner.token_file.lock().expect("token file lock") = Some(file);
+    }
+
+    /// Whether `pairing` is the record this adapter was loaded for.
+    fn serves(&self, pairing: &Pairing) -> bool {
+        secs(pairing.paired_at) == self.inner.paired_at
+            && hex(&pairing.guardian_pubkey) == self.inner.paired_guardian
     }
 
     fn held(&self) -> MutexGuard<'_, Held> {
@@ -422,6 +492,7 @@ impl GuardianKeys {
     /// The label a working key's approval gave it, if any (rule 5: shown next
     /// to the key's root as a short npub, never alone, since a label can be
     /// spoofed). Departed keys keep theirs, so a rule they set still says who.
+    /// Made safe to show with [`clean_label`]; `None` when nothing is left.
     pub fn signer_label(&self, key: &PubKey) -> Option<String> {
         let key = hex(key);
         self.read(|d| {
@@ -429,24 +500,51 @@ impl GuardianKeys {
                 .keys
                 .iter()
                 .find(|k| k.key == key)
-                .and_then(|k| k.label.clone())
+                .and_then(|k| k.label.as_deref())
+                .map(clean_label)
+                .filter(|l| !l.is_empty())
         })
         .flatten()
     }
 
-    /// The STATUS recipients: [`SignerSet::recipients`] plus the departed
-    /// keys owed one last STATUS showing their departure. Empty when
-    /// unavailable.
-    pub fn status_recipients(&self) -> Vec<PubKey> {
-        self.read(|d| keys(cg::status_recipients(&d.state)))
-            .unwrap_or_default()
+    /// The departed keys owed one last STATUS that shows their departure
+    /// (contract, *STATUS*), and what it shows, read together. `None` when
+    /// none is owed or the state is unavailable.
+    ///
+    /// Interim reading (open question "A departed key's last STATUS"): the
+    /// departed key gets [`Farewell::to_json`] only, never the STATUS the
+    /// signer set's recipients get (usage, apps, the relay list). Send it to
+    /// each key on its own and pass the keys a relay took to
+    /// [`Self::mark_status_sent`].
+    pub fn farewell(&self) -> Option<Farewell> {
+        self.read(|d| {
+            let live = cg::recipients(&d.state);
+            let recipients = keys(
+                d.state
+                    .farewell
+                    .iter()
+                    .filter(|k| !live.contains(k))
+                    .cloned(),
+            );
+            (!recipients.is_empty()).then(|| Farewell {
+                recipients,
+                guardians: status_guardians_of(&d.state),
+            })
+        })
+        .flatten()
     }
 
-    /// STATUS went out to [`Self::status_recipients`]: the departed keys
-    /// have had their last one.
-    pub fn mark_status_sent(&self, now: u64) -> SysResult<()> {
+    /// The last STATUS reached `sent` (departed keys from
+    /// [`Self::farewell`]): only they are no longer owed it. A key that
+    /// departed after the farewell was read stays owed (review batch 2,
+    /// core L3).
+    pub fn mark_status_sent(&self, sent: &[PubKey], now: u64) -> SysResult<()> {
+        let sent: Vec<String> = sent.iter().map(hex).collect();
         self.commit(|d| {
-            let step = cg::mark_status_sent(&d.state, secs(now));
+            if !d.state.farewell.iter().any(|k| sent.contains(k)) {
+                return (None, ());
+            }
+            let step = cg::mark_status_sent_to(&d.state, &sent, secs(now));
             (Some(with_state(d, step.state)), ())
         })
     }
@@ -458,36 +556,37 @@ impl GuardianKeys {
             .unwrap_or(false)
     }
 
-    /// Check an entered guardian PIN (Android). The backoff is checked first;
-    /// then the attempt is COUNTED AND WRITTEN before scrypt runs, so killing
-    /// the ward mid-check (or a power cut) still costs the attempt. A correct
-    /// PIN resets the counter.
+    /// Check an entered guardian PIN (Android). The backoff is checked and
+    /// the attempt COUNTED AND WRITTEN in one locked step before scrypt runs,
+    /// so killing the ward mid-check (or a power cut) still costs the
+    /// attempt, and entries made at once can't all pass one backoff gate
+    /// (review batch 2, core M1). A correct PIN resets the counter.
     pub fn verify_guardian_pin(&self, pin: &str, now: u64) -> PinCheck {
+        let _one = PIN_CHECK.lock().unwrap_or_else(PoisonError::into_inner);
         let now = secs(now);
-        let (record, attempts) = match self.read(|d| (d.state.guardian_pin.clone(), d.pin_attempts))
-        {
-            None => return PinCheck::Unavailable,
-            Some((None, _)) => return PinCheck::NoPin,
-            Some((Some(r), a)) => (r, a),
+        let gate = self.commit(|d| {
+            let Some(record) = d.state.guardian_pin.clone() else {
+                return (None, PinGate::NoPin);
+            };
+            let attempts = d.pin_attempts;
+            let next_try = cg::pin_next_try_at(attempts.failures, attempts.last_failure_at);
+            if attempts.failures >= cg::pin::PIN_FREE_FAILURES && now < next_try {
+                return (None, PinGate::Wait(next_try));
+            }
+            let counted = PinAttempts {
+                failures: attempts.failures.saturating_add(1),
+                last_failure_at: now,
+            };
+            let mut next = d.clone();
+            next.pin_attempts = counted;
+            (Some(next), PinGate::Check(Box::new(record), counted))
+        });
+        let (record, counted) = match gate {
+            Err(_) => return PinCheck::Unavailable,
+            Ok(PinGate::NoPin) => return PinCheck::NoPin,
+            Ok(PinGate::Wait(until)) => return PinCheck::Wait { until },
+            Ok(PinGate::Check(record, counted)) => (record, counted),
         };
-        let next_try = cg::pin_next_try_at(attempts.failures, attempts.last_failure_at);
-        if attempts.failures >= cg::pin::PIN_FREE_FAILURES && now < next_try {
-            return PinCheck::Wait { until: next_try };
-        }
-        let counted = PinAttempts {
-            failures: attempts.failures.saturating_add(1),
-            last_failure_at: now,
-        };
-        if self
-            .commit(|d| {
-                let mut next = d.clone();
-                next.pin_attempts = counted;
-                (Some(next), ())
-            })
-            .is_err()
-        {
-            return PinCheck::Unavailable;
-        }
         if cg::verify_pin(&record, pin) {
             if let Err(e) = self.commit(|d| {
                 let mut next = d.clone();
@@ -517,8 +616,22 @@ impl GuardianKeys {
         now: u64,
         fill: &mut dyn FnMut(&mut [u8]),
     ) -> Result<MintedToken, PresenceError> {
-        if !self.is_available() {
-            return Err(PresenceError::Unavailable);
+        // Checked before the shown copy is replaced, so a refused request
+        // never takes down a code that still works (review batch 2,
+        // platforms I3). The commit below checks again.
+        let pending = self.read(|d| {
+            bound_to.is_none_or(|b| {
+                cg::tick(&d.state, secs(now))
+                    .state
+                    .pending
+                    .iter()
+                    .any(|p| p.d == b)
+            })
+        });
+        match pending {
+            None => return Err(PresenceError::Unavailable),
+            Some(false) => return Err(PresenceError::NotPending),
+            Some(true) => {}
         }
         let file = self
             .inner
@@ -595,7 +708,12 @@ impl GuardianKeys {
                     cg::apply_inbound(&d.state, &seal, &value, secs(now))
                 }
                 kinds::CHARTER_PRESENCE_CONFIRM => {
-                    cg::apply_presence_confirm(&d.state, &seal, &value, secs(now))
+                    // A token "minted" after now (the clock was set back
+                    // since) has no lifetime left to trust (review batch 2,
+                    // core Info 1).
+                    let mut base = d.state.clone();
+                    base.tokens.retain(|t| t.minted_at <= secs(now));
+                    cg::apply_presence_confirm(&base, &seal, &value, secs(now))
                 }
                 _ => return (None, GuardianApplied::ignored()),
             };
@@ -652,11 +770,124 @@ fn with_state(d: &Doc, state: GuardianState) -> Doc {
         v: d.v,
         state,
         pin_attempts: d.pin_attempts,
+        paired_guardian: d.paired_guardian.clone(),
     }
 }
 
 fn to_json(doc: &Doc) -> String {
     serde_json::to_string(doc).expect("the guardian-keys document serialises")
+}
+
+/// When `key` left the signer set, as far as the state records it: a
+/// departed root's removal or move, the tombstone of a withdrawn or removed
+/// working key, or the departure of the root a working key was bound to.
+fn departed_at(state: &GuardianState, key: &str) -> Option<i64> {
+    let root_left = |r: &str| {
+        state
+            .departed_roots
+            .iter()
+            .find(|d| d.root == r)
+            .map(|d| d.issued_at)
+    };
+    root_left(key)
+        .or_else(|| {
+            state
+                .tombstones
+                .iter()
+                .filter(|t| t.key == key)
+                .map(|t| t.issued_at)
+                .min()
+        })
+        .or_else(|| {
+            state
+                .keys
+                .iter()
+                .find(|k| k.key == key)
+                .and_then(|k| root_left(&k.root))
+        })
+}
+
+/// A guardian-chosen label made safe to show (review batch 2, platforms L7):
+/// no control characters (newlines included), no invisible format
+/// characters (bidi overrides and isolates, zero-width marks), no line or
+/// paragraph separators; trimmed, and at most 64 bytes. A label is always
+/// shown beside its root's npub (rule 5); this keeps it from faking one, or
+/// a line of its own.
+pub fn clean_label(label: &str) -> String {
+    let kept: String = label
+        .chars()
+        .filter(|&c| !c.is_control() && !is_format_or_separator(c))
+        .collect();
+    let mut out = String::new();
+    for c in kept.trim().chars() {
+        if out.len() + c.len_utf8() > 64 {
+            break;
+        }
+        out.push(c);
+    }
+    out.trim_end().to_owned()
+}
+
+/// Unicode format characters (category Cf) and the line and paragraph
+/// separators (Zl, Zp).
+fn is_format_or_separator(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// The STATUS `guardians` for `state`.
+fn status_guardians_of(state: &GuardianState) -> StatusGuardians {
+    let g = cg::status_guardians(state);
+    StatusGuardians {
+        roots: g
+            .roots
+            .into_iter()
+            .filter_map(|r| {
+                Some(StatusGuardianRoot {
+                    root: PubKey::from_hex(&r.root).ok()?,
+                    keys: keys(r.keys),
+                })
+            })
+            .collect(),
+        pending: g
+            .pending
+            .into_iter()
+            .map(|p| StatusPendingStatement {
+                d: p.d,
+                kind: match p.kind {
+                    cg::PendingType::Coguardian => PendingKind::Coguardian,
+                    cg::PendingType::Removal => PendingKind::Removal,
+                    cg::PendingType::Move => PendingKind::Move,
+                },
+                takes_effect_at: p.takes_effect_at.map(|t| t.max(0) as u64),
+                expires_at: p.expires_at.max(0) as u64,
+            })
+            .collect(),
+        tombstones: u32::try_from(g.tombstones).unwrap_or(u32::MAX),
+        relays: g.relays,
+    }
 }
 
 /// Make the state's relay list the pairing record's, recording the replaced
@@ -699,6 +930,46 @@ pub enum PinCheck {
     /// The state could not be read or the attempt could not be counted:
     /// nothing was checked.
     Unavailable,
+}
+
+/// What the counted step of a PIN check decided.
+enum PinGate {
+    NoPin,
+    Wait(i64),
+    Check(Box<cg::GuardianPinRecord>, PinAttempts),
+}
+
+/// The departed keys owed one last STATUS, and the `guardians` it shows
+/// ([`GuardianKeys::farewell`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Farewell {
+    /// Each is sent [`Self::to_json`] on its own wrap.
+    pub recipients: Vec<PubKey>,
+    /// Who the ward trusts now: the departure shows as the key's absence.
+    pub guardians: StatusGuardians,
+}
+
+impl Farewell {
+    /// The farewell STATUS body (kind 31114 content): `{ v, machine, ts,
+    /// seq?, guardians: { roots, pending, tombstones } }`. No subject, usage,
+    /// apps or lock state, and no relay list: a departed key is told only
+    /// that it departed (open question "A departed key's last STATUS").
+    pub fn to_json(&self, machine: &PubKey, ts: u64, seq: Option<u64>) -> String {
+        let mut body = serde_json::json!({
+            "v": 1,
+            "machine": machine.to_hex(),
+            "ts": ts,
+            "guardians": {
+                "roots": self.guardians.roots,
+                "pending": self.guardians.pending,
+                "tombstones": self.guardians.tombstones,
+            },
+        });
+        if let Some(seq) = seq {
+            body["seq"] = serde_json::json!(seq);
+        }
+        body.to_string()
+    }
 }
 
 /// A minted presence token, for the ward to show as a code to scan (and a
@@ -803,7 +1074,10 @@ impl GuardianStatements for GuardianKeys {
             // A transient read error heals here.
             if let Ok(Some(text)) = self.inner.store.load() {
                 if let Ok(doc) = serde_json::from_str::<Doc>(&text) {
-                    if doc.v == DOC_VERSION && doc.state.paired_at == self.inner.paired_at {
+                    if doc.v == DOC_VERSION
+                        && doc_pairing(&doc, self.inner.paired_at, &self.inner.paired_guardian)
+                            == DocPairing::Same
+                    {
                         eprintln!("charter: guardian-keys state readable again");
                         *held = Held::Ready(doc);
                     }
@@ -844,17 +1118,26 @@ impl GuardianStatements for GuardianKeys {
                     SlotSeed::Held { signer, bound } => {
                         // A slot this state has never judged (the ward paired
                         // before the section): the store's floor, and its
-                        // signer, carry over. A departed signer's bound is its
-                        // replay floor: fail closed.
+                        // signer, carry over. A signer no longer in the set
+                        // departed before the slot was seeded, so no departure
+                        // clamped it: its floor is min(its issuedAt, the
+                        // departure), as rule 4 has it, or now when the
+                        // departure time is not known. A far-future clause
+                        // from a departed key can't pin the slot (review
+                        // batch 2, core L1).
                         let signer = hex(&signer);
                         let root = cg::root_of(&base, &signer).unwrap_or_else(|| signer.clone());
+                        let issued_at = secs(bound);
+                        let floor = (!cg::is_signer(&base, &signer)).then(|| {
+                            issued_at.min(departed_at(&base, &signer).unwrap_or(secs(now)))
+                        });
                         base.clauses.push(cg::state::HeldClause {
                             subject: clause.subject_hex.to_owned(),
                             kind: clause.kind.to_owned(),
                             signer,
                             root,
-                            issued_at: secs(bound),
-                            floor: None,
+                            issued_at,
+                            floor,
                         });
                     }
                 }
@@ -886,6 +1169,12 @@ impl GuardianStatements for GuardianKeys {
     }
 
     fn record_relays(&self, change: &RelaysChange<'_>, now: u64) -> RelaysRecord {
+        // The record the change would be saved to is another pairing's (a
+        // re-pair replaced it while this warden runs): refuse (review batch
+        // 2, platforms L5).
+        if secs(change.paired_at) != self.inner.paired_at {
+            return RelaysRecord::Refused;
+        }
         let author = hex(&change.author);
         let seal = hex(&change.seal_author);
         let pin = change.pin.and_then(|p| serde_json::to_value(p).ok());
@@ -925,37 +1214,7 @@ impl GuardianStatements for GuardianKeys {
     }
 
     fn status_guardians(&self, _now: u64) -> Option<StatusGuardians> {
-        self.read(|d| {
-            let g = cg::status_guardians(&d.state);
-            StatusGuardians {
-                roots: g
-                    .roots
-                    .into_iter()
-                    .filter_map(|r| {
-                        Some(StatusGuardianRoot {
-                            root: PubKey::from_hex(&r.root).ok()?,
-                            keys: keys(r.keys),
-                        })
-                    })
-                    .collect(),
-                pending: g
-                    .pending
-                    .into_iter()
-                    .map(|p| StatusPendingStatement {
-                        d: p.d,
-                        kind: match p.kind {
-                            cg::PendingType::Coguardian => PendingKind::Coguardian,
-                            cg::PendingType::Removal => PendingKind::Removal,
-                            cg::PendingType::Move => PendingKind::Move,
-                        },
-                        takes_effect_at: p.takes_effect_at.map(|t| t.max(0) as u64),
-                        expires_at: p.expires_at.max(0) as u64,
-                    })
-                    .collect(),
-                tombstones: u32::try_from(g.tombstones).unwrap_or(u32::MAX),
-                relays: g.relays,
-            }
-        })
+        self.read(|d| status_guardians_of(&d.state))
     }
 
     fn clear(&self) -> SysResult<()> {

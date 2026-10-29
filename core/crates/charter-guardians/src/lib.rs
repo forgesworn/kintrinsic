@@ -30,11 +30,11 @@ pub use pin::{
 pub use reason::{Reason, TickResult, ACCEPT_REASONS, DROP_REASONS, STATEMENT_REASONS};
 pub use state::{
     accept_clause, accept_signed_event, apply_inbound, apply_presence_confirm, apply_relays,
-    held_clause, is_departed, is_pinned, is_signer, mark_status_sent, pair_from_offer,
-    pair_from_seal, pending_expiry, project_state, recipients, register_presence_token, root_of,
-    signer_set, status_guardians, status_recipients, status_relays, tick, ClauseInput,
-    GuardianState, Outcome, PairToken, Paired, ProjectedState, RelaysChannel, RelaysInput,
-    StatusGuardians, Step, TickEntry, Verdict,
+    held_clause, is_departed, is_pinned, is_signer, mark_status_sent, mark_status_sent_to,
+    pair_from_offer, pair_from_seal, pending_expiry, project_state, recipients,
+    register_presence_token, root_of, signer_set, status_guardians, status_recipients,
+    status_relays, tick, ClauseInput, GuardianState, Outcome, PairToken, Paired, ProjectedState,
+    RelaysChannel, RelaysInput, StatusGuardians, Step, TickEntry, Verdict,
 };
 pub use statement::{parse_statement, split_pending_d, PendingType, Statement, StatementType};
 
