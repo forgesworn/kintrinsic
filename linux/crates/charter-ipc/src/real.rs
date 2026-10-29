@@ -14,7 +14,7 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 
 use crate::client::{CharterdClient, ExecProbe, PairingSink};
 use crate::dto::{DaemonEvent, Op, RequestStatusView, TimeLeftView};
-use crate::dto::{ExecMeta, PairingStateView};
+use crate::dto::{ExecMeta, GuardiansView, PairingStateView};
 use crate::error::{IpcError, IpcResult};
 
 /// The generated proxy for `org.forgesworn.Charter1`. Method names map to the
@@ -258,22 +258,39 @@ impl ExecProbe for RealExecProbe {
 /// this contract crate keeps no dependency on the transport's `Pairing` type.
 pub struct RealPairingSink {
     pairing_path: PathBuf,
+    guardians_path: PathBuf,
 }
+
+/// Where `charterd` publishes the ward's [`GuardiansView`] (world-readable,
+/// cleared with the daemon's runtime directory).
+pub const GUARDIANS_VIEW_PATH: &str = "/run/charter/guardians.json";
 
 impl Default for RealPairingSink {
     fn default() -> Self {
         Self {
             pairing_path: "/var/lib/charter/pairing.json".into(),
+            guardians_path: std::env::var_os("CHARTER_GUARDIANS_VIEW")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| GUARDIANS_VIEW_PATH.into()),
         }
     }
 }
 
 impl RealPairingSink {
-    /// Test/override constructor: redirect the pairing file.
+    /// Test/override constructor: redirect the pairing file (the guardians
+    /// view is read from `guardians.json` beside it).
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        let pairing_path: PathBuf = path.into();
+        let guardians_path = pairing_path.with_file_name("guardians.json");
         Self {
-            pairing_path: path.into(),
+            pairing_path,
+            guardians_path,
         }
+    }
+
+    fn read_guardians(&self) -> Option<GuardiansView> {
+        let text = std::fs::read_to_string(&self.guardians_path).ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     fn read_state(&self) -> PairingStateView {
@@ -289,10 +306,12 @@ impl RealPairingSink {
             Some(g) => PairingStateView {
                 paired: true,
                 guardian_short: Some(g.chars().take(8).collect()),
+                guardians: self.read_guardians(),
             },
             None => PairingStateView {
                 paired: false,
                 guardian_short: None,
+                guardians: None,
             },
         }
     }
@@ -364,5 +383,15 @@ mod local_port_tests {
         let st = block_on(sink.pairing_state()).unwrap();
         assert!(st.paired);
         assert_eq!(st.guardian_short.as_deref(), Some("abababab"));
+        assert_eq!(st.guardians, None);
+        // The warden's published view (rule 5) rides along when present.
+        std::fs::write(
+            dir.join("guardians.json"),
+            r#"{"roots":["npub1abc…xyz"],"rules":[{"subject":"bb","kind":"budget","root":"npub1abc…xyz","label":"Mum"}],"pending":[]}"#,
+        )
+        .unwrap();
+        let g = block_on(sink.pairing_state()).unwrap().guardians.unwrap();
+        assert_eq!(g.roots, vec!["npub1abc…xyz".to_string()]);
+        assert_eq!(g.rules[0].set_by(), "Mum (npub1abc…xyz)");
     }
 }

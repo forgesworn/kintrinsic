@@ -17,12 +17,16 @@
 pub mod clock;
 pub mod effects;
 pub mod error;
+pub mod file_lock;
 #[cfg(any(feature = "real-relay", feature = "real-os"))]
 pub(crate) mod fsutil;
+pub mod guardian_store;
 pub mod layer;
 pub mod persistence;
+pub mod presence_token;
 pub mod relay;
 pub mod relay_auth;
+pub mod secret_file;
 pub mod signer;
 
 pub use clock::Clock;

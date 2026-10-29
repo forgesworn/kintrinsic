@@ -26,7 +26,10 @@ use warden::{Warden, WARDEN};
 ///    `charterLinkState`.
 /// 4: the `debugging` clause — `charterDebuggingUntil` (and its
 ///    [`DEBUGGING_HOLD`] answer) and `charterSetDebuggingOpen`.
-pub const ABI_VERSION: jint = 4;
+/// 5: guardian roots and working keys — `charterHasGuardianPin`,
+///    `charterVerifyGuardianPin`, `charterPendingStatements`,
+///    `charterMintPresenceToken`, `charterGuardiansSummary`.
+pub const ABI_VERSION: jint = 5;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -757,6 +760,113 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterL
     _class: JClass,
 ) -> jstring {
     with_warden(&env, |w| w.link_state_json())
+}
+
+// ---- guardian roots and working keys --------------------------------------
+//
+// The Guardian presence screen and About's guardian list. The PIN check runs
+// scrypt, so `charterVerifyGuardianPin` and `charterMintPresenceToken` take a
+// handle on the guardian-keys state under the warden lock and run with the
+// lock RELEASED: an enforcement tick never waits on a PIN entry. Worker
+// thread only, like every call here.
+
+/// 1 when a guardian has set the ward's PIN (from the Kintrinsic app, inside
+/// a gift-wrapped RELAYS), else 0.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterHasGuardianPin(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    let guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        guard.as_ref().is_some_and(|w| w.has_guardian_pin())
+    }))
+    .map(jint::from)
+    .unwrap_or(0)
+}
+
+/// The guardian-keys handle and this machine's pubkey, cloned out from
+/// under the warden lock.
+fn presence_handle() -> Option<(charter_spine::GuardianKeys, charter_primitives::PubKey)> {
+    let guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().and_then(|w| w.presence_handle())
+}
+
+/// Check an entered guardian PIN: `{ok, failures, waitSeconds}` (plus
+/// `noPin` / `unavailable`). Every attempt is counted, durably, before it is
+/// checked; after 5 failures each try waits, doubling to an hour.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterVerifyGuardianPin(
+    mut env: JNIEnv,
+    _class: JClass,
+    pin: JString,
+    now_unix: jlong,
+) -> jstring {
+    let pin = match jstr(&mut env, pin) {
+        Ok(s) => s,
+        Err(e) => return out(&env, &err_json(&e)),
+    };
+    let res = std::panic::catch_unwind(|| {
+        let handle = presence_handle();
+        warden::guardians::pin_check_json(
+            handle.as_ref().map(|(k, _)| k),
+            &pin,
+            now_unix.max(0) as u64,
+        )
+    })
+    .unwrap_or_else(|_| err_json("internal error (panic recovered)"));
+    out(&env, &res)
+}
+
+/// The pending co-guardian, removal and move statements (JSON list).
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterPendingStatements(
+    env: JNIEnv,
+    _class: JClass,
+    now_unix: jlong,
+) -> jstring {
+    with_warden(&env, |w| w.pending_statements_json(now_unix.max(0) as u64))
+}
+
+/// Mint a presence token for the pending statement `d` (null or empty: any),
+/// gated by a correct guardian PIN in this same call:
+/// `{code, shortForm, expiresAt, qr: {size, modules}}` or `{error, …}`.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterMintPresenceToken(
+    mut env: JNIEnv,
+    _class: JClass,
+    d: JString,
+    pin: JString,
+    now_unix: jlong,
+) -> jstring {
+    let d = opt_jstr(&mut env, d).filter(|d| !d.is_empty());
+    let pin = match jstr(&mut env, pin) {
+        Ok(s) => s,
+        Err(e) => return out(&env, &err_json(&e)),
+    };
+    let res = std::panic::catch_unwind(|| match presence_handle() {
+        Some((keys, machine)) => warden::guardians::mint_presence_json(
+            Some(&keys),
+            &machine,
+            d.as_deref(),
+            &pin,
+            now_unix.max(0) as u64,
+        ),
+        None => err_json("unavailable"),
+    })
+    .unwrap_or_else(|_| err_json("internal error (panic recovered)"));
+    out(&env, &res)
+}
+
+/// About's guardian list: `{available, paired, roots: [{root, label, keys,
+/// keyLabels, rules}], pending, pin: {set, failures, waitSeconds}}`.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterGuardiansSummary(
+    env: JNIEnv,
+    _class: JClass,
+    now_unix: jlong,
+) -> jstring {
+    with_warden(&env, |w| w.guardians_summary_json(now_unix.max(0) as u64))
 }
 
 // ---- lock plumbing --------------------------------------------------------

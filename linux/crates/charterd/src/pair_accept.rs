@@ -50,8 +50,10 @@ mod tests {
                 token: token.to_string(),
                 relays: vec!["wss://relay.trotters.cc".to_string()],
                 ts,
+                approval: None,
             },
             seal_author: PubKey::from_bytes([who; 32]),
+            inner: None,
         }
     }
 

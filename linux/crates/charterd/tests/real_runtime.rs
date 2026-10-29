@@ -207,3 +207,77 @@ fn the_real_facade_unwraps_a_local_wrap_exactly_like_a_relay_copy() {
         "a wrap for another machine does not open"
     );
 }
+
+/// Guardian roots and working keys: the live facade opens a guardian
+/// statement sealed by a working key (seal-exempt, both authors kept) and a
+/// gift-wrapped RELAYS over the local link, rather than refusing them as the
+/// strict unwrap does; a strict-bound kind sealed by someone else still does
+/// not open.
+#[test]
+fn the_real_facade_opens_statements_and_wrapped_relays_from_the_local_link() {
+    use charter_primitives::kinds;
+    use charter_transport::nip59::{self, sign_event_raw, Rumor, WrapRandomness};
+    use charterd::transport_facade::{LocalInbound, TransportFacade};
+
+    fn sk(b: u8) -> [u8; 32] {
+        let mut s = [0u8; 32];
+        s[31] = b;
+        s
+    }
+    let pk = |b: u8| PubKey::from_bytes(charter_crypto::xonly_pubkey(&sk(b)).unwrap());
+    let machine_sk = sk(0x22);
+    let facade = RealTransportFacade::new(machine_sk, pk(0x11), vec!["wss://r".into()]);
+    let wrap = |ev: &charter_primitives::NostrEvent, sealer: u8| {
+        nip59::wrap(
+            &Rumor::from_signed_event(ev),
+            &sk(sealer),
+            pk(0x22).as_bytes(),
+            &WrapRandomness {
+                ephemeral_secret: sk(0x55),
+                seal_nonce: [1; 32],
+                wrap_nonce: [2; 32],
+                seal_created_at: 1_700_000_000,
+                wrap_created_at: 1_700_000_000,
+            },
+        )
+        .unwrap()
+    };
+    let now = 1_700_000_000;
+    // A withdrawal signed by the root R, carried (sealed) by its working key.
+    let statement = sign_event_raw(
+        &sk(0x11),
+        kinds::CHARTER_GUARDIAN_STATEMENT,
+        now,
+        vec![
+            kinds::marker_tag(),
+            vec![
+                "d".into(),
+                format!("kintrinsic/revoke/{}", pk(0x13).to_hex()),
+            ],
+            vec!["p".into(), pk(0x13).to_hex()],
+        ],
+        format!(r#"{{"v":1,"issuedAt":{now}}}"#),
+    )
+    .unwrap();
+    match facade.unwrap_local(&wrap(&statement, 0x12), now) {
+        Some(LocalInbound::Guardian(g)) => {
+            assert_eq!(g.seal_author(), pk(0x12));
+            assert_eq!(g.event().pubkey, pk(0x11));
+        }
+        other => panic!("expected a guardian statement, got {other:?}"),
+    }
+    let relays = sign_event_raw(
+        &sk(0x12),
+        kinds::CHARTER_DEVICE_RELAYS,
+        now,
+        vec![kinds::marker_tag(), vec!["p".into(), pk(0x22).to_hex()]],
+        "{}".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        facade.unwrap_local(&wrap(&relays, 0x12), now),
+        Some(LocalInbound::Relays(_, a)) if a == pk(0x12)
+    ));
+    // A RELAYS sealed by someone other than its author does not open.
+    assert!(facade.unwrap_local(&wrap(&relays, 0x14), now).is_none());
+}

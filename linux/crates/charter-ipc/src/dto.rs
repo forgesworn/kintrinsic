@@ -230,8 +230,72 @@ impl TimeLeftView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingStateView {
     pub paired: bool,
+    /// The guardian pinned at pairing (the record's legacy field). On a ward
+    /// with guardian roots and working keys, `guardians` is who it trusts now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_short: Option<String>,
+    /// Who this ward trusts and who set its rules, as the warden publishes it
+    /// (contract, *Guardian roots and working keys*, rule 5). Absent when the
+    /// warden has published nothing (unpaired, an older warden, not running).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardians: Option<GuardiansView>,
+}
+
+/// The ward's guardians, world-readable by design: a ward can always see what
+/// is enforced against them and by whom. Keys appear only as short npubs.
+/// A label is text a guardian chose and can be spoofed, so it is always shown
+/// next to the short npub of its signer's ROOT, never alone (rule 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardiansView {
+    /// Each pinned root, as a short npub.
+    pub roots: Vec<String>,
+    /// Who set each rule the ward holds.
+    #[serde(default)]
+    pub rules: Vec<RuleSetterView>,
+    /// Statements waiting for a guardian to confirm in person at this device.
+    #[serde(default)]
+    pub pending: Vec<PendingStatementView>,
+}
+
+/// Who set one rule (rule 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleSetterView {
+    /// The child the rule is for (64 hex, the subject in their limits file).
+    pub subject: String,
+    /// The clause kind's wire name (`budget`, `schedule`, `apps`, …).
+    pub kind: String,
+    /// The signer's root, as a short npub.
+    pub root: String,
+    /// The signing install's label, if its approval gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// One pending co-guardian, removal or root move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingStatementView {
+    /// The statement's `d`, which a presence code is bound to.
+    pub d: String,
+    /// `coguardian`, `removal` or `move`.
+    pub kind: String,
+    /// The root it names, as a short npub.
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes_effect_at: Option<i64>,
+    pub expires_at: i64,
+}
+
+impl RuleSetterView {
+    /// "Mum's phone (npub1abc…xyz)", or the short npub alone.
+    pub fn set_by(&self) -> String {
+        match &self.label {
+            Some(l) => format!("{l} ({})", self.root),
+            None => self.root.clone(),
+        }
+    }
 }
 
 /// Metadata for an exec candidate surfaced to the user surface.

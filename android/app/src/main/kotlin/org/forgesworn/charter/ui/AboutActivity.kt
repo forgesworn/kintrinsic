@@ -2,6 +2,7 @@ package org.forgesworn.charter.ui
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -22,6 +23,11 @@ import org.forgesworn.charter.native.CharterCore
  * open with, moved here so the child's screen can lead with the child's
  * question (see [HomeCopy]). A guardian-signed relay recovery code can be
  * applied here without an internet connection or changing the pairing.
+ *
+ * The guardian list (contract, *Guardian roots and working keys*): each
+ * pinned guardian by label and short npub (rule 5: a label alone can be
+ * spoofed), how many Kintrinsic apps they have linked, and which rules they
+ * set; plus the way into Guardian presence, which is PIN-gated.
  *
  * JNI reads run on a private worker thread — never the main thread (every
  * call takes the warden lock), the same discipline as MainActivity.
@@ -75,6 +81,17 @@ class AboutActivity : Activity() {
         guardianCard.addView(CharterTheme.text(this, "Guardian", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2))
         guardianCard.addView(guardianLine.apply { setPadding(0, CharterTheme.dp(this@AboutActivity, 4), 0, 0) })
         root.addView(guardianCard, CharterTheme.stackParams(this, 14))
+
+        val guardiansList = CharterTheme.text(this, "…", CharterTheme.FS_BODY, top = 4)
+        val pendingLine = CharterTheme.text(this, "", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 8)
+        val guardiansCard = CharterTheme.card(this)
+        guardiansCard.addView(CharterTheme.text(this, "Guardians", CharterTheme.FS_SECTION, bold = true))
+        guardiansCard.addView(guardiansList)
+        guardiansCard.addView(pendingLine)
+        val presence = CharterTheme.secondaryButton(this, "Guardian presence").apply { isEnabled = false }
+        presence.setOnClickListener { startActivity(Intent(this, GuardianPresenceActivity::class.java)) }
+        guardiansCard.addView(presence, CharterTheme.stackParams(this, 10))
+        root.addView(guardiansCard, CharterTheme.stackParams(this, 14))
 
         val relayLine = CharterTheme.text(this, "…", CharterTheme.FS_SMALL).apply {
             setTextIsSelectable(true)
@@ -161,11 +178,22 @@ class AboutActivity : Activity() {
             val code = runCatching { CharterCore.deviceCode() }.getOrNull()
                 ?: init?.machinePubkey ?: "(unavailable)"
             val state = runCatching { CharterCore.pairingState() }.getOrNull()
+            val guardians = runCatching {
+                CharterCore.guardiansSummary(System.currentTimeMillis() / 1000)
+            }.getOrNull()
             runOnUiThread {
+                guardiansList.text = when {
+                    guardians == null -> "Guardians could not be read."
+                    !guardians.paired -> "Not paired with a guardian yet."
+                    !guardians.available -> "This device can't read its guardian list right now."
+                    else -> guardians.roots.joinToString("\n\n") { GuardianCopy.rootLines(it) }
+                }
+                pendingLine.text = if (guardians?.available == true) GuardianCopy.pendingLine(guardians.pending) else ""
+                presence.isEnabled = guardians?.paired == true
                 codeFull.text = code
                 publicNpub.text = PairingSas.npub(code.filterNot { it.isWhitespace() }) ?: "Public key unavailable."
                 codeShort.text = if (code.length >= 16) "${code.take(8)} … ${code.takeLast(4)}" else code
-                guardianLine.text = HomeCopy.guardianLine(state)
+                guardianLine.text = HomeCopy.guardianLine(state, guardians)
                 relayLine.text = state?.relays?.joinToString("\n")?.ifEmpty { "No relays configured." }
                     ?: "Relays could not be read."
                 changeRelays.isEnabled = state?.paired == true && !state.pairingUnreadable

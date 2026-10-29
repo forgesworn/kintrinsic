@@ -22,7 +22,7 @@ use charter_schedule::{
     day_key, enforcement_tz_of, is_valid_freeze_target, reconcile_freeze, EnforcerEffect,
     FreezeAction, WarnLevel,
 };
-use charter_spine::PollHealth;
+use charter_spine::{GuardianKeys, GuardianStatements, PollHealth};
 use charter_sys::effects::{
     CgroupFreezer, RealApprovedExecStore, RealFlatpakOps, RealTrustDb, VtControl,
 };
@@ -32,7 +32,8 @@ use charter_sys::signer::RealMachineSigner;
 use charter_sys::{Clock, RealSystem, SystemLayer};
 use charter_transport::pairing::Pairing;
 use charter_transport::{
-    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant, TransportError,
+    CharterTransport, Entropy, FetchedCuratorList, GuardianSealed, ReceivedClause, ReceivedGrant,
+    TransportError,
 };
 
 use crate::atomic_file::atomic_write;
@@ -49,7 +50,7 @@ use crate::enforcer_runtime::{lock_message, managed_freeze_target, EnforcerRunti
 use crate::managed_guard::ManagedRoster;
 use crate::multi_child::{ChildDecision, ExtensionInbox, MultiChildEnforcer};
 use crate::ports::EventSink;
-use crate::transport_facade::{classify_inbound, LocalInbound, TransportFacade};
+use crate::transport_facade::{classify_opened, LocalInbound, TransportFacade};
 use crate::web_content::WebContentEnforcer;
 
 /// STATUS-feed heartbeat: re-publish an unchanged child's state at least this
@@ -275,6 +276,35 @@ impl RealTransportFacade {
         })
     }
 
+    /// Address machine→guardian wraps to the guardian-keys signer set (rule
+    /// 9): a live handle, so a working key approved later is followed.
+    pub fn with_signer_set(mut self, signers: Arc<dyn charter_primitives::SignerSet>) -> Self {
+        self.inner.set_signer_set(signers);
+        self
+    }
+
+    /// Publish a STATUS to `recipients` (the signer set's plus any departed
+    /// key owed its last one), also on `extra_relay_lists` (rule 11). Returns
+    /// whether at least one relay accepted it, as [`Self::emit_status`].
+    pub async fn emit_status_to(
+        &self,
+        status_json: &str,
+        now: u64,
+        recipients: &[PubKey],
+        extra_relay_lists: &[Vec<RelayUrl>],
+    ) -> bool {
+        let outcomes = self
+            .inner
+            .emit_status_to(status_json, now, recipients, extra_relay_lists)
+            .await;
+        crate::watchdog::ping_from_enforcement_task();
+        let delivered = outcomes
+            .iter()
+            .any(|(_, o)| matches!(o, PublishOutcome::Ok));
+        self.record_publish(outcomes);
+        delivered
+    }
+
     /// Attach the local link's outbox (a [`crate::local_link::LateSink`]):
     /// every machine→guardian wrap this facade builds — REQUEST, AUDIT,
     /// STATUS — is offered to it before relay IO starts, the identical wrap
@@ -380,13 +410,25 @@ impl TransportFacade for RealTransportFacade {
     fn machine_pubkey(&self) -> PubKey {
         self.machine
     }
+    /// Guardian statements (31120) and presence confirmations (31121): the
+    /// broker polls them only when its guardian-keys port accepts them.
+    async fn poll_guardian_events(&self, since: u64, now: u64) -> Vec<GuardianSealed> {
+        self.record_poll(self.inner.poll_guardian_events(since, now).await)
+    }
+    /// Gift-wrapped RELAYS (rule 11). Any guardian PIN they carry is kept in
+    /// the 0600 guardian-keys state by the broker, never in pairing.json
+    /// (review 2a, L2); a Linux ward has no use for it.
+    async fn poll_relays(&self, since: u64, now: u64) -> Vec<(NostrEvent, PubKey)> {
+        self.record_poll(self.inner.poll_relays(since, now).await)
+    }
     /// A guardian wrap that arrived over the local link: the same NIP-59
-    /// unwrap as every `poll_*` above (`CharterTransport::unwrap_inbound`),
-    /// sorted by inner kind the same way. CPU only, no IO.
+    /// unwrap as every `poll_*` above, opened the way the guardian-keys
+    /// section needs (statements and confirmations with both authors, a
+    /// gift-wrapped RELAYS), sorted by inner kind. CPU only, no IO.
     fn unwrap_local(&self, wrap: &NostrEvent, now: u64) -> Option<LocalInbound> {
         self.inner
-            .unwrap_inbound(wrap, now)
-            .map(|(event, seal_author)| classify_inbound(event, seal_author))
+            .unwrap_inbound_opened(wrap, now)
+            .map(classify_opened)
     }
     fn poll_health(&self) -> PollHealth {
         PollHealth {
@@ -416,6 +458,9 @@ fn load_pairing<S: SystemLayer>(sys: &S) -> Option<Pairing> {
 /// Build the broker over the real ports. The shared `enforcer` handle is also
 /// used by the enforcement loop, so `time.extend` enact + the tick agree on one
 /// ledger.
+/// The guardian-keys port is NOT optional: every broker built for a paired
+/// ward carries it (the adapter's wiring invariant), or a clause judged by the
+/// store's floor alone could be written below a newer one.
 fn build_broker(
     sys: RealSystem,
     transport: RealTransportFacade,
@@ -423,6 +468,7 @@ fn build_broker(
     events: Box<dyn EventSink>,
     subject: PubKey,
     extension_inbox: ExtensionInbox,
+    guardians: &charter_spine::GuardianKeys,
 ) -> RealBroker {
     let mut registry = EnactorRegistry::new();
     registry.register(Box::new(InstallFlatpakEnactor::new(RealFlatpakOps)));
@@ -439,7 +485,15 @@ fn build_broker(
     // purely so an allowed ask reaches `Enacted` instead of stalling as
     // `Failed` with no enactor at all (see `AppOpenEnactor`'s module doc).
     registry.register(Box::new(AppOpenEnactor));
-    Broker::new(sys, transport, RealEntropy, registry, events, subject)
+    Broker::new(
+        sys,
+        transport.with_signer_set(guardians.signers()),
+        RealEntropy,
+        registry,
+        events,
+        subject,
+    )
+    .with_guardians(Arc::new(guardians.clone()))
 }
 
 /// The uid of the active (foreground) session on the seat (`CHARTER_SEAT`
@@ -1210,15 +1264,16 @@ struct LockSpawnCtx<'a> {
     lock_bin: &'a str,
     infos: &'a std::collections::BTreeMap<u32, crate::lock_info::LockInfo>,
     paired: bool,
-    /// `Some` (paired) → derive a per-lock challenge + expected code and hand
-    /// both to `charter-lock`; `None` (device-only) → no offline unlock.
+    /// `Some` (paired) → derive a per-lock challenge and the expected code
+    /// for every key in the guardian-keys signer set, and hand them to
+    /// `charter-lock`; `None` (device-only) → no offline unlock. A set that
+    /// is empty (an unreadable state) gives no codes: the lock keeps its
+    /// device-only escape, fail closed.
     ///
-    /// Borrowed rather than copied: the owner is a [`zeroize::Zeroizing`] in
-    /// [`run`], and copying it out per tick would scatter plaintext copies of
-    /// the key that nothing wipes. This is the key that answers every offline
-    /// unlock on the device — it must live in exactly one place and be wiped
-    /// when that place drops.
-    unlock_conv_key: Option<&'a [u8; 32]>,
+    /// The machine secret is borrowed, never copied: its owner is a
+    /// [`zeroize::Zeroizing`] in [`run`]. Each conversation key is derived per
+    /// lock and wiped as soon as its code is (`guardians::unlock_codes`).
+    unlock: Option<(&'a [u8; 32], &'a GuardianKeys)>,
 }
 
 /// Apply each child's freeze/thaw to **their** app.slice, and show/kill the
@@ -1369,11 +1424,23 @@ async fn apply_child_decisions(
                 // entropy is momentarily unavailable we omit it, so the lock
                 // falls back to its device-only escape (never a predictable
                 // challenge).
-                if let Some(conv_key) = ctx.unlock_conv_key {
+                //
+                // Any key in the guardian-keys signer set may answer (open
+                // question "Offline unlock with more than one guardian key"):
+                // one expected code per key, comma-separated; the lock scales
+                // its back-off by how many there are (review 2a, Info 7).
+                if let Some((machine_sk, keys)) = ctx.unlock {
                     if let Some(challenge) = random_challenge() {
-                        let expected = charter_crypto::unlock::unlock_code(conv_key, &challenge);
-                        cmd.env("CHARTER_LOCK_CHALLENGE", &challenge)
-                            .env("CHARTER_LOCK_UNLOCK_EXPECT", expected);
+                        let codes = crate::guardians::unlock_codes(
+                            machine_sk,
+                            &keys.signer_keys(),
+                            &challenge,
+                        );
+                        if !codes.is_empty() {
+                            let sep = crate::guardians::UNLOCK_EXPECT_SEP.to_string();
+                            cmd.env("CHARTER_LOCK_CHALLENGE", &challenge)
+                                .env("CHARTER_LOCK_UNLOCK_EXPECT", codes.join(&sep));
+                        }
                     }
                 }
                 // Prefer the display's own Xorg `-auth` cookie (root-readable,
@@ -1830,6 +1897,25 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     let pairing_opt = load_pairing(&sys);
     let brokered_subject_hex: Option<String> =
         pairing_opt.as_ref().map(|p| p.subject_pubkey.to_hex());
+    // Guardian roots and working keys: loaded ONCE per run (a ward paired
+    // before the section is migrated in place), and this one adapter is
+    // handed to the broker, both transports, the local link, the lock and
+    // the STATUS feed. The daemon is the state's only writer: a helper asks
+    // it (presence) or reads it read-only.
+    let guardian_keys: Option<GuardianKeys> = pairing_opt.as_ref().map(|p| {
+        crate::guardians::load_keys(
+            std::path::Path::new(crate::guardians::STATE_DIR),
+            p,
+            sys.clock().now_utc(),
+        )
+    });
+    if guardian_keys.as_ref().is_some_and(|k| !k.is_available()) {
+        eprintln!(
+            "charterd: ERROR — the guardian-keys state could not be read; nothing a guardian \
+             signs is accepted until it is restored or an administrator re-pairs. Cached \
+             clauses are still enforced"
+        );
+    }
 
     // B4: a corrupted/zero-filled machine secret must not abort the process —
     // it must leave the daemon enforcing whatever clauses are already cached
@@ -1855,12 +1941,15 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // signal is shared by the relay poll task and the link's ingest.
     let link_sink = crate::local_link::LateSink::new();
     let link_control = crate::local_link::LinkControl::new();
-    let link_guardian: Option<PubKey> = pairing_opt.as_ref().map(|p| p.guardian_pubkey);
     let (status_tx, status_machine): (Option<Arc<RealTransportFacade>>, Option<PubKey>) =
         match (pairing_opt.as_ref(), secret) {
             (Some(p), Some(secret)) => {
                 match RealTransportFacade::try_new(secret, p.guardian_pubkey, p.relays.clone()) {
                     Ok(tx) => {
+                        let tx = match &guardian_keys {
+                            Some(k) => tx.with_signer_set(k.signers()),
+                            None => tx,
+                        };
                         let m = tx.machine;
                         (
                             Some(Arc::new(tx.with_local_sink(link_sink.as_sink()))),
@@ -1882,6 +1971,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         };
     let mut status_last: std::collections::HashMap<u32, charter_proto::StatusPayload> =
         std::collections::HashMap::new();
+    // The guardians view last published (rule 5), so it is rewritten only
+    // when it changes.
+    let mut guardians_view_last: Option<charter_ipc::dto::GuardiansView> = None;
     // `clockSteppedBackFrom` stamps that reached no relay, per child, carried
     // until one lands (see `status_emit::clock_stepped_back_from`). Memory
     // only, like `status_last`: after a restart nothing is carried. The
@@ -1900,24 +1992,20 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             .unwrap_or(0),
     );
 
-    // Offline guardian unlock: derive the guardian↔machine NIP-44 conversation
-    // key ONCE (paired only). The lock spawn uses it to compute the expected
-    // 8-digit code for a fresh per-lock challenge, so a locked-out ward can be
-    // freed by the guardian answering from Kintrinsic — no network, clock, or
-    // memorized secret. `None` (unpaired, or a key that won't derive) leaves the
-    // lock's device-only escape untouched.
+    // Offline guardian unlock (paired only): at each lock spawn the expected
+    // 8-digit code for a fresh per-lock challenge is derived from the
+    // NIP-44 conversation key with every key in the guardian-keys signer set,
+    // so a locked-out ward can be freed by any guardian install answering
+    // from Kintrinsic — no network, clock, or memorized secret. `None`
+    // (unpaired) leaves the lock's device-only escape untouched.
     //
-    // Held in `Zeroizing` so it is wiped when the daemon drops it: this key is
-    // the guardian↔machine shared secret, and a plaintext copy of it left in
-    // freed heap is a copy of the thing every offline unlock is answered
-    // against.
-    let unlock_conv_key: Option<zeroize::Zeroizing<[u8; 32]>> = pairing_opt
+    // The machine secret it is derived from is held once, in `Zeroizing`,
+    // for the lock path; each conversation key is wiped as soon as its code
+    // is computed (`guardians::unlock_codes`).
+    let unlock_secret: Option<zeroize::Zeroizing<[u8; 32]>> = pairing_opt
         .as_ref()
-        .zip(secret.as_ref())
-        .and_then(|(p, s)| {
-            charter_transport::nip44::conversation_key_zeroizing(s, p.guardian_pubkey.as_bytes())
-                .ok()
-        });
+        .and(secret.as_ref())
+        .map(|s| zeroize::Zeroizing::new(*s));
 
     // If paired, stand up the broker for guardian grants (install/exec) + its
     // signal channel. Per-child screen-time enforcement runs either way — a
@@ -1934,6 +2022,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         (Some(_), None) | (None, None) => (None, None),
         (Some(pairing), Some(secret)) => {
             let enforcer = Arc::new(Mutex::new(EnforcerRuntime::new(&sys, "UTC")));
+            let keys = guardian_keys
+                .clone()
+                .expect("a paired ward always has its guardian-keys adapter");
             match RealTransportFacade::try_new(
                 secret,
                 pairing.guardian_pubkey,
@@ -1949,6 +2040,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                         events,
                         pairing.subject_pubkey,
                         extension_inbox.clone(),
+                        &keys,
                     ));
                     eprintln!("charterd: paired — guardian grants + per-child limits enforced");
                     (Some(broker), Some(rx))
@@ -1979,13 +2071,15 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // through a daemon restart (scan-to-pair, RELEASE, a re-pair), which
     // rebuilds it. Held for the daemon's lifetime — dropping the `WardLink`
     // shuts it down. Detached: the loop never awaits it.
-    let ward_link: Option<Arc<charter_link::WardLink>> = match (&broker, link_guardian, secret) {
-        (Some(b), Some(guardian), Some(secret)) => {
+    let ward_link: Option<Arc<charter_link::WardLink>> = match (&broker, &guardian_keys, secret) {
+        (Some(b), Some(keys), Some(secret)) => {
             let ingest = crate::local_link::BrokerIngest::new(b.clone(), link_control.clone());
             match charter_link::WardLink::spawn(
                 charter_link::WardLinkConfig {
                     machine_sk: zeroize::Zeroizing::new(secret),
-                    guardian,
+                    // The live signer set: a working key approved later can
+                    // complete a handshake, a departed one cannot.
+                    signers: keys.signers(),
                     state_dir: link_state_dir(&config.key_path),
                     // The carrier is the guardian's phone, never this
                     // machine: a loopback "guardian" is a local process.
@@ -2177,6 +2271,34 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             restart_after_release(poller.as_ref(), ward_link.as_deref());
             return Ok(());
         }
+        // A gift-wrapped RELAYS change (rule 11), on either route: every
+        // transport and the link were built on the old list, so come back up
+        // on the new one, as a pasted relay code does.
+        if link_control.relays_changed() {
+            restart_after_relays_change(poller.as_ref(), ward_link.as_deref());
+            return Ok(());
+        }
+        // An administrator asked for a presence code (`charter-presence`):
+        // mint it here, in the state's one writer.
+        if let Some(keys) = &guardian_keys {
+            let served = crate::guardians::serve_presence_request(
+                std::path::Path::new(crate::guardians::STATE_DIR),
+                keys,
+                now as u64,
+                &mut |buf: &mut [u8]| RealEntropy.fill(buf),
+            );
+            match served {
+                Some(crate::guardians::PresenceServed::Minted(t)) => eprintln!(
+                    "charterd: presence code shown for {} (expires in {}s)",
+                    t.bound_to.as_deref().unwrap_or("any pending statement"),
+                    t.expires_at.saturating_sub(now as u64)
+                ),
+                Some(crate::guardians::PresenceServed::Refused(why)) => {
+                    eprintln!("charterd: presence code request refused — {why}")
+                }
+                None => {}
+            }
+        }
         // M1: a poll task that died (a panicking enactor, a poisoned lock)
         // is respawned; one that keeps dying ends the daemon non-zero, so
         // systemd restarts it — the recovery a panic inline in the loop used
@@ -2283,7 +2405,22 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                         // Re-stamped, never copied: the frozen payload's seq
                         // is the one already published.
                         cur.seq = Some(crate::status_seq::next_durable(&mut status_seq));
-                        let delivered = stx.emit_status(&cur.to_json(), now as u64).await;
+                        // The same recipients and previous relays (rule 11)
+                        // as an unpaused STATUS (review batch 2, platforms
+                        // I5); a departed key's last one waits for the pause
+                        // to end.
+                        let delivered = match &guardian_keys {
+                            Some(k) => {
+                                stx.emit_status_to(
+                                    &cur.to_json(),
+                                    now as u64,
+                                    &k.signers().recipients(),
+                                    &k.status_relays(now as u64),
+                                )
+                                .await
+                            }
+                            None => stx.emit_status(&cur.to_json(), now as u64).await,
+                        };
                         if delivered && cur.enforcement_gap_secs.is_some() {
                             gap_delivered = true;
                         }
@@ -3096,7 +3233,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     lock_bin: &lock_bin,
                     infos: &lock_infos,
                     paired: broker.is_some(),
-                    unlock_conv_key: unlock_conv_key.as_deref(),
+                    unlock: unlock_secret.as_deref().zip(guardian_keys.as_ref()),
                 },
                 &roster,
                 &mut lock,
@@ -3175,6 +3312,54 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         if !slow_tick {
             tokio::time::sleep(fast).await;
             continue;
+        }
+
+        // 4a) Guardian roots and working keys: run the timers (a removal's
+        //     notice ending, a pending statement expiring) even while the
+        //     relays are down, and publish who the ward trusts and who set
+        //     each rule (rule 5) for the ward's own CLI, world-readable.
+        if let Some(keys) = &guardian_keys {
+            // A pasted relay code (`charter-pair --relay-code`, another
+            // process) changes the pairing record while this runs; it then
+            // restarts charterd, but the live adapter follows the record at
+            // once (and if that restart fails), so rule 11's previous-relays
+            // window starts with the change. The ONE adapter is updated: a
+            // second instance would overwrite its writes.
+            if let Some(record) = load_pairing(&sys) {
+                match keys.follow_pairing(&record, now as u64) {
+                    Ok(true) => eprintln!("charterd: the guardian state follows a relay change"),
+                    Ok(false) => {}
+                    // An unavailable state is reported once, at start.
+                    Err(_) if !keys.is_available() => {}
+                    Err(e) => eprintln!(
+                        "charterd: could not record a relay change in the guardian state ({e})"
+                    ),
+                }
+            }
+            let departed = crate::guardians::advance(keys, now as u64);
+            if !departed.is_empty() {
+                eprintln!(
+                    "charterd: {} guardian key(s) left the signer set on a timer",
+                    departed.len()
+                );
+            }
+            let view = crate::guardians::build_view(keys, now as u64);
+            if view != guardians_view_last {
+                let path = std::path::Path::new(crate::guardians::GUARDIANS_VIEW_PATH);
+                match &view {
+                    Some(v) => {
+                        if let Err(e) = crate::guardians::publish_view(path, v) {
+                            eprintln!("charterd: could not publish the guardians view: {e}");
+                        }
+                    }
+                    // The state became unreadable: show nothing rather than
+                    // a stale list of who governs this ward.
+                    None => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                guardians_view_last = view;
+            }
         }
 
         // 4b) Refresh the installed-app inventory when the launcher OR the
@@ -3426,6 +3611,11 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // invisible to the guardian on that score.
                 status.app_version_code = Some(crate::version::version_code());
                 status.app_version_name = Some(crate::version::version_name().to_string());
+                // Who the ward trusts (contract, *Guardian roots and working
+                // keys*, STATUS). A change is emitted at once.
+                status.guardians = guardian_keys
+                    .as_ref()
+                    .and_then(|k| k.status_guardians(now as u64));
                 // A guardian-triggered update that has not landed, and why
                 // (machine-wide, so every ward's STATUS carries it).
                 status.update_health = updater.health();
@@ -3457,16 +3647,55 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // waiting (04-G5), which is why it is not awaited here.
                 let stx = stx.clone();
                 let at = now as u64;
+                // Rule 9: the signer set's recipients and the previous relays
+                // (rule 11), read once for the batch.
+                let keys = guardian_keys.clone();
+                let sent = keys
+                    .as_ref()
+                    .map(|k| (k.signers().recipients(), k.status_relays(at)));
+                // The departed keys owed one last STATUS get a separate,
+                // minimal one that shows their departure (open question "A
+                // departed key's last STATUS"), each on its own wrap.
+                let farewell = keys.as_ref().and_then(|k| k.farewell()).map(|f| {
+                    let seq = crate::status_seq::next_durable(&mut status_seq);
+                    let json = f.to_json(&machine, at, Some(seq));
+                    (f.recipients, json)
+                });
                 let handle = tokio::spawn(async move {
                     let mut outcomes = Vec::with_capacity(batch.len());
                     for (uid, json, carried_gap, stepped_from) in batch {
-                        let delivered = stx.emit_status(&json, at).await;
+                        let delivered = match &sent {
+                            Some((recipients, extra)) => {
+                                stx.emit_status_to(&json, at, recipients, extra).await
+                            }
+                            None => stx.emit_status(&json, at).await,
+                        };
                         outcomes.push(StatusOutcome {
                             uid,
                             delivered,
                             carried_gap,
                             stepped_from,
                         });
+                    }
+                    // A departed key is told only once a relay took the wrap
+                    // addressed to it (review batch 2, platforms L1); a key
+                    // that departed since the farewell was read stays owed.
+                    if let (Some(k), Some((departed, json))) = (&keys, farewell) {
+                        let extra = sent.map(|(_, extra)| extra).unwrap_or_default();
+                        let mut told = Vec::new();
+                        for key in departed {
+                            if stx
+                                .emit_status_to(&json, at, std::slice::from_ref(&key), &extra)
+                                .await
+                            {
+                                told.push(key);
+                            }
+                        }
+                        if !told.is_empty() {
+                            if let Err(e) = k.mark_status_sent(&told, at) {
+                                eprintln!("charterd: could not record the last STATUS sent: {e}");
+                            }
+                        }
                     }
                     outcomes
                 });
@@ -3575,6 +3804,25 @@ fn restart_after_release(
         "charterd: guardian RELEASE applied — this device is no longer managed; \
          restarting unpaired"
     );
+    if let Some(p) = poller {
+        p.abort();
+    }
+    if let Some(l) = link {
+        l.shutdown();
+    }
+    let _ = std::process::Command::new("systemctl")
+        .args(["try-restart", "charterd.service"])
+        .status();
+}
+
+/// A gift-wrapped RELAYS change was applied (rule 11). The pairing record
+/// already holds the new list; restart so every transport, the link and the
+/// STATUS feed are rebuilt on it, the way a pasted relay code is applied.
+fn restart_after_relays_change(
+    poller: Option<&crate::local_link::BrokerPoller>,
+    link: Option<&charter_link::WardLink>,
+) {
+    eprintln!("charterd: a guardian changed this device's relays — restarting on the new list");
     if let Some(p) = poller {
         p.abort();
     }

@@ -69,10 +69,20 @@ object HomeCopy {
      * The guardian line for About. Paired: who, and where this device
      * listens. Unpaired: say so plainly — the pairing itself lives on the home
      * screen, which is the onboarding surface until a guardian is pinned.
+     *
+     * Who comes from the guardian summary (the roots the ward's guardian-keys
+     * state holds), not the pairing record: after a root move the record's
+     * guardian is legacy only. One root is named (label and short npub);
+     * several are counted; an unreadable summary says only "a guardian".
      */
-    fun guardianLine(state: CharterCore.PairingState?): String {
+    fun guardianLine(state: CharterCore.PairingState?, guardians: CharterCore.GuardiansSummary? = null): String {
         if (state?.paired != true) return "Not paired with a guardian yet."
-        val who = state.guardianShort?.let { "Paired with guardian $it" } ?: "Paired with a guardian"
+        val roots = guardians?.takeIf { it.available }?.roots.orEmpty()
+        val who = when (roots.size) {
+            0 -> "Paired with a guardian"
+            1 -> "Paired with guardian ${GuardianCopy.guardianName(roots[0].label, roots[0].root)}"
+            else -> "Paired with ${roots.size} guardians"
+        }
         val relay = state.relays.firstOrNull()?.let { "\nListening on $it" } ?: ""
         return who + relay
     }

@@ -63,12 +63,11 @@ fn err_out(e: IpcError) -> CliOutcome {
 
 /// Dispatch a parsed argv (without the program name).
 ///
-/// `pairing` stays in the signature (callers — `main.rs`, the mock tests —
-/// still build a `PairingSink`) even though `pair` no longer calls it; see
-/// `PAIR_REDIRECT`.
+/// `pairing` is read by `status` (who set the rules, rule 5); `pair` no
+/// longer calls it, see `PAIR_REDIRECT`.
 pub async fn dispatch(
     client: &dyn CharterdClient,
-    _pairing: &dyn PairingSink,
+    pairing: &dyn PairingSink,
     probe: &dyn ExecProbe,
     args: &[String],
 ) -> CliOutcome {
@@ -113,7 +112,18 @@ pub async fn dispatch(
         "status" => {
             let id = positional(1).unwrap_or_default();
             match client.query_status(&id).await {
-                Ok(rows) => ok(render::render_status(&rows, json)),
+                Ok(rows) => {
+                    let mut text = render::render_status(&rows, json);
+                    // Who set the rules (rule 5), in the table form only: the
+                    // JSON form stays the request rows it always was.
+                    if !json {
+                        if let Ok(Some(g)) = pairing.pairing_state().await.map(|p| p.guardians) {
+                            text.push_str("\n\n");
+                            text.push_str(&render::render_guardians(&g));
+                        }
+                    }
+                    ok(text)
+                }
                 Err(e) => err_out(e),
             }
         }

@@ -53,6 +53,12 @@ export interface TargetDevice {
    *  `update` slot is one per ward on each device, so an Android update must
    *  never land in a laptop's slot, nor a Linux one in a phone's. */
   platform?: "linux" | "android";
+  /**
+   * The last USB-debugging state this install sent to the device
+   * (`Device.debugging`), so rule 4 can re-sign a debugging clause sent
+   * before the standing record existed.
+   */
+  debugging?: { allow: boolean; until?: number };
 }
 
 /** Where one child's clauses must be delivered. */
@@ -101,6 +107,13 @@ export interface RealSignerDeps {
    * whose bunker approves out-of-band).
    */
   confirmGate?: ConfirmGate;
+  /**
+   * Guardian roots and working keys: the key that signs and seals for one
+   * ward. Returns this install's working key where the ward holds it (and the
+   * child passes the versioning gate); undefined keeps the connected root's
+   * key, as before the section. Absent = always the root's.
+   */
+  pickOps?: (machine: string) => GuardianOps | undefined;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -143,6 +156,93 @@ export class RealSigner implements Signer {
   private lastIssuedAt = RealSigner.loadLastIssuedAt();
 
   private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
+  /** The last non-policy clause sent per child and device: what rule 4 re-signs. */
+  private static readonly STANDING_KEY = "charter.signer.standing.v1";
+
+  private static loadStanding(): Record<string, Record<string, ClausePayload>> {
+    try {
+      const raw = JSON.parse(localStorage.getItem(RealSigner.STANDING_KEY) ?? "{}") as unknown;
+      return typeof raw === "object" && raw !== null && !Array.isArray(raw)
+        ? (raw as Record<string, Record<string, ClausePayload>>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Remember a gift, stand-down, maintenance window, update or debugging
+   * clause as the latest of its kind for each device it went to. Only once it
+   * was sent or held for the home network: a send that failed outright is not
+   * standing anywhere, and re-signing it later would deliver it after all.
+   */
+  private recordStanding(childId: string, machines: string[], clause: ClausePayload): void {
+    const all = RealSigner.loadStanding();
+    const mine = { ...(all[childId] ?? {}) };
+    for (const m of machines) mine[`${clause.kind}:${m}`] = clause;
+    all[childId] = mine;
+    try {
+      localStorage.setItem(RealSigner.STANDING_KEY, JSON.stringify(all));
+    } catch {
+      // Private mode / quota: the re-sign covers what it can.
+    }
+  }
+
+  /** `settle`, recording the clause as standing when it was sent or held. */
+  private settleStanding(batch: SendBatch, childId: string, machines: string[], clause: ClausePayload): SignOutcome {
+    try {
+      const out = this.settle(batch);
+      this.recordStanding(childId, machines, clause);
+      return out;
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) this.recordStanding(childId, machines, clause);
+      throw err;
+    }
+  }
+
+  /**
+   * Rule 4: re-sign the latest gift, stand-down, maintenance window, update
+   * and debugging clause this install sent to each of the child's devices,
+   * unchanged but for a fresh `issuedAt` (and the same `id`, so a gift is
+   * never added twice). Sent before a departure, so a relay can't replay an
+   * older clause of those kinds once the departing key's own stops counting.
+   * Nothing recorded = nothing to re-sign.
+   */
+  async resignStanding(childId: string): Promise<SignOutcome> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const target = this.deps.resolveChild(childId);
+    if (!target) throw new Error(`unknown child: ${childId}`);
+    const recorded = RealSigner.loadStanding()[childId] ?? {};
+    const sends = Object.entries(recorded).flatMap(([key, clause]) => {
+      const machine = key.slice(key.indexOf(":") + 1);
+      const device = target.devices.find((d) => d.pubkey === machine);
+      return device ? [{ device, clause }] : [];
+    });
+    // A debugging clause sent before the standing record existed is known
+    // only from the device's own record: re-sign that too (batch 3b review L6).
+    for (const device of target.devices) {
+      if (!device.debugging || recorded[`debugging:${device.pubkey}`]) continue;
+      const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt: 0, body: debuggingToGrant(device.debugging, 0) };
+      if (target.subject) clause.subject = target.subject;
+      sends.push({ device, clause });
+    }
+    if (sends.length === 0) return { ok: true };
+    await this.authorize("clause", `Re-send ${target.name ?? childId}'s current rules`);
+    const issuedAt = this.nextIssuedAt();
+    const held = new SendBatch();
+    for (const { device, clause } of sends) {
+      const body = clause.body as unknown as Record<string, unknown>;
+      const fresh: ClausePayload = {
+        ...clause,
+        issuedAt,
+        body: ("issuedAt" in body ? { ...body, issuedAt } : body) as unknown as ClausePayload["body"],
+      };
+      const wrap = await giftWrapClause(fresh, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+      await this.send(target.relays, wrap, CLAUSE_META, held);
+    }
+    return this.settle(held);
+  }
 
   private static loadLastIssuedAt(): number {
     try {
@@ -183,6 +283,16 @@ export class RealSigner implements Signer {
 
   status(): SignerState {
     return this.state;
+  }
+
+  /** The connected root's operations (R over NIP-46, or the local key), or null. */
+  rootOps(): GuardianOps | null {
+    return this.guardian;
+  }
+
+  /** Who signs and seals for `machine`: its working key where that applies, else the root. */
+  private sealerFor(machine: string, root: GuardianOps): GuardianOps {
+    return this.deps.pickOps?.(machine) ?? root;
   }
 
   async connect(kind: SignerKind): Promise<SignerState> {
@@ -374,7 +484,7 @@ export class RealSigner implements Signer {
       const clauses = this.appRulesClauses(childId, policy, target.subject, issuedAt);
       for (const clause of clauses) {
         for (const device of target.devices) {
-          const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+          const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
           await this.send(target.relays, wrap, CLAUSE_META, held);
         }
       }
@@ -390,7 +500,7 @@ export class RealSigner implements Signer {
       const effective = effectivePolicyForDevice(policy, device.id);
       const clauses = policyToClauses(target.subject, effective, issuedAt);
       for (const clause of clauses) {
-        const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+        const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
         await this.send(target.relays, wrap, CLAUSE_META, held);
       }
     }
@@ -415,7 +525,7 @@ export class RealSigner implements Signer {
     const createdAt = this.deps.now();
     for (const [devicePubkey, payload] of Object.entries(payloadsByDevice)) {
       if (!target.devices.some((d) => d.pubkey === devicePubkey)) continue;
-      const wrap = await giftWrapUsageSync(payload, devicePubkey, guardian, createdAt);
+      const wrap = await giftWrapUsageSync(payload, devicePubkey, this.sealerFor(devicePubkey, guardian), createdAt);
       await this.deps.publish(target.relays, wrap);
     }
     return { ok: true };
@@ -456,10 +566,10 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "maintenance", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
   }
 
   /**
@@ -506,10 +616,10 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "gift", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
   }
 
   /**
@@ -565,10 +675,10 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "standdown", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
   }
 
   async signUpdateClause(
@@ -597,10 +707,10 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of phones) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleStanding(held, childId, phones.map((d) => d.pubkey), clause);
   }
 
   async signDebUpdateClause(
@@ -634,9 +744,9 @@ export class RealSigner implements Signer {
     const body = debUpdateToGrant(deb, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
-    return this.settle(held);
+    return this.settleStanding(held, childId, [device.pubkey], clause);
   }
 
   /**
@@ -676,10 +786,10 @@ export class RealSigner implements Signer {
     const body = debuggingToGrant(grant, issuedAt);
     const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     try {
-      return { ...this.settle(held), issuedAt };
+      return { ...this.settleStanding(held, childId, [device.pubkey], clause), issuedAt };
     } catch (err) {
       // A held send throws; hand the caller the value that was really signed.
       if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;
@@ -728,7 +838,7 @@ export class RealSigner implements Signer {
         ? `Disconnect ${label} — it stops following your rules`
         : `Release device ${machinePubkey.slice(0, 8)}…`,
     );
-    const wrap = await giftWrapRelease(machinePubkey, guardian, this.deps.now());
+    const wrap = await giftWrapRelease(machinePubkey, this.sealerFor(machinePubkey, guardian), this.deps.now());
     await this.deps.publish(relays, wrap);
     return { ok: true };
   }
@@ -744,6 +854,11 @@ export class RealSigner implements Signer {
     if (!/^[0-9a-f]{64}$/.test(machinePubkey)) return { ok: true };
     if (!/^[0-9a-f]{32}$/.test(token)) return { ok: true };
     await this.authorize("clause", `Connect to computer ${machinePubkey.slice(0, 8)}…`);
+    // Always offered by the connected root, never by a working key: a ward
+    // that predates guardian keys would pin the seal author, and the app
+    // can't tell its version before pairing. W's approval follows once the
+    // ward is recorded (docs/guardian-keys-open-questions.md, "A working-key
+    // PAIR_OFFER to a ward that predates the section").
     const wrap = await giftWrapPairOffer(
       machinePubkey,
       token,
@@ -791,7 +906,7 @@ export class RealSigner implements Signer {
         source: install.source,
         ts,
       });
-      const wrap = await giftWrapGrant(payload, install.machine, guardian, ts);
+      const wrap = await giftWrapGrant(payload, install.machine, this.sealerFor(install.machine, guardian), ts);
       await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: install.reqId });
       return { ok: true };
     }
@@ -815,7 +930,7 @@ export class RealSigner implements Signer {
         minutesGranted: ctx?.minutesGranted ?? 0,
         ts,
       });
-      const wrap = await giftWrapGrant(payload, appOpen.machine, guardian, ts);
+      const wrap = await giftWrapGrant(payload, appOpen.machine, this.sealerFor(appOpen.machine, guardian), ts);
       await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: appOpen.reqId });
       return { ok: true };
     }
@@ -864,7 +979,7 @@ export class RealSigner implements Signer {
       budgetTz: ctx.budgetTz,
     });
     // The GRANT answers exactly ONE device — the machine that brokered the ask.
-    const wrap = await giftWrapGrant(payload, wire.machine, guardian, ts);
+    const wrap = await giftWrapGrant(payload, wire.machine, this.sealerFor(wire.machine, guardian), ts);
     await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: wire.reqId });
     return { ok: true };
   }

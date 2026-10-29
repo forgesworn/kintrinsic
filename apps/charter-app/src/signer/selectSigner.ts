@@ -4,6 +4,8 @@ import type { Signer } from "./Signer";
 import { createMockSigner, type ConfirmGate } from "./mockSigner";
 import { createSignetSigner } from "./signetSigner";
 import { createLocalSigner } from "./localSigner";
+import { createUnsetSigner } from "./unsetSigner";
+import type { RealSignerDeps } from "./realSigner";
 import type { LocalRouteHooks } from "./routePublish";
 
 export interface SelectSignerDeps {
@@ -13,13 +15,22 @@ export interface SelectSignerDeps {
   confirmGate: ConfirmGate;
   /** Home-network delivery bookkeeping, shared by both real signers. */
   localRoute?: LocalRouteHooks;
+  /** Guardian roots and working keys, for the Signet signer (see SignetSignerConfig). */
+  keys?: {
+    knownRoot: () => string | undefined;
+    workingKey: () => Uint8Array;
+    pickOps: NonNullable<RealSignerDeps["pickOps"]>;
+  };
+  /** Fall back to the demo mock signer (development only). Defaults to `import.meta.env.DEV`. */
+  allowMock?: boolean;
 }
 
 /**
  * Pick the concrete Signer for a persisted signer state:
  *   kind "local"  → the local-key self-signer (this phone holds the key)
  *   bunkerUri set  → the Signet NIP-46 bunker signer
- *   otherwise      → the local mock (pre-setup default)
+ *   otherwise      → nothing set up: a disconnected signer that refuses to
+ *                    sign (the demo mock only in development)
  * `kind` "local" is checked FIRST so it never carries a bunkerUri.
  */
 export function selectSigner(signerState: SignerState, deps: SelectSignerDeps): Signer {
@@ -39,7 +50,11 @@ export function selectSigner(signerState: SignerState, deps: SelectSignerDeps): 
       resolveChild: deps.resolveChild,
       childPolicies: deps.childPolicies,
       localRoute: deps.localRoute,
+      ...(deps.keys ?? {}),
     });
   }
-  return createMockSigner({ initial: signerState, confirmGate: deps.confirmGate });
+  if (deps.allowMock ?? import.meta.env.DEV) {
+    return createMockSigner({ initial: signerState, confirmGate: deps.confirmGate });
+  }
+  return createUnsetSigner(signerState);
 }

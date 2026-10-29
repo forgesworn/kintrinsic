@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "scrypt": {
+    "N": 32768,
+    "r": 8,
+    "p": 1,
+    "dkLen": 32,
+    "input": "utf8(pin)",
+    "salt": "hex-decoded record salt"
+  },
+  "vectors": [
+    {
+      "pin": "123456",
+      "salt": "d414c6c3963614ded791816665c2deef",
+      "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9",
+      "record": {
+        "v": 1,
+        "salt": "d414c6c3963614ded791816665c2deef",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      }
+    },
+    {
+      "pin": "000000",
+      "salt": "9786cd4059bfeb5ecc6ea5224d355bb6",
+      "hash": "9275d93bdfa6199b3088fb06c2c1dfc50d7f55cddd0df8a67bd5b279ffaae040",
+      "record": {
+        "v": 1,
+        "salt": "9786cd4059bfeb5ecc6ea5224d355bb6",
+        "hash": "9275d93bdfa6199b3088fb06c2c1dfc50d7f55cddd0df8a67bd5b279ffaae040"
+      }
+    },
+    {
+      "pin": "987654",
+      "salt": "6b4198bb2ce2c110c992da7a815ed825",
+      "hash": "5dc7c834274f7d30657ac6698ae8d9020560a9191520f31e56cc4a5d065daef2",
+      "record": {
+        "v": 1,
+        "salt": "6b4198bb2ce2c110c992da7a815ed825",
+        "hash": "5dc7c834274f7d30657ac6698ae8d9020560a9191520f31e56cc4a5d065daef2"
+      }
+    },
+    {
+      "pin": "1234",
+      "salt": "40002a2f0bf116beeed39568baa6868f",
+      "hash": "c81c177dc558b3627023c2466cd9e7fe73f19e534bd4963bef5963fe30e93cc7",
+      "record": {
+        "v": 1,
+        "salt": "40002a2f0bf116beeed39568baa6868f",
+        "hash": "c81c177dc558b3627023c2466cd9e7fe73f19e534bd4963bef5963fe30e93cc7"
+      }
+    }
+  ],
+  "records": [
+    {
+      "name": "valid",
+      "record": {
+        "v": 1,
+        "salt": "d414c6c3963614ded791816665c2deef",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": true
+    },
+    {
+      "name": "salt_64_bytes",
+      "record": {
+        "v": 1,
+        "salt": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": true
+    },
+    {
+      "name": "v_2",
+      "record": {
+        "v": 2,
+        "salt": "d414c6c3963614ded791816665c2deef",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": false
+    },
+    {
+      "name": "salt_15_bytes",
+      "record": {
+        "v": 1,
+        "salt": "ababababababababababababababab",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": false
+    },
+    {
+      "name": "salt_65_bytes",
+      "record": {
+        "v": 1,
+        "salt": "ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": false
+    },
+    {
+      "name": "hash_uppercase",
+      "record": {
+        "v": 1,
+        "salt": "d414c6c3963614ded791816665c2deef",
+        "hash": "6BAC7200F62A786BA6C1C8253F23DA20D3237857968953D22FB0BF8E2D3CD9A9"
+      },
+      "valid": false
+    },
+    {
+      "name": "hash_31_bytes",
+      "record": {
+        "v": 1,
+        "salt": "d414c6c3963614ded791816665c2deef",
+        "hash": "ac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": false
+    },
+    {
+      "name": "salt_odd_length",
+      "record": {
+        "v": 1,
+        "salt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "hash": "6bac7200f62a786ba6c1c8253f23da20d3237857968953d22fb0bf8e2d3cd9a9"
+      },
+      "valid": false
+    }
+  ],
+  "backoff": [
+    {
+      "failures": 0,
+      "waitSeconds": 0
+    },
+    {
+      "failures": 1,
+      "waitSeconds": 0
+    },
+    {
+      "failures": 2,
+      "waitSeconds": 0
+    },
+    {
+      "failures": 3,
+      "waitSeconds": 0
+    },
+    {
+      "failures": 4,
+      "waitSeconds": 0
+    },
+    {
+      "failures": 5,
+      "waitSeconds": 60
+    },
+    {
+      "failures": 6,
+      "waitSeconds": 120
+    },
+    {
+      "failures": 7,
+      "waitSeconds": 240
+    },
+    {
+      "failures": 8,
+      "waitSeconds": 480
+    },
+    {
+      "failures": 9,
+      "waitSeconds": 960
+    },
+    {
+      "failures": 10,
+      "waitSeconds": 1920
+    },
+    {
+      "failures": 11,
+      "waitSeconds": 3600
+    },
+    {
+      "failures": 12,
+      "waitSeconds": 3600
+    },
+    {
+      "failures": 13,
+      "waitSeconds": 3600
+    }
+  ]
+}

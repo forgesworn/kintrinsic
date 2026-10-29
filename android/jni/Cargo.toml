@@ -51,6 +51,12 @@ charter-webpolicy = { path = "../../core/crates/charter-webpolicy" }
 # The local link (v1): the ward client that connects out to the guardian
 # carrier on the home network (docs/local-network-design.md).
 charter-link = { path = "../../core/crates/charter-link", features = ["net"] }
+# The guardian-keys state machine's types (pending statements, the PIN rules)
+# for the ward's presence screen and guardian list.
+charter-guardians = { path = "../../core/crates/charter-guardians" }
+# The presence code's QR, drawn by Kotlin from the module grid (the ward app
+# carries no QR library). Encoder only: no image or SVG features.
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 charter-testkit = { path = "../../core/crates/charter-testkit" }

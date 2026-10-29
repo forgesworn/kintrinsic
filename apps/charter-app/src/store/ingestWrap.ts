@@ -9,7 +9,10 @@
 
 import type { NostrEvent } from "nostr-tools";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
-import { unwrapStatus, type DeviceStatus } from "../wire/status";
+import { unwrapStatusOrFarewell, type DeviceStatus, type StatusFarewell } from "../wire/status";
+import { MAX_WRAP_JITTER_SECS } from "../wire/request";
+import { unwrapToWorkingKey } from "../keys/guardianKeys";
+import { CHARTER_FAMILY_ROSTER, type SignedEvent } from "../keys/sdk";
 
 export interface WrapIngestContext {
   guardianSk: Uint8Array;
@@ -23,12 +26,26 @@ export interface WrapIngestContext {
   ingestStatus: (status: DeviceStatus) => void;
   /** Take in a ward ask; false = nobody to attribute it to yet (retry later). */
   ingestRequest: (request: DeviceRequest) => boolean;
+  /** A departed key's last STATUS (guardian keys). Never usage data. */
+  ingestFarewell?: (farewell: StatusFarewell) => void;
+  /**
+   * A family roster (31119) from another guardian install's working key.
+   * Returns "ok", or why it was refused. Every refusal is final: a roster is
+   * accepted only on the strength of a root this install already trusts, so
+   * nothing a later STATUS says can let it in (and a sender nobody vouches
+   * for can't make this phone decrypt its rosters on every poll).
+   */
+  ingestRoster?: (inbound: { sealAuthor: string; inner: SignedEvent }) => string | void;
 }
 
 export type WrapIngestResult =
   /** Already handled earlier this session; nothing was decrypted. */
   | { kind: "handled" }
   | { kind: "status" }
+  /** A departed key's last STATUS. */
+  | { kind: "farewell" }
+  /** A family roster, taken in or refused (either way, for good). */
+  | { kind: "roster" }
   /** Not ours, or not readable. Neither will change with time. */
   | { kind: "unreadable" }
   /** An ask we already hold (this session or persisted). */
@@ -42,13 +59,30 @@ export type WrapIngestResult =
 export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
   // The one line that saves the battery: everything below this decrypts.
   if (ctx.handledWraps.has(w.id)) return { kind: "handled" };
-  const s = unwrapStatus(w, ctx.guardianSk);
-  if (s) {
-    ctx.ingestStatus(s);
+  const opened = unwrapStatusOrFarewell(w, ctx.guardianSk);
+  if (opened && "status" in opened) {
+    ctx.ingestStatus(opened.status);
     ctx.handledWraps.add(w.id);
     return { kind: "status" };
   }
+  if (opened && ctx.ingestFarewell) {
+    // A departed key's last STATUS: never usage, only where this phone stands.
+    ctx.ingestFarewell(opened.farewell);
+    ctx.handledWraps.add(w.id);
+    return { kind: "farewell" };
+  }
   const req = unwrapRequest(w, ctx.guardianSk);
+  // A roster from another guardian install, inside the same freshness window
+  // the other intakes keep.
+  const fresh = Math.abs(Math.floor(Date.now() / 1000) - w.created_at) <= MAX_WRAP_JITTER_SECS;
+  if (!req && ctx.ingestRoster && fresh) {
+    const roster = unwrapToWorkingKey(w, ctx.guardianSk);
+    if (roster && roster.inner.kind === CHARTER_FAMILY_ROSTER) {
+      ctx.ingestRoster(roster);
+      ctx.handledWraps.add(w.id);
+      return { kind: "roster" };
+    }
+  }
   if (!req) {
     // Not ours, or not readable. Neither will change with time.
     ctx.handledWraps.add(w.id);

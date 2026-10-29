@@ -752,6 +752,46 @@ function dailyStepper(min){
   return `<div class="stepper" style="max-width:280px"><button data-step="daily" data-d="-1">−</button><div class="val" id="v-daily">${esc(fmtDaily(min))}</div><button data-step="daily" data-d="1">+</button></div>`;
 }
 
+// Who this computer trusts, as charterd publishes it. Short npubs only: a
+// guardian's own label never stands alone (it can be spoofed).
+function guardianRoots(){
+  const roots = (S.guardians && Array.isArray(S.guardians.roots)) ? S.guardians.roots : [];
+  if(!roots.length) return "";
+  return `<p class="muted" style="margin-top:14px">${roots.length>1?"Guardians":"Guardian"}: ${roots.map(esc).join(", ")}</p>`;
+}
+function pendingText(p){
+  if(p.kind==="coguardian") return "Add "+p.key+" as a guardian";
+  if(p.kind==="removal") return "Remove the guardian "+p.key;
+  if(p.kind==="move") return "Move a guardian to the new identity "+p.key;
+  return p.kind+" "+p.key;
+}
+// "Confirm in person": a change to who manages this computer (another
+// parent, a removal, a new identity) waits until a guardian standing HERE
+// scans a one-time code. Only a parent can show the code (admin password).
+function presenceCard(){
+  const pend = (S.guardians && Array.isArray(S.guardians.pending)) ? S.guardians.pending : [];
+  const pres = S.presence;
+  if(!pend.length && !pres) return "";
+  const body = pres
+    ? `<div class="qr-wrap">
+        <div class="qr">${pres.qr||""}</div>
+        <ol class="steps">
+          <li><span class="txt">${esc(pendingText(pres))}: the guardian opens <b>Kintrinsic</b> on their phone and scans this code.</span></li>
+          <li><span class="txt">Or types this code: <b>${esc(pres.short||"")}</b></span></li>
+        </ol>
+      </div>
+      <p class="muted" style="margin-top:16px;text-align:center">The code works once and expires in ${fmtLeft(pres.secsLeft)}.</p>`
+    : pend.map(p=>`<div class="stack" style="margin-top:12px">
+        <span>${esc(pendingText(p))}</span>
+        <button class="btn btn-wax btn-block" data-presence="${esc(p.d)}">${busySpin("Show the code to confirm")}</button>
+      </div>`).join("")
+      + `<p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password — only a parent can show this code.</p>`;
+  return `<div class="card pad-lg" style="margin-top:18px">
+      <p class="eyebrow">Confirm in person</p>
+      ${body}
+    </div>`;
+}
+
 function vConnect(){
   if(!S.configured) return notReady("Set up Kintrinsic first","Connect a phone once this computer is set up on the Home screen.");
   if(S.paired) return `
@@ -760,9 +800,11 @@ function vConnect(){
     <p class="lede">This computer takes its limits from your phone. You can set limits, see time used, and approve “more time” from Kintrinsic — anywhere.</p>
     <div class="card pad-lg" style="margin-top:26px">
       <div class="banner ok"><svg class="bi" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg><span>Your phone is connected.</span></div>
+      ${guardianRoots()}
       <button class="btn btn-ghost btn-block" id="do-invite" style="margin-top:18px">${busySpin("Connect a different phone")}</button>
       <p class="muted" style="margin-top:10px;text-align:center">Connecting another phone replaces this one.</p>
-    </div>`;
+    </div>
+    ${presenceCard()}`;
 
   // Waiting for the scan: the QR carries a one-time code, so the phone can
   // finish the pairing by itself. This page flips on its own when it lands.
@@ -889,6 +931,7 @@ function wire(){
   };
   const inv=document.getElementById("do-invite");
   if(inv) inv.onclick=()=>{ act(); send({cmd:"invite"}); };
+  document.querySelectorAll("[data-presence]").forEach(b=>b.onclick=()=>{ act(); send({cmd:"presence", d:b.dataset.presence}); });
   const rec=document.getElementById("do-recovery"); if(rec) rec.onclick=()=>{ send({cmd:"recovery"}); showToast("Opening Recovery…"); };
   // Amount chooser + the give/take/ask verbs.
   document.querySelectorAll("[data-amt]").forEach(b=>b.onclick=()=>{ adjustMins=+b.dataset.amt; render(); });
@@ -944,7 +987,7 @@ send({cmd:"refresh"});
 // While a pairing code is on screen the phone finishes the job over the
 // network, so nothing here would otherwise tell us it landed. Poll until it
 // does — then the Connect page flips to "Connected" unaided.
-setInterval(()=>{ if(route==="connect" && !S.paired && (S.invited||S.invitedOnce)) send({cmd:"refresh"}); }, 1000);
+setInterval(()=>{ if(route==="connect" && ((!S.paired && (S.invited||S.invitedOnce)) || (S.presence && !S.busy))) send({cmd:"refresh"}); }, 1000);
 // Today is a LIVE panel: the numbers move on their own as time is used, and a
 // panel that only updates when you press something is how a ward ends up
 // staring at a figure that stopped being true ten minutes ago. Only while

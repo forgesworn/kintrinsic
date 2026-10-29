@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use charter_link::{AckResult, LocalSink, WardIngest, WardLink, WardLinkConfig};
-use charter_primitives::{NostrEvent, PubKey};
+use charter_primitives::NostrEvent;
 use charter_spine::LocalIngestOptions;
 
 use crate::warden::Warden;
@@ -105,14 +105,14 @@ fn prepare_socket(_net: Arc<AtomicU64>) -> Option<charter_link::PrepareSocket> {
 }
 
 impl LinkHandle {
-    /// Start a link to `guardian` with its state (outbox, remembered
+    /// Start a link to the keys in `signers` with its state (outbox, remembered
     /// address) under `state_dir`. `allow_loopback` is for host tests (a
     /// carrier on 127.0.0.1); production passes `false`.
     pub fn spawn(
         home: WardenHome,
         gen: u64,
         machine_sk: [u8; 32],
-        guardian: PubKey,
+        signers: Arc<dyn charter_primitives::SignerSet>,
         state_dir: PathBuf,
         allow_loopback: bool,
     ) -> Result<LinkHandle, String> {
@@ -133,7 +133,10 @@ impl LinkHandle {
         let link = WardLink::spawn(
             WardLinkConfig {
                 machine_sk: zeroize::Zeroizing::new(machine_sk),
-                guardian,
+                // The live signer set: any key in it may complete the
+                // handshake (contract, *Other places that name the guardian*),
+                // and an approval or a departure is followed as it lands.
+                signers,
                 state_dir: state_dir.clone(),
                 allow_loopback,
                 prepare_socket: prepare_socket(net_handle.clone()),

@@ -294,6 +294,58 @@ pub struct StatusPayload {
     /// failed. Additive under the open STATUS field-set decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debugging_open: Option<bool>,
+    /// The ward's guardian roots, working keys, pending statements and relay
+    /// list (contract, *Guardian roots and working keys*, STATUS). Present
+    /// only on a ward that implements that section; absent keeps every
+    /// earlier payload byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardians: Option<StatusGuardians>,
+}
+
+/// STATUS `guardians`: who the ward trusts, as it sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusGuardians {
+    /// Each pinned root with its working keys in the signer set.
+    pub roots: Vec<StatusGuardianRoot>,
+    /// Pending co-guardian, removal and move statements.
+    pub pending: Vec<StatusPendingStatement>,
+    /// How many tombstones (applied withdrawals and removals) the ward holds,
+    /// so a dropped withdrawal shows up as a mismatch.
+    pub tombstones: u32,
+    /// The ward's current relay list.
+    pub relays: Vec<String>,
+}
+
+/// One pinned root and its working keys (64 lowercase hex each).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusGuardianRoot {
+    pub root: PubKey,
+    pub keys: Vec<PubKey>,
+}
+
+/// What kind of pending statement it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PendingKind {
+    Coguardian,
+    Removal,
+    Move,
+}
+
+/// One pending statement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusPendingStatement {
+    /// The statement's `d` tag.
+    pub d: String,
+    pub kind: PendingKind,
+    /// When it takes effect, once that is known (a removal's notice period).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes_effect_at: Option<u64>,
+    /// When it expires if nothing settles it.
+    pub expires_at: u64,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -508,7 +560,41 @@ mod tests {
             usage_unsaved: None,
             app_lock_armed: None,
             debugging_open: None,
+            guardians: None,
         }
+    }
+
+    #[test]
+    fn guardians_omits_when_none_and_round_trips_in_contract_shape() {
+        let mut s = sample();
+        assert!(!s.to_json().contains("guardians"));
+        let root = PubKey::from_bytes([0x01; 32]);
+        let w = PubKey::from_bytes([0x02; 32]);
+        s.guardians = Some(StatusGuardians {
+            roots: vec![StatusGuardianRoot {
+                root,
+                keys: vec![w],
+            }],
+            pending: vec![StatusPendingStatement {
+                d: "kintrinsic/guardian/ab".into(),
+                kind: PendingKind::Coguardian,
+                takes_effect_at: None,
+                expires_at: 99,
+            }],
+            tombstones: 3,
+            relays: vec!["wss://nos.lol".into()],
+        });
+        let json = s.to_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let g = &v["guardians"];
+        assert_eq!(g["roots"][0]["root"], root.to_hex());
+        assert_eq!(g["roots"][0]["keys"][0], w.to_hex());
+        assert_eq!(g["pending"][0]["kind"], "coguardian");
+        assert_eq!(g["pending"][0]["expiresAt"], 99);
+        assert!(g["pending"][0].get("takesEffectAt").is_none());
+        assert_eq!(g["tombstones"], 3);
+        assert_eq!(g["relays"][0], "wss://nos.lol");
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
     }
 
     #[test]

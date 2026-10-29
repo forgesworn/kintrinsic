@@ -7,7 +7,7 @@
 //! instance over the same disk handle) sees prior writes — modelling
 //! restart-durability without touching the filesystem.
 
-use charter_primitives::ReqId;
+use charter_primitives::{PubKey, ReqId};
 
 use crate::error::SysResult;
 
@@ -69,6 +69,45 @@ impl ReplayFloor {
     pub fn admits(self, issued_at: u64) -> bool {
         self.verify_bound().is_none_or(|b| issued_at > b)
     }
+}
+
+/// Who signed the clause a slot holds (rule 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldSigner {
+    /// Recorded with the clause.
+    Key(PubKey),
+    /// A record written before signers were recorded, or by a caller that
+    /// does not record one: read as signed by the pinned root, the only
+    /// possible signer before the guardian-keys section.
+    Legacy,
+    /// The record is there but could not be read, so neither can its signer.
+    Unknown,
+}
+
+impl HeldSigner {
+    /// The signer, with a legacy record read as `legacy_signer` (the pinned
+    /// root). `None` when unknown.
+    pub fn resolve(self, legacy_signer: &PubKey) -> Option<PubKey> {
+        match self {
+            HeldSigner::Key(k) => Some(k),
+            HeldSigner::Legacy => Some(*legacy_signer),
+            HeldSigner::Unknown => None,
+        }
+    }
+}
+
+/// What a per-child clause slot holds: its replay floor and who signed the
+/// held clause (contract rule 5). On a ward with the guardian-keys section the
+/// floor a new clause must clear is the guardian-keys state's (rule 4), not
+/// this one; the state seeds a slot it has never seen from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotState {
+    /// The replay floor, exactly as [`ChildClauseStore::replay_floor`] reports
+    /// it. `None`: nothing was ever stored in the slot.
+    pub floor: Option<ReplayFloor>,
+    /// Who signed the held clause. Only meaningful when `floor` is a record
+    /// floor.
+    pub signer: HeldSigner,
 }
 
 /// Authenticated standing-clause store with per-kind monotonic `issuedAt`
@@ -192,7 +231,38 @@ pub trait ChildClauseStore: Send + Sync {
     }
     /// Forget every clause for `subject_hex` (a release: enforcement must stop,
     /// and the rollback floor must reset so a later re-pair starts clean).
+    /// Recorded signers go with them.
     fn clear_for(&self, subject_hex: &str) -> SysResult<()>;
+
+    /// The slot's replay floor and the held clause's signer, read together.
+    fn slot_state(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState>;
+
+    /// [`Self::put_child_clause`], recording `signer` with the clause (rule
+    /// 5). The replay floor is the only bar: a ward that pins one guardian
+    /// and nothing else. Returns false (nothing written) when the floor
+    /// refuses it.
+    fn put_child_clause_signed(
+        &self,
+        subject_hex: &str,
+        kind: u16,
+        issued_at: u64,
+        signer: &PubKey,
+        json: &str,
+    ) -> SysResult<bool>;
+
+    /// Store a clause signed by `signer` whose acceptance the guardian-keys
+    /// state has already decided (rules 4 and 5): no replay-floor check here,
+    /// because once the held clause's signer has departed the bar can be
+    /// BELOW this slot's floor. The sidecar floor is set to `issued_at` first,
+    /// then the record, as for every put.
+    fn replace_child_clause(
+        &self,
+        subject_hex: &str,
+        kind: u16,
+        issued_at: u64,
+        signer: &PubKey,
+        json: &str,
+    ) -> SysResult<()>;
 }
 
 /// Usage-accounting snapshot store (opaque JSON; shape owned by Phase 6).
@@ -213,6 +283,14 @@ pub trait PairingStore: Send + Sync {
     fn load(&self) -> SysResult<Option<String>>;
     /// Forget the pairing entirely (a parent-gated release / unpair).
     fn clear(&self) -> SysResult<()>;
+    /// Hold an exclusive lock across a load-change-save of the record, so a
+    /// writer in another process (Linux `charter-pair`) cannot lose this
+    /// change or have its own lost (review 2a, Info 2). `None`: this store
+    /// has no other writer to order against (in-memory stores, a platform
+    /// whose record only its own process writes).
+    fn lock_for_update(&self) -> SysResult<Option<crate::file_lock::FileLock>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +315,9 @@ mod mock {
         // Per-(subject_hex, kind) authenticated clauses. The stored `issued_at`
         // is itself the per-slot high-water mark (rollback bound).
         child_clauses: BTreeMap<(String, u16), (u64, String)>,
+        /// The recorded signer of each per-child clause (rule 5); absent for
+        /// a record written without one ([`HeldSigner::Legacy`]).
+        child_signers: BTreeMap<(String, u16), PubKey>,
         curator_lists: BTreeMap<String, (u64, String)>,
         usage: Option<String>,
         extension: Option<String>,
@@ -547,6 +628,7 @@ mod mock {
                 }
             }
             g.records_torn = false;
+            g.child_signers.remove(&key);
             g.child_clauses.insert(key, (issued_at, json.to_string()));
             Ok(true)
         }
@@ -605,13 +687,78 @@ mod mock {
             })
         }
         fn clear_for(&self, subject_hex: &str) -> SysResult<()> {
-            self.disk
-                .0
-                .lock()
-                .expect("disk lock")
-                .child_clauses
-                .retain(|(s, _), _| s != subject_hex);
+            let mut g = self.disk.0.lock().expect("disk lock");
+            g.child_clauses.retain(|(s, _), _| s != subject_hex);
+            g.child_signers.retain(|(s, _), _| s != subject_hex);
             Ok(())
+        }
+        fn slot_state(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState> {
+            if self.disk.clause_reads_broken() {
+                return Err(unreadable());
+            }
+            let g = self.disk.0.lock().expect("disk lock");
+            Ok(Self::state_locked(&g, &(subject_hex.to_string(), kind)))
+        }
+        fn put_child_clause_signed(
+            &self,
+            subject_hex: &str,
+            kind: u16,
+            issued_at: u64,
+            signer: &PubKey,
+            json: &str,
+        ) -> SysResult<bool> {
+            if self.disk.clause_writes_broken() || self.disk.clause_reads_broken() {
+                return Err(unwritable());
+            }
+            let mut g = self.disk.0.lock().expect("disk lock");
+            let key = (subject_hex.to_string(), kind);
+            if Self::state_locked(&g, &key)
+                .floor
+                .is_some_and(|f| !f.admits(issued_at))
+            {
+                return Ok(false);
+            }
+            g.records_torn = false;
+            g.child_signers.insert(key.clone(), *signer);
+            g.child_clauses.insert(key, (issued_at, json.to_string()));
+            Ok(true)
+        }
+        fn replace_child_clause(
+            &self,
+            subject_hex: &str,
+            kind: u16,
+            issued_at: u64,
+            signer: &PubKey,
+            json: &str,
+        ) -> SysResult<()> {
+            if self.disk.clause_writes_broken() {
+                return Err(unwritable());
+            }
+            let mut g = self.disk.0.lock().expect("disk lock");
+            let key = (subject_hex.to_string(), kind);
+            g.records_torn = false;
+            g.child_signers.insert(key.clone(), *signer);
+            g.child_clauses.insert(key, (issued_at, json.to_string()));
+            Ok(())
+        }
+    }
+
+    impl MockChildClauseStore {
+        fn state_locked(g: &DiskState, key: &(String, u16)) -> SlotState {
+            let high = g.child_clauses.get(key).map(|(t, _)| *t);
+            let floor = if g.records_torn {
+                high.map(ReplayFloor::Sidecar)
+            } else {
+                high.map(ReplayFloor::Record)
+            };
+            let signer = if g.records_torn {
+                HeldSigner::Unknown
+            } else {
+                g.child_signers
+                    .get(key)
+                    .map_or(HeldSigner::Legacy, |k| HeldSigner::Key(*k))
+            };
+            SlotState { floor, signer }
         }
     }
 
@@ -837,6 +984,17 @@ mod real {
     struct ClauseRec {
         issued_at: u64,
         json: String,
+        /// Who signed it (rule 5). Absent on every record written before
+        /// signers were recorded, and on one written without a signer: read
+        /// as the pinned root's ([`HeldSigner::Legacy`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer: Option<PubKey>,
+    }
+
+    impl ClauseRec {
+        fn held_signer(&self) -> HeldSigner {
+            self.signer.map_or(HeldSigner::Legacy, HeldSigner::Key)
+        }
     }
 
     // ---- replay-floor sidecar (M3) -----------------------------------------
@@ -929,6 +1087,20 @@ mod real {
         issued_at: u64,
         json: &str,
     ) -> SysResult<bool> {
+        put_rec_signed(record_path, floor_path, floor, issued_at, json, None)
+    }
+
+    /// [`put_rec`], recording `signer` with the clause. The sidecar is set to
+    /// `issued_at`, which lowers it when the caller passes no floor because
+    /// the guardian-keys state decided (rule 4).
+    fn put_rec_signed(
+        record_path: &std::path::Path,
+        floor_path: &std::path::Path,
+        floor: Option<ReplayFloor>,
+        issued_at: u64,
+        json: &str,
+        signer: Option<PubKey>,
+    ) -> SysResult<bool> {
         if floor.is_some_and(|f| !f.admits(issued_at)) {
             return Ok(false);
         }
@@ -942,6 +1114,7 @@ mod real {
             &ClauseRec {
                 issued_at,
                 json: json.to_string(),
+                signer,
             },
         )?;
         Ok(true)
@@ -1059,6 +1232,17 @@ mod real {
         fn current(&self, subject_hex: &str, kind: u16) -> SysResult<Option<ClauseRec>> {
             read_json(&self.file(subject_hex, kind)?)
         }
+        /// The slot's state. The caller holds `lock` (`floor_of` may backfill
+        /// the sidecar).
+        fn state_locked(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState> {
+            let rec = self.current(subject_hex, kind);
+            let signer = match &rec {
+                Ok(Some(r)) => r.held_signer(),
+                _ => HeldSigner::Unknown,
+            };
+            let floor = floor_of(rec, &self.floor(subject_hex, kind)?)?;
+            Ok(SlotState { floor, signer })
+        }
     }
     impl ChildClauseStore for RealChildClauseStore {
         fn put_child_clause(
@@ -1159,6 +1343,50 @@ mod real {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(io_err("remove child clauses", e)),
             }
+        }
+        fn slot_state(&self, subject_hex: &str, kind: u16) -> SysResult<SlotState> {
+            let _g = self.lock.lock().expect("child clause lock");
+            self.state_locked(subject_hex, kind)
+        }
+        fn put_child_clause_signed(
+            &self,
+            subject_hex: &str,
+            kind: u16,
+            issued_at: u64,
+            signer: &PubKey,
+            json: &str,
+        ) -> SysResult<bool> {
+            let _g = self.lock.lock().expect("child clause lock");
+            let floor = self.state_locked(subject_hex, kind)?.floor;
+            put_rec_signed(
+                &self.file(subject_hex, kind)?,
+                &self.floor(subject_hex, kind)?,
+                floor,
+                issued_at,
+                json,
+                Some(*signer),
+            )
+        }
+        fn replace_child_clause(
+            &self,
+            subject_hex: &str,
+            kind: u16,
+            issued_at: u64,
+            signer: &PubKey,
+            json: &str,
+        ) -> SysResult<()> {
+            let _g = self.lock.lock().expect("child clause lock");
+            // No floor: the guardian-keys state decided. The record may be
+            // torn or unreadable; it is replaced either way.
+            put_rec_signed(
+                &self.file(subject_hex, kind)?,
+                &self.floor(subject_hex, kind)?,
+                None,
+                issued_at,
+                json,
+                Some(*signer),
+            )
+            .map(|_| ())
         }
     }
 
@@ -1321,6 +1549,11 @@ mod real {
                 Err(e) => Err(io_err("remove pairing", e)),
             }
         }
+        fn lock_for_update(&self) -> SysResult<Option<crate::file_lock::FileLock>> {
+            crate::file_lock::lock_exclusive(&self.base.join(crate::file_lock::PAIRING_LOCK_FILE))
+                .map(Some)
+                .map_err(|e| io_err("lock pairing", e))
+        }
     }
 
     #[cfg(test)]
@@ -1335,6 +1568,52 @@ mod real {
         }
         fn rid(b: u8) -> ReqId {
             ReqId::from_bytes([b; 32])
+        }
+
+        #[test]
+        fn child_clause_signer_survives_a_restart_and_a_replacement_may_lower_the_floor() {
+            let base = tmp("childclause-signer");
+            let subject = "ab".repeat(32);
+            let root = PubKey::from_bytes([1; 32]);
+            let working = PubKey::from_bytes([2; 32]);
+            {
+                let s = RealChildClauseStore::with_base(&base);
+                // A legacy record: no signer, read as the pinned root's.
+                assert!(s.put_child_clause(&subject, 2, 100, "{}").unwrap());
+                assert_eq!(
+                    s.slot_state(&subject, 2).unwrap().signer,
+                    HeldSigner::Legacy
+                );
+                // The working key replaces it far ahead.
+                assert!(s
+                    .put_child_clause_signed(&subject, 2, 900, &working, "{\"w\":1}")
+                    .unwrap());
+                assert_eq!(
+                    s.slot_state(&subject, 2).unwrap().signer,
+                    HeldSigner::Key(working)
+                );
+            }
+            let s = RealChildClauseStore::with_base(&base);
+            let st = s.slot_state(&subject, 2).unwrap();
+            assert_eq!(st.floor, Some(ReplayFloor::Record(900)));
+            assert_eq!(st.signer, HeldSigner::Key(working));
+            // The replay floor alone refuses an older clause.
+            assert!(!s
+                .put_child_clause_signed(&subject, 2, 201, &root, "{}")
+                .unwrap());
+            // The guardian-keys state decided (the working key departed): the
+            // replacement lands below the old floor, which comes down with it.
+            s.replace_child_clause(&subject, 2, 201, &root, "{\"r\":1}")
+                .unwrap();
+            assert_eq!(
+                s.get_child_clause(&subject, 2).unwrap().unwrap(),
+                "{\"r\":1}"
+            );
+            let st = s.slot_state(&subject, 2).unwrap();
+            assert_eq!(st.floor, Some(ReplayFloor::Record(201)));
+            assert_eq!(st.signer, HeldSigner::Key(root));
+            s.clear_for(&subject).unwrap();
+            assert_eq!(s.slot_state(&subject, 2).unwrap().floor, None);
         }
 
         #[test]

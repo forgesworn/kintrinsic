@@ -1,9 +1,11 @@
 //! Relay recovery works without any functioning relay. Only the pinned
-//! guardian can authorise a replacement list; identity and clauses survive.
+//! guardian can authorise a replacement list pasted as a code; a RELAYS event
+//! gift-wrapped to the ward may come from any key in its signer set (rule 11).
+//! Identity and clauses survive either way.
 
-use charter_primitives::{kinds, EventId, NostrEvent, PubKey};
+use charter_primitives::{kinds, EventId, NostrEvent, PubKey, SignerSet};
 use charter_proto::canonical_event_string;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::pairing::Pairing;
 
@@ -77,22 +79,155 @@ pub fn migrate_legacy_relays(pairing: &mut Pairing) -> bool {
     true
 }
 
-#[derive(Deserialize)]
+/// The ward's guardian PIN record, as a guardian sets it inside a RELAYS body
+/// (contract, *Presence confirmation*): scrypt (N=2^15, r=8, p=1, 32-byte
+/// output) of the PIN's UTF-8 bytes under `salt`. Never stored in the pairing
+/// record, which is not a secret: [`apply_signed_relays`] hands it back, and
+/// the guardian-keys state keeps it in its `0600` file (review 2a, L2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct GuardianPin {
+    /// Format version: 1.
+    pub v: u32,
+    /// The scrypt salt, lowercase hex of 16 to 64 bytes.
+    pub salt: String,
+    /// The 32-byte scrypt output, lowercase hex.
+    pub hash: String,
+}
+
+impl GuardianPin {
+    /// Whether this record has the shape version 1 requires (open question
+    /// "Guardian PIN salt and encoding": salt is 16 to 64 bytes of lowercase
+    /// hex, hash is 32 bytes of lowercase hex).
+    pub fn is_valid(&self) -> bool {
+        fn lower_hex(s: &str) -> bool {
+            s.len().is_multiple_of(2)
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        self.v == 1
+            && lower_hex(&self.salt)
+            && (32..=128).contains(&self.salt.len())
+            && lower_hex(&self.hash)
+            && self.hash.len() == 64
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RelayConfig {
     machine: PubKey,
     relays: Vec<String>,
+    #[serde(default)]
+    guardian_pin: Option<GuardianPin>,
+}
+
+/// How long a ward with more than one root also sends STATUS on its previous
+/// relays after a RELAYS change (rule 11).
+pub const PREVIOUS_RELAYS_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// The relay list a RELAYS change replaced, and until when STATUS should
+/// still go out on it (rule 11). The guardian-keys port keeps it and hands
+/// the lists back for STATUS emission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousRelays {
+    pub relays: Vec<String>,
+    /// Ward time (unix seconds) after which the list is no longer used.
+    pub until: u64,
+}
+
+/// What a gift-wrapped RELAYS change did to the pairing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaysApplied {
+    /// The list it replaced (rule 11).
+    pub previous: PreviousRelays,
+    /// The guardian PIN record it carried, validated. NOT written into the
+    /// pairing: the caller stores it with the guardian-keys state, or drops
+    /// it on a ward without one.
+    pub pin: Option<GuardianPin>,
 }
 
 /// Validate before mutating; callers must persist successfully before swapping
 /// their live transport. The signed JSON can be pasted or read from a file.
+///
+/// Only the pinned guardian can sign a pasted code, and a pasted code may not
+/// carry a `guardianPin`: a code passes through whoever pastes it, so a PIN
+/// reaches a ward only gift-wrapped from a key in its signer set (see
+/// [`apply_signed_relays`] and the open question "How a guardian PIN reaches
+/// an Android ward").
 pub fn apply_signed_config(pairing: &mut Pairing, json: &str, now: u64) -> Result<(), String> {
+    let pinned = pairing.guardian_pubkey;
+    apply_signed_config_from(pairing, json, &pinned, now)
+}
+
+/// [`apply_signed_config`] with the author checked against `signers` rather
+/// than the pinned guardian alone: on a ward with the guardian-keys section,
+/// "a RELAYS change from any signer applies as usual" (rule 11; review 2a,
+/// Info 6). The pasted-code rules are unchanged, a `guardianPin` included.
+pub fn apply_signed_config_from(
+    pairing: &mut Pairing,
+    json: &str,
+    signers: &dyn SignerSet,
+    now: u64,
+) -> Result<(), String> {
     if json.len() > 16_384 {
         return Err("Relay code is too long.".into());
     }
     let event: NostrEvent = serde_json::from_str(json).map_err(|_| "Invalid signed relay code.")?;
-    let hash = charter_crypto::sha256(canonical_event_string(&event).as_bytes());
-    if event.pubkey != pairing.guardian_pubkey
+    let config = check_relays_event(pairing, &event, signers, now)?;
+    if config.guardian_pin.is_some() {
+        return Err("A guardian PIN can't be set from a pasted code.".into());
+    }
+    let relays = validate_relays(&config.relays)?;
+    pairing.relays = relays;
+    pairing.relays_updated_at = Some(event.created_at);
+    Ok(())
+}
+
+/// Apply a RELAYS event that arrived gift-wrapped (over relays or the local
+/// link) from a key in `signers` (rule 11: "A RELAYS change from any signer
+/// applies as usual"). The checks are [`apply_signed_config`]'s — kind,
+/// marker, `p` names this machine, id and signature, not future-dated, at
+/// most 600 seconds old, not before pairing, newer than the last change —
+/// with the author checked against the signer set. A `guardianPin` is
+/// accepted here and returned in [`RelaysApplied::pin`]; the pairing never
+/// holds it. Nothing is mutated on `Err`.
+/// The caller must have checked that the seal author is the event's author.
+pub fn apply_signed_relays(
+    pairing: &mut Pairing,
+    event: &NostrEvent,
+    signers: &dyn SignerSet,
+    now: u64,
+) -> Result<RelaysApplied, String> {
+    let config = check_relays_event(pairing, event, signers, now)?;
+    let relays = validate_relays(&config.relays)?;
+    if let Some(pin) = &config.guardian_pin {
+        if !pin.is_valid() {
+            return Err("Invalid guardian PIN record.".into());
+        }
+    }
+    let previous = PreviousRelays {
+        relays: std::mem::replace(&mut pairing.relays, relays),
+        until: now.saturating_add(PREVIOUS_RELAYS_SECS),
+    };
+    pairing.relays_updated_at = Some(event.created_at);
+    Ok(RelaysApplied {
+        previous,
+        pin: config.guardian_pin,
+    })
+}
+
+/// The checks every RELAYS event passes, however it arrived, returning its
+/// parsed body. `authors` is the pinned guardian for a pasted code, the
+/// signer set for a gift-wrapped event.
+fn check_relays_event(
+    pairing: &Pairing,
+    event: &NostrEvent,
+    authors: &dyn SignerSet,
+    now: u64,
+) -> Result<RelayConfig, String> {
+    let hash = charter_crypto::sha256(canonical_event_string(event).as_bytes());
+    if !authors.is_signer(&event.pubkey)
         || event.kind != kinds::CHARTER_DEVICE_RELAYS
         || !event.has_tag("t", "charter-device")
         || !event.has_tag("p", &pairing.machine.to_hex())
@@ -113,10 +248,7 @@ pub fn apply_signed_config(pairing: &mut Pairing, json: &str, now: u64) -> Resul
     if config.machine != pairing.machine {
         return Err("This relay code is for a different device.".into());
     }
-    let relays = validate_relays(&config.relays)?;
-    pairing.relays = relays;
-    pairing.relays_updated_at = Some(event.created_at);
-    Ok(())
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -245,6 +377,130 @@ mod tests {
         let mut p = original.clone();
         assert!(apply_signed_config(&mut p, &tampered.to_string(), 200).is_err());
         assert_eq!(p, original);
+    }
+
+    fn event_with(pairing: &Pairing, sk: [u8; 32], ts: u64, body: serde_json::Value) -> NostrEvent {
+        sign_event_raw(
+            &sk,
+            kinds::CHARTER_DEVICE_RELAYS,
+            ts,
+            vec![
+                kinds::marker_tag(),
+                vec!["p".into(), pairing.machine.to_hex()],
+            ],
+            body.to_string(),
+        )
+        .unwrap()
+    }
+
+    fn pin() -> serde_json::Value {
+        serde_json::json!({"v": 1, "salt": "ab".repeat(16), "hash": "cd".repeat(32)})
+    }
+
+    #[test]
+    fn a_pasted_code_may_not_set_a_guardian_pin() {
+        let original = pairing();
+        let ev = event_with(
+            &original,
+            [1; 32],
+            200,
+            serde_json::json!({"machine": original.machine, "relays": default_relays(), "guardianPin": pin()}),
+        );
+        let mut p = original.clone();
+        assert!(apply_signed_config(&mut p, &serde_json::to_string(&ev).unwrap(), 200).is_err());
+        assert_eq!(p, original);
+    }
+
+    #[test]
+    fn a_gift_wrapped_change_from_any_signer_applies_and_may_set_the_pin() {
+        struct Two(PubKey, PubKey);
+        impl SignerSet for Two {
+            fn is_signer(&self, k: &PubKey) -> bool {
+                *k == self.0 || *k == self.1
+            }
+            fn root_of(&self, _k: &PubKey) -> Option<PubKey> {
+                Some(self.0)
+            }
+            fn is_departed(&self, _k: &PubKey) -> bool {
+                false
+            }
+            fn recipients(&self) -> Vec<PubKey> {
+                vec![self.1]
+            }
+            fn roots(&self) -> Vec<PubKey> {
+                vec![self.0]
+            }
+        }
+        let mut p = pairing();
+        let working = PubKey::from_bytes(charter_crypto::xonly_pubkey(&[5; 32]).unwrap());
+        let set = Two(p.guardian_pubkey, working);
+        let before = p.relays.clone();
+        let ev = event_with(
+            &p,
+            [5; 32],
+            200,
+            serde_json::json!({"machine": p.machine, "relays": default_relays(), "guardianPin": pin()}),
+        );
+        let applied = apply_signed_relays(&mut p, &ev, &set, 200).unwrap();
+        assert_eq!(applied.pin.as_ref().unwrap().hash, "cd".repeat(32));
+        assert_eq!(applied.previous.relays, before);
+        assert_eq!(applied.previous.until, 200 + PREVIOUS_RELAYS_SECS);
+        assert_eq!(p.relays, default_relays());
+        // The PIN never reaches the persisted pairing (L2).
+        assert!(!serde_json::to_string(&p)
+            .unwrap()
+            .contains("cd".repeat(32).as_str()));
+        // Same event again: not newer.
+        assert!(apply_signed_relays(&mut p.clone(), &ev, &set, 201).is_err());
+        // A key outside the set is refused, and nothing changes.
+        let original = pairing();
+        let mut q = original.clone();
+        let stranger = event_with(
+            &q,
+            [9; 32],
+            200,
+            serde_json::json!({"machine": q.machine, "relays": default_relays()}),
+        );
+        assert!(apply_signed_relays(&mut q, &stranger, &set, 200).is_err());
+        assert_eq!(q, original);
+        // A malformed PIN refuses the whole change.
+        let bad = event_with(
+            &q,
+            [1; 32],
+            200,
+            serde_json::json!({"machine": q.machine, "relays": default_relays(),
+                "guardianPin": {"v": 1, "salt": "AB", "hash": "cd"}}),
+        );
+        assert!(apply_signed_relays(&mut q, &bad, &set, 200).is_err());
+        assert_eq!(q, original);
+    }
+
+    /// Review 2a, Info 6: a pasted code from a working key in the signer set
+    /// applies; a stranger's does not; a PIN is refused whoever signed it.
+    #[test]
+    fn a_pasted_code_from_any_signer_applies_but_never_a_pin() {
+        let mut p = pairing();
+        let working = PubKey::from_bytes(charter_crypto::xonly_pubkey(&[5; 32]).unwrap());
+        let set = charter_primitives::SinglePinned(working);
+        let signed = code(&p, [5; 32], 200, default_relays());
+        // Against the pinned guardian alone (the old reading) it is refused.
+        assert!(apply_signed_config(&mut p.clone(), &signed, 200).is_err());
+        apply_signed_config_from(&mut p, &signed, &set, 200).unwrap();
+        assert_eq!(p.relays, default_relays());
+        assert_eq!(p.relays_updated_at, Some(200));
+        let original = pairing();
+        let mut q = original.clone();
+        let stranger = code(&q, [9; 32], 200, default_relays());
+        assert!(apply_signed_config_from(&mut q, &stranger, &set, 200).is_err());
+        let with_pin = event_with(
+            &q,
+            [5; 32],
+            200,
+            serde_json::json!({"machine": q.machine, "relays": default_relays(), "guardianPin": pin()}),
+        );
+        let with_pin = serde_json::to_string(&with_pin).unwrap();
+        assert!(apply_signed_config_from(&mut q, &with_pin, &set, 200).is_err());
+        assert_eq!(q, original);
     }
 
     #[test]

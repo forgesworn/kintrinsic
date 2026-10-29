@@ -3,7 +3,6 @@ import QRCode from "qrcode";
 import { Banner, Button } from "../components/ui";
 import { useCharter } from "../store/store";
 import type { Child } from "../domain/types";
-import { guardianPubkeyHex } from "../signer/guardianKey";
 import { guardianPairingBunkerUri } from "../signer/guardianPairing";
 import { DEFAULT_RELAYS } from "../signer/config";
 import { pairingSas } from "../domain/pairingSas";
@@ -43,7 +42,7 @@ export default function SetupPhoneQr({
   onUseCable: () => void;
   onBack: () => void;
 }) {
-  const { beginPhonePairing, cancelPhonePairing } = useCharter();
+  const { beginPhonePairing, cancelPhonePairing, guardianKeys } = useCharter();
   const [feed, setFeed] = useState<Feed>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [link, setLink] = useState<string | null>(null);
@@ -60,7 +59,8 @@ export default function SetupPhoneQr({
   // The one-time pairing token: this screen's for as long as it is shown.
   useEffect(() => {
     const token = beginPhonePairing(child.id);
-    const pk = guardianPubkeyHex();
+    // The key the ward pins: the family's root (see Family's phone QR).
+    const pk = guardianKeys.rootPubkey();
     setLink(guardianPairingBunkerUri(pk, DEFAULT_RELAYS, token));
     let alive = true;
     void pairingSas(pk, token).then((code) => {

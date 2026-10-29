@@ -1,18 +1,24 @@
 //! `verify_clause` — authenticate a standing schedule/budget clause against the
-//! pinned guardian's inner NIP-01 signature AND author, with per-kind monotonic
-//! `issuedAt` rollback protection. A hostile relay can delay/drop a clause but
+//! inner NIP-01 signature AND an author in the ward's signer set, with per-kind
+//! monotonic `issuedAt` rollback protection. A hostile relay can delay/drop a clause but
 //! can never forge one or roll it back. The body is left opaque (Phase 6 parses
 //! the schedule/budget shape).
 
-use charter_primitives::{NostrEvent, PubKey};
+use charter_primitives::{NostrEvent, PubKey, SignerSet};
+
+use crate::verify::FRESHNESS_SKEW_SECS;
 use charter_proto::{ClauseKind, ClausePayload};
 
 use crate::event::{event_id, signature_is_valid};
 
-// M5 NOTE: a clause freshness/age bound is intentionally NOT enforced here. The
-// design is fail-safe-offline — a managed device may run with a lagging/leading
-// clock (dead RTC, pre-NTP boot), so a `now`-based skew gate would wrongly reject
+// M5 NOTE: a clause AGE bound is intentionally NOT enforced here. The design is
+// fail-safe-offline — a managed device may run with a lagging clock (dead RTC,
+// pre-NTP boot), so a `now`-based staleness gate would wrongly reject
 // legitimately-signed guardian clauses and silently block tightening/revocation.
+// The gate is one-directional: a clause whose `issuedAt` is more than
+// `FRESHNESS_SKEW_SECS` AHEAD of the ward's clock is refused (contract, *Who
+// may sign what*), because a far-future clause could otherwise never be
+// replaced once its signer departs. A ward's clock is not the child's to set.
 // Rollback is covered by the durable per-kind monotonic `issuedAt` (the precise
 // floor after the first clause); the first-seen replay window is low risk
 // (no-clause = unlocked-by-default, and the guardian's real clause always wins on
@@ -23,6 +29,7 @@ use crate::event::{event_id, signature_is_valid};
 pub struct VerifiedClause {
     kind: ClauseKind,
     issued_at: u64,
+    signer: PubKey,
     body: serde_json::Value,
 }
 
@@ -34,6 +41,11 @@ impl VerifiedClause {
     /// The clause `issuedAt` (drives rollback protection).
     pub fn issued_at(&self) -> u64 {
         self.issued_at
+    }
+    /// Who signed it: a key in the signer set (rule 5 records it with the
+    /// stored clause).
+    pub fn signer(&self) -> PubKey {
+        self.signer
     }
     /// The opaque clause body (Phase 6 parses schedule/budget).
     pub fn body(&self) -> &serde_json::Value {
@@ -48,8 +60,11 @@ pub enum ClauseError {
     Malformed,
     /// Event-id integrity or schnorr signature failed.
     BadSignature,
-    /// The author is not the pinned guardian.
+    /// The author is not in the signer set.
     UntrustedSigner,
+    /// `issuedAt` is more than [`FRESHNESS_SKEW_SECS`] ahead of the ward's
+    /// clock.
+    FutureIssuedAt,
     /// `issuedAt` was at or below the highest already seen (rollback).
     StaleIssuedAt,
     /// The payload kind did not match the expected kind.
@@ -58,13 +73,15 @@ pub enum ClauseError {
 
 /// Authenticate a CLAUSE event. `prev_issued_at` is the highest `issuedAt`
 /// previously accepted for `kind` (None if never). Order: malformed → kind
-/// match → event-id integrity → signature → pinned author → monotonic issuedAt.
+/// match → event-id integrity → signature → author in the signer set → not
+/// future-dated → monotonic issuedAt. The floor is checked last, so a
+/// [`ClauseError::StaleIssuedAt`] clause is otherwise authentic.
 pub fn verify_clause(
     event: &NostrEvent,
-    pinned_guardian: &PubKey,
+    signers: &dyn SignerSet,
     kind: ClauseKind,
     prev_issued_at: Option<u64>,
-    _now: u64,
+    now: u64,
 ) -> Result<VerifiedClause, ClauseError> {
     if event.kind != charter_primitives::kinds::CHARTER_DEVICE_CLAUSE {
         return Err(ClauseError::Malformed);
@@ -81,8 +98,11 @@ pub fn verify_clause(
     if !signature_is_valid(event) {
         return Err(ClauseError::BadSignature);
     }
-    if &event.pubkey != pinned_guardian {
+    if !signers.is_signer(&event.pubkey) {
         return Err(ClauseError::UntrustedSigner);
+    }
+    if payload.issued_at > now.saturating_add(FRESHNESS_SKEW_SECS) {
+        return Err(ClauseError::FutureIssuedAt);
     }
 
     // Monotonic rollback protection (the precise floor once a clause is cached).
@@ -95,6 +115,7 @@ pub fn verify_clause(
     Ok(VerifiedClause {
         kind: payload.kind,
         issued_at: payload.issued_at,
+        signer: event.pubkey,
         body: payload.body,
     })
 }

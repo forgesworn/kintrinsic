@@ -192,14 +192,41 @@ const UNLOCK_DIGITS: usize = 8;
 const FAIL_THRESHOLD: u32 = 5;
 /// First lockout length; each subsequent lockout doubles it.
 const BASE_COOLDOWN_SECS: u64 = 30;
-/// Cap on the doubling cooldown (~5 minutes).
+/// Cap on the doubling cooldown (~5 minutes) when ONE code is accepted.
 const MAX_COOLDOWN_SECS: u64 = 300;
+/// The most expected codes the lock takes: one per key in the guardian-keys
+/// signer set (at most 4 roots and 16 working keys each). More is malformed.
+const MAX_EXPECTED_CODES: usize = 4 + 4 * 16;
 
 /// Whether an env-supplied expected code is a well-formed unlock target: exactly
 /// 8 ASCII digits (mirrors `charter_crypto::unlock::UNLOCK_CODE_DIGITS`, kept
 /// inline so the lock pulls in no crypto crate).
 fn valid_expected(expected: &str) -> bool {
     expected.len() == UNLOCK_DIGITS && expected.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The expected codes charterd hands over: one per key in the guardian-keys
+/// signer set, comma-separated (open question "Offline unlock with more than
+/// one guardian key"). Every one must be well-formed, and there must be at
+/// least one and at most [`MAX_EXPECTED_CODES`]; otherwise `None` and the lock
+/// keeps its device-only escape.
+fn parse_expected(list: &str) -> Option<Vec<String>> {
+    let codes: Vec<String> = list.split(',').map(str::to_owned).collect();
+    (!codes.is_empty()
+        && codes.len() <= MAX_EXPECTED_CODES
+        && codes.iter().all(|c| valid_expected(c)))
+    .then_some(codes)
+}
+
+/// Whether `typed` is any expected code: every one is compared in constant
+/// time and none short-circuits, so timing says nothing about which or how
+/// many keys there are.
+fn matches_any(expected: &[String], typed: &str) -> bool {
+    let mut any = false;
+    for e in expected {
+        any |= ct_eq(e.as_bytes(), typed.as_bytes());
+    }
+    any
 }
 
 /// Constant-time byte equality: a same-length check then an XOR-accumulate over
@@ -263,18 +290,30 @@ fn entry_display(typed: &str) -> String {
 /// locked out for a cooldown that starts at [`BASE_COOLDOWN_SECS`] and doubles
 /// per lockout (capped at [`MAX_COOLDOWN_SECS`]). Pure over an injected `now`
 /// (`Instant`) — it holds no clock of its own — so it is fully unit-tested.
+///
+/// With `n` accepted codes a guess is `n` times as likely to hit, so the
+/// cooldown cap is `n` times as long (review 2a, Info 7): a sustained guesser
+/// gets the same odds per hour as against one code. The early lockouts a
+/// parent's mistyping meets (30 s, 60 s, …) are unchanged.
 struct RateLimit {
     fails: u32,
     lockouts: u32,
     cooldown_until: Option<Instant>,
+    max_cooldown_secs: u64,
 }
 
 impl RateLimit {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::for_codes(1)
+    }
+
+    fn for_codes(n: usize) -> Self {
         Self {
             fails: 0,
             lockouts: 0,
             cooldown_until: None,
+            max_cooldown_secs: MAX_COOLDOWN_SECS.saturating_mul(n.max(1) as u64),
         }
     }
 
@@ -308,8 +347,9 @@ impl RateLimit {
         }
         self.fails += 1;
         if self.fails >= FAIL_THRESHOLD {
-            let shift = self.lockouts.min(4); // 30,60,120,240, then capped
-            let secs = (BASE_COOLDOWN_SECS << shift).min(MAX_COOLDOWN_SECS);
+            // 30, 60, 120, 240, … then capped (300 s for one code).
+            let shift = self.lockouts.min(16);
+            let secs = (BASE_COOLDOWN_SECS << shift).min(self.max_cooldown_secs);
             let until = now + Duration::from_secs(secs);
             self.cooldown_until = Some(until);
             self.lockouts += 1;
@@ -343,7 +383,7 @@ enum UnlockStatus {
 /// limiter, and the last outcome. Built from the environment charterd sets.
 struct UnlockState {
     challenge: String,
-    expected: String,
+    expected: Vec<String>,
     active: bool,
     typed: String,
     limiter: RateLimit,
@@ -356,16 +396,17 @@ impl UnlockState {
     /// unlock-capable" — the caller keeps the direct escape chord.
     fn from_env() -> Option<Self> {
         let challenge = std::env::var("CHARTER_LOCK_CHALLENGE").ok()?;
-        let expected = std::env::var("CHARTER_LOCK_UNLOCK_EXPECT").ok()?;
-        if challenge.trim().is_empty() || !valid_expected(&expected) {
+        let expected = parse_expected(&std::env::var("CHARTER_LOCK_UNLOCK_EXPECT").ok()?)?;
+        if challenge.trim().is_empty() {
             return None;
         }
+        let limiter = RateLimit::for_codes(expected.len());
         Some(Self {
             challenge,
             expected,
             active: false,
             typed: String::new(),
-            limiter: RateLimit::new(),
+            limiter,
             status: UnlockStatus::Prompt,
         })
     }
@@ -914,7 +955,7 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                                         dirty = true;
                                     } else if return_keys.contains(&ev.detail) {
                                         if u.typed.len() == UNLOCK_DIGITS {
-                                            if ct_eq(u.expected.as_bytes(), u.typed.as_bytes()) {
+                                            if matches_any(&u.expected, &u.typed) {
                                                 u.status = UnlockStatus::Unlocking;
                                                 u.limiter.reset();
                                                 u.typed.clear();
@@ -1298,12 +1339,49 @@ mod tests {
         let u = UnlockState::from_env().expect("well-formed pair -> unlock-capable");
         assert!(!u.active);
         assert_eq!(u.challenge, "K7QN");
-        assert_eq!(u.expected, "48437822");
+        assert_eq!(u.expected, vec!["48437822".to_string()]);
         // A malformed expected code -> not unlock-capable (keep the direct chord).
         std::env::set_var("CHARTER_LOCK_UNLOCK_EXPECT", "48A37822");
+        assert!(UnlockState::from_env().is_none());
+        // One code per guardian key: any of them unlocks, and the back-off
+        // cap grows with the count.
+        std::env::set_var("CHARTER_LOCK_UNLOCK_EXPECT", "48437822,11112222");
+        let u = UnlockState::from_env().expect("a list of codes");
+        assert_eq!(u.expected.len(), 2);
+        assert_eq!(u.limiter.max_cooldown_secs, 2 * MAX_COOLDOWN_SECS);
+        // One malformed entry spoils the whole list (fail closed).
+        std::env::set_var("CHARTER_LOCK_UNLOCK_EXPECT", "48437822,");
         assert!(UnlockState::from_env().is_none());
         std::env::remove_var("CHARTER_LOCK_CHALLENGE");
         std::env::remove_var("CHARTER_LOCK_UNLOCK_EXPECT");
         assert!(UnlockState::from_env().is_none());
+    }
+
+    #[test]
+    fn any_expected_code_matches_and_the_list_is_bounded() {
+        let codes = parse_expected("48437822,11112222").unwrap();
+        assert!(matches_any(&codes, "11112222"));
+        assert!(matches_any(&codes, "48437822"));
+        assert!(!matches_any(&codes, "48437823"));
+        assert!(!matches_any(&[], "48437822"));
+        let many = vec!["00000000"; MAX_EXPECTED_CODES + 1].join(",");
+        assert!(parse_expected(&many).is_none());
+        assert!(parse_expected("").is_none());
+    }
+
+    #[test]
+    fn the_cooldown_cap_scales_with_the_number_of_codes() {
+        let mut r = RateLimit::for_codes(3);
+        let mut t = Instant::now();
+        let mut last = 0u64;
+        for _ in 0..12 {
+            for _ in 0..FAIL_THRESHOLD {
+                if let Some(u) = r.on_fail(t) {
+                    last = (u - t).as_secs();
+                }
+            }
+            t += Duration::from_secs(last + 1);
+        }
+        assert_eq!(last, 3 * MAX_COOLDOWN_SECS);
     }
 }

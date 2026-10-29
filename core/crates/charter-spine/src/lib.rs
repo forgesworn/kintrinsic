@@ -19,6 +19,7 @@ pub mod enactors;
 pub mod enforce_mode;
 pub mod enforcer_runtime;
 pub mod error;
+pub mod guardian_keys;
 pub mod lifecycle;
 pub mod local_limits;
 pub mod lock_info;
@@ -33,9 +34,17 @@ pub use audit::{AuditOutcome, AuditRecord};
 pub use broker::{Broker, LocalAudits, LocalIngestOptions, LocalIngestOutcome};
 pub use enactor::{EnactOutcome, Enactor, EnactorRegistry};
 pub use error::{BrokerError, EnactError};
+pub use guardian_keys::{
+    clean_label, release_gate, scan_to_pair, Farewell, GuardianKeys, MintedToken, PairDecision,
+    PinCheck, PresenceError, ReleaseRefused,
+};
 pub use lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
-pub use ports::{EventSink, TimeLeftProvider, TimeLeftSnapshot, TimeLeftState};
+pub use ports::{
+    ClauseCandidate, ClauseGate, EventSink, GuardianApplied, GuardianStatements, RelaysChange,
+    RelaysRecord, SinglePinnedGuardians, SlotSeed, TimeLeftProvider, TimeLeftSnapshot,
+    TimeLeftState,
+};
 pub use transport_facade::{
-    classify_inbound, CharterTransportAdapter, LocalInbound, MockTransport, PollHealth,
-    TransportFacade,
+    classify_inbound, classify_opened, CharterTransportAdapter, LocalInbound, MockTransport,
+    PollHealth, TransportFacade,
 };

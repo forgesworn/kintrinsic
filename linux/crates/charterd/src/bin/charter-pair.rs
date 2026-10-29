@@ -30,6 +30,7 @@ use charterd::pairing_setup::{build_pairing_json, map_pairing_error, read_device
 
 const DEVICE_PUB: &str = "/var/lib/charter/device.pub";
 const PAIRING: &str = "/var/lib/charter/pairing.json";
+const STATE_DIR: &str = charterd::guardians::STATE_DIR;
 const LIMITS_DIR: &str = "/etc/charter/limits.d";
 
 /// The headless flags that consume the following token as a value.
@@ -187,7 +188,32 @@ fn pick_child(configs: &[(String, ChildConfig)]) -> Option<String> {
     }
 }
 
+/// The lock the warden also takes around its own read-modify-write of the
+/// pairing record (a gift-wrapped RELAYS), so neither loses the other's
+/// change (review 2a, Info 2).
+fn lock_pairing() -> std::io::Result<charter_sys::file_lock::FileLock> {
+    charter_sys::file_lock::lock_exclusive(
+        &Path::new(STATE_DIR).join(charter_sys::file_lock::PAIRING_LOCK_FILE),
+    )
+}
+
+/// A fresh pin is a local unpair by an administrator followed by a new
+/// pairing (rule 11): the new guardian inherits no root, working key,
+/// pending statement or presence token from the old one. Run after the new
+/// pairing is written, so a failure here leaves the old state bound to the
+/// OLD pairing's `paired_at`, which the warden then discards on its own.
+fn forget_previous_guardians() {
+    if let Err(e) = charterd::guardians::clear_state(Path::new(STATE_DIR)) {
+        eprintln!("charter-pair: could not clear the previous guardian state: {e}");
+    }
+}
+
 fn write_pairing(json: &str) -> std::io::Result<()> {
+    let _lock = lock_pairing()?;
+    write_pairing_locked(json)
+}
+
+fn write_pairing_locked(json: &str) -> std::io::Result<()> {
     if let Some(dir) = Path::new(PAIRING).parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -298,6 +324,7 @@ fn headless_pair(args: &[String]) -> ! {
         eprintln!("charter-pair: could not save the pairing: {e}");
         std::process::exit(1);
     }
+    forget_previous_guardians();
     purge_if_repaired_to_a_new_subject(pairing_existed, previous_subject.as_deref(), &subject_hex);
     let _ = Command::new("systemctl")
         .args(["try-restart", "charterd.service"])
@@ -317,13 +344,33 @@ fn main() {
                 .take(16_385)
                 .read_to_string(&mut code)
                 .map_err(|e| e.to_string())?;
-            let json =
-                std::fs::read_to_string(PAIRING).map_err(|e| format!("read pairing: {e}"))?;
-            let mut pairing =
-                serde_json::from_str(&json).map_err(|e| format!("read pairing: {e}"))?;
-            charter_transport::relay_config::apply_signed_config(&mut pairing, code.trim(), now())?;
-            let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
-            write_pairing(&json).map_err(|e| format!("save relay change: {e}"))?;
+            // Released before the restart below: the warden being stopped
+            // may itself be waiting on it.
+            {
+                // Held across the read and the write: the warden rewrites this
+                // record too (review 2a, Info 2).
+                let _lock = lock_pairing().map_err(|e| format!("lock pairing: {e}"))?;
+                let json =
+                    std::fs::read_to_string(PAIRING).map_err(|e| format!("read pairing: {e}"))?;
+                let mut pairing: charter_transport::Pairing =
+                    serde_json::from_str(&json).map_err(|e| format!("read pairing: {e}"))?;
+                // Any key in the guardian-keys signer set may sign it (rule 11;
+                // review 2a, Info 6), read without writing: the warden is the
+                // state's one writer. An unreadable state has no signers, so the
+                // code is refused (fail closed).
+                let signers = {
+                    use charter_spine::GuardianStatements as _;
+                    charterd::guardians::peek_keys(Path::new(STATE_DIR), &pairing, now()).signers()
+                };
+                charter_transport::relay_config::apply_signed_config_from(
+                    &mut pairing,
+                    code.trim(),
+                    &*signers,
+                    now(),
+                )?;
+                let json = serde_json::to_string_pretty(&pairing).map_err(|e| e.to_string())?;
+                write_pairing_locked(&json).map_err(|e| format!("save relay change: {e}"))?;
+            }
             let status = Command::new("systemctl")
                 .args(["try-restart", "charterd.service"])
                 .status()
@@ -445,6 +492,7 @@ fn main() {
         err(&format!("Could not save the pairing: {e}"));
         std::process::exit(1);
     }
+    forget_previous_guardians();
     purge_if_repaired_to_a_new_subject(pairing_existed, previous_subject.as_deref(), &subject_hex);
     let _ = Command::new("systemctl")
         .args(["try-restart", "charterd.service"])

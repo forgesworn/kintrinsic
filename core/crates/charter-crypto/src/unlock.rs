@@ -80,6 +80,20 @@ pub fn code_matches(expected: &str, typed: &str) -> bool {
     diff == 0
 }
 
+/// Whether `typed` is the code for `challenge` under ANY of `conv_keys`: the
+/// conversation keys between this machine and every key currently in its
+/// signer set (contract, *Guardian roots and working keys*; open question
+/// "Offline unlock with more than one guardian key"). Every key is checked,
+/// without an early exit, so timing says nothing about which key (if any)
+/// matched. An empty list matches nothing.
+pub fn code_matches_any(conv_keys: &[[u8; 32]], challenge: &str, typed: &str) -> bool {
+    let mut any = false;
+    for conv_key in conv_keys {
+        any |= code_matches(&unlock_code(conv_key, challenge), typed);
+    }
+    any
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +140,30 @@ mod tests {
         assert!(!code_matches("00012345", "00012346"));
         assert!(!code_matches("00012345", "0001234")); // length mismatch
         assert!(!code_matches("00012345", ""));
+    }
+
+    #[test]
+    fn any_key_in_the_set_unlocks_and_no_other_does() {
+        let keys = [key(1), key(2)];
+        assert!(code_matches_any(
+            &keys,
+            "K7QN",
+            &unlock_code(&key(1), "K7QN")
+        ));
+        assert!(code_matches_any(
+            &keys,
+            "K7QN",
+            &unlock_code(&key(2), "K7QN")
+        ));
+        assert!(!code_matches_any(
+            &keys,
+            "K7QN",
+            &unlock_code(&key(3), "K7QN")
+        ));
+        assert!(!code_matches_any(
+            &[],
+            "K7QN",
+            &unlock_code(&key(1), "K7QN")
+        ));
     }
 }

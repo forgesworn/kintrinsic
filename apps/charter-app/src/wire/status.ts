@@ -14,6 +14,7 @@
 import { nip44, verifyEvent, type NostrEvent } from "nostr-tools";
 import { decodeMinutes } from "../insights/minuteSet";
 import { MAX_WRAP_JITTER_SECS } from "./request";
+import { parseStatusGuardians, type StatusGuardians } from "../keys/statusGuardians";
 
 export const CHARTER_DEVICE_STATUS = 31114;
 const SEAL = 13;
@@ -242,6 +243,13 @@ export interface DeviceStatus {
    * `domain/debugging.ts`).
    */
   debuggingOpen?: boolean;
+  /**
+   * Who the ward trusts, as it sees it (contract, *Guardian roots and working
+   * keys*, STATUS): its roots and their working keys, pending statements,
+   * tombstone count and relay list. Absent on a ward that predates the
+   * section, or when malformed (parsed strictly, all or nothing).
+   */
+  guardians?: StatusGuardians;
 }
 
 /** One installed launchable app on a device. */
@@ -417,6 +425,7 @@ export function parseStatus(json: string): DeviceStatus | null {
     appLockArmed: typeof o.appLockArmed === "boolean" ? o.appLockArmed : undefined,
     // Same posture as appLockArmed: a non-boolean is absent, never `false`.
     debuggingOpen: typeof o.debuggingOpen === "boolean" ? o.debuggingOpen : undefined,
+    guardians: parseStatusGuardians(o.guardians),
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)
@@ -443,6 +452,21 @@ export function unwrapStatus(
   recipientSk: Uint8Array,
   nowSecs: number = Math.floor(Date.now() / 1000),
 ): DeviceStatus | null {
+  const rumor = openStatusRumor(wrap, recipientSk, nowSecs);
+  if (!rumor) return null;
+  const status = parseStatus(rumor.content);
+  // The rumor author is the device; the payload's `machine` must match it, so a
+  // relay can't attribute one device's status to another.
+  if (status && status.machine !== rumor.pubkey) return null;
+  return status;
+}
+
+/**
+ * Decrypt wrap → seal → rumor and authenticate the machine (see
+ * `unwrapStatus`): a verified seal, rumor author == seal author, a kind-31114
+ * rumor inside the jitter window. Null on any failure; never throws.
+ */
+function openStatusRumor(wrap: NostrEvent, recipientSk: Uint8Array, nowSecs: number): NostrEvent | null {
   try {
     // Jitter: wraps are backdated; drop one too far from now in either direction
     // (the same window charterd's nip59::unwrap enforces on its side).
@@ -461,14 +485,69 @@ export function unwrapStatus(
     if (rumor.kind !== CHARTER_DEVICE_STATUS) return null;
     // The sealed (signed) author must equal the rumor author — no forged sender.
     if (rumor.pubkey !== seal.pubkey) return null;
-    const status = parseStatus(rumor.content);
-    // The rumor author is the device; the payload's `machine` must match it, so a
-    // relay can't attribute one device's status to another.
-    if (status && status.machine !== rumor.pubkey) return null;
-    return status;
+    return rumor;
   } catch {
     return null;
   }
+}
+
+/**
+ * A departed key's last STATUS (docs/guardian-keys-open-questions.md, "A
+ * departed key's last STATUS"): `{ v: 1, machine, ts, seq, guardians: { roots,
+ * pending, tombstones } }` and nothing else of the ward's state. It is never
+ * usage data: it only tells this install where it now stands on that device.
+ */
+export interface StatusFarewell {
+  machine: string;
+  ts: number;
+  seq?: number;
+  guardians: StatusGuardians;
+}
+
+/** Parse a farewell STATUS's content; null for anything else (a full STATUS included). */
+export function parseFarewell(json: string): StatusFarewell | null {
+  let o: Record<string, unknown>;
+  try {
+    o = JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (typeof o !== "object" || o === null || o.v !== 1) return null;
+  // A full STATUS names its subject; a farewell never does.
+  if (o.subject !== undefined) return null;
+  if (!isHex(o.machine) || !isNonNegInt(o.ts)) return null;
+  const guardians = parseStatusGuardians(o.guardians, { relaysOptional: true });
+  if (!guardians) return null;
+  return { machine: o.machine, ts: o.ts, ...(isNonNegInt(o.seq) ? { seq: o.seq } : {}), guardians };
+}
+
+/**
+ * Open a STATUS wrap once and read it as either a full STATUS or a departed
+ * key's farewell (one decryption for both; the poll pays per wrap).
+ */
+export function unwrapStatusOrFarewell(
+  wrap: NostrEvent,
+  recipientSk: Uint8Array,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): { status: DeviceStatus } | { farewell: StatusFarewell } | null {
+  const rumor = openStatusRumor(wrap, recipientSk, nowSecs);
+  if (!rumor) return null;
+  const status = parseStatus(rumor.content);
+  if (status) return status.machine === rumor.pubkey ? { status } : null;
+  const farewell = parseFarewell(rumor.content);
+  return farewell && farewell.machine === rumor.pubkey ? { farewell } : null;
+}
+
+/** Unwrap and authenticate a farewell STATUS, as `unwrapStatus` does a full one. */
+export function unwrapFarewell(
+  wrap: NostrEvent,
+  recipientSk: Uint8Array,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): StatusFarewell | null {
+  const rumor = openStatusRumor(wrap, recipientSk, nowSecs);
+  if (!rumor) return null;
+  const farewell = parseFarewell(rumor.content);
+  return farewell && farewell.machine === rumor.pubkey ? farewell : null;
 }
 
 /**

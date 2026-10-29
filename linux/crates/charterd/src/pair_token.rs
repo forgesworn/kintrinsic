@@ -61,12 +61,18 @@ pub fn mint(path: &str, now: u64, random: [u8; 16]) -> std::io::Result<String> {
 
 /// The live token, or `None` when absent, unreadable, junk, or expired.
 pub fn current(path: &str, now: u64) -> Option<String> {
+    current_with_mint(path, now).map(|(token, _)| token)
+}
+
+/// [`current`] with the time it was minted (the guardian-keys pairing check
+/// measures the token's lifetime from the mint).
+pub fn current_with_mint(path: &str, now: u64) -> Option<(String, u64)> {
     let text = std::fs::read_to_string(path).ok()?;
     let stored: Stored = serde_json::from_str(&text).ok()?;
     if now.saturating_sub(stored.minted_at) >= TOKEN_TTL_SECS {
         return None;
     }
-    Some(stored.token)
+    Some((stored.token, stored.minted_at))
 }
 
 /// Spend the token — single use, so a captured offer replayed later finds

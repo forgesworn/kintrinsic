@@ -4,7 +4,7 @@
 //! cannot act without a guardian-signed, fresh, single-use, pinned-authority,
 //! request-bound grant.
 
-use charter_primitives::{Nonce, NostrEvent, PubKey, ReqId};
+use charter_primitives::{Nonce, NostrEvent, ReqId, SignerSet};
 use charter_proto::{Decision, GrantParams, GrantPayload, OpType};
 use charter_sys::persistence::ConsumedIdStore;
 use charter_sys::SysError;
@@ -17,8 +17,9 @@ pub const FRESHNESS_SKEW_SECS: u64 = 300;
 /// Inputs that bind a grant to a known pending request. **No request params** —
 /// the enactor acts on the params inside the signed grant, never the request.
 pub struct VerifyParams<'a> {
-    /// The guardian pubkey pinned at pairing (the only authority).
-    pub pinned_guardian: &'a PubKey,
+    /// The ward's signer set: the grant's author must be in it. A bare
+    /// pinned guardian key (`&guardian`) is a single-key set.
+    pub signers: &'a dyn SignerSet,
     /// The reqId of the pending request this grant must answer.
     pub expected_req_id: &'a ReqId,
     /// The nonce of the pending request.
@@ -86,7 +87,7 @@ pub enum VerifyError {
     EventIdMismatch,
     /// The schnorr signature did not verify.
     BadSignature,
-    /// The author is not the pinned guardian.
+    /// The author is not in the signer set.
     UntrustedSigner,
     /// The grant's op did not match the pending request's op (confused-deputy /
     /// audit-accuracy defense-in-depth — the grant answers a different op than
@@ -143,8 +144,8 @@ pub fn verify_grant(
         return Err(VerifyError::BadSignature);
     }
 
-    // 4. Pinned authority.
-    if &event.pubkey != p.pinned_guardian {
+    // 4. Authority: the author must be in the signer set.
+    if !p.signers.is_signer(&event.pubkey) {
         return Err(VerifyError::UntrustedSigner);
     }
 
