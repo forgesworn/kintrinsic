@@ -83,6 +83,8 @@ export interface GuardianKeysApi {
   trustedRoots(): string[];
   /** Wards confirmed in person here that wait for an anchored parent's family list. */
   waitingPresenceWards(): ReturnType<GuardianKeys["waitingPresenceWards"]>;
+  /** Other parents whose family list stopped because they changed identity (scan their new code). */
+  movedAwayRoots(): string[];
 }
 
 export interface UseGuardianKeysDeps {
@@ -288,6 +290,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       anchorRoot: (code) => keys.anchorRoot(code),
       trustedRoots: () => keys.trustedRoots(),
       waitingPresenceWards: () => keys.waitingPresenceWards(),
+      movedAwayRoots: () => keys.movedAwayRoots(),
     }),
     [keys, keysState, workingPubkey, approveInstall, moveRoot, finishMove],
   );

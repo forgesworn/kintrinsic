@@ -100,6 +100,7 @@ export function mockStore(opts: {
       anchorRoot: vi.fn((code: string) => code),
       trustedRoots: vi.fn(() => [keys.root?.pubkey ?? MY_W, ...Object.keys(keys.anchoredRoots ?? {})]),
       waitingPresenceWards: vi.fn(() => [] as { machine: string; confirmedAt: number; ts?: number }[]),
+      movedAwayRoots: vi.fn(() => [] as string[]),
     },
   };
 }
