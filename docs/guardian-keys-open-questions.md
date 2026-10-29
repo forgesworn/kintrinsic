@@ -830,8 +830,13 @@ mints its own subject. What does a roster record use as `subject`?
 (64 hex), minted once by the install that created the child and kept. It is
 not a Nostr key and never goes to a ward. An install that adopts a child from
 a roster keeps the sender's `rosterId`, so records for the same child merge.
+When two installs minted different ids for the same child (each added it and
+paired or claimed one of its devices), a roster record that shares a device
+with a local child under another id is the same child: both installs keep the
+smaller of the two ids, so they converge on one record. See "A joining
+parent's devices".
 
-**Raised by:** batch 3a.
+**Raised by:** batch 3a; the merge of two ids by the batch 3 review.
 
 ## The objection's p when STATUS doesn't name the remover
 
@@ -970,13 +975,16 @@ until W's approval lands, and W can't send its approval until it knows the
 machine key. The guardian app never sees the `pairToken` echo.
 
 **Build's interim reading:** the app names R in the link and SAS as the
-interim reading says, but it only shows the phone QR while it holds a local
-signer, as before. Under a Signet root, a ward phone is claimed by its device
-code (the existing manual path); the approval goes out as soon as the device
-is recorded. A carried W (or approval) in the link, covered by the SAS, would
-close the gap.
+interim reading says. Under a Signet root it shows the phone's pairing QR (the
+ward pins R), then asks the parent to type the ward's device code, since the
+ward's STATUS goes only to R and the app never sees the `pairToken` echo; W's
+approval goes out as soon as the device is recorded. The cable and
+factory-reset QR setups wait for that echo, so they stay with a local signer.
+A carried W (or approval) in the link, covered by the SAS, would close the
+gap.
 
-**Raised by:** batch 3a.
+**Raised by:** batch 3a; the QR under a Signet root after the batch 3 review
+(the device code alone pinned nothing on a new ward).
 
 ## A phone-held root has no approval for the roster
 
@@ -1101,12 +1109,13 @@ the remover); guardian app `removeCoGuardian`, `confirmPresence`.
 not a working key bound to it, so its confirmation of its own removal
 statement is dropped. The removal could never complete.
 
-**Build's interim reading:** the app offers "Remove the other parent" only
-with a My Signet or Heartwood root, and says why otherwise. `removeCoGuardian`
-and `confirmPresence` themselves don't refuse it yet. Inviting stays open to
-a local-only family: the new parent confirms with their own working key.
+**Build's interim reading:** the app offers "Remove the other parent" and
+"Confirm in person" only with a My Signet or Heartwood root, and says why
+otherwise. `removeCoGuardian` and `confirmPresence` refuse it too
+(`requireSignetRoot`). Inviting stays open to a local-only family: the new
+parent confirms with their own working key.
 
-**Raised by:** batch 3b.
+**Raised by:** batch 3b; updated after the batch 3 review.
 
 ## Checking the invited identity when joining
 
@@ -1117,15 +1126,16 @@ as the bunker connects); `approveInstall({ expectRoot })`.
 parent invited. `pairSignet` asks the bunker to approve the working key
 before the app can compare identities.
 
-**Build's interim reading:** on a phone already connected to My Signet but
-not approved, the app takes the invited npub (optional) and passes it as
-`expectRoot`. On a fresh connection it shows the full npub after approval
-and says the devices won't accept a different one; the app's own
-`confirmPresence` refuses an invitation for another identity, so a mismatch
-fails closed. Passing `expectRoot` through `pairSignet` (refuse and
-disconnect before approving) would check it up front.
+**Build's interim reading:** on a fresh connection the invited npub is
+required. `pairSignet` passes it as `expectRoot`: a different identity is
+refused and disconnected before My Signet is asked to sign anything, and
+`approveThisInstall` checks it again. On a phone already connected to My
+Signet but not approved, the npub is optional and, when given, passed as
+`expectRoot` the same way. Without it, a mismatch still fails closed: wards
+drop an approval for an unpinned root, and the app's own `confirmPresence`
+refuses an invitation for another identity.
 
-**Raised by:** batch 3b.
+**Raised by:** batch 3b; updated after the batch 3 review.
 
 ## Guardians have no names in STATUS
 
@@ -1141,22 +1151,50 @@ short npub, installs as "Phone" and the first 8 hex of the working key, with
 
 **Raised by:** batch 3b.
 
-## A joining parent's device list
+## A joining parent's devices
 
-**Where:** *Family roster* (sent to the working keys the wards report);
-guardian app join checklist.
+**Where:** *Family roster* (sent to the working keys the wards report; "a
+device known only from a roster is shown as unconfirmed until a STATUS from
+it arrives"; "accepts a roster only from a W approved by a root that the
+family's wards report"); guardian app `confirmPresence`, `receiveRoster`,
+`adoptRoster`, STATUS admission.
 
-**Question:** the inviting install shares the roster only with working keys
-the wards report, and a joining W is reported only after its first
-confirmation. Before that the joining phone doesn't know which devices to
-visit.
+**Question:** a joining install has no devices. Its W is reported only after
+its first confirmation, so the roster can't reach it before then, and it
+can't accept a roster until some ward has told it who the family's roots
+are. The contract doesn't say how a roster becomes the joining install's
+family, or which devices count where "every device" must agree.
 
-**Build's interim reading:** the join checklist is generic (go to each
-device, ask it for a code, scan it), and lists roster devices as "still to
-confirm" once a roster has arrived. The inviting parent's checklist tells
-them to name the devices.
+**Build's interim reading:**
+- The join checklist is generic (go to each device, ask it for a code, scan
+  it). The inviting parent's checklist names the devices and asks them to
+  open Kintrinsic once the other parent has confirmed somewhere.
+- The machine key in the presence code (`m=`) is kept as a "presence ward"
+  when this install doesn't know the device. Its STATUS (now addressed to
+  this W) is admitted, and only its guardians view and version are kept, plus
+  the live status. That view counts as a ward's report, so the roster from
+  the inviting install can be accepted.
+- A roster refused only because no ward has vouched for its sender yet is
+  left unhandled and retried, as an unlanded ask is: the inviting install
+  sends it the moment its wards report the new W, which can be before this
+  install has read that STATUS.
+- An accepted roster becomes the family: each changed record is a child
+  (keyed by its `rosterId`), its devices are added as known only from the
+  roster (`fromRoster`), with any presence ward's view carried over. A child
+  adopted this way has no rules of its own in this install; see "Rules a
+  joining parent doesn't know". Devices paired here or heard from are never
+  removed; a roster-only device never heard from is dropped when a newer
+  record no longer lists it.
+- A roster-only device never heard from is shown as unconfirmed. It still
+  receives statements (harmless where this root isn't pinned), but it isn't
+  counted where every device must agree, since nothing shows this install's
+  root is pinned there: leaving the family, and finishing a root move.
+- Before any roster has arrived the joining install can't act on the
+  presence wards (leave, object): it says the other parent's phone hasn't
+  shared the family yet.
 
-**Raised by:** batch 3b.
+**Raised by:** batch 3b; rewritten by the batch 3 review (it found a joined
+parent never got the family).
 
 ## A root move that lapses half-way
 
@@ -1176,10 +1214,18 @@ and the rest still pin R. The contract has no state for "half moved".
 - while any ward is half-way, statements signed by R (co-guardian, removal,
   withdrawal, leaving, a move elsewhere) are refused, since the moved wards
   would drop them. Restarting the move to the same identity finishes it.
+- once it has lapsed with some ward moved, the app offers "Finish my identity
+  move" (Guardians), which reconnects R2 from its stored link and restarts
+  the move to R2 (both identities sign again). A cancel or objection R signs
+  meanwhile isn't counted as sent to a moved ward. A lapsed move with no ward
+  moved can be started afresh, to any identity.
+- there is no way to abandon a half-way move: R can't sign anything a moved
+  ward accepts, and nothing in the contract moves a ward back from R2 to R.
+  Moving the switched wards back would be a new move signed by R2.
 Signing those statements with R2 for the moved wards needs R2's bunker as a
 second live signer; design session.
 
-**Raised by:** batch 3a review.
+**Raised by:** batch 3a review; the way to finish by the batch 3 review.
 
 ## Who decides which roots may send a roster
 
@@ -1190,10 +1236,13 @@ approved by a root that the family's wards report in STATUS"); guardian app
 **Question:** the roots are the union of every ward's STATUS. One tampered
 ward (a rooted phone, root on a laptop) can report an extra root and working
 key; the app then sends every child's name, colour and device list to that
-key and accepts its rosters. Roster data never reaches the family itself
-(`children`), but the names leave the family.
+key and accepts its rosters. Since the batch 3 review an accepted roster also
+becomes children and devices in the family ("A joining parent's devices"),
+so such a key could add a child or an unconfirmed device. Clauses sent to an
+added device reach a machine key the tamperer chose.
 
 **Build's interim reading:** unchanged, matching the contract's wording.
+Added devices are shown as unconfirmed until they report here.
 Possible hardening for the design session: count a root only when more than
 one ward reports it, or when a ward this install paired reports it and an
 approval for its working key has been seen; or ask the guardian before the
@@ -1216,3 +1265,97 @@ recorded and R signs for it from then on; the app shows what it last heard.
 Hearing from it again needs a fresh approval of a new working key.
 
 **Raised by:** batch 3a review.
+
+## Rules a joining parent doesn't know
+
+**Where:** *Family roster* (carries names, colours and devices, not rules);
+rule 6 ("among clauses of one kind from current signers, the newest
+`issuedAt` wins"); rule 4 (re-sign before a departure).
+
+**Question:** a child adopted from a roster arrives with no rules in the
+joining install. Its screens show the device's own report of what is in
+force (STATUS `dailyMinutes`, `source` and so on), but the joining install's
+policy is empty.
+
+**Build's interim reading:** a rule the joining parent sets replaces only the
+clause kinds it sets, newest `issuedAt` wins, as the contract says; the
+other parent's other rules stand. Its rule 4 re-sign covers only what it has
+set itself. Sharing the current clause set between guardians (or reading it
+back from STATUS) would let the joining install start from the rules in
+force; design session.
+
+**Raised by:** batch 3 review.
+
+## A second install of the same identity
+
+**Where:** *Family roster* (sent only to working keys the wards report);
+`syncApprovals` (W's approval goes to the devices this install knows).
+
+**Question:** a second phone approved by the same root has no devices, so
+its approval reaches no ward, no ward reports its W, and no roster is ever
+sent to it. Presence doesn't help: nothing is pending.
+
+**Build's interim reading:** the second install connects one device by its
+device code (add the child, Set up a device, type the code). Its approval
+then goes to that ward, the ward reports the new W, and the first install's
+roster brings the rest. The child it added and the roster's child merge by
+their shared device ("The roster's subject for a child with no dependant
+key"). A roster accepted on the strength of this install's own root, or a
+code the first install shows, would remove the manual step; design session.
+
+**Raised by:** batch 3 review.
+
+## Leaving while a device hasn't reported its guardians
+
+**Where:** rule 7 ("the last root leaves only by unpairing"; "a removal that
+would [leave no roots] is refused"); *Versioning*.
+
+**Question:** a parent may leave only where another root stays. A device
+that hasn't reported its guardians (silent, or a ward that predates the
+section) can't show that.
+
+**Build's interim reading:** leaving is refused, naming the device, until
+every device this install paired or has heard from reports its guardians
+with another root. A device known only from a roster and never heard from
+isn't counted ("A joining parent's devices"). Finishing a root move counts
+every such device the same way: one that hasn't reported holds the move
+open.
+
+**Raised by:** batch 3 review.
+
+## Re-approving after My Signet is disconnected
+
+**Where:** rule 1 (binding), rule 11 (re-pairing only through a confirmed
+move); guardian app `forgetRoot`, `approveThisInstall`, `pairSignet`.
+
+**Question:** disconnecting My Signet forgets this install's root. Without
+it, nothing stopped a different identity approving the phone, which would
+then sign as a working key for devices that pin the old root.
+
+**Build's interim reading:** the forgotten root is kept. Approving again is
+refused for an identity that no reporting device lists as a root, or, when
+none reports, for any identity but the forgotten one. Reconnecting stamps
+the forgotten root (not this phone's key) as the pinned key of devices with
+no record, so they don't block approval as "trusting the key on this
+phone".
+
+**Raised by:** batch 3 review.
+
+## Rule 4's record of standing clauses
+
+**Where:** rule 4 ("a guardian app re-signs the current clause set with a
+live key before it sends a departure"); guardian app `resignStanding`
+(gift, stand-down, maintenance, update and debugging clauses).
+
+**Question:** the record of the last such clause per device lives in the
+browser's storage, outside the household state, so it starts empty on an
+upgrade and is lost by a key backup and restore.
+
+**Build's interim reading:** a debugging clause missing from the record is
+re-signed from the device's own record of what was sent
+(`Device.debugging`). A gift, stand-down, maintenance window or update sent
+before the record existed isn't re-signed; each is short-lived or replaced
+by the next of its kind. Moving the record into the household state (so the
+backup carries it) is left for a later batch.
+
+**Raised by:** batch 3 review.
