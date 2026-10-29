@@ -121,11 +121,14 @@ fn percent_encode(s: &str) -> String {
 }
 
 /// The presence code to scan (open question "Presence code encoding
-/// (build-defined)"): `charter://presence?m=<machine>&t=<token>&d=<d>`, `d`
-/// percent-encoded.
-pub fn presence_payload(machine: &PubKey, token: &str, d: &str) -> String {
+/// (build-defined)"):
+/// `charter://presence?m=<machine>&t=<token>&d=<d>&s=<statement>`, `d`
+/// percent-encoded, `s` the pending statement's event id (64 hex). The
+/// confirming install may never have seen the statement, and the confirmation
+/// must name its event id.
+pub fn presence_payload(machine: &PubKey, token: &str, d: &str, statement: &str) -> String {
     format!(
-        "charter://presence?m={}&t={token}&d={}",
+        "charter://presence?m={}&t={token}&d={}&s={statement}",
         machine.to_hex(),
         percent_encode(d)
     )
@@ -422,12 +425,13 @@ mod tests {
         let m = PubKey::from_bytes([0xab; 32]);
         let d = format!("kintrinsic/guardian/{}", "cd".repeat(32));
         assert_eq!(
-            presence_payload(&m, &"ef".repeat(16), &d),
+            presence_payload(&m, &"ef".repeat(16), &d, &"12".repeat(32)),
             format!(
-                "charter://presence?m={}&t={}&d=kintrinsic%2Fguardian%2F{}",
+                "charter://presence?m={}&t={}&d=kintrinsic%2Fguardian%2F{}&s={}",
                 "ab".repeat(32),
                 "ef".repeat(16),
-                "cd".repeat(32)
+                "cd".repeat(32),
+                "12".repeat(32)
             )
         );
         assert_eq!(
