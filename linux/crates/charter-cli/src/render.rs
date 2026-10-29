@@ -1,6 +1,6 @@
 //! Pure rendering for the CLI (a table by default, JSON with `--json`).
 
-use charter_ipc::{RequestStatusView, TimeLeftView};
+use charter_ipc::{GuardiansView, RequestStatusView, TimeLeftView};
 
 /// Whether `--json` was passed.
 pub fn json_flag(args: &[String]) -> bool {
@@ -26,6 +26,31 @@ pub fn render_status(rows: &[RequestStatusView], json: bool) -> String {
         ));
     }
     out.trim_end().to_string()
+}
+
+/// Who this ward trusts and who set its rules (rule 5): each label next to
+/// its signer's root as a short npub, never alone. Labels are guardian-chosen
+/// text, so control characters are dropped before printing.
+pub fn render_guardians(g: &GuardiansView) -> String {
+    let clean = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
+    let mut out = format!("Guardians: {}", clean(&g.roots.join(", ")));
+    if !g.rules.is_empty() {
+        out.push_str("\nRules set by:");
+        for r in &g.rules {
+            out.push_str(&format!(
+                "\n  {:<10} {}",
+                clean(&r.kind),
+                clean(&r.set_by())
+            ));
+        }
+    }
+    if !g.pending.is_empty() {
+        out.push_str("\nWaiting to be confirmed in person:");
+        for p in &g.pending {
+            out.push_str(&format!("\n  {:<10} {}", clean(&p.kind), clean(&p.key)));
+        }
+    }
+    out
 }
 
 /// Render the time-left breakdown.
