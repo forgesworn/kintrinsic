@@ -2118,12 +2118,22 @@ impl Warden {
         self.pairing
             .save(&json)
             .map_err(|e| format!("save relay change: {e:?}"))?;
-        self.relays = pairing.relays;
+        self.relays = pairing.relays.clone();
         self.last_status = None;
         // The guardian-keys state follows the pairing record's relay list
-        // when it loads (rule 11's previous-relays window covers a pasted
-        // change too).
-        self.load_guardian_keys(now);
+        // (rule 11's previous-relays window covers a pasted change too). The
+        // LIVE instance does the following, under its own lock: a second
+        // `GuardianKeys` for this ward could race an in-flight poll holding
+        // the first, and the two would overwrite each other's writes.
+        match &self.guardian_keys {
+            Some(keys) => {
+                if let Err(e) = keys.follow_pairing(&pairing, now) {
+                    eprintln!("charter: guardian keys did not follow the relay change ({e:?})");
+                }
+            }
+            // None live (never loaded): nothing to race, so load as init does.
+            None => self.load_guardian_keys(now),
+        }
         self.rebuild_relay();
         Ok(self.pairing_state())
     }

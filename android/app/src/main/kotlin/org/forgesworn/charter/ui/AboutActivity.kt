@@ -193,7 +193,7 @@ class AboutActivity : Activity() {
                 codeFull.text = code
                 publicNpub.text = PairingSas.npub(code.filterNot { it.isWhitespace() }) ?: "Public key unavailable."
                 codeShort.text = if (code.length >= 16) "${code.take(8)} … ${code.takeLast(4)}" else code
-                guardianLine.text = HomeCopy.guardianLine(state)
+                guardianLine.text = HomeCopy.guardianLine(state, guardians)
                 relayLine.text = state?.relays?.joinToString("\n")?.ifEmpty { "No relays configured." }
                     ?: "Relays could not be read."
                 changeRelays.isEnabled = state?.paired == true && !state.pairingUnreadable
