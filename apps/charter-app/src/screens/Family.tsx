@@ -21,7 +21,7 @@ import {
   writeWindow,
   INSTALL_WINDOW_MINUTES,
 } from "./installWindow";
-import type { Child, Device, SignerKind } from "../domain/types";
+import type { Child, Device } from "../domain/types";
 import { guardianPubkeyHex } from "../signer/guardianKey";
 import { pairingSas } from "../domain/pairingSas";
 import {
@@ -548,6 +548,13 @@ function DeviceRow({ child, device }: { child: Child; device: Device }) {
           {paired ? "Managed by Kintrinsic" : "Disconnected"}
           {paired ? ` · ${onHomeNetwork ? "On home network" : (seen ?? "waiting to hear from it")}` : ""}
         </div>
+        {device.departedAt !== undefined && (
+          // The device's last STATUS to this phone said its key is no longer
+          // trusted there (guardian keys); nothing more is sent to it.
+          <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+            This phone no longer has access to {device.label}.
+          </div>
+        )}
         {reportedName && (
           <div className="card-sub">Kintrinsic {reportedName}</div>
         )}
@@ -846,6 +853,7 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
     beginPhonePairing,
     cancelPhonePairing,
     sendPairOffer,
+    guardianKeys,
   } = useCharter();
   const [step, setStep] = useState<"scan" | "name">("scan");
   const [kind, setKind] = useState<Device["platform"]>("linux");
@@ -907,7 +915,9 @@ function SetupComputer({ child, onClose }: { child: Child; onClose: () => void }
       return;
     }
     const token = beginPhonePairing(child.id);
-    const pk = guardianPubkeyHex();
+    // The key the ward pins: this family's root (R with My Signet as root,
+    // else this phone's key). The SAS covers it and the token, as before.
+    const pk = guardianKeys.rootPubkey();
     const content = guardianPairingQrContent(pk, DEFAULT_RELAYS, token);
     setQrContent(content);
     let alive = true;
@@ -1310,7 +1320,7 @@ function SetupPhoneCable({
   onBack: () => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
-  const { phonePairing, beginPhonePairing, cancelPhonePairing, addDevice, confirmPairing } =
+  const { phonePairing, beginPhonePairing, cancelPhonePairing, addDevice, confirmPairing, guardianKeys } =
     useCharter();
   const [phase, setPhase] = useState<CablePhase>("intro");
   const [detail, setDetail] = useState("");
@@ -1372,7 +1382,7 @@ function SetupPhoneCable({
       );
 
       const token = beginPhonePairing(child.id);
-      const bunkerUri = guardianPairingBunkerUri(guardianPubkeyHex(), DEFAULT_RELAYS, token);
+      const bunkerUri = guardianPairingBunkerUri(guardianKeys.rootPubkey(), DEFAULT_RELAYS, token);
 
       await runProvision(session, bytes, bunkerUri, (p) => setDetail(p.detail));
 
@@ -1703,12 +1713,17 @@ const srOnlyStyle: CSSProperties = {
 // ---------------------------------------------------------------------------
 
 function SignerCard() {
-  const { state, connectSigner, enableLocalSigner, pairSignet, disconnectSigner, setAutoSign } = useCharter();
+  const { state, enableLocalSigner, pairSignet, disconnectSigner, setAutoSign, guardianKeys } = useCharter();
   const signer = state.signer;
   const [busy, setBusy] = useState(false);
-  const [pairing, setPairing] = useState(false);
+  // Which root is being connected: My Signet, or a Heartwood behind My Signet
+  // (the same bunker link; only the words differ). Null = not connecting.
+  const [pairingVia, setPairingVia] = useState<"signet" | "heartwood" | null>(null);
+  const pairing = pairingVia !== null;
   const [uri, setUri] = useState("");
   const [pairError, setPairError] = useState<string | null>(null);
+  const [approvalNote, setApprovalNote] = useState<string | null>(null);
+  const viaName = pairingVia === "heartwood" ? "your Heartwood" : "My Signet";
 
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -1741,11 +1756,16 @@ function SignerCard() {
   async function doPair() {
     setPairError(null);
     try {
-      await pairSignet(uri.trim());
-      setPairing(false);
+      const result = await pairSignet(uri.trim(), { via: pairingVia ?? "signet" });
+      setApprovalNote(
+        result.approved
+          ? null
+          : `Connected. This phone isn't approved to sign for you yet, so ${viaName} will be asked each time: ${result.error}`,
+      );
+      setPairingVia(null);
       setUri("");
     } catch (e) {
-      setPairError(e instanceof Error ? e.message : "Couldn't connect to Signet.");
+      setPairError(e instanceof Error ? e.message : `Couldn't connect to ${viaName}.`);
     }
   }
 
@@ -1761,7 +1781,13 @@ function SignerCard() {
         {pairing ? (
           <div className="stack">
             <p className="card-sub" style={{ margin: 0 }}>
-              In Signet, copy your connection link and paste it here.
+              {pairingVia === "heartwood"
+                ? "Your Heartwood is reached through My Signet. In My Signet, copy the connection link for your Heartwood identity and paste it here."
+                : "In My Signet, copy your connection link and paste it here."}
+            </p>
+            <p className="card-sub" style={{ margin: 0 }}>
+              {pairingVia === "heartwood" ? "Your Heartwood" : "My Signet"} becomes your guardian identity. It will be
+              asked once to approve this phone, which then signs your changes itself.
             </p>
             <input
               className="input"
@@ -1786,7 +1812,7 @@ function SignerCard() {
               block
               disabled={busy}
               onClick={() => {
-                setPairing(false);
+                setPairingVia(null);
                 setPairError(null);
               }}
             >
@@ -1797,8 +1823,8 @@ function SignerCard() {
           <ApprovalSetupChoices
             busy={busy}
             onLocal={() => run(enableLocalSigner)}
-            onSignet={() => setPairing(true)}
-            onHeartwood={() => run(() => connectSigner("heartwood" as SignerKind))}
+            onSignet={() => setPairingVia("signet")}
+            onHeartwood={() => setPairingVia("heartwood")}
           />
         )}
         <p className="card-sub" style={{ marginTop: 12 }}>
@@ -1857,6 +1883,45 @@ function SignerCard() {
           </div>
         );
       })()}
+      {(signer.kind === "signet" || signer.kind === "heartwood") && (
+        <div className="stack" style={{ marginTop: 12 }}>
+          {guardianKeys.state.root ? (
+            <p className="card-sub" style={{ margin: 0 }}>
+              This phone is approved to sign for your guardian identity
+              ({guardianNpub(guardianKeys.state.root.pubkey).slice(0, 16)}…). Devices that have
+              been updated take changes straight from this phone.
+            </p>
+          ) : (
+            <>
+              <p className="card-sub" style={{ margin: 0 }}>
+                Approve this phone once in {signer.kind === "heartwood" ? "My Signet (for your Heartwood)" : "My Signet"},
+                and it signs your changes itself, without asking each time.
+              </p>
+              <Button
+                block
+                disabled={busy}
+                onClick={() =>
+                  run(async () => {
+                    try {
+                      await guardianKeys.approveInstall();
+                      setApprovalNote(null);
+                    } catch (e) {
+                      setApprovalNote(e instanceof Error ? e.message : String(e));
+                    }
+                  })
+                }
+              >
+                Approve this phone
+              </Button>
+            </>
+          )}
+          {approvalNote && (
+            <p className="card-sub" style={{ margin: 0, color: "var(--danger, #B23B30)" }}>
+              {approvalNote}
+            </p>
+          )}
+        </div>
+      )}
       {signer.kind === "local" && (
         <div id={KEY_BACKUP_ANCHOR} style={{ scrollMarginTop: 80 }}>
           <KeyBackupSection busy={busy} />
