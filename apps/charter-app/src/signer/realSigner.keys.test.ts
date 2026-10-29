@@ -1,7 +1,7 @@
 // RealSigner under guardian roots and working keys: each ward's events are
 // signed and sealed by the key `pickOps` chooses for it (W where the ward
-// holds it, else the root), and a scan-to-pair offer goes out sealed by W
-// with R's approval when the install has a Signet root.
+// holds it, else the root); a scan-to-pair offer always goes out from the
+// root; and rule 4's re-sign of the standing one-off clauses.
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip44, type NostrEvent } from "nostr-tools";
@@ -79,30 +79,60 @@ describe("RealSigner with working keys", () => {
     for (const e of published) expect(unwrapToWorkingKey(e, sk(e))!.inner.pubkey).toBe(R);
   });
 
-  it("scan-to-pair: sealed by W with R's approval when the hook offers it", async () => {
+  it("scan-to-pair is offered by the root, never by W, whatever pickOps says", async () => {
+    // A ward that predates guardian keys pins the seal author: a W-sealed
+    // offer would pin W, and the app can't tell the ward's version first.
     const published: NostrEvent[] = [];
-    const approval = { kind: 31120, id: "x" };
-    const s = signer(published, {
-      pairOffer: (token, relays, ts) => ({ content: JSON.stringify({ token, relays, ts, approval }), ops: opsOf(wSk) }),
-    });
+    const s = signer(published, { pickOps: () => opsOf(wSk) });
     await s.connect("signet");
     await s.sendPairOffer(A, "ab".repeat(16), ["wss://one.example"]);
     const out = unwrapToWorkingKey(published[0], aSk)!;
-    expect(out.sealAuthor).toBe(W);
-    expect(out.inner.pubkey).toBe(W);
+    expect(out.sealAuthor).toBe(R);
+    expect(out.inner.pubkey).toBe(R);
     expect(out.inner.kind).toBe(31117);
-    expect(out.inner.tags).toEqual([["t", "charter-device"]]);
-    expect(JSON.parse(out.inner.content)).toEqual({ token: "ab".repeat(16), relays: ["wss://one.example"], ts: 1_800_000_000, approval });
+    expect(JSON.parse(out.inner.content).approval).toBeUndefined();
+  });
+});
+
+describe("rule 4: re-signing standing clauses", () => {
+  it("re-signs the last gift, stand-down and debugging per device with a fresh issuedAt and the same id", async () => {
+    const published: NostrEvent[] = [];
+    let now = 1_800_000_000;
+    const s = signer(published, { now: () => now });
+    await s.connect("signet");
+    await s.signGiftClause("c1", 15);
+    await s.signStandDownClause("c1");
+    await s.signDebuggingClause("c1", B, { allow: true, until: now + 3600 });
+    const first = published.map((e) => unwrapToWorkingKey(e, sk(e))!);
+    const giftId = (JSON.parse(first[0].inner.content) as { body: { id: string } }).body.id;
+    published.length = 0;
+    now += 100;
+    await s.resignStanding("c1");
+    const again = published.map((e) => ({ to: e.tags.find((t) => t[0] === "p")![1], c: JSON.parse(unwrapToWorkingKey(e, sk(e))!.inner.content) }));
+    // gift + standdown to both devices, debugging to B only
+    expect(again.map((x) => `${x.c.kind}:${x.to === A ? "A" : "B"}`).sort()).toEqual(
+      ["debugging:B", "gift:A", "gift:B", "standdown:A", "standdown:B"],
+    );
+    for (const x of again) {
+      expect(x.c.issuedAt).toBeGreaterThan(1_800_000_000 + 99);
+      if ("issuedAt" in x.c.body) expect(x.c.body.issuedAt).toBe(x.c.issuedAt);
+    }
+    expect(again.filter((x) => x.c.kind === "gift").every((x) => x.c.body.id === giftId)).toBe(true);
   });
 
-  it("scan-to-pair falls back to the root's offer when the hook declines", async () => {
+  it("does not record a clause whose send failed outright, and re-signs nothing when nothing is recorded", async () => {
     const published: NostrEvent[] = [];
-    const s = signer(published, { pairOffer: () => null });
-    await s.connect("local");
-    await s.sendPairOffer(A, "ab".repeat(16), ["wss://one.example"]);
-    const out = unwrapToWorkingKey(published[0], aSk)!;
-    expect(out.sealAuthor).toBe(R);
-    expect(JSON.parse(out.inner.content).approval).toBeUndefined();
+    const s = signer(published, {
+      publish: async () => {
+        throw new Error("no relay");
+      },
+    });
+    await s.connect("signet");
+    await expect(s.signGiftClause("c1", 15)).rejects.toThrow();
+    const ok = signer(published);
+    await ok.connect("signet");
+    await expect(ok.resignStanding("c1")).resolves.toEqual({ ok: true });
+    expect(published).toHaveLength(0);
   });
 });
 

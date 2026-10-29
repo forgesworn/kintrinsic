@@ -12,6 +12,14 @@
 //   same bunker flow), R approves W once. From then on W signs and seals for
 //   every ward that lists W under R and whose child passes the versioning
 //   gate; any other ward still gets R's signature over NIP-46, as before.
+// - During a root move to R2, each ward is judged by its own STATUS: one that
+//   already pins R2 and lists W under it gets W; one still on R gets W under
+//   R or R itself. Statements that need root authority wait until no ward is
+//   half-way (see `requireNoMovedWards`).
+// - Scan-to-pair under a Signet root is offered by R, with no approval, so a
+//   ward that predates the section pins R exactly as before; W's approval
+//   follows (`syncApprovals`). See docs/guardian-keys-open-questions.md,
+//   "A working-key PAIR_OFFER to a ward that predates the section".
 //
 // Seal author per statement (contract, *Delivery and the two seal
 // exceptions*):
@@ -42,11 +50,8 @@ import {
   isDeviceConfirmed,
   markDeviceStatusSeen,
   mergeRoster,
-  pairOfferContent,
   parseStatement,
   splitPendingD,
-  CHARTER_DEVICE_PAIR_OFFER,
-  CHARTER_MARKER_TAG,
   MAX_LABEL_BYTES,
   type EventSigner,
   type LocalRoster,
@@ -126,6 +131,9 @@ export interface SendReport {
 /** Resend W's approval to a ward that doesn't list it at most this often. */
 export const APPROVAL_RESEND_SECONDS = 6 * 60 * 60;
 
+/** A pending statement with no `expiresAt` expires this long after `issuedAt` (contract, *Pending statements*). */
+export const PENDING_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
+
 const HEX64 = /^[0-9a-f]{64}$/;
 
 /** A guardian identity typed or scanned: an `npub1…` or 64 hex. */
@@ -171,6 +179,9 @@ function truncateLabel(label: string): string {
 
 export class GuardianKeys {
   constructor(private readonly deps: GuardianKeysDeps) {}
+
+  /** > 0 while a rule 4 re-sign must use the root, not W (W is the key departing). */
+  private rootSigning = 0;
 
   // ---------------------------------------------------------------------
   // Keys and the per-ward choice
@@ -255,6 +266,10 @@ export class GuardianKeys {
    *   every ward of the child passes the versioning gate, or because the
    *   ward pins W itself as a root (a local-only family);
    * - "root": R (over NIP-46 for a Signet root), as before the section.
+   *
+   * During a root move, a ward that already lists W under the new root R2
+   * gets W too: it has moved, so R would be refused there (rule 8), and its
+   * STATUS `guardians` already shows it implements the section.
    */
   keyFor(machine: string): "working" | "root" {
     const keys = this.deps.read().keys;
@@ -263,8 +278,53 @@ export class GuardianKeys {
     if (!device?.guardians) return "root";
     const standing = keyStanding(device.guardians, this.workingPubkey());
     if (standing.as === "root") return "working";
-    if (standing.as !== "working" || standing.root !== keys.root.pubkey) return "root";
+    if (standing.as !== "working") return "root";
+    if (this.rootSigning > 0) return "root";
+    if (keys.nextRoot && standing.root === keys.nextRoot.pubkey) return "working";
+    if (standing.root !== keys.root.pubkey) return "root";
     return this.childReadiness(device.childId).ready ? "working" : "root";
+  }
+
+  /**
+   * Wards half-way through this install's root move: they pin R2 and no
+   * longer R, so a statement R signs can't reach them.
+   */
+  private movedWards(): (KeysDevice & { childId: string })[] {
+    const { keys } = this.deps.read();
+    const next = keys.nextRoot;
+    const root = keys.root;
+    if (!next || !root) return [];
+    return this.allDevices().filter(
+      (d) =>
+        d.guardians?.roots.some((r) => r.root === next.pubkey) &&
+        !d.guardians.roots.some((r) => r.root === root.pubkey),
+    );
+  }
+
+  /**
+   * A statement signed by R would be dropped by every ward that has already
+   * moved to R2, so root statements wait until the move is finished (or
+   * restarted and finished). docs/guardian-keys-open-questions.md, "A root
+   * move that lapses half-way".
+   */
+  private requireNoMovedWards(what: string): void {
+    const moved = this.movedWards();
+    if (moved.length === 0) return;
+    const names = [...new Set(moved.map((d) => d.name))].join(", ");
+    throw new Error(
+      `${names} already use${moved.length === 1 ? "s" : ""} your new guardian identity. Finish the move by confirming it in person at your other devices, then ${what}.`,
+    );
+  }
+
+  /** A family whose root is this phone's own key can't take part in presence or removal (OQ "Moving a phone-held root"). */
+  private requireSignetRoot(what: string): InstallRoot {
+    const root = this.signetRoot();
+    if (!root) {
+      throw new Error(
+        `Your guardian identity is kept on this phone, so you can't ${what} here. Connect My Signet as your guardian identity first.`,
+      );
+    }
+    return root;
   }
 
   /** The operations for `keyFor(machine)`. */
@@ -300,6 +360,13 @@ export class GuardianKeys {
     }
     const w = this.workingPubkey();
     if (ops.pubkey === w) throw new Error("This phone's own key can't approve itself.");
+    const current = this.deps.read().keys.root;
+    if (current && current.pubkey !== ops.pubkey) {
+      // A different identity is a root move (rule 11), never a re-approval.
+      throw new Error(
+        "This phone is already approved by a different guardian identity. To change identity, move your guardian identity instead.",
+      );
+    }
     const label = truncateLabel(opts.label) || "Kintrinsic";
     const approval = await buildApproval(signerOf(ops), w, { issuedAt: this.deps.now(), label });
     this.requireApproval(approval, ops.pubkey, w);
@@ -332,18 +399,21 @@ export class GuardianKeys {
     const root = keys.root;
     if (!root) return [];
     const now = this.deps.now();
-    const owed = this.allDevices().filter((d) => {
-      if (opts.machines && !opts.machines.includes(d.machine)) return false;
-      if (this.holdsWorkingKey(d.machine, root.pubkey)) return false;
+    const moved = new Set(this.movedWards().map((d) => d.machine));
+    const owed = this.allDevices().flatMap((d) => {
+      if (opts.machines && !opts.machines.includes(d.machine)) return [];
+      // A ward that has moved to R2 needs R2's approval of W; R's is dropped there.
+      const bind = moved.has(d.machine) && keys.nextRoot ? keys.nextRoot : root;
+      if (this.holdsWorkingKey(d.machine, bind.pubkey)) return [];
       const last = keys.approvalSentAt[d.machine];
-      return opts.force || last === undefined || now - last >= APPROVAL_RESEND_SECONDS;
+      return opts.force || last === undefined || now - last >= APPROVAL_RESEND_SECONDS ? [{ d, approval: bind.approval }] : [];
     });
     if (owed.length === 0) return [];
     const w = this.workingOps();
     const sent: string[] = [];
-    for (const d of owed) {
+    for (const { d, approval } of owed) {
       try {
-        const wrap = await giftWrapSigned(root.approval, d.machine, w, now);
+        const wrap = await giftWrapSigned(approval, d.machine, w, now);
         await this.deps.publish(this.relaysFor(d), wrap);
         sent.push(d.machine);
       } catch (e) {
@@ -358,16 +428,6 @@ export class GuardianKeys {
       });
     }
     return sent;
-  }
-
-  /** The PAIR_OFFER content and sealer for scan-to-pair (contract, *Scan-to-pair with a working key*). */
-  pairOffer(token: string, relays: string[], ts: number): { content: string; ops: GuardianOps } | null {
-    const root = this.signetRoot();
-    if (!root) return null; // local-only: the local key seals, no approval, as before
-    return {
-      content: pairOfferContent({ token, relays, ts, approval: root.approval }),
-      ops: this.workingOps(),
-    };
   }
 
   // ---------------------------------------------------------------------
@@ -451,11 +511,20 @@ export class GuardianKeys {
     );
   }
 
-  /** Re-sign every child's clauses with a live key before a departure (rule 4). */
-  private async resignAll(): Promise<void> {
+  /**
+   * Re-sign every child's clauses with a live key before a departure (rule 4).
+   * `asRoot`: W itself is departing, so the re-sign must come from R.
+   */
+  private async resignAll(opts: { asRoot?: boolean } = {}): Promise<void> {
     if (!this.deps.resignClauses) return;
-    for (const c of this.deps.read().children) {
-      if (c.devices.some((d) => HEX64.test(d.machine))) await this.deps.resignClauses(c.id);
+    if (opts.asRoot) this.rootOps(); // R must be connected to re-sign for W
+    if (opts.asRoot) this.rootSigning += 1;
+    try {
+      for (const c of this.deps.read().children) {
+        if (c.devices.some((d) => HEX64.test(d.machine))) await this.deps.resignClauses(c.id);
+      }
+    } finally {
+      if (opts.asRoot) this.rootSigning -= 1;
     }
   }
 
@@ -472,6 +541,7 @@ export class GuardianKeys {
       throw new Error("That's your own guardian ID.");
     }
     this.requireFamilyReady("invite another parent");
+    this.requireNoMovedWards("invite another parent");
     const event = await this.signAsRoot((s) =>
       buildCoGuardian(s, key, {
         issuedAt: this.deps.now(),
@@ -503,6 +573,7 @@ export class GuardianKeys {
     if (reporting.some((d) => !d.guardians!.roots.some((r) => r.root !== me))) {
       throw new Error("You're the only guardian on at least one device. Unpair it instead.");
     }
+    this.requireNoMovedWards("leave");
     const event = await this.signAsRoot((s) => buildRootRemoval(s, me, { issuedAt: this.deps.now() }));
     const report = await this.fanOut(event, "working-or-root");
     this.remember(event);
@@ -519,6 +590,10 @@ export class GuardianKeys {
     const key = parseGuardianKey(r2);
     if (!key) throw new Error("That isn't a guardian ID (npub).");
     if (key === this.rootPubkey()) throw new Error("To remove yourself, leave the family instead.");
+    // Its presence confirmation must come from a working key bound to this
+    // install's root; a phone-held root has none, so the ward would drop it.
+    this.requireSignetRoot("remove the other parent");
+    this.requireNoMovedWards("remove the other parent");
     await this.resignAll();
     const event = await this.signAsRoot((s) =>
       buildRootRemoval(s, key, {
@@ -569,6 +644,11 @@ export class GuardianKeys {
     const event = await this.signAsRoot((s) => buildCancel(s, d, { issuedAt: this.deps.now() }));
     const report = await this.fanOut(event, "working-or-root");
     this.remember(event);
+    if (this.deps.read().keys.nextRoot?.moveD === d) {
+      const at = this.deps.now();
+      this.deps.write((k) => (k.nextRoot ? { ...k, nextRoot: { ...k.nextRoot, cancelledAt: at } } : k));
+      this.dropLapsedMove();
+    }
     return report;
   }
 
@@ -576,8 +656,8 @@ export class GuardianKeys {
    * Withdraw a working key for good (a lost or replaced phone). Signed by its
    * binding root, which must be this install's root: sealed by this install's
    * W (another W of the same root), or by R itself when withdrawing this
-   * install's own W. Re-signs the clauses first (rule 4) unless it is this
-   * install's own key.
+   * install's own W. Re-signs the clauses first (rule 4): with R when it is
+   * this install's own key, since W is the one departing.
    */
   async withdrawInstall(w: string): Promise<SendReport> {
     const key = parseGuardianKey(w);
@@ -589,8 +669,10 @@ export class GuardianKeys {
     if (boundTo !== undefined && boundTo !== me) {
       throw new Error("That phone belongs to another parent; only they can withdraw it.");
     }
+    this.requireNoMovedWards("withdraw that phone");
     const own = key === this.workingPubkey();
-    if (!own) await this.resignAll();
+    // Rule 4: W itself departs when it is this install's own, so R re-signs.
+    await this.resignAll({ asRoot: own });
     const event = await this.signAsRoot((s) => buildWithdrawal(s, key, { issuedAt: this.deps.now() }));
     const report = await this.fanOut(event, own ? "root" : "working-or-root");
     this.remember(event);
@@ -610,9 +692,17 @@ export class GuardianKeys {
     if (!root) throw new Error("Moving a guardian identity held on this phone isn't available yet.");
     if (next.ops.pubkey === root.pubkey) throw new Error("That's already your guardian identity.");
     if (next.ops.pubkey === this.workingPubkey()) throw new Error("This phone's own key can't be the new identity.");
+    const pending = this.deps.read().keys.nextRoot;
+    if (pending && pending.pubkey !== next.ops.pubkey && this.movedWards().length > 0) {
+      // Some wards already pin the identity of the move in progress; a move
+      // R signs to somewhere else can't reach them. Restarting the same move
+      // (the same identity) is how a lapsed one is finished.
+      throw new Error("Some of your devices already use the guardian identity you were moving to. Finish that move first.");
+    }
     this.requireFamilyReady("move your guardian identity");
     await this.resignAll();
-    const event = await this.signAsRoot((s) => buildRootMove(s, next.ops.pubkey, { issuedAt: this.deps.now() }));
+    const issuedAt = this.deps.now();
+    const event = await this.signAsRoot((s) => buildRootMove(s, next.ops.pubkey, { issuedAt }));
     const w = this.workingPubkey();
     const approval = await buildApproval(signerOf(next.ops), w, {
       issuedAt: this.deps.now(),
@@ -627,6 +717,7 @@ export class GuardianKeys {
       bunkerUri: next.bunkerUri,
       moveD: event.tags.find((t) => t[0] === "d")?.[1] ?? "",
       moveId: event.id,
+      expiresAt: issuedAt + PENDING_LIFETIME_SECONDS,
     };
     this.deps.write((k) => ({ ...k, nextRoot }));
     this.remember(event);
@@ -643,17 +734,90 @@ export class GuardianKeys {
     const next = keys.nextRoot;
     if (!next || !keys.root) return null;
     const reporting = this.allDevices().filter((d) => d.guardians);
-    if (reporting.length === 0) return null;
-    const done = reporting.every(
-      (d) => d.guardians!.roots.some((r) => r.root === next.pubkey) && !d.guardians!.roots.some((r) => r.root === keys.root!.pubkey),
-    );
-    if (!done) return null;
+    const done =
+      reporting.length > 0 &&
+      reporting.every(
+        (d) => d.guardians!.roots.some((r) => r.root === next.pubkey) && !d.guardians!.roots.some((r) => r.root === keys.root!.pubkey),
+      );
+    if (!done) {
+      this.dropLapsedMove();
+      return null;
+    }
     this.deps.write((k) => {
       const { nextRoot: _drop, ...rest } = k;
       void _drop;
       return { ...rest, root: { pubkey: next.pubkey, approval: next.approval, via: next.via }, approvalSentAt: {} };
     });
     return next.bunkerUri;
+  }
+
+  /**
+   * When the move was cancelled or has expired (by the wards' STATUS
+   * `pending`, else its own 7 days) and no ward pins R2, forget it. If some
+   * ward already moved, R2 is kept: those wards still take W under R2, and
+   * restarting the move to the same identity finishes it.
+   */
+  private dropLapsedMove(): void {
+    const { keys } = this.deps.read();
+    const next = keys.nextRoot;
+    if (!next) return;
+    const reporting = this.allDevices().filter((d) => d.guardians);
+    const fromStatus = reporting.flatMap((d) => d.guardians!.pending.filter((p) => p.d === next.moveD).map((p) => p.expiresAt));
+    const sentAt = keys.sent[next.moveD]?.issuedAt;
+    const expiresAt =
+      fromStatus.length > 0
+        ? Math.max(...fromStatus)
+        : (next.expiresAt ?? (sentAt !== undefined ? sentAt + PENDING_LIFETIME_SECONDS : undefined));
+    const lapsed = next.cancelledAt !== undefined || (expiresAt !== undefined && this.deps.now() >= expiresAt);
+    if (!lapsed) return;
+    if (reporting.some((d) => d.guardians!.roots.some((r) => r.root === next.pubkey))) return;
+    this.deps.write((k) => {
+      const { nextRoot: _drop, ...rest } = k;
+      void _drop;
+      return rest;
+    });
+  }
+
+  /**
+   * Forget the root (and any move) when this install stops using it: the
+   * signer was disconnected. Nothing is sent.
+   */
+  forgetRoot(): void {
+    const { keys } = this.deps.read();
+    if (!keys.root && !keys.nextRoot) return;
+    this.deps.write((k) => {
+      const { root: _r, nextRoot: _n, ...rest } = k;
+      void _r;
+      void _n;
+      return { ...rest, approvalSentAt: {} };
+    });
+  }
+
+  /**
+   * Drop an approval that no longer names this install's working key (a
+   * key-only backup restored a different W). Wards would refuse it anyway:
+   * an approval is sealed only by the W it names.
+   */
+  dropStaleApproval(): boolean {
+    const { keys } = this.deps.read();
+    const w = this.workingPubkey();
+    const names = (a: SignedEvent | undefined) => {
+      const p = a ? parseStatement(a) : null;
+      return !!p && p.ok && p.statement.key === w;
+    };
+    const rootStale = !!keys.root && !names(keys.root.approval);
+    const nextStale = !!keys.nextRoot && !names(keys.nextRoot.approval);
+    if (!rootStale && !nextStale) return false;
+    this.deps.write((k) => {
+      const { root, nextRoot, ...rest } = k;
+      return {
+        ...rest,
+        ...(root && !rootStale ? { root } : {}),
+        ...(nextRoot && !nextStale && !rootStale ? { nextRoot } : {}),
+        approvalSentAt: {},
+      };
+    });
+    return true;
   }
 
   // ---------------------------------------------------------------------
@@ -670,6 +834,9 @@ export class GuardianKeys {
   async confirmPresence(input: string | PresenceCode): Promise<SendReport> {
     const code = typeof input === "string" ? parsePresenceCode(input) : input;
     if (!code) throw new Error("That isn't a Kintrinsic presence code.");
+    // Only a working key bound to a root may confirm; a phone-held root
+    // signs as the root itself, and the ward would drop it.
+    this.requireSignetRoot("confirm in person");
     const { keys } = this.deps.read();
     let approval: SignedEvent | undefined;
     if (code.kind === "coguardian") {
@@ -693,7 +860,7 @@ export class GuardianKeys {
     const known = this.findDevice(code.machine);
     // A joining install may not know this ward yet: its own defaults, plus
     // anything it does know. OQ: "Presence code carries no relays".
-    const relays = known ? this.relaysFor(known) : [...this.deps.defaultRelays];
+    const relays = [...new Set([...(known ? this.relaysFor(known) : []), ...this.deps.defaultRelays])];
     const report: SendReport = { event, sent: [], held: [], failed: [] };
     const wrap = await giftWrapSigned(event, code.machine, w, this.deps.now());
     try {
@@ -885,9 +1052,4 @@ export function unwrapToWorkingKey(
   } catch {
     return null;
   }
-}
-
-/** The kind-31117 inner template for a PAIR_OFFER whose content is already built. */
-export function pairOfferInnerTemplate(content: string, createdAt: number) {
-  return { kind: CHARTER_DEVICE_PAIR_OFFER, created_at: createdAt, tags: [[...CHARTER_MARKER_TAG]], content };
 }

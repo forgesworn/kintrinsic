@@ -5,7 +5,14 @@
 import { describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, nip44, type NostrEvent } from "nostr-tools";
 import type { Child, Device } from "../domain/types";
-import { applyDeviceKeysView, applyFarewell, devicesPinningLocalKey, ensureRosterIds, keysChildren } from "./guardianKeysWiring";
+import {
+  applyDeviceKeysView,
+  applyFarewell,
+  devicesPinningLocalKey,
+  ensureRosterIds,
+  keysChildren,
+  stampPinnedKeys,
+} from "./guardianKeysWiring";
 import { parseFarewell, parseStatus, unwrapFarewell, unwrapStatus, type DeviceStatus } from "../wire/status";
 import { ingestWrap, type WrapIngestContext } from "./ingestWrap";
 import { resolveChildTarget } from "../signer/resolveChild";
@@ -115,6 +122,16 @@ describe("a departed key's last STATUS (farewell)", () => {
     expect(back[0].devices[0].departedAt).toBeUndefined();
   });
 
+  it("keeps a device whose pinned root is still this install's own: R keeps signing for it", () => {
+    const kids = [child([device({ keysViewAt: T - 10, guardians: g([{ root: R, keys: [W] }]) })])];
+    const f = parseFarewell(JSON.stringify(farewellBody([{ root: R, keys: [] }])))!;
+    const after = applyFarewell(kids, f, W, [R]);
+    expect(after[0].devices[0].departedAt).toBeUndefined();
+    expect(after[0].devices[0].guardians?.roots).toEqual([{ root: R, keys: [] }]);
+    expect(keysChildren(after, [])[0].devices).toHaveLength(1);
+    expect(applyFarewell(after, f, W, [R])).toBe(after);
+  });
+
   it("ignores a farewell that still lists W, or one older than the view held", () => {
     const kids = [child([device({ keysViewAt: T })])];
     expect(applyFarewell(kids, parseFarewell(JSON.stringify(farewellBody([{ root: R, keys: [W] }])))!, W)).toBe(kids);
@@ -148,10 +165,31 @@ describe("roster ids", () => {
 });
 
 describe("connecting My Signet over a family that trusts this phone's key", () => {
-  it("names devices heard from with the local key, unless they hold it as a working key", () => {
+  it("counts every device not known to trust another key, heard from or not (fail-closed)", () => {
     const heard = device({ lastSeenAt: 1 });
     const working = device({ id: "d2", label: "Laptop", devicePubkey: "b".repeat(64), keysViewAt: 1, guardians: g([{ root: R, keys: [W] }]) });
     const silent = device({ id: "d3", label: "Tablet", devicePubkey: "e".repeat(64) });
-    expect(devicesPinningLocalKey([child([heard, working, silent])], W)).toEqual(["Sam's phone"]);
+    const pinnedW = device({ id: "d4", label: "New laptop", devicePubkey: "f".repeat(64), pinnedKey: W });
+    const pinnedR = device({ id: "d5", label: "Old laptop", devicePubkey: "9".repeat(64), pinnedKey: R });
+    const asRoot = device({ id: "d6", label: "Desk", devicePubkey: "8".repeat(64), pinnedKey: R, guardians: g([{ root: W, keys: [] }]) });
+    expect(devicesPinningLocalKey([child([heard, working, silent, pinnedW, pinnedR, asRoot])], W)).toEqual([
+      "Sam's phone",
+      "Tablet",
+      "New laptop",
+      "Desk",
+    ]);
+  });
+
+  it("a family already on My Signet: unheard devices are stamped with the root, so approving passes", () => {
+    const silent = device({ label: "Tablet" });
+    const heard = device({ id: "d2", label: "Laptop", devicePubkey: "b".repeat(64), lastSeenAt: 1 });
+    const stamped = stampPinnedKeys([child([silent, heard])], R, { onlyUnheard: true });
+    expect(stamped[0].devices.map((d) => d.pinnedKey)).toEqual([R, undefined]);
+    expect(devicesPinningLocalKey(stamped, W)).toEqual(["Laptop"]);
+    // A phone that signed with its own key stamps everything with it first.
+    const local = stampPinnedKeys([child([silent, heard])], W);
+    expect(devicesPinningLocalKey(stampPinnedKeys(local, R, { onlyUnheard: true }), W)).toEqual(["Tablet", "Laptop"]);
+    // Nothing to stamp: the same array.
+    expect(stampPinnedKeys(local, R)).toBe(local);
   });
 });

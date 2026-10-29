@@ -37,9 +37,8 @@ export interface SignetSignerConfig {
   knownRoot?: () => string | undefined;
   /** This install's working key (the local guardian key), for relay AUTH once R has approved it. */
   workingKey?: () => Uint8Array;
-  /** Per-ward key choice and the working-key PAIR_OFFER (see RealSignerDeps). */
+  /** Per-ward key choice (see RealSignerDeps). */
   pickOps?: RealSignerDeps["pickOps"];
-  pairOffer?: RealSignerDeps["pairOffer"];
 }
 
 /**
@@ -137,6 +136,5 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
     childPolicies: config.childPolicies,
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),
     pickOps: config.pickOps,
-    pairOffer: config.pairOffer,
   });
 }

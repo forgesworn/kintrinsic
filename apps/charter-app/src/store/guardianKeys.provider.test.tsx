@@ -89,4 +89,90 @@ describe("approving this phone on an existing My Signet family", () => {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
     expect(saved.guardianKeys.root.pubkey).toBe(R);
   });
+
+  it("refuses to connect an identity other than the invited one, and approves nothing", async () => {
+    const invited = "b2".repeat(32);
+    await act(async () => {
+      await expect(ctx!.pairSignet("bunker://y?relay=wss://bunker.example", { expectRoot: invited })).rejects.toThrow(
+        /isn't the one the other parent invited/,
+      );
+    });
+    expect(ctx!.guardianKeys.state.root).toBeUndefined();
+    // The refused link is not kept.
+    expect(ctx!.state.signer.bunkerUri).toBe("bunker://x?relay=wss://bunker.example");
+  });
+});
+
+describe("approving this phone on a My Signet family with devices it has never heard from", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const machine = "c3".repeat(32);
+
+  function mount(signerKind: "signet" | "local") {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        children: [
+          {
+            id: "c1",
+            name: "Sam",
+            color: "#000",
+            dependantPubkey: null,
+            policies: [],
+            devices: [{ id: "d1", label: "Sam's laptop", platform: "linux", pairing: "paired", devicePubkey: machine }],
+          },
+        ],
+        requests: [],
+        activity: [],
+        signer:
+          signerKind === "signet"
+            ? { connected: true, kind: "signet", autoSign: false, bunkerUri: "bunker://x?relay=wss://bunker.example" }
+            : { connected: true, kind: "local", autoSign: true },
+      }),
+    );
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <CharterProvider>
+          <Probe />
+        </CharterProvider>,
+      );
+    });
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    resetGuardianKeyCacheForTests();
+    localStorage.setItem("charter.guardian.key.v1", nip19.nsecEncode(wSk));
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    localStorage.clear();
+    resetGuardianKeyCacheForTests();
+  });
+
+  it("a family already on My Signet: the silent device was offered by R, so approving passes", async () => {
+    mount("signet");
+    await act(async () => {
+      await ctx!.guardianKeys.approveInstall({ label: "Parent's phone" });
+    });
+    expect(ctx!.guardianKeys.state.root?.pubkey).toBe(R);
+    expect(ctx!.state.children[0].devices[0].pinnedKey).toBe(R);
+  });
+
+  it("a phone that signed with its own key: the silent device pins it, so connecting My Signet doesn't approve", async () => {
+    mount("local");
+    let result: Awaited<ReturnType<CharterContextValue["pairSignet"]>> | undefined;
+    await act(async () => {
+      result = await ctx!.pairSignet("bunker://x?relay=wss://bunker.example");
+    });
+    expect(result).toMatchObject({ approved: false });
+    expect(result && !result.approved && result.error).toMatch(/already trust the key on this phone/);
+    expect(ctx!.guardianKeys.state.root).toBeUndefined();
+    expect(ctx!.state.children[0].devices[0].pinnedKey).toBe(W);
+  });
 });

@@ -76,6 +76,8 @@ export interface UseGuardianKeysDeps {
   localRoute: LocalRouteHooks;
   /** Rule 4: re-sign one child's clause set; throws when it couldn't be sent. */
   resign: (childId: string) => Promise<void>;
+  /** Record `key` as the pinned key of every paired device with none yet (see guardianKeysWiring). */
+  stampPinnedKeys: (key: string, opts?: { onlyUnheard?: boolean }) => void;
   /** A root move landed on every ward: switch the signer to the new bunker. */
   onRootMoved: (bunkerUri: string) => void;
   /**
@@ -134,7 +136,6 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       knownRoot: () => keysRef.current.root?.pubkey,
       workingKey: loadOrCreateGuardianKey,
       pickOps: (machine) => (keys.keyFor(machine) === "working" ? keys.workingOps() : undefined),
-      pairOffer: (token, relays, ts) => keys.pairOffer(token, relays, ts),
     }),
     [keys],
   );
@@ -160,6 +161,12 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
     })();
   }, [children, rootKey, keys]);
 
+  // An approval for a different working key (a restored key backup) is no
+  // use: wards take an approval only from the W it names.
+  useEffect(() => {
+    keys.dropStaleApproval();
+  }, [keys, rootKey]);
+
   // Share the roster when what it says changes and another working key exists.
   const lastRoster = useRef<string | null>(null);
   useEffect(() => {
@@ -183,6 +190,16 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       }
       if (!depsRef.current.signer()?.status().connected) {
         await depsRef.current.reconnect();
+        s = depsRef.current.stateRef.current;
+      }
+      // A family already on My Signet: its devices with no record that it has
+      // never heard from were offered by that root (their STATUS goes to R).
+      // A phone switching from its own key recorded its devices as pinning
+      // that key before connecting (see pairSignet).
+      const r = depsRef.current.signer() as (Signer & { rootOps?: () => GuardianOps | null }) | null;
+      const rootKey = r?.rootOps?.()?.pubkey;
+      if (rootKey) {
+        depsRef.current.stampPinnedKeys(rootKey, { onlyUnheard: true });
         s = depsRef.current.stateRef.current;
       }
       const w = keys.workingPubkey();
