@@ -46,6 +46,14 @@ import { isValidDevicePubkey } from "./offlineUnlock";
 import { anyOnHomeNetwork, bestLiveness, livenessChip } from "../domain/liveness";
 import { useLocalRoute } from "../carrier/useLocalRoute";
 import { appLockNote, deviceHealthNotes } from "../domain/deviceHealth";
+import Guardians from "./Guardians";
+import {
+  familyWards,
+  goGuardians,
+  guardiansSubroute,
+  removalsAgainstMe,
+  rootsView,
+} from "./guardiansView";
 
 // Accent colors a parent can pick for a child's avatar/chips.
 const CHILD_COLORS = ["#3B6FB2", "#2E7D5B", "#C4860F", "#7A4FB5", "#B23B30"];
@@ -67,6 +75,10 @@ const CHILD_COLORS = ["#3B6FB2", "#2E7D5B", "#C4860F", "#7A4FB5", "#B23B30"];
 export default function Family() {
   const { state } = useCharter();
   const hasChildren = state.children.length > 0;
+  const guardiansSub = useGuardiansSubroute();
+
+  // `#/family/guardians/…`: the Guardians screens, inside the Family tab.
+  if (guardiansSub !== null) return <Guardians sub={guardiansSub} />;
 
   return (
     <>
@@ -98,11 +110,67 @@ export default function Family() {
         </p>
         <SignerCard />
       </div>
+
+      <div id="setup-guardians" style={{ scrollMarginTop: 80 }}>
+        <SectionLabel>Guardians</SectionLabel>
+        <GuardiansCard />
+      </div>
       {/* Foot of the page: which Kintrinsic this actually is, and a way out
           when it is behind. Renders nothing in an ordinary browser tab —
           there is no shell to be out of date. */}
       <AppVersion />
     </>
+  );
+}
+
+/** The Guardians sub-route, following the address as it changes. */
+function useGuardiansSubroute(): string | null {
+  const [sub, setSub] = useState(() => guardiansSubroute());
+  useEffect(() => {
+    const onHash = () => setSub(guardiansSubroute());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return sub;
+}
+
+/**
+ * Who looks after the family's devices, in one line, with the way into the
+ * Guardians screens. A pending removal of you is shown here too, so it can't
+ * go unseen behind a tap.
+ */
+function GuardiansCard() {
+  const { state, guardianKeys } = useCharter();
+  const wards = familyWards(state.children);
+  const me = guardianKeys.rootPubkey();
+  const roots = rootsView(wards, me);
+  const againstMe = removalsAgainstMe(wards, guardianKeys.state, me);
+  const others = roots.filter((r) => !r.you).length;
+  return (
+    <Card>
+      {againstMe.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <Banner tone="warn">
+            The other parent has asked to remove you as a guardian. Open Guardians to object.
+          </Banner>
+        </div>
+      )}
+      <p className="card-sub" style={{ marginTop: 0 }}>
+        {wards.length === 0
+          ? "Another parent already uses Kintrinsic for your child? Join their family with your own My Signet."
+          : others === 0
+            ? "You're the only guardian. Invite the other parent so they can set limits and answer requests too."
+            : `You and ${others === 1 ? "one other parent" : `${others} other parents`} look after these devices.`}
+      </p>
+      <Button block variant={againstMe.length > 0 ? "primary" : "secondary"} onClick={() => goGuardians()}>
+        Guardians
+      </Button>
+      {wards.length === 0 && (
+        <Button block variant="ghost" onClick={() => goGuardians("join")} style={{ marginTop: 8 }}>
+          Join a family
+        </Button>
+      )}
+    </Card>
   );
 }
 
@@ -1851,9 +1919,9 @@ function SignerCard() {
           <div className="stack" style={{ marginTop: 12 }}>
             {/* This used to end "it links that laptop to this phone", which a
                 second parent reasonably read as the way to add THEMSELVES —
-                when the laptop being paired is a ward's device. Kintrinsic has one
-                pinned guardian key by contract, so naming whose computer this
-                is matters more than the mechanics. */}
+                when the laptop being paired is a ward's device. A second parent
+                joins with their own identity (Guardians), so naming whose
+                computer this is matters more than the mechanics. */}
             <p className="card-sub" style={{ margin: 0 }}>
               To connect a computer your child uses: on that computer open
               Kintrinsic, go to “Connect a phone” and press “Show the pairing
@@ -1862,9 +1930,8 @@ function SignerCard() {
               rules you set here.
             </p>
             <p className="card-sub" style={{ margin: 0 }}>
-              This isn’t how another parent joins — Kintrinsic has one guardian key,
-              held on this phone. Sharing the household today means sharing that
-              key, through Back up key below.
+              This isn’t how another parent joins. They join with their own
+              identity: Family → Guardians → Invite a parent.
             </p>
             <p className="card-sub" style={{ margin: 0 }}>
               No internet on either device? Copy this link instead and paste it
