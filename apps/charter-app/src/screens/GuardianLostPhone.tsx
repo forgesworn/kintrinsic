@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button, Card } from "../components/ui";
 import { useCharter } from "../store/store";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
-import { familyWards, rootsView } from "./guardiansView";
+import { familyWards, myRootOf, rootsView } from "./guardiansView";
 
 /**
  * A lost or replaced phone: withdraw its working key from every device, for
@@ -13,7 +13,7 @@ export default function GuardianLostPhone({ onBack }: { onBack: () => void }) {
   const { state, guardianKeys } = useCharter();
   const wards = familyWards(state.children);
   const names = Object.fromEntries(wards.map((w) => [w.device.devicePubkey, w.device.label]));
-  const me = guardianKeys.rootPubkey();
+  const me = myRootOf(guardianKeys);
   const mine = rootsView(wards, me).find((r) => r.you);
   const others = (mine?.keys ?? []).filter((k) => k !== guardianKeys.workingPubkey);
   const [confirming, setConfirming] = useState<string | null>(null);

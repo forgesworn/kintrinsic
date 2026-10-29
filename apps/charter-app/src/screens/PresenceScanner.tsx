@@ -5,6 +5,7 @@ import { useCharter } from "../store/store";
 import { parsePresenceCode, parsePresenceToken } from "../keys/presenceCode";
 import {
   familyWards,
+  myRootOf,
   pendingFor,
   pendingTitle,
   presenceCodeFrom,
@@ -38,7 +39,7 @@ type Result = { ok: true; device: string; held: boolean; kind: string } | null;
 export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
   const { state, guardianKeys } = useCharter();
   const wards = familyWards(state.children);
-  const me = guardianKeys.rootPubkey();
+  const me = myRootOf(guardianKeys);
   const [scanning, setScanning] = useState(false);
   const [typed, setTyped] = useState("");
   const [token, setToken] = useState<string | null>(null);
