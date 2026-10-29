@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use charter_link::LocalSink;
-use charter_primitives::PubKey;
+use charter_primitives::{PubKey, SignerSet};
+use charter_spine::GuardianKeys;
 use charter_sys::relay::{PublishOutcome, RelayTransport, RelayUrl};
 use charter_transport::transport::{CharterTransport, Entropy, ReceivedClause};
 
@@ -42,22 +43,32 @@ pub trait WardenRelay: Send + Sync {
         since: u64,
         now: u64,
     ) -> Result<Vec<(charter_primitives::NostrEvent, PubKey)>, String>;
-    /// Gift-wrap + publish a STATUS payload. Returns how many relays accepted;
-    /// zero acceptances is an Err carrying the relays' rejection text.
-    fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String>;
+    /// Gift-wrap + publish a STATUS payload, one wrap per STATUS recipient
+    /// (rule 9, plus a departed key's one last STATUS), on the pinned relays
+    /// and `extra_relays` (rule 11: a ward with more than one root keeps
+    /// sending STATUS on its previous relays for 7 days after a change).
+    /// Returns how many relay acceptances there were; a wrap no relay took
+    /// is parked and makes this an Err carrying the relays' rejection text.
+    fn emit_status(
+        &self,
+        status_json: &str,
+        now: u64,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> Result<usize, String>;
     /// Retry parked offline wraps (the §2.2 spool); returns (sent, remaining).
     fn drain_outbox(&self, now: u64) -> (usize, usize);
-    /// Gift-wrap (without publishing) a device AUDIT (kind 31000) to the
-    /// guardian — tags only, content always empty. Used by the break-glass
-    /// override so an emergency unlock is LOUD (contract §Break-glass
-    /// override event). NOT offered to the local link: the caller journals
-    /// it first and then offers it with [`Self::offer_audit_local`], and
-    /// retries it with [`Self::publish_wrap`].
-    fn build_audit_wrap(
+    /// Gift-wrap (without publishing) a device AUDIT (kind 31000), one wrap
+    /// per recipient in the signer set (rule 9) — tags only, content always
+    /// empty. Used by the break-glass override so an emergency unlock is LOUD
+    /// (contract §Break-glass override event). NOT offered to the local
+    /// link: the caller journals them first and then offers each with
+    /// [`Self::offer_audit_local`], and retries each with
+    /// [`Self::publish_wrap`].
+    fn build_audit_wraps(
         &self,
         tags: Vec<Vec<String>>,
         now: u64,
-    ) -> Option<charter_primitives::NostrEvent>;
+    ) -> Vec<charter_primitives::NostrEvent>;
     /// Offer an AUDIT wrap from [`Self::build_audit_wrap`] to the local link,
     /// once it is journaled.
     fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent);
@@ -133,6 +144,20 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
         self
     }
 
+    /// Address every wrap to the ward's guardian-keys recipients (rule 9):
+    /// AUDITs to the live signer set's recipients, STATUS to those plus any
+    /// departed key owed one last STATUS showing its departure. Without
+    /// keys (an unpaired build path) the pinned guardian alone, as before.
+    pub fn with_guardians(mut self, keys: Option<&GuardianKeys>) -> Self {
+        if let Some(keys) = keys {
+            self.transport
+                .set_signer_set(Arc::new(StatusRecipients(keys.clone())));
+            self.audit_builder
+                .set_signer_set(charter_spine::GuardianStatements::signers(keys));
+        }
+        self
+    }
+
     /// Attach the local link's outbox: every STATUS and AUDIT wrap this
     /// facade builds is offered to it before relay IO starts (the identical
     /// wrap, so both copies share one event id).
@@ -161,33 +186,49 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
             .map_err(|e| format!("relay poll (release): {e:?}"))
     }
 
-    fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String> {
-        // Build once so a total failure can park the EXACT wrap for retry.
-        let Some(wrap) = self.transport.build_status_wrap(status_json, now) else {
-            return Err("status wrap build failed".into());
-        };
-        let outcomes = self
-            .rt
-            .block_on(self.transport.publish_prebuilt(wrap.clone()));
-        let accepted = outcomes
-            .iter()
-            .filter(|(_, o)| matches!(o, PublishOutcome::Ok))
-            .count();
-        if accepted == 0 {
-            if let Some(outbox) = &self.outbox {
-                let subject = serde_json::from_str::<serde_json::Value>(status_json)
-                    .ok()
-                    .and_then(|v| v.get("subject").and_then(|s| s.as_str().map(String::from)))
-                    .unwrap_or_else(|| "unknown".into());
-                outbox.put_status(&subject, &wrap, now);
-            }
-            let reasons: Vec<String> = outcomes
+    fn emit_status(
+        &self,
+        status_json: &str,
+        now: u64,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> Result<usize, String> {
+        // Build once so a total failure can park the EXACT wraps for retry:
+        // one per recipient (each already offered to the local link).
+        let wraps = self.transport.build_status_wraps(status_json, now);
+        if wraps.is_empty() {
+            return Err("status wrap build failed (no recipients)".into());
+        }
+        let subject = serde_json::from_str::<serde_json::Value>(status_json)
+            .ok()
+            .and_then(|v| v.get("subject").and_then(|s| s.as_str().map(String::from)))
+            .unwrap_or_else(|| "unknown".into());
+        let many = wraps.len() > 1;
+        let mut accepted = 0;
+        let mut reasons: Vec<String> = Vec::new();
+        for wrap in wraps {
+            let outcomes = self.rt.block_on(
+                self.transport
+                    .publish_prebuilt_on(std::slice::from_ref(&wrap), extra_relays),
+            );
+            let took = outcomes
                 .iter()
-                .map(|(url, o)| match o {
+                .filter(|(_, o)| matches!(o, PublishOutcome::Ok))
+                .count();
+            accepted += took;
+            if took == 0 {
+                if let Some(outbox) = &self.outbox {
+                    // Latest-only per (subject, recipient): one recipient's
+                    // parked STATUS never replaces another's.
+                    let recipient = many.then(|| wrap_recipient(&wrap)).flatten();
+                    outbox.put_status_for(&subject, recipient.as_deref(), &wrap, now);
+                }
+                reasons.extend(outcomes.iter().map(|(url, o)| match o {
                     PublishOutcome::Ok => format!("{url}: ok"),
                     PublishOutcome::Failed(e) => format!("{url}: {e}"),
-                })
-                .collect();
+                }));
+            }
+        }
+        if !reasons.is_empty() {
             return Err(format!(
                 "status rejected everywhere: {}",
                 reasons.join("; ")
@@ -196,12 +237,13 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         Ok(accepted)
     }
 
-    fn build_audit_wrap(
+    fn build_audit_wraps(
         &self,
         tags: Vec<Vec<String>>,
         now: u64,
-    ) -> Option<charter_primitives::NostrEvent> {
-        self.audit_builder.build_audit_wrap(tags, now)
+    ) -> Vec<charter_primitives::NostrEvent> {
+        // `audit_builder` has no local sink: nothing is offered here.
+        self.audit_builder.build_audit_wraps(tags, now)
     }
 
     fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent) {
@@ -258,6 +300,38 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
     }
 }
 
+/// The recipient a gift wrap is addressed to (its single `p` tag), as hex.
+fn wrap_recipient(wrap: &charter_primitives::NostrEvent) -> Option<String> {
+    wrap.tags
+        .iter()
+        .find(|t| t.first().is_some_and(|n| n == "p"))
+        .and_then(|t| t.get(1).cloned())
+}
+
+/// The STATUS recipients as a signer set: the live set in every respect but
+/// `recipients`, which also names each departed key owed one last STATUS
+/// (contract: "a departed key receives one last STATUS that shows its
+/// departure"). Used only by the transport that builds STATUS wraps.
+struct StatusRecipients(GuardianKeys);
+
+impl SignerSet for StatusRecipients {
+    fn is_signer(&self, key: &PubKey) -> bool {
+        charter_spine::GuardianStatements::signers(&self.0).is_signer(key)
+    }
+    fn root_of(&self, key: &PubKey) -> Option<PubKey> {
+        charter_spine::GuardianStatements::signers(&self.0).root_of(key)
+    }
+    fn is_departed(&self, key: &PubKey) -> bool {
+        charter_spine::GuardianStatements::signers(&self.0).is_departed(key)
+    }
+    fn recipients(&self) -> Vec<PubKey> {
+        self.0.status_recipients()
+    }
+    fn roots(&self) -> Vec<PubKey> {
+        charter_spine::GuardianStatements::signers(&self.0).roots()
+    }
+}
+
 /// Build the production relay (feature `real-relay`): the real `wss://` client
 /// with rustls + compiled-in webpki roots — no OS cert store, no Google.
 #[cfg(feature = "real-relay")]
@@ -267,6 +341,7 @@ pub fn real_relay(
     relays: Vec<RelayUrl>,
     base: &std::path::Path,
     local_sink: Option<Arc<dyn LocalSink>>,
+    keys: Option<&GuardianKeys>,
 ) -> Result<std::sync::Arc<dyn WardenRelay>, String> {
     let transport =
         charter_sys::relay::RealRelayTransport::default().with_auth_signer(std::sync::Arc::new(
@@ -275,6 +350,7 @@ pub fn real_relay(
     Ok(std::sync::Arc::new(
         BlockingRelay::new(transport, machine_sk, guardian, relays)?
             .with_outbox(base)
+            .with_guardians(keys)
             .with_local_sink(local_sink),
     ))
 }
@@ -370,6 +446,14 @@ impl AndroidTransportFacade {
         self
     }
 
+    /// Address every REQUEST and AUDIT wrap to the signer set's recipients
+    /// (rule 9), one wrap each. The set is live, so an approval or a
+    /// departure is followed from the next wrap on.
+    pub fn with_signer_set(mut self, signers: Arc<dyn SignerSet>) -> Self {
+        self.transport.set_signer_set(signers);
+        self
+    }
+
     /// A poll's batch, with an unreachable relay set noted for
     /// [`charter_spine::TransportFacade::poll_health`] rather than swallowed.
     fn record_poll<T>(&self, r: Result<Vec<T>, charter_sys::relay::RelayIoError>) -> Vec<T> {
@@ -399,21 +483,21 @@ impl AndroidTransportFacade {
 #[async_trait::async_trait]
 impl charter_spine::TransportFacade for AndroidTransportFacade {
     async fn publish_request(&self, request_json: &str, now: u64) {
-        // Build once; if EVERY relay refuses, park the exact wrap for retry —
-        // a child's ask made offline must reach the guardian when the network
-        // returns, not silently vanish (§2.2). M16 already persisted the
-        // Pending record before this call, so the record + spool re-converge.
-        let Some(wrap) = self.transport.build_request_wrap(request_json, now) else {
-            return;
-        };
-        let outcomes = self.transport.publish_prebuilt(wrap.clone()).await;
-        self.record_publish(&outcomes);
-        let accepted = outcomes
-            .iter()
-            .any(|(_, o)| matches!(o, charter_sys::relay::PublishOutcome::Ok));
-        if !accepted {
-            if let Some(outbox) = &self.outbox {
-                outbox.put_request(&wrap, now);
+        // Build once, one wrap per recipient (rule 9); if EVERY relay
+        // refuses one, park that exact wrap for retry — a child's ask made
+        // offline must reach the guardian when the network returns, not
+        // silently vanish (§2.2). M16 already persisted the Pending record
+        // before this call, so the record + spool re-converge.
+        for wrap in self.transport.build_request_wraps(request_json, now) {
+            let outcomes = self.transport.publish_prebuilt(wrap.clone()).await;
+            self.record_publish(&outcomes);
+            let accepted = outcomes
+                .iter()
+                .any(|(_, o)| matches!(o, charter_sys::relay::PublishOutcome::Ok));
+            if !accepted {
+                if let Some(outbox) = &self.outbox {
+                    outbox.put_request(&wrap, now);
+                }
             }
         }
     }
@@ -458,6 +542,25 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
         let outcomes = self.transport.emit_audit(tags, now).await;
         self.record_publish(&outcomes);
     }
+    /// Guardian statements (31120) and presence confirmations (31121),
+    /// opened with the seal-exempt unwrap, for the broker's guardian-keys
+    /// port.
+    async fn poll_guardian_events(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Vec<charter_transport::GuardianSealed> {
+        self.record_poll(self.transport.poll_guardian_events(since, now).await)
+    }
+    /// Gift-wrapped RELAYS (rule 11), with any guardian PIN they carry: the
+    /// broker records the PIN in the guardian-keys state, never the pairing.
+    async fn poll_relays(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Vec<(charter_primitives::NostrEvent, PubKey)> {
+        self.record_poll(self.transport.poll_relays(since, now).await)
+    }
     fn pinned_guardian(&self) -> PubKey {
         self.guardian
     }
@@ -474,9 +577,11 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
         wrap: &charter_primitives::NostrEvent,
         now: u64,
     ) -> Option<charter_spine::LocalInbound> {
+        // The opened unwrap also sorts out gift-wrapped RELAYS and guardian
+        // statements / presence confirmations (seal-exempt, both authors).
         self.transport
-            .unwrap_inbound(wrap, now)
-            .map(|(ev, author)| charter_spine::classify_inbound(ev, author))
+            .unwrap_inbound_opened(wrap, now)
+            .map(charter_spine::transport_facade::classify_opened)
     }
     /// Read-and-reset, once per broker `poll_once` round.
     fn poll_health(&self) -> charter_spine::transport_facade::PollHealth {

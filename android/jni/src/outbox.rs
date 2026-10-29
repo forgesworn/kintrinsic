@@ -41,6 +41,27 @@ impl Outbox {
         self.write(&format!("status-{subject_hex}.json"), wrap, now);
     }
 
+    /// Park a STATUS wrap — latest-only per (subject, recipient) when the
+    /// ward sends STATUS to more than one key (rule 9), so one recipient's
+    /// parked STATUS never replaces another's. `None` is [`Self::put_status`].
+    pub fn put_status_for(
+        &self,
+        subject_hex: &str,
+        recipient_hex: Option<&str>,
+        wrap: &NostrEvent,
+        now: u64,
+    ) {
+        let Some(recipient) = recipient_hex else {
+            return self.put_status(subject_hex, wrap, now);
+        };
+        if !subject_hex.chars().all(|c| c.is_ascii_hexdigit())
+            || !recipient.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return;
+        }
+        self.write(&format!("status-{subject_hex}-{recipient}.json"), wrap, now);
+    }
+
     /// Park a REQUEST wrap — ordered queue.
     pub fn put_request(&self, wrap: &NostrEvent, now: u64) {
         self.write(&format!("req-{now}-{}.json", wrap.id.to_hex()), wrap, now);
