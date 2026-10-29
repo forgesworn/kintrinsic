@@ -1177,10 +1177,10 @@ family, or which devices count where "every device" must agree.
   (now addressed to this W) is admitted, and only its guardians view and
   version are kept, plus the live status, for display. That view vouches for
   nothing: it neither lets a roster in nor adds a roster recipient.
-- A refused roster is refused for good (the wrap is handled). The inviting
-  install sends it once its wards report the new W; by then this install has
-  anchored the inviting root, so it lands whether or not this install has
-  read the ward's STATUS yet.
+- The inviting install sends the roster once its wards report the new W.
+  If it arrives before this install has read the ward's STATUS, it is held
+  and lands when that STATUS does; the ward this install confirmed at is
+  what vouches for the sender ("Anchoring a joining parent's trust").
 - An accepted roster becomes the family: each changed record is a child
   (keyed by its `rosterId`), its devices are added as known only from the
   roster (`fromRoster`), with any presence ward's view carried over. A child
@@ -1250,7 +1250,8 @@ added device reach a machine key the tamperer chose.
 **Build's interim reading:** superseded by "Anchoring a joining parent's
 trust": a reported root counts only if this install also trusts it (its own,
 or one it anchored or invited), and a roster needs an approval signed by a
-trusted root. A tampered ward can still list an extra working key under a
+trusted root, listed by a ward this install paired or confirmed in person
+at. A tampered ward of that kind can still list an extra working key under a
 trusted root and so receive the roster; it can't get its rosters accepted
 without that root's approval. Added devices are shown as unconfirmed until
 they report here.
@@ -1400,14 +1401,23 @@ family's wards report" is not enough on its own for a joining install.
   invitation anchors the invited root; older installs count the co-guardian
   statements they sent). STATUS reports never make a root trusted.
 - **Roster acceptance.** A roster is accepted only if the approval it
-  carries is signed by a trusted root and names the sender, and the
-  family's wards report that root and list the sender under it (so a
-  withdrawn W, or a parent who has left or been removed, is refused). Only
-  an install none of whose devices reports its guardians yet (a joining
-  one, or a second install whose device hasn't reported) relies on the
-  approval alone. Every refusal is final: the wrap is
-  marked handled, not retried on every poll. Merge rules are unchanged.
-- **Roster recipients.** Only working keys that the family's own devices
+  carries is signed by a trusted root and names the sender, **and** the
+  sender is currently listed under that root in the STATUS of a
+  *self-vouched* ward: one this install paired itself, or confirmed in
+  person at (the machine key came from a code it scanned at the device;
+  recorded per machine, including presence wards not yet named by a
+  roster). A device introduced by a roster, or known only from another
+  install, never vouches, so a roster can't vouch for its own sender, and a
+  withdrawn W (lost or stolen phone) or a parent who has left or been
+  removed is refused.
+- **Held rosters.** While no self-vouched ward has reported its guardians
+  at all (a joining install before its first confirmation reports, a second
+  install before its device reports), a roster that passes every other
+  check is held: the newest per sender, at most 4 senders, for at most 7
+  days. It is re-checked when a self-vouched ward's report arrives (not by
+  polling), then merged or dropped. Every other refusal is final: the wrap
+  is marked handled, not retried on every poll. Merge rules are unchanged.
+- **Roster recipients.** Only working keys that self-vouched family devices
   (not presence wards) list under a trusted root.
 - **Presence-learned machines.** A machine known only from a scanned
   presence code gets the presence confirmation (kind 31121) and nothing
@@ -1423,9 +1433,31 @@ family's wards report" is not enough on its own for a joining install.
   only if it invited or anchored them; a parent invited by the other parent
   reaches it through that parent's roster merge, not directly. Leaving or
   removing a parent doesn't un-anchor them: their rosters are then refused
-  because no ward reports their root, and the approval alone counts only
-  before any device reports its guardians. A withdrawn W of a trusted root
-  could still send a roster to an install none of whose devices has
-  reported yet.
+  because no self-vouched ward lists them. A withdrawn W of a trusted root
+  is accepted only if a self-vouched ward lists it: an honest ward never
+  does, but a machine whose presence code this install scanned can claim
+  anything, so a stolen withdrawn key plus a forged code scanned in person
+  would still get one roster in. An install that joined before
+  self-vouching was recorded has no self-vouched ward, so its rosters are
+  refused until it confirms in person again (unreleased builds only).
+
+**Raised by:** batch 3 re-review.
+
+## A co-guardian's identity move stops the family list
+
+**Where:** *Family roster*; rule 8 (root move); guardian app
+`trustedRoots`, `movedAwayRoots`, Guardians.
+
+**Question:** an install trusts the other parent's root it anchored. Once
+that parent moves to a new root R_A2, their roster's approval is signed by
+R_A2, which this install doesn't trust, and its own wards list their working
+key under R_A2, so rosters stop both ways. Nothing re-anchors R_A2.
+
+**Build's interim reading:** not fixed; it fails closed. When the wards this
+install vouches for itself no longer report an anchored root but do report
+one it doesn't trust, Guardians says "The family list from npub1… stopped"
+and offers **Scan their new guardian code**, which anchors R_A2. Anchoring
+R_A2 automatically from a confirmed move signed by the anchored R_A (the
+move statement names R2) is left for the design session.
 
 **Raised by:** batch 3 re-review.
