@@ -633,3 +633,131 @@ with nothing pending it mints nothing. A removal already confirmed and
 waiting out its notice is not offered again.
 
 **Raised by:** batch 2c-C.
+
+## appVersionCode is per platform
+
+**Where:** *Versioning* ("every ward of that child reports `appVersionCode`
+at or above the first version that implements this section"); Linux
+`charterd::version::version_code`, the Android `versionCode`.
+
+**Question:** the two platforms number their builds differently. Linux
+sends `major * 10000 + minor * 100 + patch` of the package version (0.7.12
+is 712); Android sends its own `versionCode`. One threshold cannot serve
+both, and STATUS carries no platform field to key a per-platform threshold
+on.
+
+**Build's interim reading:** Linux keeps sending the code it already sends
+(no change). The guardian app must not offer co-guardians or root moves on
+`appVersionCode` alone until the contract records one threshold per
+platform and says how the guardian tells the platforms apart (the device
+record's platform from pairing, or a new STATUS field). Until then it
+should offer them to no child with a ward it cannot place (fail closed).
+
+**Raised by:** batch 2c-B.
+
+## How a Linux administrator mints a presence token
+
+**Where:** *Presence confirmation* ("an administrator on Linux (polkit, as
+for other admin actions)"); `linux/crates/charterd/src/guardians.rs`,
+`charter-presence`, `charter-console`.
+
+**Question:** the contract says who may mint, not how the request reaches
+the warden, which is the one process that may write the guardian-keys state.
+
+**Build's interim reading:** `charter-presence` runs as root (pkexec from the
+console's "Confirm in person", or sudo). It lists what is pending by reading
+the state without writing it, writes a `0600` request `{d, requestedAt}` into
+the root-only state directory, and waits up to 15 seconds. `charterd` takes
+the request on its next 2-second tick, refuses one older than 120 seconds
+or dated in the future, mints a token bound to that `d` (refused when
+nothing with that `d` is pending), records it in the state and writes the
+`0600` display copy, then removes the request. The helper shows the code
+from the display copy. Nothing pending: the helper says so and writes no
+request.
+
+**Raised by:** batch 2c-B.
+
+## The pairing record's guardian key after a root move
+
+**Where:** rule 8; the pairing record's `guardian_pubkey`;
+`charter-spine` guardian-keys module docs.
+
+**Question:** after a confirmed move from R to R2, should the pairing
+record's `guardian_pubkey` become R2?
+
+**Build's interim reading:** no. The guardian-keys state is authoritative;
+the record's field stays the root pinned at pairing. It is read only as the
+signer of a clause stored before the section (rule 5) and as the
+transport's legacy single recipient when no signer set is wired. Rewriting
+it would attribute R's old clauses to a current signer and lift their
+departure floor (rule 4). The Linux CLI and console show the roots from
+the warden's published view instead.
+
+**Raised by:** batch 2c-B.
+
+## Gift-wrap timestamps link a ward's fan-out
+
+**Where:** rule 9 (one wrap per recipient); `CharterTransport` seal and wrap
+`created_at` (review 2a, Info 3).
+
+**Question:** every wrap of one STATUS carries the same `created_at`, so a
+relay can group a ward's wraps and learn all of its guardians' working keys.
+NIP-59 backdates `created_at` by a random amount instead.
+
+**Build's interim reading:** unchanged. The guardian app reads with a
+`since` cursor whose floor is 24 hours, and the wards poll with a lookback;
+wraps backdated by up to two days would be stepped over. Jitter needs the
+readers' windows widened first, on every platform at once. Design session.
+
+**Raised by:** batch 2c-B.
+
+## Offline unlock codes and the lock's back-off
+
+**Where:** open question "Offline unlock with more than one guardian key";
+`charter-lock` (review 2a, Info 7).
+
+**Question:** accepting a code from any of up to 68 keys makes a guess up to
+68 times as likely to hit.
+
+**Build's interim reading:** charterd hands the lock one code per key in the
+signer set; the lock's cooldown cap is 300 seconds times the number of codes
+(30, 60, 120, … seconds as before, then the longer cap), so a sustained
+guesser gets the same odds per hour as against one code. An empty set (an
+unreadable state) gives no codes, and the lock keeps its device-only escape.
+
+**Raised by:** batch 2c-B.
+
+## A departed key's last STATUS and a change during the publish
+
+**Where:** *STATUS* ("a departed key receives one last STATUS that shows its
+departure"); charterd's STATUS batch.
+
+**Question:** the warden marks the departed keys as told once a STATUS batch
+reaches a relay. A further change can land while the batch is publishing.
+
+**Build's interim reading:** the batch reads its recipients and `guardians`
+once; the departed keys are marked as told only if at least one relay
+accepted the batch and `guardians` is unchanged when it finishes. Otherwise
+they stay owed, and the next STATUS (emitted at once, since `guardians`
+changed) goes to them too. A local-link copy addressed to a departed key is
+not held: its session is closed (review 2a, Info 5), so it hears the last
+STATUS over relays only.
+
+**Raised by:** batch 2c-B.
+
+## Who may see a pending removal on the ward
+
+**Where:** rule 5; rule 7 ("reported in STATUS to R2's working keys");
+charterd's world-readable `/run/charter/guardians.json`.
+
+**Question:** the ward's own CLI and console show who set each rule, and the
+console must list what is waiting to be confirmed in person. Is it right
+that the child can see that one parent has asked to remove the other?
+
+**Build's interim reading:** yes, as the ward can see everything enforced on
+it: the view lists the pending statement's kind, the short npub it names,
+and when it takes effect or expires; a label never appears without its
+root. A design session may prefer to hide removals from the ward's own
+screen.
+
+**Raised by:** batch 2c-B.
