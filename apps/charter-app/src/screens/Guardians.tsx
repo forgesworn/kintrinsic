@@ -8,6 +8,7 @@ import GuardianMove from "./GuardianMove";
 import GuardianLostPhone from "./GuardianLostPhone";
 import PresenceScanner from "./PresenceScanner";
 import GuardianCode from "./GuardianCode";
+import { AnchorScanFields } from "./AnchorScan";
 import { familyGateReason } from "../keys/guardianKeys";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
@@ -101,6 +102,21 @@ export default function Guardians({ sub }: { sub: string }) {
       return <GuardianJoin onBack={back} onConfirm={() => goGuardians("presence")} />;
     case "code":
       return <GuardianCode onBack={back} />;
+    case "anchor":
+      return (
+        <Card>
+          <h2 className="card-title">Scan their new guardian code</h2>
+          <p className="card-sub">
+            On the other parent's phone: Family → Guardians → Show my guardian code. Scan it here, in person.
+          </p>
+          <div className="stack" style={{ marginTop: 12 }}>
+            <AnchorScanFields onAnchored={() => back()} />
+            <Button variant="ghost" block onClick={back}>
+              Back
+            </Button>
+          </div>
+        </Card>
+      );
     case "presence":
       return (
         <PinGate wards={wards} multiRoot={multiRoot}>
@@ -149,6 +165,7 @@ function Overview() {
   const keys = guardianKeys.state;
   const readiness = guardianKeys.familyReadiness();
   const againstMe = removalsAgainstMe(wards, keys, me);
+  const movedAway = guardianKeys.movedAwayRoots();
   // Adopted roster devices show in the device list; only ones no child holds show apart.
   const roster = guardianKeys
     .unconfirmedRosterDevices()
@@ -206,6 +223,19 @@ function Overview() {
           ‹ Family
         </Button>
       </div>
+
+      {movedAway.map((r) => (
+        <div key={r} style={{ marginBottom: 12 }}>
+          <Banner tone="warn">
+            <strong>The family list from {shortNpub(r)} stopped:</strong> your devices no longer report that
+            identity, but report one this phone doesn't know. If the other parent changed identity, scan their new
+            guardian code.
+            <div style={{ marginTop: 8 }}>
+              <Button onClick={() => goGuardians("anchor")}>Scan their new guardian code</Button>
+            </div>
+          </Banner>
+        </div>
+      ))}
 
       {againstMe.map((r) => (
         <div key={r.d} style={{ marginBottom: 12 }}>
