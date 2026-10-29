@@ -43,10 +43,10 @@ pub trait WardenRelay: Send + Sync {
         since: u64,
         now: u64,
     ) -> Result<Vec<(charter_primitives::NostrEvent, PubKey)>, String>;
-    /// Gift-wrap + publish a STATUS payload, one wrap per STATUS recipient
-    /// (rule 9, plus a departed key's one last STATUS), on the pinned relays
-    /// and `extra_relays` (rule 11: a ward with more than one root keeps
-    /// sending STATUS on its previous relays for 7 days after a change).
+    /// Gift-wrap + publish a STATUS payload, one wrap per recipient in the
+    /// signer set (rule 9), on the pinned relays and `extra_relays` (rule 11:
+    /// a ward with more than one root keeps sending STATUS on its previous
+    /// relays for 7 days after a change).
     /// Returns how many relay acceptances there were; a wrap no relay took
     /// is parked and makes this an Err carrying the relays' rejection text.
     fn emit_status(
@@ -55,7 +55,21 @@ pub trait WardenRelay: Send + Sync {
         now: u64,
         extra_relays: &[Vec<RelayUrl>],
     ) -> Result<usize, String>;
+    /// Gift-wrap + publish a departed key's last STATUS (the body from
+    /// `charter_spine::Farewell::to_json`) to `recipient` alone, on the
+    /// pinned relays and `extra_relays`. Never parked: the guardian-keys
+    /// state keeps it owed until a relay takes it. Returns whether one did.
+    fn emit_farewell(
+        &self,
+        json: &str,
+        now: u64,
+        recipient: &PubKey,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> bool;
     /// Retry parked offline wraps (the §2.2 spool); returns (sent, remaining).
+    /// A parked wrap addressed to a key no longer among the signer set's
+    /// recipients is dropped, never re-addressed (review batch 2, platforms
+    /// L4); with the guardian-keys state unreadable nothing is published.
     fn drain_outbox(&self, now: u64) -> (usize, usize);
     /// Gift-wrap (without publishing) a device AUDIT (kind 31000), one wrap
     /// per recipient in the signer set (rule 9) — tags only, content always
@@ -99,6 +113,8 @@ pub struct BlockingRelay<R: RelayTransport + Send + Sync + Clone> {
     rt: tokio::runtime::Runtime,
     /// The durable offline spool (§2.2), when a base dir was provided.
     outbox: Option<crate::outbox::Outbox>,
+    /// The ward's guardian keys: who a parked wrap may still go to.
+    keys: Option<GuardianKeys>,
 }
 
 impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
@@ -135,6 +151,7 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
             relays,
             rt,
             outbox: None,
+            keys: None,
         })
     }
 
@@ -145,15 +162,17 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
     }
 
     /// Address every wrap to the ward's guardian-keys recipients (rule 9):
-    /// AUDITs to the live signer set's recipients, STATUS to those plus any
-    /// departed key owed one last STATUS showing its departure. Without
-    /// keys (an unpaired build path) the pinned guardian alone, as before.
+    /// STATUS and AUDITs to the live signer set's recipients; a departed key
+    /// owed its last STATUS gets [`WardenRelay::emit_farewell`] instead.
+    /// Without keys (an unpaired build path) the pinned guardian alone, as
+    /// before.
     pub fn with_guardians(mut self, keys: Option<&GuardianKeys>) -> Self {
         if let Some(keys) = keys {
             self.transport
-                .set_signer_set(Arc::new(StatusRecipients(keys.clone())));
+                .set_signer_set(charter_spine::GuardianStatements::signers(keys));
             self.audit_builder
                 .set_signer_set(charter_spine::GuardianStatements::signers(keys));
+            self.keys = Some(keys.clone());
         }
         self
     }
@@ -263,12 +282,47 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         Ok(accepted)
     }
 
+    fn emit_farewell(
+        &self,
+        json: &str,
+        now: u64,
+        recipient: &PubKey,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> bool {
+        self.rt
+            .block_on(self.transport.emit_status_to(
+                json,
+                now,
+                std::slice::from_ref(recipient),
+                extra_relays,
+            ))
+            .iter()
+            .any(|(_, o)| matches!(o, PublishOutcome::Ok))
+    }
+
     fn drain_outbox(&self, now: u64) -> (usize, usize) {
         let Some(outbox) = &self.outbox else {
             return (0, 0);
         };
+        let live: Option<Vec<String>> = match &self.keys {
+            Some(k) if !k.is_available() => return (0, outbox.len()),
+            Some(k) => Some(
+                charter_spine::GuardianStatements::signers(k)
+                    .recipients()
+                    .iter()
+                    .map(PubKey::to_hex)
+                    .collect(),
+            ),
+            None => None,
+        };
         let mut sent = 0;
         for (path, wrap) in outbox.entries(now) {
+            if let Some(live) = &live {
+                if !wrap_recipient(&wrap).is_some_and(|p| live.contains(&p)) {
+                    outbox.remove(&path);
+                    continue;
+                }
+            }
             let outcomes = self.rt.block_on(self.transport.publish_prebuilt(wrap));
             if outcomes
                 .iter()
@@ -306,30 +360,6 @@ fn wrap_recipient(wrap: &charter_primitives::NostrEvent) -> Option<String> {
         .iter()
         .find(|t| t.first().is_some_and(|n| n == "p"))
         .and_then(|t| t.get(1).cloned())
-}
-
-/// The STATUS recipients as a signer set: the live set in every respect but
-/// `recipients`, which also names each departed key owed one last STATUS
-/// (contract: "a departed key receives one last STATUS that shows its
-/// departure"). Used only by the transport that builds STATUS wraps.
-struct StatusRecipients(GuardianKeys);
-
-impl SignerSet for StatusRecipients {
-    fn is_signer(&self, key: &PubKey) -> bool {
-        charter_spine::GuardianStatements::signers(&self.0).is_signer(key)
-    }
-    fn root_of(&self, key: &PubKey) -> Option<PubKey> {
-        charter_spine::GuardianStatements::signers(&self.0).root_of(key)
-    }
-    fn is_departed(&self, key: &PubKey) -> bool {
-        charter_spine::GuardianStatements::signers(&self.0).is_departed(key)
-    }
-    fn recipients(&self) -> Vec<PubKey> {
-        self.0.status_recipients()
-    }
-    fn roots(&self) -> Vec<PubKey> {
-        charter_spine::GuardianStatements::signers(&self.0).roots()
-    }
 }
 
 /// Build the production relay (feature `real-relay`): the real `wss://` client

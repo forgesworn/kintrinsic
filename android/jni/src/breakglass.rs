@@ -238,6 +238,30 @@ impl BreakGlass {
             .collect()
     }
 
+    /// Drop every journaled wrap whose recipient (its `p`, hex) is not in
+    /// `live`: a key that departed while the wrap waited gets nothing more
+    /// (rule 4; review batch 2, platforms L4). An entry left with no wrap is
+    /// kept, so [`Self::wraps_to_publish`] builds it afresh for the current
+    /// recipients: the audit stays LOUD for whoever is a guardian now.
+    pub fn drop_wraps_not_to(&self, live: &[String]) {
+        let mut all = self.entries();
+        let mut changed = false;
+        for e in all.iter_mut() {
+            let before = e.wraps.len();
+            e.wraps.retain(|w| {
+                w.tags
+                    .iter()
+                    .find(|t| t.first().is_some_and(|n| n == "p"))
+                    .and_then(|t| t.get(1))
+                    .is_some_and(|p| live.contains(p))
+            });
+            changed |= e.wraps.len() != before;
+        }
+        if changed {
+            self.write_entries(&all);
+        }
+    }
+
     /// Forget the wraps a relay has taken, and drop each entry whose every
     /// wrap has gone.
     pub fn mark_sent(&self, sent: &[EventId]) {
@@ -381,6 +405,30 @@ mod tests {
         assert_eq!(bg.pending_audits(), vec![audit_tags(SCOPE_CALLS, 300)]);
         bg.mark_sent(&[both[1].id]);
         assert!(bg.pending_audits().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_wrap_to_a_departed_key_is_dropped_and_its_audit_rebuilt_for_who_is_left() {
+        let base = tmp("departed");
+        let bg = BreakGlass::new(&base);
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        let to = |n: u8, p: &str| {
+            let mut w = fake_wrap(n);
+            w.tags = vec![vec!["p".into(), p.into()]];
+            w
+        };
+        let first = bg.wraps_to_publish(T0, |_| vec![to(1, "aa"), to(2, "bb")], |_| {});
+        assert_eq!(first.len(), 2);
+        // "bb" departed: its wrap goes, "aa"'s stays.
+        bg.drop_wraps_not_to(&["aa".to_string()]);
+        let left = bg.wraps_to_publish(T0 + 1, |_| panic!("not rebuilt"), |_| {});
+        assert_eq!(left, vec![to(1, "aa")]);
+        // Every recipient departed: built afresh for the current ones.
+        bg.drop_wraps_not_to(&["cc".to_string()]);
+        let rebuilt = bg.wraps_to_publish(T0 + 2, |_| vec![to(3, "cc")], |_| {});
+        assert_eq!(rebuilt, vec![to(3, "cc")]);
+        assert_eq!(bg.pending_audits(), vec![audit_tags(SCOPE_FULL, 600)]);
         let _ = std::fs::remove_dir_all(&base);
     }
 

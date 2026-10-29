@@ -2170,6 +2170,10 @@ impl Warden {
         }
         let json = serde_json::to_string_pretty(&pairing)
             .map_err(|e| format!("serialize pairing: {e}"))?;
+        // A new pairing inherits nothing from an earlier one's guardian keys
+        // (a state left behind by an unpair that could not remove it would
+        // otherwise fail closed against the new record).
+        guardians::clear_guardian_state(&self.base)?;
         self.pairing
             .save(&json)
             .map_err(|e| format!("persist pairing: {e:?}"))?;
@@ -2208,7 +2212,17 @@ impl Warden {
             if existing != guardian {
                 return Err("already paired to a different guardian".into());
             }
+            // The same pairing again: nothing to do. Rewriting the record
+            // would re-migrate the guardian-keys state and drop every
+            // co-guardian, move and withdrawal since (review batch 2,
+            // platforms L3).
+            if self.subject == Some(subject) {
+                return Ok(());
+            }
+            return Err("already paired for a different child".into());
         }
+        // A new pairing inherits nothing from an earlier one's guardian keys.
+        guardians::clear_guardian_state(&self.base)?;
         let pairing = Pairing {
             guardian_pubkey: guardian,
             relays: Vec::new(),
@@ -3955,7 +3969,7 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
 
     // Phase 3 (locked): authenticate + store (legacy path); mirror the ward's
     // clauses for the broker's EOD cap; decide whether STATUS is due.
-    let (status_due, status_extra_relays) = {
+    let (status_due, status_extra_relays, farewell) = {
         match guard(lock).as_mut() {
             None => {
                 out.reason = "warden shut down mid-poll".into();
@@ -3990,7 +4004,20 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
                 if broker_counts.relays_changed {
                     w.relays_reload_due = true;
                 }
-                (due, extra)
+                // The departed keys owed one last STATUS get a separate,
+                // minimal one that shows their departure (open question "A
+                // departed key's last STATUS"), read in one go with the keys
+                // it is for, alongside a STATUS that is going out anyway.
+                let owed = due
+                    .as_ref()
+                    .and(w.guardian_keys.clone())
+                    .and_then(|k| k.farewell().map(|f| (k, f)));
+                let farewell = owed.map(|(k, f)| {
+                    let seq = w.next_status_seq();
+                    let json = f.to_json(&w.signer.pubkey(), now, Some(seq));
+                    (k, f.recipients, json)
+                });
+                (due, extra, farewell)
             }
         }
     };
@@ -4009,6 +4036,22 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
         let wraps = guard(lock)
             .as_ref()
             .map(|w| {
+                // A journaled wrap is published only to a key still in the
+                // signer set's recipients: one addressed to a key that has
+                // departed since is dropped, never re-addressed (review batch
+                // 2, platforms L4). With the state unreadable nobody is known
+                // to be a recipient: publish nothing, drop nothing.
+                if let Some(k) = &w.guardian_keys {
+                    if !k.is_available() {
+                        return Vec::new();
+                    }
+                    let live: Vec<String> = charter_spine::GuardianStatements::signers(k)
+                        .recipients()
+                        .iter()
+                        .map(PubKey::to_hex)
+                        .collect();
+                    w.break_glass.drop_wraps_not_to(&live);
+                }
                 w.break_glass.wraps_to_publish(
                     now,
                     |tags| relay.build_audit_wraps(tags.to_vec(), now),
@@ -4040,11 +4083,19 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
                     // Phase 5 (locked): record it for the throttle.
                     if let Some(w) = guard(lock).as_mut() {
                         w.mark_status_emitted(status);
-                        // Every STATUS recipient had it, departed keys
-                        // included: they have had their last one.
-                        if let Some(k) = &w.guardian_keys {
-                            if let Err(e) = k.mark_status_sent(now) {
-                                eprintln!("charter: could not record the STATUS farewell ({e})");
+                    }
+                    // Each departed key, on its own wrap (unlocked); a key is
+                    // told only once a relay took the wrap addressed to it
+                    // (review batch 2, platforms L2). Never parked: the state
+                    // keeps it owed until then.
+                    if let Some((keys, departed, json)) = farewell {
+                        let told: Vec<PubKey> = departed
+                            .into_iter()
+                            .filter(|k| relay.emit_farewell(&json, now, k, &status_extra_relays))
+                            .collect();
+                        if !told.is_empty() {
+                            if let Err(e) = keys.mark_status_sent(&told, now) {
+                                eprintln!("charter: could not record the last STATUS sent ({e})");
                             }
                         }
                     }
