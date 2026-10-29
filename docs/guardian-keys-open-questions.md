@@ -1026,3 +1026,105 @@ ward refuses an unknown RELAYS field outright). The derivation matches
 `vectors/guardians/pin.json`, including its 4-digit vector.
 
 **Raised by:** batch 3a.
+
+## The typed presence code needs the statement's id
+
+**Where:** *Presence confirmation* (the confirmation names the pending
+statement's event id); STATUS `pending` (`{ d, kind, takesEffectAt?,
+expiresAt }`, no id); guardian app presence scanner.
+
+**Question:** the short form a guardian types is the token alone. The app
+must then supply the statement id, which STATUS doesn't carry.
+
+**Build's interim reading:** after the typed token the app offers only the
+pending items this install sent (it kept their ids: a removal, or its own
+root move), per device. A joining parent confirming an invitation must scan
+the full code. A STATUS `id` on pending entries would let the short form
+cover invitations.
+
+**Raised by:** batch 3b.
+
+## Whether a ward phone has a guardian PIN
+
+**Where:** *Presence confirmation* ("The guardian app sets one before it
+offers anything that needs presence"); guardian app `pinSentAt`.
+
+**Question:** STATUS doesn't say whether a PIN is set, and each install only
+knows the PINs it sent. A second guardian's install would ask to set a PIN
+the other parent already set, and replace it.
+
+**Build's interim reading:** before inviting, removing, moving or confirming
+in person, the app asks for a PIN when it hasn't sent one to every Android
+ward itself. When the wards report more than one guardian it also offers
+"The other parent already set a PIN", which skips it: a ward phone with no
+PIN can't show a code, so a wrong skip fails closed at the ward. A STATUS
+flag (`pinSet: true`) would remove the guess.
+
+**Raised by:** batch 3b.
+
+## Removing the other parent from a phone-held root
+
+**Where:** rule 7 (presence by an install bound to R1); `applyPresenceConfirm`
+(`confirmer_not_bound`: the confirmer must be an active working key bound to
+the remover); guardian app `removeCoGuardian`, `confirmPresence`.
+
+**Question:** in a local-only family the install's key is the root itself,
+not a working key bound to it, so its confirmation of its own removal
+statement is dropped. The removal could never complete.
+
+**Build's interim reading:** the app offers "Remove the other parent" only
+with a My Signet or Heartwood root, and says why otherwise. `removeCoGuardian`
+and `confirmPresence` themselves don't refuse it yet. Inviting stays open to
+a local-only family: the new parent confirms with their own working key.
+
+**Raised by:** batch 3b.
+
+## Checking the invited identity when joining
+
+**Where:** guardian app join flow; `pairSignet` (approves this phone as soon
+as the bunker connects); `approveInstall({ expectRoot })`.
+
+**Question:** the joining parent should connect the identity the other
+parent invited. `pairSignet` asks the bunker to approve the working key
+before the app can compare identities.
+
+**Build's interim reading:** on a phone already connected to My Signet but
+not approved, the app takes the invited npub (optional) and passes it as
+`expectRoot`. On a fresh connection it shows the full npub after approval
+and says the devices won't accept a different one; the app's own
+`confirmPresence` refuses an invitation for another identity, so a mismatch
+fails closed. Passing `expectRoot` through `pairSignet` (refuse and
+disconnect before approving) would check it up front.
+
+**Raised by:** batch 3b.
+
+## Guardians have no names in STATUS
+
+**Where:** STATUS `guardians.roots` (`{ root, keys }`); statement labels.
+
+**Question:** the Guardians screen lists each root and its installs, but
+STATUS carries no label for either, and a joining install never sees the
+statements that carry them.
+
+**Build's interim reading:** roots show as "You" or "Other parent" with a
+short npub, installs as "Phone" and the first 8 hex of the working key, with
+"this phone" marked. No label is shown that a ward didn't vouch for.
+
+**Raised by:** batch 3b.
+
+## A joining parent's device list
+
+**Where:** *Family roster* (sent to the working keys the wards report);
+guardian app join checklist.
+
+**Question:** the inviting install shares the roster only with working keys
+the wards report, and a joining W is reported only after its first
+confirmation. Before that the joining phone doesn't know which devices to
+visit.
+
+**Build's interim reading:** the join checklist is generic (go to each
+device, ask it for a code, scan it), and lists roster devices as "still to
+confirm" once a roster has arrived. The inviting parent's checklist tells
+them to name the devices.
+
+**Raised by:** batch 3b.
