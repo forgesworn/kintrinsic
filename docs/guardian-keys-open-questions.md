@@ -496,7 +496,16 @@ retried at each timer advance. Recovery is a local unpair by an administrator
 (or restoring the file). The guardian sees the ward go silent: the design
 session may prefer a STATUS to the last known roots saying the ward is stuck.
 
-**Raised by:** batch 2c-A.
+The same holds for a readable state that belongs to neither this pairing nor
+an earlier one: the state records the guardian the pairing record pinned
+beside `pairedAt`, and a state with the record's `pairedAt` but another
+guardian, or a `pairedAt` above the record's, is unavailable rather than
+migrated afresh (a fresh migration would re-pin the record's guardian over a
+confirmed root move or removal). A state from an earlier pairing (a lower
+`pairedAt`) is still replaced, and every re-pair path clears the state
+before it writes the new record.
+
+**Raised by:** batch 2c-A; the second paragraph by the batch 2 review.
 
 ## The clause pairing floor on a ward that paired before the section
 
@@ -512,12 +521,21 @@ signed by a guardian whose clock was behind the ward's when they paired.)
 
 **Build's interim reading:** yes, as the contract and the vectors have it: a
 clause from before the current pairing belongs to an earlier one. The slots a
-migrated ward already holds keep their own replay floors (the state seeds
-each slot from the clause store the first time a clause for it arrives; a
-seeded clause whose signer has since departed keeps its replay floor, fail
-closed).
+migrated ward already holds keep their own replay floors: the state seeds
+each slot from the clause store the first time a clause for it arrives.
 
-**Raised by:** batch 2c-A.
+A seeded clause whose signer is no longer in the signer set departed before
+the slot was seeded, so no departure clamped it. It takes rule 4's floor
+instead: min(its `issuedAt`, the departure), where the departure is the
+removal or move of a departed root, or the tombstone of a withdrawn or
+removed working key; when the state does not record when the signer left,
+the ward's time at seeding. (An earlier build kept the clause's own
+`issuedAt` as the bar, calling it fail-closed. It was not: a departed root's
+far-future clause, possible before the section's 300-second refusal, then
+held the slot for ever, and the remaining guardians could not replace a
+permissive rule.)
+
+**Raised by:** batch 2c-A; corrected by the batch 2 review.
 
 ## One presence token at a time
 
@@ -617,9 +635,13 @@ own. What does the ward show for it?
 **Build's interim reading:** a root is shown as its label from the
 co-guardian statement that pinned it, if any, else "A guardian", always
 beside its short npub; its working keys' labels are listed beneath. A label
-is never shown without the npub.
+is never shown without the npub. Both platforms strip control characters
+(newlines included), invisible format characters (bidi overrides and
+isolates, zero-width marks) and line separators from a label before showing
+it, and cut it to 64 bytes, so a label can't fake a line or an npub of its
+own.
 
-**Raised by:** batch 2c-C.
+**Raised by:** batch 2c-C; label cleaning by the batch 2 review.
 
 ## Which pending statement the Android presence screen offers
 
@@ -633,7 +655,9 @@ pending statement. Should a ward's screen ever show one?
 **Build's interim reading:** no. The Android screen lists the unconfirmed
 pending statements and mints a token bound to the one the guardian picks;
 with nothing pending it mints nothing. A removal already confirmed and
-waiting out its notice is not offered again.
+waiting out its notice is not offered again. The native call refuses a
+request that names no statement, or a confirmed one, so this does not rest
+on the screen alone; Linux `charter-presence` offers the same list.
 
 **Raised by:** batch 2c-C.
 
@@ -656,7 +680,11 @@ platform and says how the guardian tells the platforms apart (the device
 record's platform from pairing, or a new STATUS field). Until then it
 should offer them to no child with a ward it cannot place (fail closed).
 
-**Raised by:** batch 2c-B.
+The guardian app keys a per-platform threshold on the device record's
+platform, and counts a ward it has not heard an `appVersionCode` from as not
+ready (never "silence means capable"); the wards are unchanged.
+
+**Raised by:** batch 2c-B; the last paragraph by the batch 2 review.
 
 ## How a Linux administrator mints a presence token
 
@@ -730,23 +758,47 @@ unreadable state) gives no codes, and the lock keeps its device-only escape.
 
 **Raised by:** batch 2c-B.
 
-## A departed key's last STATUS and a change during the publish
+## A departed key's last STATUS
 
 **Where:** *STATUS* ("a departed key receives one last STATUS that shows its
-departure"); charterd's STATUS batch.
+departure"); `GuardianKeys::farewell`; charterd's STATUS batch; the Android
+poll.
 
-**Question:** the warden marks the departed keys as told once a STATUS batch
-reaches a relay. A further change can land while the batch is publishing.
+**Question:** what does that last STATUS carry, and when is the key told?
+The STATUS the signer set's recipients get holds the child's usage, apps and
+lock state, and the ward's current relay list (`guardians.relays`). For a
+removed root, that is more than "shows its departure". A further change can
+also land while a STATUS is publishing.
 
-**Build's interim reading:** the batch reads its recipients and `guardians`
-once; the departed keys are marked as told only if at least one relay
-accepted the batch and `guardians` is unchanged when it finishes. Otherwise
-they stay owed, and the next STATUS (emitted at once, since `guardians`
-changed) goes to them too. A local-link copy addressed to a departed key is
-not held: its session is closed (review 2a, Info 5), so it hears the last
-STATUS over relays only.
+**Build's interim reading:** the departed key gets a separate, minimal
+STATUS (kind 31114, gift-wrapped to it alone, on the current relays and any
+previous ones of rule 11), never the full one. Its content is exactly:
 
-**Raised by:** batch 2c-B.
+```json
+{ "v": 1, "machine": "<hex>", "ts": 1700000000, "seq": 42,
+  "guardians": { "roots": [{ "root": "<hex>", "keys": ["<hex>"] }],
+                 "pending": [{ "d": "...", "kind": "removal",
+                               "takesEffectAt": 1700000000,
+                               "expiresAt": 1700000000 }],
+                 "tombstones": 3 } }
+```
+
+No `subject`, no usage, apps or lock state, and no `relays`; the departure
+shows as the key's absence from `roots`. `seq` comes from the ward's one STATUS
+sequence. The guardian app must take this shape as a farewell rather than
+drop it as a malformed STATUS.
+
+The ward reads the keys owed a farewell and the `guardians` it shows in one
+step, sends each key its own wrap, and marks as told only the keys whose own
+wrap a relay accepted; a key that departs meanwhile stays owed and is told
+alongside the next STATUS. A farewell is never parked in the Android
+offline spool: the state keeps it owed. A STATUS parked for a key before it
+departed is dropped, never sent or re-addressed, and so is a break-glass
+AUDIT wrap journaled for it (the audit is built afresh for the current
+recipients if none of its wraps is left). A local-link copy addressed to a
+departed key is not held: its session is closed (review 2a, Info 5).
+
+**Raised by:** batch 2c-B; rewritten by the batch 2 review.
 
 ## Who may see a pending removal on the ward
 
