@@ -87,6 +87,13 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
         <PresenceWhere />
         <p className="card-sub">
           A ward phone asks for the guardian PIN first: the parent who invited you knows it. Repeat at every device.
+          Once you have confirmed at one, the other parent's phone shares the family with this one when they next open
+          Kintrinsic.
+        </p>
+        <p className="card-sub">
+          Adding a second phone for your own guardian identity? Nothing waits to be confirmed then. Instead connect one
+          device by its device code: on Family, add the child, choose Set up a device, then type the code the device
+          shows. Your other phone then shares the rest of the family.
         </p>
         {roster.length > 0 && (
           <div className="stack" style={{ gap: 4, marginTop: 8 }}>
@@ -183,15 +190,17 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
               onChange={(e) => setUri(e.target.value)}
             />
           </label>
-          <InvitedField value={invited} onChange={setInvited} disabled={busy} />
+          <InvitedField value={invited} onChange={setInvited} disabled={busy} required />
           {errorLine}
           <Button
             block
-            disabled={busy || !uri.trim().startsWith("bunker://")}
+            disabled={busy || !uri.trim().startsWith("bunker://") || !invited.trim()}
             onClick={() =>
               run(async () => {
                 const want = expected();
-                if (want === null) throw new Error("That isn't a guardian ID. It starts with npub1.");
+                // Required here: the identity is checked before My Signet
+                // is asked to sign anything (batch 3b review).
+                if (!want) throw new Error("Enter the guardian ID you were invited as. It starts with npub1.");
                 // Checked before anything is approved: a different identity is refused and not left connected.
                 const r = await pairSignet(uri.trim(), { via, ...(want ? { expectRoot: want } : {}) });
                 if (!r.approved) throw new Error(`Connected, but this phone isn't approved yet: ${r.error}`);
@@ -209,10 +218,20 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
   );
 }
 
-function InvitedField({ value, onChange, disabled }: { value: string; onChange: (v: string) => void; disabled: boolean }) {
+function InvitedField({
+  value,
+  onChange,
+  disabled,
+  required = false,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+  required?: boolean;
+}) {
   return (
     <label className="field">
-      <span className="field-label">The guardian ID you were invited as (optional)</span>
+      <span className="field-label">The guardian ID you were invited as{required ? "" : " (optional)"}</span>
       <input
         className="input"
         placeholder="npub1…"
@@ -223,7 +242,11 @@ function InvitedField({ value, onChange, disabled }: { value: string; onChange: 
         spellCheck={false}
         onChange={(e) => onChange(e.target.value)}
       />
-      <span className="card-sub">If you give it, Kintrinsic refuses any other identity.</span>
+      <span className="card-sub">
+        {required
+          ? "Kintrinsic checks it before anything is signed, and refuses any other identity."
+          : "If you give it, Kintrinsic refuses any other identity."}
+      </span>
     </label>
   );
 }

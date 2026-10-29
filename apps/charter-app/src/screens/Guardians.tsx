@@ -15,8 +15,10 @@ import {
   familyWards,
   myRootOf,
   goGuardians,
+  isUnconfirmed,
   leaveGate,
   moveGate,
+  moveNeedsFinishing,
   pendingFor,
   pendingTitle,
   readinessLine,
@@ -143,7 +145,11 @@ function Overview() {
   const keys = guardianKeys.state;
   const readiness = guardianKeys.familyReadiness();
   const againstMe = removalsAgainstMe(wards, keys, me);
-  const roster = guardianKeys.unconfirmedRosterDevices();
+  // Adopted roster devices show in the device list; only ones no child holds show apart.
+  const roster = guardianKeys
+    .unconfirmedRosterDevices()
+    .filter((d) => !wards.some((w) => w.device.devicePubkey === d.machine));
+  const presenceOnly = Object.keys(guardianKeys.state.presenceWards ?? {}).length;
   const departed = departedWards(state.children);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -173,9 +179,17 @@ function Overview() {
           ok: false,
           reason: `Update Kintrinsic on ${[...new Set(notReady.map((w) => names[w.machine] ?? "a device"))].join(", ")} first, then invite another parent.`,
         };
-  const leave = leaveGate(wards, me);
+  const leave = leaveGate(wards, me, { waitingForRoster: presenceOnly > 0 });
   const remove = removeGate(keys);
-  const move = moveGate(keys, readiness.ready);
+  const progress = guardianKeys.moveProgress();
+  const move = moveGate(keys, readiness.ready, progress);
+  const confirmGate: Gate = keys.root
+    ? { ok: true }
+    : {
+        ok: false,
+        reason:
+          "Confirming in person needs your guardian identity in My Signet or a Heartwood: a key kept only on this phone can't confirm.",
+      };
   const otherRoots = roots.filter((r) => !r.you);
   const rosterGate: Gate = keys.root
     ? { ok: true }
@@ -230,7 +244,9 @@ function Overview() {
         {roots.length === 0 ? (
           <p className="card-sub" style={{ margin: 0 }}>
             {wards.length === 0
-              ? "No device is connected to this phone yet."
+              ? presenceOnly > 0
+                ? `You've confirmed in person at ${presenceOnly === 1 ? "a device" : `${presenceOnly} devices`}. The family appears here once the other parent's phone shares it: ask them to open Kintrinsic.`
+                : "No device is connected to this phone yet."
               : "None of your devices has reported its guardians yet. They do once they have the latest Kintrinsic."}
           </p>
         ) : (
@@ -301,9 +317,10 @@ function Overview() {
           </Button>
           <Reason gate={inviteGate} />
 
-          <Button variant="secondary" block onClick={() => goGuardians("presence")}>
+          <Button variant="secondary" block disabled={!confirmGate.ok} onClick={() => goGuardians("presence")}>
             Confirm in person
           </Button>
+          <Reason gate={confirmGate} />
 
           {wards.length === 0 && (
             <Button variant="secondary" block onClick={() => goGuardians("join")}>
@@ -369,7 +386,7 @@ function Overview() {
           ))}
 
           <Button variant="secondary" block disabled={!move.ok} onClick={() => goGuardians("move")}>
-            Change my identity
+            {moveNeedsFinishing(progress) ? "Finish my identity move" : "Change my identity"}
           </Button>
           <Reason gate={move} />
 
@@ -425,6 +442,8 @@ function DeviceCard({
   const r = guardianKeys.childReadiness(ward.childId).wards.find((w) => w.machine === ward.device.devicePubkey);
   const line = r ? readinessLine(r.readiness) : null;
   const pending = pendingFor(ward.device.guardians, guardianKeys.state, me);
+  const unconfirmed = isUnconfirmed(ward.device);
+  const silent = r && !r.readiness.ready && r.readiness.reason === "silent";
   return (
     <Card>
       <div className="row-between">
@@ -432,12 +451,27 @@ function DeviceCard({
           {ward.device.label}
           <span className="card-sub"> · {ward.childName}</span>
         </span>
-        {line ? <Pill tone="warn">needs update</Pill> : <Pill tone="ok">ready</Pill>}
+        {unconfirmed ? (
+          <Pill tone="warn">unconfirmed</Pill>
+        ) : silent ? (
+          <Pill tone="warn">not heard from</Pill>
+        ) : line ? (
+          <Pill tone="warn">needs update</Pill>
+        ) : (
+          <Pill tone="ok">ready</Pill>
+        )}
       </div>
-      {line && (
+      {unconfirmed ? (
         <p className="card-sub" style={{ margin: "4px 0 0" }}>
-          {line}
+          The other guardian shared this device. It shows as unconfirmed until it reports to this phone: confirm in
+          person there if you haven't.
         </p>
+      ) : (
+        line && (
+          <p className="card-sub" style={{ margin: "4px 0 0" }}>
+            {line}
+          </p>
+        )
       )}
       {pending.map((p) => (
         <PendingRow key={p.d} p={p} me={me} now={now} busy={busy} act={act} />
@@ -483,7 +517,7 @@ function PendingRow({
         {when.join(" · ")}
         {hint ? `. ${hint}` : ""}
       </p>
-      {p.role === "mine" && (
+      {p.role === "mine" && p.expiresAt > now && (
         <Button
           variant="ghost"
           disabled={busy !== null}
@@ -504,7 +538,8 @@ function RemoveParent({ target }: { target: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ReportLike | null>(null);
-  const valid = /^[0-9a-f]{64}$/.test(target);
+  // Only a guardian the devices report, and not this phone's own identity.
+  const valid = rootsView(wards, myRootOf(guardianKeys)).some((r) => !r.you && r.root === target);
 
   if (report) {
     return (

@@ -16,12 +16,12 @@ export function PresenceWhere() {
   return (
     <div className="stack" style={{ gap: 6 }}>
       <p className="card-sub" style={{ margin: 0 }}>
-        <strong>On a computer:</strong> open Kintrinsic → Connect → Confirm in person. It asks for the computer's
-        administrator password, then shows a code.
+        <strong>On a computer:</strong> open Kintrinsic → Connect a phone → Confirm in person → Show the code to
+        confirm. It asks for the computer's administrator password, then shows a code.
       </p>
       <p className="card-sub" style={{ margin: 0 }}>
-        <strong>On a ward phone:</strong> open Kintrinsic → About → Guardians → Guardian presence. It asks for the
-        guardian PIN, then shows a code.
+        <strong>On a ward phone:</strong> open Kintrinsic → About this device → Guardians → Guardian presence. Pick
+        the change, then Show a code for this. It asks for the guardian PIN, then shows a code.
       </p>
       <p className="card-sub" style={{ margin: 0 }}>Each code works once, for ten minutes.</p>
     </div>
@@ -125,7 +125,10 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
   if (token) {
     const items = wards.flatMap((w) =>
       pendingFor(w.device.guardians, guardianKeys.state, me)
-        .filter((p) => p.statement)
+        // Only what this phone itself confirms: a removal it started, or its
+        // own identity move. An invitation it sent is confirmed by the other
+        // parent's phone, never this one.
+        .filter((p) => p.statement && p.role === "mine" && p.kind !== "coguardian")
         .map((p) => ({ machine: w.device.devicePubkey, device: w.device.label, ...p })),
     );
     const devicesWithItems = [...new Map(items.map((i) => [i.machine, i.device])).entries()];

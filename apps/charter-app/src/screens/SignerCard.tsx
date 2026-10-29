@@ -25,14 +25,25 @@ export default function SignerCard() {
   const [approvalNote, setApprovalNote] = useState<string | null>(null);
   const viaName = pairingVia === "heartwood" ? "your Heartwood" : "My Signet";
 
+  // Anything a step throws is shown: turning on parent approval is refused
+  // while My Signet holds the guardian identity, and that must be read.
+  const [runError, setRunError] = useState<string | null>(null);
   async function run(fn: () => Promise<void>) {
     setBusy(true);
+    setRunError(null);
     try {
       await fn();
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }
+  const runErrorLine = runError && (
+    <p role="alert" className="card-sub" style={{ margin: "8px 0 0", color: "var(--danger, #B23B30)" }}>
+      {runError}
+    </p>
+  );
 
   async function copyText(text: string) {
     try {
@@ -127,6 +138,7 @@ export default function SignerCard() {
             onHeartwood={() => setPairingVia("heartwood")}
           />
         )}
+        {runErrorLine}
         <p className="card-sub" style={{ marginTop: 12 }}>
           Simplest: “Set up on this phone” keeps the guardian key right here — no
           extra app. You can also set limits first; they’ll save now and apply
@@ -221,6 +233,7 @@ export default function SignerCard() {
           )}
         </div>
       )}
+      {runErrorLine}
       {signer.kind === "local" && (
         <div id={KEY_BACKUP_ANCHOR} style={{ scrollMarginTop: 80 }}>
           <KeyBackupSection busy={busy} />

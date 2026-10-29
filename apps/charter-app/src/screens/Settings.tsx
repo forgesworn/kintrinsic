@@ -80,6 +80,7 @@ function GuardiansCard() {
   const roots = rootsView(wards, me);
   const againstMe = removalsAgainstMe(wards, guardianKeys.state, me);
   const others = roots.filter((r) => !r.you).length;
+  const reported = wards.some((w) => w.device.guardians);
   return (
     <Card>
       {againstMe.length > 0 && (
@@ -92,7 +93,9 @@ function GuardiansCard() {
       <p className="card-sub" style={{ marginTop: 0 }}>
         {wards.length === 0
           ? "Another parent already uses Kintrinsic for your child? Join their family with your own My Signet."
-          : others === 0
+          : !reported
+            ? "Your devices haven't said who their guardians are yet. They do once they have the latest Kintrinsic."
+            : others === 0
             ? "You're the only guardian. Invite the other parent so they can set limits and answer requests too."
             : `You and ${others === 1 ? "one other parent" : `${others} other parents`} look after these devices.`}
       </p>

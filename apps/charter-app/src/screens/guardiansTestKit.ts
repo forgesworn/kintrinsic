@@ -91,6 +91,8 @@ export function mockStore(opts: {
       objectToRemoval: vi.fn(async () => report),
       cancelPending: vi.fn(async () => report),
       moveRoot: vi.fn(async () => report),
+      moveProgress: vi.fn(() => null as null | { to: string; lapsed: boolean; expiresAt?: number; moved: string[] }),
+      finishMove: vi.fn(async () => report),
       withdrawInstall: vi.fn(async () => report),
       setGuardianPin: vi.fn(async () => ({ sent: machines, held: [] as string[], failed: [] as { to: string; error: string }[] })),
       sendRoster: vi.fn(async () => ({ sent: [OTHER_W], held: [] as string[], failed: [] as { to: string; error: string }[] })),

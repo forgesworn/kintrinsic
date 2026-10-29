@@ -1,9 +1,26 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { Button, Card } from "../components/ui";
 import { useCharter } from "../store/store";
 import { MIN_PIN_LENGTH } from "../keys/pin";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import { pinProblem, type WardRef } from "./guardiansView";
+
+/**
+ * A masked text field where the browser can mask one, so it doesn't offer to
+ * save (and sync) the PIN as a password; a password field otherwise.
+ */
+const textSecurity =
+  typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("-webkit-text-security", "disc");
+const pinFieldProps = textSecurity
+  ? {
+      type: "text",
+      inputMode: "numeric" as const,
+      autoComplete: "off",
+      "data-lpignore": "true",
+      "data-1p-ignore": "true",
+      style: { WebkitTextSecurity: "disc" } as CSSProperties,
+    }
+  : { type: "password", inputMode: "numeric" as const, autoComplete: "off" };
 
 /**
  * Set the guardian PIN on the family's Android wards. A ward phone asks for
@@ -37,7 +54,9 @@ export default function GuardianPin({
     setBusy(true);
     setError(null);
     try {
-      const r = await guardianKeys.setGuardianPin(pin);
+      // Only the phones listed here: one the other parent (or this phone)
+      // already set a PIN on isn't silently given a new one.
+      const r = await guardianKeys.setGuardianPin(pin, { machines: wards.map((w) => w.device.devicePubkey) });
       setReport(r);
       setPin("");
       setAgain("");
@@ -85,9 +104,7 @@ export default function GuardianPin({
           <span className="field-label">Guardian PIN</span>
           <input
             className="input"
-            type="password"
-            inputMode="numeric"
-            autoComplete="new-password"
+            {...pinFieldProps}
             value={pin}
             disabled={busy}
             onChange={(e) => setPin(e.target.value.trim())}
@@ -97,9 +114,7 @@ export default function GuardianPin({
           <span className="field-label">The same PIN again</span>
           <input
             className="input"
-            type="password"
-            inputMode="numeric"
-            autoComplete="new-password"
+            {...pinFieldProps}
             value={again}
             disabled={busy}
             onChange={(e) => setAgain(e.target.value.trim())}
