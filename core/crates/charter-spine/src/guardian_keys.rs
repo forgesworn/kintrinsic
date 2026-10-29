@@ -47,6 +47,20 @@
 //! never build the broker without the port for a ward that has one (no
 //! conditional wiring, no recovery mode without it).
 //!
+//! # The pairing record's `guardian_pubkey` after a root move
+//!
+//! The state document is authoritative for who the ward trusts. The pairing
+//! record's `guardian_pubkey` stays the root pinned at pairing, even after a
+//! confirmed root move replaces it: it is read only as the signer of a clause
+//! record that names none (a clause stored before the section, rule 5), and
+//! as the transport's legacy single recipient when no signer set is wired.
+//! Rewriting it to the new root would attribute every such clause to a
+//! CURRENT signer, so its departure floor (rule 4) would no longer apply, and
+//! it would be one more read-modify-write of a record another process also
+//! writes (review 2a, Info 2). Nothing that decides authority reads it on a
+//! ward with this adapter: the signer set, recipients, the local link and the
+//! offline unlock all come from the state.
+//!
 //! # Fail closed
 //!
 //! A state document that exists but cannot be read or parsed is NOT replaced
@@ -209,6 +223,25 @@ impl GuardianKeys {
     /// and a pasted relay code changes: a list that differs from the state's
     /// is recorded as a change, so rule 11's previous-relays window covers it.
     pub fn load(store: Arc<dyn GuardianStateStore>, pairing: &Pairing, now: u64) -> Self {
+        Self::load_with(store, pairing, now, true)
+    }
+
+    /// [`Self::load`] for a process that must never write the state: another
+    /// process (the warden) is its one writer, so a second writer would lose
+    /// that process's changes. Nothing is migrated or recorded on disk, and
+    /// every call that would change the state fails. For a privileged helper
+    /// that only reads it (Linux `charter-presence` listing what is pending,
+    /// `charter-pair` checking a pasted relay code against the signer set).
+    pub fn peek(store: Arc<dyn GuardianStateStore>, pairing: &Pairing, now: u64) -> Self {
+        Self::load_with(Arc::new(ReadOnly(store)), pairing, now, false)
+    }
+
+    fn load_with(
+        store: Arc<dyn GuardianStateStore>,
+        pairing: &Pairing,
+        now: u64,
+        persist: bool,
+    ) -> Self {
         let held = match store.load() {
             Err(e) => {
                 eprintln!("charter: guardian-keys state unreadable ({e}): failing closed");
@@ -226,7 +259,7 @@ impl GuardianKeys {
                             && doc.state.paired_at == secs(pairing.paired_at) =>
                     {
                         let mut doc = doc;
-                        if follow_pairing_relays(&mut doc.state, pairing, now) {
+                        if follow_pairing_relays(&mut doc.state, pairing, now) && persist {
                             if let Err(e) = store.save(&to_json(&doc)) {
                                 eprintln!(
                                     "charter: could not record a relay change in the \
@@ -255,6 +288,9 @@ impl GuardianKeys {
                             state: migrated(pairing),
                             pin_attempts: PinAttempts::default(),
                         };
+                        if !persist {
+                            return Self::new(store, secs(pairing.paired_at), Held::Ready(doc));
+                        }
                         if let Err(e) = store.save(&to_json(&doc)) {
                             // Derived from the pairing record alone, so the
                             // next load derives it again.
@@ -339,6 +375,30 @@ impl GuardianKeys {
     /// [`Self::mint_presence_token`] binds a token to.
     pub fn pending_statements(&self, now: u64) -> Vec<cg::state::ProjectedPending> {
         self.project(now).map(|p| p.pending).unwrap_or_default()
+    }
+
+    /// Every key in the signer set (pinned roots and their approved working
+    /// keys), sorted. Empty when unavailable. For the offline unlock, which
+    /// accepts a code from any of them (open question "Offline unlock with
+    /// more than one guardian key").
+    pub fn signer_keys(&self) -> Vec<PubKey> {
+        self.read(|d| keys(cg::signer_set(&d.state)))
+            .unwrap_or_default()
+    }
+
+    /// The label a working key's approval gave it, if any (rule 5: shown next
+    /// to the key's root as a short npub, never alone, since a label can be
+    /// spoofed). Departed keys keep theirs, so a rule they set still says who.
+    pub fn signer_label(&self, key: &PubKey) -> Option<String> {
+        let key = hex(key);
+        self.read(|d| {
+            d.state
+                .keys
+                .iter()
+                .find(|k| k.key == key)
+                .and_then(|k| k.label.clone())
+        })
+        .flatten()
     }
 
     /// The STATUS recipients: [`SignerSet::recipients`] plus the departed
@@ -536,6 +596,21 @@ impl GuardianKeys {
         if let Some(token) = token {
             let _ = file.consume_if_matches(&token, now);
         }
+    }
+}
+
+/// The store behind [`GuardianKeys::peek`]: reads through, refuses writes.
+struct ReadOnly(Arc<dyn GuardianStateStore>);
+
+impl GuardianStateStore for ReadOnly {
+    fn load(&self) -> SysResult<Option<String>> {
+        self.0.load()
+    }
+    fn save(&self, _json: &str) -> SysResult<()> {
+        Err(SysError::Io("guardian-keys state opened read-only".into()))
+    }
+    fn clear(&self) -> SysResult<()> {
+        Err(SysError::Io("guardian-keys state opened read-only".into()))
     }
 }
 

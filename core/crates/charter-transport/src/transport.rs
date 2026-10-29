@@ -319,13 +319,22 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     /// that is the pinned guardian, this is exactly `build_and_offer` (the
     /// same wrap, the same entropy draws, the same outbox key).
     fn build_and_offer_all(&self, rumor: &Rumor, now: u64) -> Vec<NostrEvent> {
-        let recipients = self.recipients();
+        self.build_and_offer_to(rumor, &self.recipients(), now)
+    }
+
+    /// [`Self::build_and_offer_all`] for an explicit recipient list.
+    fn build_and_offer_to(
+        &self,
+        rumor: &Rumor,
+        recipients: &[PubKey],
+        now: u64,
+    ) -> Vec<NostrEvent> {
         if recipients.len() == 1 && recipients[0] == self.guardian_pk {
             return self.build_and_offer(rumor, now).into_iter().collect();
         }
         let many = recipients.len() > 1;
         let mut out = Vec::with_capacity(recipients.len());
-        for recipient in &recipients {
+        for recipient in recipients {
             let Some(wrap) = self.build_wrap_to(rumor, recipient, now) else {
                 continue;
             };
@@ -577,6 +586,31 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             return self.emit_status(status_json, now).await;
         }
         let wraps = self.build_status_wraps(status_json, now);
+        if wraps.is_empty() {
+            return vec![(
+                "<local>".to_string(),
+                PublishOutcome::Failed("wrap failed".into()),
+            )];
+        }
+        self.publish_prebuilt_on(&wraps, extra_relay_lists).await
+    }
+
+    /// A STATUS to an explicit recipient list, on this transport's relays and
+    /// `extra_relay_lists` (rule 11), one wrap per recipient, each offered to
+    /// the local sink. For the guardian-keys STATUS, whose recipients are the
+    /// signer set's plus the departed keys owed one last STATUS showing their
+    /// departure (`GuardianKeys::status_recipients`), which the set itself
+    /// never reports. With no recipients nothing is sent (a `Failed` outcome,
+    /// as for a wrap that could not be built).
+    pub async fn emit_status_to(
+        &self,
+        status_json: &str,
+        now: u64,
+        recipients: &[PubKey],
+        extra_relay_lists: &[Vec<RelayUrl>],
+    ) -> Vec<(RelayUrl, PublishOutcome)> {
+        let rumor = self.machine_rumor(kinds::CHARTER_DEVICE_STATUS, status_json.to_string(), now);
+        let wraps = self.build_and_offer_to(&rumor, recipients, now);
         if wraps.is_empty() {
             return vec![(
                 "<local>".to_string(),
