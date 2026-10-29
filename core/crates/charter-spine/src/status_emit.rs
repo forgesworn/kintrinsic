@@ -231,6 +231,11 @@ pub fn should_emit_status(
                 // A Free -> Learning (or back) transition while unlocked is news
                 // to the guardian's "Now" card; it must not wait out a heartbeat.
                 || prev.active_time != cur.active_time
+                // Who the ward trusts changed (contract, *Guardian roots and
+                // working keys*): every root's working keys hear it at once,
+                // and a departed key gets its last STATUS without waiting
+                // out a heartbeat.
+                || prev.guardians != cur.guardians
                 || cur.ts < prev.ts
                 || cur.ts.abs_diff(prev.ts) >= heartbeat_secs
         }
@@ -476,5 +481,19 @@ mod tests {
             clock_stepped_back_from(Some(&high), 800_000, Some(1_000_000)),
             Some(1_100_000)
         );
+    }
+
+    #[test]
+    fn a_change_in_who_the_ward_trusts_is_emitted_at_once() {
+        let prev = at(1_000);
+        let mut cur = at(1_010);
+        assert!(!should_emit_status(Some(&prev), &cur, 300));
+        cur.guardians = Some(charter_proto::StatusGuardians {
+            roots: vec![],
+            pending: vec![],
+            tombstones: 1,
+            relays: vec![],
+        });
+        assert!(should_emit_status(Some(&prev), &cur, 300));
     }
 }

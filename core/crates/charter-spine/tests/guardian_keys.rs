@@ -1019,6 +1019,93 @@ async fn a_set_with_no_recipients_sends_nothing_rather_than_fall_back() {
     assert!(w.store.load().unwrap().is_some());
 }
 
+/// A departed working key is owed one last STATUS showing its departure:
+/// `emit_status_to` with `status_recipients()` reaches it, the signer set's
+/// own recipients never do, and after `mark_status_sent` it gets nothing more.
+#[tokio::test]
+async fn a_departed_key_gets_one_last_status_then_nothing() {
+    let w = Ward::new();
+    let (b, keys) = w.broker();
+    approve(&w, &b, ROOT_SEED, WORKING_SEED, 0x01).await;
+    let out = b
+        .ingest_local(
+            &w.sealed(
+                &withdrawal(ROOT_SEED, WORKING_SEED, NOW - 400),
+                ROOT_SEED,
+                0x02,
+            ),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert!(!keys.signers().is_signer(&pk(WORKING_SEED)));
+    assert!(!keys.signers().recipients().contains(&pk(WORKING_SEED)));
+    let farewell = keys.status_recipients();
+    assert!(farewell.contains(&pk(WORKING_SEED)), "owed its last STATUS");
+
+    let relay = MockRelayTransport::new();
+    let mut t = CharterTransport::new(
+        relay.clone(),
+        ScriptedEntropy::new(9),
+        machine_sk(),
+        pk(ROOT_SEED),
+        vec!["wss://r".into()],
+    );
+    t.set_signer_set(keys.signers());
+    t.emit_status_to("{}", NOW, &farewell, &[]).await;
+    assert_eq!(wraps_to(&relay, pk(WORKING_SEED)).await.len(), 1);
+    keys.mark_status_sent(NOW).unwrap();
+    assert!(!keys.status_recipients().contains(&pk(WORKING_SEED)));
+    // Nobody to send to: nothing is built, nothing is published.
+    let none = t.emit_status_to("{}", NOW, &[], &[]).await;
+    assert!(matches!(
+        none.as_slice(),
+        [(_, charter_sys::relay::PublishOutcome::Failed(_))]
+    ));
+}
+
+/// `peek` reads the state another process writes and never writes it.
+#[tokio::test]
+async fn a_peek_reads_the_signer_set_and_labels_and_never_writes() {
+    let w = Ward::new();
+    let (b, _keys) = w.broker();
+    let labelled = statement_by(
+        ROOT_SEED,
+        format!("kintrinsic/device/{}", pk(WORKING_SEED).to_hex()),
+        pk(WORKING_SEED),
+        NOW - 500,
+        json!({"label": "Mum's phone"}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&labelled, WORKING_SEED, 0x03), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    let saves = w.store.saves();
+    let peeked = GuardianKeys::peek(Arc::new(w.store.clone()), &pairing(), NOW);
+    let mut want = vec![pk(ROOT_SEED), pk(WORKING_SEED)];
+    want.sort_by_key(|k| k.to_hex());
+    let mut got = peeked.signer_keys();
+    got.sort_by_key(|k| k.to_hex());
+    assert_eq!(got, want);
+    assert_eq!(
+        peeked.signer_label(&pk(WORKING_SEED)).as_deref(),
+        Some("Mum's phone")
+    );
+    assert_eq!(peeked.signer_label(&pk(ROOT_SEED)), None);
+    assert_eq!(
+        peeked.mint_presence_token(None, NOW, &mut fill(1)),
+        Err(PresenceError::Failed),
+        "read-only: nothing can be recorded"
+    );
+    assert_eq!(w.store.saves(), saves, "a peek writes nothing");
+
+    // A ward with no state yet: the peek migrates in memory only.
+    let fresh = Ward::new();
+    let peeked = GuardianKeys::peek(Arc::new(fresh.store.clone()), &pairing(), NOW);
+    assert_eq!(peeked.signer_keys(), vec![pk(ROOT_SEED)]);
+    assert!(fresh.store.raw().is_none());
+}
+
 // ---------------------------------------------------------------------------
 // Scan-to-pair (review 2a, L4)
 // ---------------------------------------------------------------------------
