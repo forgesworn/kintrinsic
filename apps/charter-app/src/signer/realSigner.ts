@@ -59,6 +59,12 @@ export interface TargetDevice {
    *  `false` makes the signer refuse a typed gift or answer to it, because an
    *  older ward would land the minutes as Free time. */
   timesCapable?: boolean;
+  /**
+   * The last USB-debugging state this install sent to the device
+   * (`Device.debugging`), so rule 4 can re-sign a debugging clause sent
+   * before the standing record existed.
+   */
+  debugging?: { allow: boolean; until?: number };
 }
 
 /** Where one child's clauses must be delivered. */
@@ -232,6 +238,14 @@ export class RealSigner implements Signer {
       const device = target.devices.find((d) => d.pubkey === machine);
       return device ? [{ device, clause }] : [];
     });
+    // A debugging clause sent before the standing record existed is known
+    // only from the device's own record: re-sign that too (batch 3b review L6).
+    for (const device of target.devices) {
+      if (!device.debugging || recorded[`debugging:${device.pubkey}`]) continue;
+      const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt: 0, body: debuggingToGrant(device.debugging, 0) };
+      if (target.subject) clause.subject = target.subject;
+      sends.push({ device, clause });
+    }
     if (sends.length === 0) return { ok: true };
     await this.authorize("clause", `Re-send ${target.name ?? childId}'s current rules`);
     const issuedAt = this.nextIssuedAt();

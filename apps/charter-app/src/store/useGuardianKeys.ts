@@ -57,10 +57,19 @@ export interface GuardianKeysApi {
   cancelPending(d: string): Promise<SendReport>;
   /** Move this install's root to the identity behind `bunkerUri` (presence at each ward finishes it). */
   moveRoot(bunkerUri: string, via?: RootVia): Promise<SendReport>;
+  /** The move in progress: where to, whether it has lapsed, and which devices already switched. */
+  moveProgress(): ReturnType<GuardianKeys["moveProgress"]>;
+  /**
+   * Restart a move that lapsed after some devices switched: the same new
+   * identity, reconnected from its stored link. The one way out of a
+   * half-way move (docs/guardian-keys-open-questions.md, "A root move that
+   * lapses half-way").
+   */
+  finishMove(): Promise<SendReport>;
   /** Withdraw a working key for good (a lost phone). */
   withdrawInstall(w: string): Promise<SendReport>;
   /** Set the guardian PIN on Android wards (one child's, or all). */
-  setGuardianPin(pin: string, opts?: { childId?: string }): Promise<Omit<SendReport, "event">>;
+  setGuardianPin(pin: string, opts?: { childId?: string; machines?: readonly string[] }): Promise<Omit<SendReport, "event">>;
   /** Share the family roster with the other guardians' working keys. */
   sendRoster(): ReturnType<GuardianKeys["sendRoster"]>;
   /** Roster devices this install has neither paired nor heard from. */
@@ -229,6 +238,12 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
     [keys],
   );
 
+  const finishMove = useCallback<GuardianKeysApi["finishMove"]>(async () => {
+    const next = keysRef.current.nextRoot;
+    if (!next) throw new Error("There's no identity move to finish.");
+    return moveRoot(next.bunkerUri, next.via);
+  }, [moveRoot]);
+
   const workingPubkey = (() => {
     const k = readGuardianKey();
     return k.kind === "ok" ? getPublicKey(k.key) : null;
@@ -249,12 +264,14 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       objectToRemoval: (d, remover) => keys.objectToRemoval(d, remover),
       cancelPending: (d) => keys.cancelPending(d),
       moveRoot,
+      moveProgress: () => keys.moveProgress(),
+      finishMove,
       withdrawInstall: (w) => keys.withdrawInstall(w),
       setGuardianPin: (pin, opts) => keys.setGuardianPin(pin, opts),
       sendRoster: () => keys.sendRoster(),
       unconfirmedRosterDevices: () => keys.unconfirmedRosterDevices(),
     }),
-    [keys, keysState, workingPubkey, approveInstall, moveRoot],
+    [keys, keysState, workingPubkey, approveInstall, moveRoot, finishMove],
   );
 
   return { keys, keysRef, signerKeys, api };

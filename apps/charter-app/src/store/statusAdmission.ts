@@ -16,6 +16,10 @@ export type StatusAdmission =
    *  proof a stranger cannot forge. Kept as a live status only (so the pairing
    *  flow and the unclaimed-device recovery can see it) — no usage history. */
   | "pairing"
+  /** Not claimed, but a ward this install confirmed in person at (a joining
+   *  parent, before the roster names it): only its guardians view and
+   *  version are kept, plus the live status. */
+  | "presence"
   /** Anyone else. Dropped before anything is recorded. */
   | "stranger";
 
@@ -23,6 +27,7 @@ export function admitStatus(
   status: { machine: string; pairToken?: string | null },
   children: Pick<Child, "devices">[],
   liveTokens: ReadonlySet<string>,
+  isPresenceWard: (machine: string) => boolean = () => false,
 ): StatusAdmission {
   for (const c of children) {
     for (const d of c.devices) {
@@ -30,5 +35,6 @@ export function admitStatus(
     }
   }
   if (status.pairToken && liveTokens.has(status.pairToken)) return "pairing";
+  if (isPresenceWard(status.machine)) return "presence";
   return "stranger";
 }

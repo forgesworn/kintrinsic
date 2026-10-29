@@ -10,6 +10,7 @@
 //   signs directly, as before the section.
 
 import type { LocalRoster, SignedEvent, StatementType } from "./sdk";
+import type { StatusGuardians } from "./statusGuardians";
 
 /** How the root is held. Both are reached through My Signet's NIP-46 bunker. */
 export type RootVia = "signet" | "heartwood";
@@ -47,6 +48,23 @@ export interface SentStatement {
   key: string;
 }
 
+/**
+ * A ward this install confirmed in person at (its machine key came from the
+ * presence code) before it knew the device from a pairing or a roster: a
+ * joining parent. Its STATUS is admitted and its guardians view kept here
+ * until a roster names the device, so that view can vouch for the roster's
+ * sender. See docs/guardian-keys-open-questions.md, "A joining parent's
+ * devices".
+ */
+export interface PresenceWard {
+  /** When this install confirmed in person there (unix s). */
+  confirmedAt: number;
+  /** The newest STATUS read from it: its `ts`, version and guardians. */
+  ts?: number;
+  appVersionCode?: number;
+  guardians?: StatusGuardians;
+}
+
 export interface GuardianKeysState {
   v: 1;
   /** This install's root and its approval of W; absent for a local-only family. */
@@ -63,10 +81,19 @@ export interface GuardianKeysState {
   roster: LocalRoster;
   /** Statements this install sent, by `d`. */
   sent: Record<string, SentStatement>;
+  /** Wards confirmed in person here that no child of this install has yet, by machine. */
+  presenceWards: Record<string, PresenceWard>;
+  /**
+   * The root this install last used, kept when My Signet is disconnected
+   * (`root` is cleared then): the key devices paired under it still pin, and
+   * the only identity that may approve this phone again while no device
+   * reports its guardians.
+   */
+  forgottenRoot?: string;
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {} };
+  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -86,5 +113,6 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
         ? o.roster
         : empty.roster,
     sent: rec(o.sent) as Record<string, SentStatement>,
+    presenceWards: rec(o.presenceWards) as Record<string, PresenceWard>,
   };
 }
