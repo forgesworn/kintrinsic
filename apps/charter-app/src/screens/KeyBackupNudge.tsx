@@ -9,7 +9,7 @@ import {
   isKeyBackedUp,
 } from "../signer/backupStatus";
 
-/** The element id of the "Back up your guardian key" section on Family. */
+/** The element id of the "Back up your guardian key" section on Settings. */
 export const KEY_BACKUP_ANCHOR = "key-backup";
 
 function backedUp(): boolean {
@@ -23,7 +23,7 @@ function backedUp(): boolean {
 }
 
 /**
- * A reminder, near the top of Family, to save a backup of the parent key.
+ * A reminder, near the top of Home and Settings, to save a backup of the parent key.
  *
  * Only for the key that lives on this phone (parent approval "on this phone"):
  * with Signet or Heartwood the key is held elsewhere and there is nothing here
@@ -57,7 +57,10 @@ export default function KeyBackupNudge() {
               block
               onClick={() => {
                 const el = document.getElementById(KEY_BACKUP_ANCHOR);
-                el?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                // Off the page that holds the section (Home shows this nudge
+                // too): go to it, and Settings scrolls it into view.
+                if (el) el.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                else window.location.hash = `/settings/${KEY_BACKUP_ANCHOR}`;
               }}
             >
               Back up now

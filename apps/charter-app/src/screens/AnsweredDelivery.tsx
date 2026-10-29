@@ -8,8 +8,9 @@ import { answeredLines, recordsOf, type LocalWrapRecord } from "../store/localDe
  * home network: "Applied on {device}" once the ward's own acknowledgement says
  * so, or a plain warning if it refused, failed or found the ask expired. Renders
  * nothing for answers that went by relay only — there is nothing honest to add.
+ * With `childId`, only that child's answers; without, the whole family's.
  */
-export default function AnsweredDelivery() {
+export default function AnsweredDelivery({ childId }: { childId?: string } = {}) {
   const { state } = useCharter();
   // A queued answer can pass its ask's 24 h window while the screen sits open:
   // a slow clock lets "waiting" turn into "Expired before it reached…" without
@@ -27,8 +28,9 @@ export default function AnsweredDelivery() {
       }
       return "their device";
     };
-    return answeredLines(state.requests, recordsOf(state.localDeliveries), nameOf, now);
-  }, [state.requests, state.localDeliveries, state.children, now]);
+    const requests = childId ? state.requests.filter((r) => r.childId === childId) : state.requests;
+    return answeredLines(requests, recordsOf(state.localDeliveries), nameOf, now);
+  }, [state.requests, state.localDeliveries, state.children, childId, now]);
 
   if (lines.length === 0) return null;
   return (

@@ -21,7 +21,7 @@ export default function GuardianRecovery({ onResolved }: { onResolved: () => voi
     setError(null);
     setWorking(true);
     try {
-      // Lazy-load the crypto (mirrors Family's backup flow) — off the boot path.
+      // Lazy-load the crypto (mirrors the Settings backup flow) — off the boot path.
       // Reads BOTH blob generations: the only backup the app produces is v2,
       // so a v1-only decrypt here refused every real backup and left "start
       // fresh" — orphaning every pairing — as the only way off this screen.

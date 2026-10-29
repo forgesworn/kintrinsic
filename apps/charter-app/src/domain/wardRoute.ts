@@ -14,6 +14,17 @@ export function wardIdFromHash(tab: string, hash = window.location.hash): string
   return parts[0] === tab && parts[1] ? decodeURIComponent(parts[1]) : "";
 }
 
+/** The route (no `#/`) of a child's page: `ward/<id>`. */
+export function wardPath(childId: string): string {
+  return `ward/${encodeURIComponent(childId)}`;
+}
+
+/** The route (no `#/`) of a child's settings: `ward/<id>/settings`. Their rules,
+ *  devices, name and colour; the child's page keeps the daily things. */
+export function wardSettingsPath(childId: string): string {
+  return `${wardPath(childId)}/settings`;
+}
+
 /** Navigate to a tab, focused on one ward. */
 export function goToWard(tab: string, childId: string): void {
   window.location.hash = `/${tab}/${encodeURIComponent(childId)}`;

@@ -1,0 +1,37 @@
+/* Child administration and Settings: devices, the device page, the set-up
+   page, Manage, and the household list. Spacing and touch targets only; the
+   colours and type stay in theme.css. */
+
+/* A warning line on a device row. */
+.admin-warn {
+  color: var(--warn, #8a5a00);
+}
+
+/* Rows that open a page: tall enough to hit with a thumb. */
+.admin-list .row {
+  min-height: 56px;
+}
+
+/* Every button on these pages is at least 48px tall. */
+.device-page .btn,
+.child-device-settings .btn,
+.child-manage .btn,
+.settings-page .btn,
+.settings-page .row {
+  min-height: 48px;
+}
+
+/* A device-page section; one a device doesn't support renders nothing, so the
+   empty card must not leave a gap. */
+.device-section:empty {
+  display: none;
+}
+
+.device-section .card-sub {
+  margin: 6px 0 12px;
+}
+
+/* A short explanatory line under a Settings heading. */
+.settings-note {
+  margin: 0 4px 10px;
+}

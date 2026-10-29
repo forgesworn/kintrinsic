@@ -6,18 +6,17 @@ import {
   buildApps,
   lifelineSummary,
   namedTimesSummary,
-  SECTION_TABS,
-  SECTION_TAB_OF,
   SECTION_TITLE,
   buildLifeline,
   type SectionId,
 } from "./Limits";
 
 /**
- * Splitting nine always-open editors across three tabs is exactly the change
- * that can lose one. If a control's id stops mapping to a tab, or maps to a tab
- * that isn't rendered, it disappears from the app while every test still passes
- * and the wire code is untouched — a rule the guardian can no longer reach.
+ * Each control is its own editor page now. If a control's id stops being
+ * reachable, it disappears from the app while every test still passes and the
+ * wire code is untouched: a rule the guardian can no longer reach. (That every
+ * id is listed on the child page and opens its editor is covered in
+ * RuleEditor.test.tsx.)
  */
 describe("every control still has somewhere to live", () => {
   const ALL = Object.keys(SECTION_TITLE) as SectionId[];
@@ -38,31 +37,13 @@ describe("every control still has somewhere to live", () => {
     );
   });
 
-  it("puts each control on exactly one tab that is actually shown", () => {
-    const shown = SECTION_TABS.map((t) => t.id);
-    for (const id of ALL) {
-      const tab = SECTION_TAB_OF[id];
-      expect(tab, `${id} has no tab`).toBeDefined();
-      expect(shown, `${id} lives on a tab nobody can open`).toContain(tab);
-    }
-  });
-
-  it("leaves no tab empty", () => {
-    for (const t of SECTION_TABS) {
-      expect(
-        ALL.filter((id) => SECTION_TAB_OF[id] === t.id).length,
-        `the ${t.label} tab has nothing on it`,
-      ).toBeGreaterThan(0);
-    }
-  });
-
-  it("gives every control a title to show when collapsed", () => {
+  it("gives every control a title for its page and its row", () => {
     for (const id of ALL) expect(SECTION_TITLE[id].trim()).not.toBe("");
   });
 });
 
 /**
- * A collapsed row is the ONLY thing a guardian sees until they open it, so its
+ * A row on the child page is the ONLY thing a guardian sees until they open it, so its
  * summary has to be true. These three are the summaries written for this pass.
  */
 describe("what a collapsed row says", () => {

@@ -1,78 +1,91 @@
 import { useEffect, useRef, useState } from "react";
-import { Badge, Seal } from "./components/ui";
+import { Seal } from "./components/ui";
 import { SignSheet } from "./components/SignSheet";
 import { PullToRefresh } from "./components/PullToRefresh";
-import { pendingCount, useCharter } from "./store/store";
+import { BottomBar } from "./components/BottomBar";
+import { bottomBarFor } from "./components/bottomBarFor";
+import { useCharter } from "./store/store";
 import Home from "./screens/Home";
-import Approvals from "./screens/Approvals";
-import Limits from "./screens/Limits";
+import ChildPage from "./screens/ChildPage";
+import RuleEditor, { AppRulePage } from "./screens/RuleEditor";
+import { AddDevicePage, DevicePage } from "./screens/ChildAdmin";
+import ChildSettings from "./screens/ChildSettings";
+import Settings from "./screens/Settings";
+import { SECTION_TITLE } from "./screens/Limits";
 import Activity from "./screens/Activity";
-import Family from "./screens/Family";
 import Guide from "./screens/Guide";
 import GuardianRecovery from "./screens/GuardianRecovery";
 import { readGuardianKey } from "./signer/guardianKey";
 import { provisionCarrier, pushCarrierRoster } from "./carrier/bridge";
+import { confirmLeave } from "./components/RuleSaveBar";
+import { resolveRoute, waitingChildIds } from "./routes";
+import type { Child } from "./domain/types";
+import { wardPath, wardSettingsPath } from "./domain/wardRoute";
 
 // A tiny hash-based router — no dependency, install-safe, and shareable URLs.
-export type TabId = "home" | "approvals" | "limits" | "activity" | "family";
-
-interface TabDef {
-  id: TabId;
-  label: string;
-  icon: string;
-  title: string;
-  /** One line saying what this tab is for. Five screens of white cards with
-   *  only a noun at the top is how a parent loses track of which one they are
-   *  on — this is the cheapest possible "you are here". */
-  subtitle: string;
-  Screen: () => JSX.Element;
-}
-
-const TABS: TabDef[] = [
-  {
-    id: "home",
-    label: "Home",
-    icon: "🏠",
-    title: "Today",
-    subtitle: "What's happening right now",
-    Screen: Home,
-  },
-  {
-    id: "approvals",
-    label: "Approvals",
-    icon: "✓",
-    title: "Approvals",
-    subtitle: "Decisions waiting for you",
-    Screen: Approvals,
-  },
-  {
-    id: "limits",
-    label: "Limits",
-    icon: "⏱",
-    title: "Limits",
-    subtitle: "The rules you've set",
-    Screen: Limits,
-  },
-  {
-    id: "activity",
-    label: "Activity",
-    icon: "≣",
-    title: "Activity",
-    subtitle: "What's happened",
-    Screen: Activity,
-  },
-  {
-    id: "family",
-    label: "Family",
-    icon: "👤",
-    title: "Family",
-    subtitle: "People, devices and your key",
-    Screen: Family,
-  },
-];
+// Every page is a hash route, so Android's back button works with no native
+// help. The route table lives in ./routes.ts.
+//
+// The bottom bar (one button per child, Settings) is the way between the
+// top-level pages: a child's page and settings, and Settings. There is no Home
+// once the family has a child: the app opens on the first one. (Home is only
+// the getting-started page for a family with none, and then the bar has a Home
+// button too.) Those pages have no back arrow; every deeper page (a rule
+// editor, a device page, set-up, Activity) has one, and
+// the full-screen editors hide the bar for their own pinned actions.
 
 function hashRoute(): string {
   return window.location.hash.replace(/^#\/?/, "");
+}
+
+function seg(s: string | undefined): string {
+  if (!s) return "";
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/** `ward/<id>/rule/app/<policyId>`: the page for one singled-out game or app.
+ *  The route table only knows the section editors, so this one is read here. */
+function appRuleRoute(
+  route: string,
+  children: Child[],
+): { childId: string; policyId: string } | null {
+  const parts = route.split("/").filter((p) => p !== "");
+  if (parts[0] !== "ward" || parts[2] !== "rule" || parts[3] !== "app") return null;
+  const childId = seg(parts[1]);
+  const policyId = seg(parts[4]);
+  if (!policyId || !children.some((c) => c.id === childId)) return null;
+  return { childId, policyId };
+}
+
+/** The old Limits addresses are redirects: `limits/<childId>` is that child's
+ *  settings (where the Rules are), bare `limits` the first child's (Home if
+ *  there are none), and a child who no longer exists lands on "home", which
+ *  is the first child's page (see resolveRoute). */
+function limitsRedirect(
+  route: string,
+  children: Child[],
+): { to: string; scroll?: string } | null {
+  const parts = route.split("/").filter((p) => p !== "");
+  if (parts[0] !== "limits") return null;
+  const id = seg(parts[1]) || children[0]?.id;
+  if (!id || !children.some((c) => c.id === id)) return { to: "home" };
+  return { to: wardSettingsPath(id) };
+}
+
+/** Bring a section into view once it has rendered; the top of the page if it
+ *  never does (an `approvals` link when nothing is waiting). */
+function scrollToWhenReady(anchorId: string, tries = 24): void {
+  const el = document.getElementById(anchorId);
+  if (el) {
+    el.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (tries > 0) requestAnimationFrame(() => scrollToWhenReady(anchorId, tries - 1));
+  else window.scrollTo(0, 0);
 }
 
 export default function App() {
@@ -86,11 +99,77 @@ export default function App() {
     () => readGuardianKey().kind === "corrupt",
   );
 
+  // Whether the guardian has moved around inside this session, so the back
+  // arrow has somewhere in the app to go back to.
+  const navigated = useRef(false);
+  const childrenRef = useRef(state.children);
+  childrenRef.current = state.children;
+  const waitingRef = useRef(waitingChildIds(state.requests));
+  waitingRef.current = waitingChildIds(state.requests);
+  // A section to scroll to once the route that replaces this one has rendered.
+  const pendingScroll = useRef<string | null>(null);
+  // The address the page on screen belongs to, and the route before this one:
+  // the first so a refused navigation can put the address back, the second so
+  // coming back from a rule editor lands on the Rules.
+  const shownHash = useRef(window.location.hash);
+  const prevRoute = useRef<string | null>(null);
+
   useEffect(() => {
-    const onHash = () => setRoute(hashRoute());
+    const onHash = () => {
+      const next = window.location.hash;
+      // A rule editor with unsaved changes can refuse to be left. The address
+      // has already moved, so push it back: that adds no hashchange, and when
+      // the guardian pressed Back it restores the entry they just left.
+      if (next !== shownHash.current && !confirmLeave()) {
+        window.history.pushState(null, "", shownHash.current);
+        return;
+      }
+      shownHash.current = next;
+      navigated.current = true;
+      setRoute(hashRoute());
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  // On a route change: scroll to the section the route names (`approvals` ->
+  // Waiting for you), or to the top. `approvals` and `approvals/<childId>` are
+  // also tidied to `ward/<childId>` in place, without adding a history entry,
+  // as are the empty route and `home` (the first child's page), and the old
+  // `limits` addresses are redirected the same way.
+  useEffect(() => {
+    const prev = prevRoute.current;
+    prevRoute.current = route;
+    const redirect = limitsRedirect(route, childrenRef.current);
+    if (redirect) {
+      pendingScroll.current = redirect.scroll ?? null;
+      window.history.replaceState(null, "", `#/${redirect.to}`);
+      shownHash.current = window.location.hash;
+      setRoute(redirect.to);
+      return;
+    }
+    const r = resolveRoute(route, childrenRef.current, waitingRef.current);
+    if (r.kind === "ward" && r.canonical) {
+      pendingScroll.current = r.scroll ?? null;
+      window.history.replaceState(null, "", `#/${r.canonical}`);
+      shownHash.current = window.location.hash;
+      setRoute(r.canonical);
+      return;
+    }
+    // Back from one of this child's rule editors (or a singled-out app's page)
+    // lands on the Rules, the first section of their settings.
+    const fromEditor =
+      r.kind === "ward-settings" &&
+      prev !== null &&
+      prev.startsWith(`${wardPath(r.childId)}/rule/`);
+    const target =
+      ("scroll" in r ? r.scroll : undefined) ??
+      pendingScroll.current ??
+      (fromEditor ? "rules" : undefined);
+    pendingScroll.current = null;
+    if (target) scrollToWhenReady(target);
+    else window.scrollTo(0, 0);
+  }, [route]);
 
   // Publish the sticky header's real height as --header-h, so anything that must
   // stick BENEATH it lands in the right place. Measured, not a magic number: the
@@ -125,8 +204,20 @@ export default function App() {
   });
 
   const nav = (to: string) => {
+    // The same unsaved-changes question the address bar and Android's back
+    // button get (see onHash).
+    if (!confirmLeave()) return;
+    shownHash.current = `#/${to}`;
     window.location.hash = `/${to}`;
     setRoute(to);
+  };
+
+  /** Leave a rule editor, a device page or the set-up wizard once it is done:
+   *  back to where the guardian came from, or to the child's settings if they
+   *  arrived by a link. */
+  const leaveEditor = (childId: string) => {
+    if (navigated.current) window.history.back();
+    else nav(wardSettingsPath(childId));
   };
 
   // Corrupt key wins over every route — recover before anything reads the key.
@@ -134,53 +225,141 @@ export default function App() {
     return <GuardianRecovery onResolved={() => setKeyCorrupt(false)} />;
   }
 
-  // Full-screen, non-tab routes (the setup guide has its own back button).
-  if (route === "setup") {
+  const effectiveRoute = limitsRedirect(route, state.children)?.to ?? route;
+  const appRule = appRuleRoute(effectiveRoute, state.children);
+  const waiting = waitingChildIds(state.requests);
+  const resolved = resolveRoute(effectiveRoute, state.children, waiting);
+
+  // Full-screen, non-page routes (the setup guide has its own back button).
+  if (resolved.kind === "setup") {
     return <Guide onBack={() => nav("home")} />;
   }
 
-  const go = (id: TabId) => nav(id);
-  // Routes may carry a subject: `#/limits/<childId>` opens Limits already on
-  // that child's tab, so tapping a ward on Home or Family lands where you
-  // meant rather than on whoever happens to be first.
-  const routeTab = route.split("/")[0];
-  const tab: TabId = TABS.find((t) => t.id === routeTab)?.id ?? "home";
-  const active = TABS.find((t) => t.id === tab) ?? TABS[0];
-  const pending = pendingCount(state);
+  const child =
+    "childId" in resolved ? state.children.find((c) => c.id === resolved.childId) : undefined;
+
+  // Only the getting-started page (no children yet) is "Home".
+  const isHome = resolved.kind === "home";
+  const bar = bottomBarFor(effectiveRoute, state.children, waiting);
+  // Top-level pages have no back arrow: Home, a child's page and settings, and
+  // Settings itself.
+  const topLevel =
+    !appRule &&
+    (resolved.kind === "home" ||
+      resolved.kind === "ward" ||
+      resolved.kind === "ward-settings" ||
+      resolved.kind === "settings");
+  let title = "Kintrinsic";
+  let page: JSX.Element;
+  const appRuleChild = appRule ? state.children.find((c) => c.id === appRule.childId) : undefined;
+  const appRulePolicy = appRule
+    ? appRuleChild?.policies.find((p) => p.id === appRule.policyId)
+    : undefined;
+  // `rule/app/<policyId>` is read ahead of the route table (see appRuleRoute).
+  if (appRule) {
+    title = appRulePolicy?.scope.kind === "app" ? appRulePolicy.scope.label : "Game or app";
+    page = (
+      <AppRulePage
+        childId={appRule.childId}
+        policyId={appRule.policyId}
+        onDone={() => leaveEditor(appRule.childId)}
+      />
+    );
+  } else switch (resolved.kind) {
+    case "ward":
+      title = child?.name ?? "";
+      page = child ? <ChildPage child={child} /> : <Home />;
+      break;
+    case "ward-settings":
+      title = child ? `${child.name}’s settings` : "";
+      page = child ? <ChildSettings child={child} /> : <Home />;
+      break;
+    case "rule":
+      title = SECTION_TITLE[resolved.section];
+      page = (
+        <RuleEditor
+          childId={resolved.childId}
+          section={resolved.section}
+          onDone={() => leaveEditor(resolved.childId)}
+        />
+      );
+      break;
+    case "device":
+      title = child?.devices.find((d) => d.id === resolved.deviceId)?.label ?? "Device";
+      page = (
+        <DevicePage
+          childId={resolved.childId}
+          deviceId={resolved.deviceId}
+          onDone={() => leaveEditor(resolved.childId)}
+        />
+      );
+      break;
+    case "add-device":
+      title = "Set up a device";
+      page = <AddDevicePage childId={resolved.childId} onDone={() => leaveEditor(resolved.childId)} />;
+      break;
+    case "settings":
+      title = "Settings";
+      page = <Settings sub={resolved.sub} />;
+      break;
+    case "activity":
+      title = "Activity";
+      page = <Activity />;
+      break;
+    default:
+      page = <Home />;
+  }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${bar.show ? " has-bottom-bar" : ""}`}>
       <header className="app-header" ref={headerRef}>
-        <Seal />
-        <span style={{ minWidth: 0 }}>
-          <h1 className="app-title">{active.title}</h1>
-          <span className="app-subtitle">{active.subtitle}</span>
-        </span>
+        {isHome && (
+          <>
+            <Seal />
+            <h1 className="app-title" style={{ flex: 1, minWidth: 0 }}>
+              Kintrinsic
+            </h1>
+          </>
+        )}
+        {!isHome && (
+          <>
+            {!topLevel && (
+              <button
+                type="button"
+                className="app-header-btn"
+                aria-label="Back"
+                onClick={() => {
+                  // Back where the guardian came from if they have moved around
+                  // in this session; otherwise (a deep link, a notification) Home.
+                  if (navigated.current) window.history.back();
+                  else nav("home");
+                }}
+              >
+                <span aria-hidden="true">‹</span>
+              </button>
+            )}
+            <h1 className={`app-title app-title-page${topLevel ? " app-title-top" : ""}`}>
+              {title}
+            </h1>
+            {resolved.kind === "ward" && !appRule && child && (
+              <button
+                type="button"
+                className="app-header-btn"
+                aria-label={`${child.name}’s settings`}
+                onClick={() => nav(wardSettingsPath(child.id))}
+              >
+                <span aria-hidden="true">⚙</span>
+              </button>
+            )}
+          </>
+        )}
       </header>
 
       <PullToRefresh>
-        <main className="app-main">
-          <active.Screen />
-        </main>
+        <main className="app-main">{page}</main>
       </PullToRefresh>
 
-      <nav className="tabbar" aria-label="Main">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className="tab"
-            aria-current={t.id === tab ? "page" : undefined}
-            onClick={() => go(t.id)}
-          >
-            <span className="tab-icon" aria-hidden="true">
-              {t.icon}
-            </span>
-            {t.label}
-            {t.id === "approvals" && <Badge count={pending} />}
-          </button>
-        ))}
-      </nav>
+      <BottomBar route={effectiveRoute} />
 
       <SignSheet />
     </div>

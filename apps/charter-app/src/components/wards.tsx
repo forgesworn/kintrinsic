@@ -6,7 +6,7 @@ import type { Child } from "../domain/types";
 //
 // Before this there were three gestures for the same act — a brand-red
 // segmented control (Limits), a scrolling strip of filter pills (Activity), and
-// a list of cards (Home, Family) — and the ward's name, avatar and status pill
+// a list of cards (Home, Settings) — and the ward's name, avatar and status pill
 // were drawn five different ways across five screens. That is most of why every
 // tab looked like the last one: the chrome varied and the content didn't.
 //
