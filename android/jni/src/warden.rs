@@ -2099,6 +2099,13 @@ impl Warden {
     /// Apply an offline, guardian-signed relay change without re-pairing.
     pub fn update_relays(&mut self, code: &str, now: u64) -> Result<dto::PairingState, String> {
         self.require_readable_pairing()?;
+        // Held to the save: a gift-wrapped RELAYS (the broker, on the poll or
+        // link thread) rewrites the same record under the same lock (review
+        // 2a, Info 2), so neither change can lose the other.
+        let _record_lock = self
+            .pairing
+            .lock_for_update()
+            .map_err(|e| format!("lock pairing: {e:?}"))?;
         let json = self
             .pairing
             .load()

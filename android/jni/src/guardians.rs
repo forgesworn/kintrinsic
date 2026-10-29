@@ -123,32 +123,17 @@ impl Warden {
         code: &str,
         now: u64,
     ) -> Result<(), String> {
-        let Some(keys) = &self.guardian_keys else {
-            return charter_transport::relay_config::apply_signed_config(pairing, code, now);
-        };
-        if code.len() > 16_384 {
-            return Err("Relay code is too long.".into());
+        match &self.guardian_keys {
+            // Review 2a, Info 6: checked against the live signer set, so a
+            // working key may sign one and a moved-away root may not.
+            Some(keys) => charter_transport::relay_config::apply_signed_config_from(
+                pairing,
+                code,
+                &*keys.signers(),
+                now,
+            ),
+            None => charter_transport::relay_config::apply_signed_config(pairing, code, now),
         }
-        let event: NostrEvent =
-            serde_json::from_str(code).map_err(|_| "Invalid signed relay code.")?;
-        let carries_pin = serde_json::from_str::<Value>(&event.content)
-            .ok()
-            .is_some_and(|v| v.get("guardianPin").is_some());
-        if carries_pin {
-            return Err("A guardian PIN can't be set from a pasted code.".into());
-        }
-        let mut candidate = pairing.clone();
-        let applied = charter_transport::relay_config::apply_signed_relays(
-            &mut candidate,
-            &event,
-            &*keys.signers(),
-            now,
-        )?;
-        if applied.pin.is_some() {
-            return Err("A guardian PIN can't be set from a pasted code.".into());
-        }
-        *pairing = candidate;
-        Ok(())
     }
 
     /// The broker's clause gate for a per-child clause (rules 4 and 5),
@@ -325,7 +310,6 @@ impl Warden {
             .to_string();
         };
         let raw = self.raw_state();
-        let state = raw.as_ref().and_then(|r| r.get("state"));
         let roots: Vec<Value> = projected
             .roots
             .iter()
@@ -333,7 +317,8 @@ impl Warden {
                 let key_labels: Vec<Value> = r
                     .keys
                     .iter()
-                    .filter_map(|k| key_label(state, k).map(Value::String))
+                    .filter_map(|k| PubKey::from_hex(k).ok())
+                    .filter_map(|k| keys.signer_label(&k).map(Value::String))
                     .collect();
                 let mut rules: Vec<String> = projected
                     .clauses
@@ -395,17 +380,6 @@ fn statement_label(raw: Option<&Value>, d: &str) -> Option<String> {
         .iter()
         .find(|s| s.get("d").and_then(Value::as_str) == Some(d))
         .and_then(|s| s.get("label").and_then(Value::as_str))
-        .map(str::to_owned)
-}
-
-/// The label a working key's approval carried, if any.
-fn key_label(state: Option<&Value>, key: &str) -> Option<String> {
-    state?
-        .get("keys")?
-        .as_array()?
-        .iter()
-        .find(|k| k.get("key").and_then(Value::as_str) == Some(key))
-        .and_then(|k| k.get("label").and_then(Value::as_str))
         .map(str::to_owned)
 }
 
