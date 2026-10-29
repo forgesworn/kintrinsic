@@ -162,7 +162,7 @@ describe("approving this phone on a My Signet family with devices it has never h
     });
     expect(ctx!.guardianKeys.state.root?.pubkey).toBe(R);
     expect(ctx!.state.children[0].devices[0].pinnedKey).toBe(R);
-  });
+  }, 15_000); // ~3 s alone; slower under a full parallel run
 
   it("a phone that signed with its own key: the silent device pins it, so connecting My Signet doesn't approve", async () => {
     mount("local");
