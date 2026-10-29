@@ -78,6 +78,11 @@ export interface UseGuardianKeysDeps {
   resign: (childId: string) => Promise<void>;
   /** A root move landed on every ward: switch the signer to the new bunker. */
   onRootMoved: (bunkerUri: string) => void;
+  /**
+   * Re-open the paired bunker when the signer isn't connected (a family
+   * paired with My Signet before this version, after a reload).
+   */
+  reconnect: () => Promise<void>;
 }
 
 /** Does this install read ward traffic with its local key? A local signer, or any install with an approved working key. */
@@ -172,9 +177,13 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
 
   const approveInstall = useCallback<GuardianKeysApi["approveInstall"]>(
     async (opts = {}) => {
-      const s = depsRef.current.stateRef.current;
+      let s = depsRef.current.stateRef.current;
       if (s.signer.kind !== "signet" && s.signer.kind !== "heartwood") {
         throw new Error("Connect My Signet first.");
+      }
+      if (!depsRef.current.signer()?.status().connected) {
+        await depsRef.current.reconnect();
+        s = depsRef.current.stateRef.current;
       }
       const w = keys.workingPubkey();
       const pinned = devicesPinningLocalKey(s.children, w);
