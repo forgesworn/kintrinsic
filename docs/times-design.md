@@ -179,8 +179,14 @@ Given Free time's resolved standing clauses (`apps` after
 - **Linux, inventory unknown:** an *only these* time is locked (the allowlist
   is inventory-scoped and "empty inventory blocks nothing" would run it as
   Free); `lockReason: 'schedule'`. Same fail direction as the learning arm.
+- A named time's own additions are never inert: a paused Free `apps` clause
+  composes to un-paused with `blocked := blockApps`; a revoked/absent Free
+  `content` with `denySites` composes to a synthesised blocklist; a paused
+  content (block all web) carries. Over an allowlist Free posture, bans
+  remove from `allowed` and un-bans add to it.
 - In all cases: `apprules`, `buckets`, `hidden`, `alwaysavailable` apply
   unchanged on top; sanctioned learning windows survive (existing rule).
+  `time` on a bucket-hit grant is ignored. Labels: Unicode code points.
 - `countsAgainstBudget: false` → usage in this time charges neither the
   screen budget nor any bucket; budget exhaustion does not lock it.
 
@@ -188,8 +194,9 @@ Given Free time's resolved standing clauses (`apps` after
 
 - **Lock card / lock screen:** "Locked until <Time> at HH:MM" for the next
   window today (else tomorrow's first; else "Locked today"). Ask-for-more-time
-  offers a type when the child has any named time; default = the time whose
-  window most recently ended today, else the next one up today, else Free.
+  offers a type when the child has any named time; default = inside a window
+  now ⇒ that window's time; else the time whose window most recently ended
+  today, else the next one up today, else Free.
 - **Unlocked in a named time:** status/tray (Linux) and the ward app's home
   (Android) show "<Time> until HH:MM" and, for *only these*, the allowed list.
   10-/1-minute warnings name the time and say what follows ("then Free time"

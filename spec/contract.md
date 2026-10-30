@@ -989,16 +989,28 @@ time's resolved standing policy — `apps` after `effective_at(now)`, and
   arrange without privilege (see §Apps). While the inventory is UNKNOWN an
   `onlyThese` time is therefore **locked** (`lockReason: 'schedule'`), the
   same fail direction as the learning arm that depends on the inventory.
+- **A named time's own additions are never inert.** Under `everythingExcept`:
+  if Free's `apps` is `paused`, the composed clause is un-paused with
+  `blocked := blockApps` only (Free's lists stay off, as the guardian meant);
+  if Free's `content` is `revoked` or absent and the time has `denySites`, a
+  blocklist clause with `parentDeny := denySites` is synthesised; a `paused`
+  content (block ALL web) carries, being the more restrictive state. Over an
+  `allowlist` Free posture, `blockApps` remove from `allowed` and
+  `unblockApps` add to it (as a hold folds). Under `onlyThese` with `sites`,
+  a Free `parentDeny` naming a listed site's domain is dropped (deny would
+  otherwise beat the allow the time just stated).
 - In every time: `apprules`, `buckets`, `hidden` and `alwaysavailable` apply
   unchanged on top, and sanctioned learning windows survive (the existing
-  `sweep_decision` rule). A named time can never loosen those.
+  `sweep_decision` rule). A named time can never loosen those. Label length
+  is counted in Unicode code points on both stacks.
 - `countsAgainstBudget: false` (the default): usage charges neither the
   screen budget nor any bucket; budget exhaustion never locks this time.
 
 **Ward-facing.** The lock surface says what is next — "Locked until Learning
 time at 09:00" — and the ask-for-more-time affordance offers a type when the
-child has any named time (default: the time whose window most recently ended
-today, else the next one up today, else Free). Unlocked in a named time, the
+child has any named time (default: inside a window now ⇒ that window's time;
+else the time whose window most recently ended today, else the next one up
+today, else Free). Unlocked in a named time, the
 ward's status shows "<Time> until HH:MM" and, for *only these*, what is
 allowed; the 10-/1-minute warnings name the time and what follows. A span
 locked because its tag is unknown reports `lockReason: 'schedule'` (so a
@@ -1464,7 +1476,8 @@ interface TimeExtendGrantParams   { minutesGranted: number   /* u16, 0..=1440 */
   `minutesGranted: 0` grant (closing the ask) plus a `gift` carrying the wanted
   `time`, both wrapped to the asking device only. Device-side a typed grant
   lands in that time's pool (`ExtensionLedger::apply_time`), never Free's;
-  an unknown id enacts no extra time.
+  an unknown id enacts no extra time. `time` on a `bucket`-hit grant is
+  ignored (a bucket pool is already a pool).
 
 - `MAX_EXTEND_MINUTES = 1440` (24h); minutes are **`u16`** on both sides.
 - The guardian may grant **less** than requested; `minutesGranted: 0` is a
