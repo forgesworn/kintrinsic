@@ -9,7 +9,7 @@ describe("ruleSummaries (the child page's rule rows)", () => {
     const s = ruleSummaries({ id: "p", scope: { kind: "device" } }, NOW);
     expect(s.schedule).toBe("No schedule set yet");
     expect(s.budget).toBe("No daily limit");
-    expect(s["named-times"]).toBe("No named times yet");
+    expect(s["named-times"]).toBe("No app allowances yet");
     expect(s.listening).toBe("Audio stops with the screen");
     expect(s["always-available"]).toBe("Nothing — the lock takes everything");
     expect(s.web).toBe("Web filtering off — all sites allowed");

@@ -8,6 +8,8 @@ import { useCharter } from "./store/store";
 import Home from "./screens/Home";
 import ChildPage from "./screens/ChildPage";
 import RuleEditor, { AppRulePage } from "./screens/RuleEditor";
+import TimeEditor from "./screens/TimeEditor";
+import { timeEditorTitle } from "./screens/timesView";
 import { AddDevicePage, DevicePage } from "./screens/ChildAdmin";
 import ChildSettings from "./screens/ChildSettings";
 import Settings from "./screens/Settings";
@@ -162,10 +164,15 @@ export default function App() {
       r.kind === "ward-settings" &&
       prev !== null &&
       prev.startsWith(`${wardPath(r.childId)}/rule/`);
+    // Back from a time's editor lands on the Times, the top of their settings.
+    const fromTimeEditor =
+      r.kind === "ward-settings" &&
+      prev !== null &&
+      prev.startsWith(`${wardPath(r.childId)}/time/`);
     const target =
       ("scroll" in r ? r.scroll : undefined) ??
       pendingScroll.current ??
-      (fromEditor ? "rules" : undefined);
+      (fromEditor ? "rules" : fromTimeEditor ? "times" : undefined);
     pendingScroll.current = null;
     if (target) scrollToWhenReady(target);
     else window.scrollTo(0, 0);
@@ -280,6 +287,19 @@ export default function App() {
         <RuleEditor
           childId={resolved.childId}
           section={resolved.section}
+          onDone={() => leaveEditor(resolved.childId)}
+        />
+      );
+      break;
+    case "time":
+      title = child ? timeEditorTitle(child, resolved) : "Time";
+      page = (
+        <TimeEditor
+          key={`${resolved.childId}:${resolved.timeId ?? resolved.template}`}
+          childId={resolved.childId}
+          timeId={resolved.timeId}
+          template={resolved.template}
+          name={resolved.name}
           onDone={() => leaveEditor(resolved.childId)}
         />
       );

@@ -26,7 +26,7 @@ export function isValidTimeId(s: unknown): s is string {
 
 /** Label length the way the Rust side counts it (chars, not UTF-16 units). */
 function labelLength(s: string): number {
-  return Array.from(s).length;
+  return [...s].length;
 }
 
 function isStringList(v: unknown): v is string[] {
@@ -49,8 +49,18 @@ export function siteFault(a: unknown): string | null {
   }
   if (typeof s.label !== "string" || s.label.trim().length === 0) return "a site needs a name";
   if (typeof s.url !== "string" || s.url.trim().length === 0) return "a site needs a launch address";
+  // The device's `valid_learning_url`: the raw string reaches the resolver sink,
+  // so https only, and no whitespace or comma to smuggle a second rule in.
+  if (!s.url.startsWith("https://") || /[\s,]/u.test(s.url)) {
+    return "a site's launch address must start with https:// and contain no spaces or commas";
+  }
   if (!isStringList(s.domains) || s.domains.length === 0 || s.domains.some((d) => d.trim() === "")) {
     return "a site needs at least one verified domain";
+  }
+  // Hostname characters only (the device's injection guard): `a.org/, EXCLUDE *`
+  // would otherwise pass a check that cuts at the first `/`.
+  if (s.domains.some((d) => !/^[A-Za-z0-9.-]+$/.test(d))) {
+    return "a site's domains must be plain host names";
   }
   return null;
 }
@@ -75,9 +85,13 @@ export function namedTimeFault(t: unknown): string | null {
   }
   if (o.sites !== undefined) {
     if (!Array.isArray(o.sites)) return "sites must be a list";
-    for (const site of o.sites) {
-      const f = siteFault(site);
-      if (f) return f;
+    // Only the posture in force is validated: the device ignores the other
+    // posture's fields, so a stale `sites` on an everythingExcept time is inert.
+    if (o.posture === "onlyThese") {
+      for (const site of o.sites) {
+        const f = siteFault(site);
+        if (f) return f;
+      }
     }
   }
   if (o.countsAgainstBudget !== undefined && typeof o.countsAgainstBudget !== "boolean") {

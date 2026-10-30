@@ -145,3 +145,37 @@ describe("route table", () => {
     expect([...ids]).toEqual(["ella s"]);
   });
 });
+
+describe("a time's editor", () => {
+  const kids = [{ id: "c1", name: "Sam", color: "#000", dependantPubkey: null, devices: [], policies: [] }] as never;
+
+  it("resolves an existing time and a new one", async () => {
+    const { resolveRoute } = await import("./routes");
+    expect(resolveRoute("ward/c1/time/learning", kids)).toEqual({ kind: "time", childId: "c1", timeId: "learning" });
+    expect(resolveRoute("ward/c1/time/new/learning", kids)).toEqual({
+      kind: "time",
+      childId: "c1",
+      template: "learning",
+      name: undefined,
+    });
+    expect(resolveRoute("ward/c1/time/new/custom/Reading%20time", kids)).toEqual({
+      kind: "time",
+      childId: "c1",
+      template: "custom",
+      name: "Reading time",
+    });
+  });
+
+  it("a malformed one lands on the child's page, not a blank", async () => {
+    const { resolveRoute } = await import("./routes");
+    expect(resolveRoute("ward/c1/time", kids)).toEqual({ kind: "ward", childId: "c1" });
+    expect(resolveRoute("ward/c1/time/new/sideways", kids)).toEqual({ kind: "ward", childId: "c1" });
+  });
+
+  it("builds the paths it parses", async () => {
+    const { newTimePath, timePath } = await import("./routes");
+    expect(timePath("c1", "learning")).toBe("ward/c1/time/learning");
+    expect(newTimePath("c1", "learning")).toBe("ward/c1/time/new/learning");
+    expect(newTimePath("c1", "custom", "Reading time")).toBe("ward/c1/time/new/custom/Reading%20time");
+  });
+});

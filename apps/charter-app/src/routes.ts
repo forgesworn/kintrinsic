@@ -25,6 +25,9 @@ export type ResolvedRoute =
   | { kind: "ward-settings"; childId: string }
   | { kind: "rule"; childId: string; section: SectionId }
   | { kind: "device"; childId: string; deviceId: string }
+  // A time's own editor (`ward/<id>/time/<timeId>`), or the editor for a new one
+  // (`ward/<id>/time/new/learning`, `.../new/custom/<name>`).
+  | { kind: "time"; childId: string; timeId?: string; template?: "learning" | "custom"; name?: string }
   | { kind: "add-device"; childId: string }
   | { kind: "settings"; sub: string }
   | { kind: "activity" }
@@ -117,6 +120,16 @@ export function resolveRoute(
             ? { kind: "rule", childId: id, section: section as SectionId }
             : page;
         }
+        case "time": {
+          if (seg(parts[3]) === "new") {
+            const template = seg(parts[4]);
+            return template === "learning" || template === "custom"
+              ? { kind: "time", childId: id, template, name: seg(parts[5]) || undefined }
+              : page;
+          }
+          const timeId = seg(parts[3]);
+          return timeId ? { kind: "time", childId: id, timeId } : page;
+        }
         case "device": {
           const deviceId = seg(parts[3]);
           return child.devices.some((d) => d.id === deviceId)
@@ -132,4 +145,16 @@ export function resolveRoute(
     default:
       return fallback;
   }
+}
+
+/** The route (no `#/`) of a time's editor. */
+export function timePath(childId: string, timeId: string): string {
+  return `${wardPath(childId)}/time/${encodeURIComponent(timeId)}`;
+}
+
+/** The route of the editor for a NEW time: the Learning template, or a custom
+ *  one with the name the guardian typed. */
+export function newTimePath(childId: string, template: "learning" | "custom", name?: string): string {
+  const base = `${wardPath(childId)}/time/new/${template}`;
+  return name ? `${base}/${encodeURIComponent(name)}` : base;
 }

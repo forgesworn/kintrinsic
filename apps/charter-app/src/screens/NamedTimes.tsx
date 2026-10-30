@@ -1,8 +1,16 @@
-// The Named times editor — ONE guardian surface replacing the separate
-// Learning and App-time-limits (buckets) sections (2026-08 spec). A named
-// time is a set of apps sharing one policy: Free (never counted, like the old
+// The App allowances editor — ONE guardian surface replacing the separate
+// Learning and App-time-limits (buckets) sections (2026-08 spec). A group is a
+// set of apps sharing one policy: Time-free (never counted, like the old
 // Learning section), Counted (a shared daily/weekly allowance, like the old
-// buckets), or On request (blocked, but askable).
+// buckets), or Ask first (blocked, but askable).
+//
+// This used to be called "Named times". Times (Free time, Learning time…) now
+// mean a window with a posture — see `screens/Times.tsx` — so the word has left
+// this screen's copy entirely. The code, the `named-times` section id and the
+// wire shapes keep their old names on purpose: nothing saved or linked moves.
+//
+// These groups sit INSIDE Free time (they decide what counts there), which is
+// why the screen lives under Free time → Apps.
 //
 // Limits.tsx owns the section registry and the drafts this reads/writes
 // (`domain/namedTimes.ts` compiles/decompiles them); this file is only the
@@ -24,6 +32,7 @@ import type { LearningAppSel } from "../domain/types";
 import { LEARNING_CATALOGUE } from "../data/learning_catalogue";
 import { Banner, Button, Card } from "../components/ui";
 import { AddSiteForm, Segmented, Stepper, Toggle } from "./Limits";
+import { allowanceCopy } from "./allowanceCopy";
 import type { AppSection, ReportedApp } from "../domain/deviceApps";
 import {
   attachAllSignatures,
@@ -37,13 +46,21 @@ import {
 } from "../domain/launchSignatures";
 
 const POLICY_OPTIONS: { value: GroupPolicy; label: string }[] = [
-  { value: "free", label: "Free" },
+  { value: "free", label: "Time-free" },
   { value: "counted", label: "Counted" },
-  { value: "onRequest", label: "On request" },
+  { value: "onRequest", label: "Ask first" },
 ];
 
+/** The sections the groups are listed under, in this order. */
+const POLICY_SECTIONS: { policy: GroupPolicy; title: string }[] = [
+  { policy: "free", title: "Time-free" },
+  { policy: "counted", title: "Counted" },
+  { policy: "onRequest", title: "Ask first" },
+];
+
+
 const POLICY_HINT: Record<GroupPolicy, string> = {
-  free: "Unlimited — this time is never counted, the same as homework always has been.",
+  free: "Unlimited — these apps are never counted, the same as homework always has been.",
   counted:
     "A shared daily and/or weekly allowance. When it runs out these apps close for the period; everything else keeps working.",
   onRequest: "Blocked — but they can ask, and you can say yes just for now.",
@@ -122,7 +139,7 @@ function DeviceNotReportedYet() {
  * vocabulary, when picking the wrong one writes a rule that can never once
  * fire on the device it was meant for.
  */
-function AppPicker({
+export function AppPicker({
   apps,
   sections,
   labelFor,
@@ -148,7 +165,7 @@ function AppPicker({
     <div>
       {apps.length === 0 && (
         <p className="card-sub" style={{ marginTop: 0 }}>
-          No apps yet — this named time does nothing until you add one.
+          No apps yet — this group does nothing until you add one.
         </p>
       )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -629,12 +646,12 @@ export function NamedTimesSection({
     });
     setDroppedNotice(
       dropped.length > 0
-        ? { groupLabel: g.label || "this named time", names: dropped.map((id) => labelFor(id)) }
+        ? { groupLabel: g.label || "this group", names: dropped.map((id) => labelFor(id)) }
         : null,
     );
     setSignatureStrippedNotice(
       strippedIdentity
-        ? `Minecraft's extra identity only works in a Counted named time, so it's been removed from "${g.label || "this named time"}".`
+        ? `Minecraft's extra identity only works in a Counted group, so it's been removed from "${g.label || "this group"}".`
         : null,
     );
     if (reenteringSig) {
@@ -663,14 +680,14 @@ export function NamedTimesSection({
   return (
     <div className="stack">
       <p className="card-sub" style={{ marginTop: 0 }}>
-        Give a set of apps a name, then decide what that name means: Free
-        (never counted, like homework), Counted (a shared daily or weekly
-        allowance), or On request (blocked, but they can ask). Each app
-        belongs to one named time at a time — picking it for another one
-        moves it there.
+        These are app allowances inside Free time. Give a set of apps a name,
+        then decide how it counts: Time-free (never counted, like homework),
+        Counted (a shared daily or weekly allowance), or Ask first (blocked,
+        but they can ask). Each app belongs to one group at a time — picking
+        it for another one moves it there.
       </p>
 
-      {error && <Banner tone="warn">{error}</Banner>}
+      {error && <Banner tone="warn">{allowanceCopy(error)}</Banner>}
 
       {moveNotice && (
         <Banner tone="info">
@@ -684,9 +701,9 @@ export function NamedTimesSection({
       {droppedNotice && (
         <Banner tone="warn">
           {droppedNotice.names.join(", ")} {droppedNotice.names.length > 1 ? "are learning sites" : "is a learning site"},
-          not apps on their device — {droppedNotice.names.length > 1 ? "they" : "it"} can’t be in a Counted or On-request
-          time, so {droppedNotice.names.length > 1 ? "they’ve" : "it’s"} been taken out of “{droppedNotice.groupLabel}”.
-          Add {droppedNotice.names.length > 1 ? "them" : "it"} to a Free named time to keep{" "}
+          not apps on their device — {droppedNotice.names.length > 1 ? "they" : "it"} can’t be in a Counted or Ask-first
+          group, so {droppedNotice.names.length > 1 ? "they’ve" : "it’s"} been taken out of “{droppedNotice.groupLabel}”.
+          Add {droppedNotice.names.length > 1 ? "them" : "it"} to a Time-free group to keep{" "}
           {droppedNotice.names.length > 1 ? "them" : "it"} time-free.
         </Banner>
       )}
@@ -710,7 +727,7 @@ export function NamedTimesSection({
 
       {hasAnyOf(groups, "free") && (
         <AxisToggle
-          label="Free times"
+          label="Time-free groups"
           enabled={learningEnabled}
           onChange={onLearningEnabledChange}
           pausedHint="Paused — free apps count as normal screen time until you turn this back on. Nothing here is deleted."
@@ -718,7 +735,7 @@ export function NamedTimesSection({
       )}
       {hasAnyOf(groups, "counted") && (
         <AxisToggle
-          label="Counted times"
+          label="Counted groups"
           enabled={bucketsEnabled}
           onChange={onBucketsEnabledChange}
           pausedHint="Paused — counted apps are unlimited until you turn this back on. Nothing here is deleted."
@@ -726,13 +743,16 @@ export function NamedTimesSection({
       )}
 
       <div className="stack">
-        {groups.map((g) => (
+        {POLICY_SECTIONS.filter((sec) => groups.some((g) => g.policy === sec.policy)).map((sec) => (
+          <section key={sec.policy} aria-label={sec.title} className="stack">
+        <h3 className="rule-group-title">{sec.title}</h3>
+        {groups.filter((g) => g.policy === sec.policy).map((g) => (
           <Card key={g.id} tinted>
             <div className="row-between">
               <input
                 className="input"
                 value={g.label}
-                aria-label="Named time"
+                aria-label="Group name"
                 onChange={(e) => put(g.id, { label: e.target.value.slice(0, 32) })}
               />
               <Button variant="ghost" onClick={() => remove(g.id)}>
@@ -754,7 +774,7 @@ export function NamedTimesSection({
             {g.policy === "counted" && <CountedAxes group={g} onChange={(patch) => put(g.id, patch)} />}
 
             <div className="field-label" style={{ marginTop: 12 }}>
-              Apps in {g.label || "this named time"}
+              Apps in {g.label || "this group"}
             </div>
             <AppPicker
               apps={g.apps}
@@ -786,13 +806,15 @@ export function NamedTimesSection({
             )}
           </Card>
         ))}
+          </section>
+        ))}
       </div>
 
       {creating ? (
         <Card>
           <div className="field-label">Name it</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "6px 0" }}>
-            {NAMED_TIME_SUGGESTIONS.map((s) => (
+            {NAMED_TIME_SUGGESTIONS.filter((s) => s !== "Learning").map((s) => (
               <button
                 key={s}
                 type="button"
@@ -806,8 +828,8 @@ export function NamedTimesSection({
           <div style={{ display: "flex", gap: 8 }}>
             <input
               className="input"
-              placeholder="Name this time (e.g. Play)"
-              aria-label="New named time"
+              placeholder="Name this group (e.g. Play)"
+              aria-label="New group name"
               value={draftLabel}
               onChange={(e) => setDraftLabel(e.target.value.slice(0, 32))}
               onKeyDown={(e) => e.key === "Enter" && createGroup(draftLabel)}
@@ -829,16 +851,16 @@ export function NamedTimesSection({
         </Card>
       ) : (
         <Button variant="secondary" block onClick={() => setCreating(true)}>
-          + Named time
+          + Add a group
         </Button>
       )}
 
       {hasFree && (
         <div className="row-between" style={{ borderTop: "1px solid var(--line)", paddingTop: 14 }}>
-          <span className="row-sub">Cap free time (advanced)</span>
+          <span className="row-sub">Cap time-free apps (advanced)</span>
           <Toggle
             checked={capMinutes != null}
-            label="Cap free time"
+            label="Cap time-free apps"
             onChange={(on) => onCapMinutesChange(on ? 120 : undefined)}
           />
         </div>
@@ -846,7 +868,7 @@ export function NamedTimesSection({
       {hasFree && capMinutes != null && (
         <div style={{ paddingLeft: 2 }}>
           <Stepper
-            label="Daily cap on free time"
+            label="Daily cap on time-free apps"
             value={capMinutes}
             min={15}
             max={1440}
@@ -862,7 +884,7 @@ export function NamedTimesSection({
 
       {countedCount > 0 && (
         <p className="card-sub" style={{ marginTop: 4 }}>
-          {countedCount}/{MAX_BUCKETS} counted named times used.
+          {countedCount}/{MAX_BUCKETS} counted groups used.
         </p>
       )}
     </div>

@@ -157,7 +157,29 @@ export function ChildStatus({
   // across the child's paired devices wins.
   const freshest = freshestStatusFor(child, deviceStatus, Date.now());
   const s = liveStatusFor(child, freshest, Date.now());
-  const secondsLeft = useLiveSeconds(s.secondsLeftToday, s.asOf);
+  const devicePolicy = child.policies.find((p) => p.scope.kind === "device");
+
+  // Times: the named time the device says it is running right now. STATUS
+  // `activeTime` is the truth (a pool can run a time outside any window, which
+  // only the device knows); the label comes from the child's saved times. An id
+  // the saved times no longer name (deleted since) shows nothing special rather
+  // than a bare id. Only on a live report: a local guess can't know.
+  const activeTime =
+    s.live && s.allowedNow && freshest?.activeTime
+      ? (devicePolicy?.times ?? []).find((t) => t.id === freshest.activeTime)
+      : undefined;
+  // What is LEFT in it. A time that counts against the budget is limited by it,
+  // so the device's own effective figure is the answer. One that does not is
+  // not locked by an exhausted budget, so the budget-limited figure could read
+  // zero while the child has an hour of it: take the larger of that and the
+  // seconds to the end of the span the device says it is in.
+  const timeReported =
+    activeTime && freshest
+      ? activeTime.countsAgainstBudget === true
+        ? freshest.effectiveSecs
+        : Math.max(freshest.effectiveSecs, freshest.windowLeftSecs)
+      : undefined;
+  const secondsLeft = useLiveSeconds(timeReported ?? s.secondsLeftToday, s.asOf);
   const cap = dailyCap(child);
 
   if (!setUp) {
@@ -187,12 +209,17 @@ export function ChildStatus({
   // Named times' saved bucket set — the source of both the group progress
   // rows' labels/caps AND (M-2) the day boundary today's granted extras are
   // scoped to (the buckets clause carries its own required tz).
-  const devicePolicy = child.policies.find((p) => p.scope.kind === "device");
   const homeBuckets = devicePolicy?.buckets;
   // The device's OWN day-boundary tz — mirrors charterd's `enforcement_tz_of`
   // exactly (schedule, then budget, then UTC — NEVER buckets.tz, unlike
   // `resolveChildTz`) for the unrecognised-time day guard (F5, then New-1).
   const unrecognisedTz = unrecognisedGuardTz(devicePolicy);
+
+  const activeLine = activeTime
+    ? timeReported != null && timeReported > 0
+      ? `${activeTime.label} · ${formatTimeLeft(secondsLeft ?? timeReported)} left`
+      : activeTime.label
+    : null;
 
   const statusLine = s.allowedNow
     ? s.minutesLeftToday == null
@@ -222,7 +249,11 @@ export function ChildStatus({
 
   return (
     <div className="child-status">
-      {statusLine ? (
+      {activeLine ? (
+        <p className="card-title" style={{ marginBottom: 2 }}>
+          {activeLine}
+        </p>
+      ) : statusLine ? (
         <>
           <p className="card-title" style={{ marginBottom: 2 }}>
             {statusLine}
