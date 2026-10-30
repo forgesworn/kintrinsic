@@ -22,6 +22,7 @@ export function bottomBarFor(
   switch (r.kind) {
     case "setup":
     case "rule":
+    case "time":
     case "device":
     case "add-device":
       return hidden;

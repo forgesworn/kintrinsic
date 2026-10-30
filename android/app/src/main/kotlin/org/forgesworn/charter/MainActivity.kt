@@ -603,7 +603,14 @@ class MainActivity : Activity() {
         // via HomeCopy — never repeated here). Hidden when there is nothing
         // beyond the headline to say.
         val detail = if (!paired || view == null) "" else buildString {
-            view.detail?.let { append(it) }
+            // §Times: the time the ward is in and what it allows, above the
+            // charter's own detail (empty in Free time).
+            val inTime = org.forgesworn.charter.ui.HomeCopy.timeLines(view)
+            if (inTime.isNotEmpty()) append(inTime.joinToString("\n"))
+            view.detail?.let {
+                if (isNotEmpty()) append("\n\n")
+                append(it)
+            }
             if (view.lines.isNotEmpty()) {
                 if (isNotEmpty()) append("\n\n")
                 append(view.lines.joinToString("\n"))

@@ -1,0 +1,2073 @@
+{
+  "note": "Canonical times clause vectors (spec/contract.md §Times) — pins the guardian producer ↔ warden (Rust: GrantTimes parse/validate, compose_apps, compose_content). `vectors` must parse and validate; `invalid` must fail closed (the clause is then ABSENT: every tagged window locks). `composition` pins Free time's resolved standing policy + one named time → the policy in force (expectContent null = no content clause). `params` pins the additive `time` field on gift and time.extend request/grant: absent stays byte-identical, present round-trips verbatim.",
+  "vectors": [
+    {
+      "name": "empty_clause",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": []
+      },
+      "expect": {}
+    },
+    {
+      "name": "learning_template_runs_nothing",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "countsAgainstBudget": false
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "learning"
+        ],
+        "runsNothing": [
+          "learning"
+        ],
+        "countsAgainstBudget": []
+      }
+    },
+    {
+      "name": "only_these_apps_and_sites",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ],
+            "sites": [
+              {
+                "id": "khan-academy",
+                "label": "khan-academy",
+                "kind": "site",
+                "url": "https://khanacademy.org/",
+                "domains": [
+                  "khanacademy.org",
+                  "kastatic.org",
+                  "kasandbox.org"
+                ]
+              },
+              {
+                "id": "youtube",
+                "label": "youtube",
+                "kind": "site",
+                "url": "https://youtube.com/",
+                "domains": [
+                  "youtube.com",
+                  "googlevideo.com",
+                  "ytimg.com"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "learning"
+        ],
+        "runsNothing": [],
+        "countsAgainstBudget": []
+      }
+    },
+    {
+      "name": "everything_except_with_departures",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept",
+            "blockApps": [
+              "roblox"
+            ],
+            "unblockApps": [
+              "youtube"
+            ],
+            "denySites": [
+              "roblox.com"
+            ],
+            "undenySites": [
+              "youtube.com"
+            ],
+            "countsAgainstBudget": true
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "chores"
+        ],
+        "runsNothing": [],
+        "countsAgainstBudget": [
+          "chores"
+        ]
+      }
+    },
+    {
+      "name": "fields_of_the_inactive_posture_are_ignored",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept",
+            "sites": [
+              {
+                "id": "BAD ID",
+                "label": "x",
+                "kind": "native"
+              }
+            ],
+            "apps": [
+              "x"
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "chores"
+        ],
+        "runsNothing": [],
+        "countsAgainstBudget": []
+      }
+    },
+    {
+      "name": "max_times",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "t0",
+            "label": "Time t0",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t1",
+            "label": "Time t1",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t2",
+            "label": "Time t2",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t3",
+            "label": "Time t3",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t4",
+            "label": "Time t4",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t5",
+            "label": "Time t5",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t6",
+            "label": "Time t6",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t7",
+            "label": "Time t7",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t8",
+            "label": "Time t8",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t9",
+            "label": "Time t9",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t10",
+            "label": "Time t10",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t11",
+            "label": "Time t11",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t12",
+            "label": "Time t12",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t13",
+            "label": "Time t13",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t14",
+            "label": "Time t14",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t15",
+            "label": "Time t15",
+            "posture": "onlyThese"
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "t0",
+          "t1",
+          "t2",
+          "t3",
+          "t4",
+          "t5",
+          "t6",
+          "t7",
+          "t8",
+          "t9",
+          "t10",
+          "t11",
+          "t12",
+          "t13",
+          "t14",
+          "t15"
+        ],
+        "runsNothing": [
+          "t0",
+          "t1",
+          "t2",
+          "t3",
+          "t4",
+          "t5",
+          "t6",
+          "t7",
+          "t8",
+          "t9",
+          "t10",
+          "t11",
+          "t12",
+          "t13",
+          "t14",
+          "t15"
+        ],
+        "countsAgainstBudget": []
+      }
+    },
+    {
+      "name": "id_of_32_chars",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Time aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "posture": "onlyThese"
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "runsNothing": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "countsAgainstBudget": []
+      }
+    },
+    {
+      "name": "label_of_60_characters",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+            "posture": "onlyThese"
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "a"
+        ],
+        "runsNothing": [
+          "a"
+        ],
+        "countsAgainstBudget": []
+      }
+    },
+    {
+      "name": "id_with_digits_and_hyphens",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "homework-2",
+            "label": "Time homework-2",
+            "posture": "onlyThese"
+          }
+        ]
+      },
+      "expect": {
+        "ids": [
+          "homework-2"
+        ],
+        "runsNothing": [
+          "homework-2"
+        ],
+        "countsAgainstBudget": []
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "v_too_high",
+      "payload": {
+        "v": 2,
+        "issuedAt": 1,
+        "times": []
+      }
+    },
+    {
+      "name": "v_zero",
+      "payload": {
+        "v": 0,
+        "issuedAt": 1,
+        "times": []
+      }
+    },
+    {
+      "name": "times_not_an_array",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1,
+        "times": {}
+      }
+    },
+    {
+      "name": "missing_issuedAt",
+      "payload": {
+        "v": 1,
+        "times": []
+      }
+    },
+    {
+      "name": "seventeen_times",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "t0",
+            "label": "Time t0",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t1",
+            "label": "Time t1",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t2",
+            "label": "Time t2",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t3",
+            "label": "Time t3",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t4",
+            "label": "Time t4",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t5",
+            "label": "Time t5",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t6",
+            "label": "Time t6",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t7",
+            "label": "Time t7",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t8",
+            "label": "Time t8",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t9",
+            "label": "Time t9",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t10",
+            "label": "Time t10",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t11",
+            "label": "Time t11",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t12",
+            "label": "Time t12",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t13",
+            "label": "Time t13",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t14",
+            "label": "Time t14",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t15",
+            "label": "Time t15",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "t16",
+            "label": "Time t16",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "free_is_reserved",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "free",
+            "label": "Time free",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty_id",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "",
+            "label": "Time ",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "upper_case_id",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "Learning",
+            "label": "Time Learning",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "id_with_space",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "has space",
+            "label": "Time has space",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "id_with_underscore",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "under_score",
+            "label": "Time under_score",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "id_of_33_chars",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "label": "Time aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate_ids",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese"
+          },
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "everythingExcept"
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty_label",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "label_of_61_characters",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+            "posture": "onlyThese"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown_posture",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "mostly"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing_posture",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "A"
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_without_url",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "x",
+                "label": "x",
+                "kind": "site",
+                "domains": [
+                  "a.org"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_without_domains",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "x",
+                "label": "x",
+                "kind": "site",
+                "url": "https://a.org/",
+                "domains": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_url_not_https",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "x",
+                "label": "x",
+                "kind": "site",
+                "url": "http://a.org/",
+                "domains": [
+                  "a.org"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_url_with_comma",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "x",
+                "label": "x",
+                "kind": "site",
+                "url": "https://a.org/,x",
+                "domains": [
+                  "a.org"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_domain_injection",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "x",
+                "label": "x",
+                "kind": "site",
+                "url": "https://a.org/, EXCLUDE */",
+                "domains": [
+                  "a.org/, EXCLUDE *"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_id_not_a_slug",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "X y",
+                "label": "X y",
+                "kind": "site",
+                "url": "https://a.org/",
+                "domains": [
+                  "a.org"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "site_of_kind_native",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "a",
+            "label": "Time a",
+            "posture": "onlyThese",
+            "sites": [
+              {
+                "id": "gcompris",
+                "label": "GCompris",
+                "kind": "native",
+                "exec": "/usr/bin/gcompris-qt"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "composition": [
+    {
+      "name": "every_except_ban_and_unban_apps",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [
+          "youtube"
+        ],
+        "hidden": [
+          "bloat"
+        ],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "blockApps": [
+          "roblox"
+        ],
+        "unblockApps": [
+          "youtube"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "roblox"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [
+          "bloat"
+        ],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_unban_wins_over_same_time_ban",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "blockApps": [
+          "youtube"
+        ],
+        "unblockApps": [
+          "youtube"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_inherits_free_bans_live",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube",
+          "tiktok"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept"
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube",
+          "tiktok"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_over_allowlist_free_edits_allowed",
+      "freeApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [
+          "khan",
+          "calc"
+        ],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "blockApps": [
+          "calc"
+        ],
+        "unblockApps": [
+          "paint"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [
+          "calc"
+        ],
+        "allowed": [
+          "khan",
+          "paint"
+        ],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_sites_normalise_and_unban_into_parentAllow",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "https://www.YouTube.com/",
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "safeSearch": false,
+        "youtubeRestrict": "strict"
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ],
+        "undenySites": [
+          "youtube.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "youtube.com"
+        ],
+        "parentDeny": [
+          "tiktok.com",
+          "roblox.com"
+        ],
+        "issuedAt": 1782734400,
+        "safeSearch": false,
+        "youtubeRestrict": "strict"
+      }
+    },
+    {
+      "name": "every_except_without_site_departures_returns_free_content_as_is",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "blockApps": [
+          "roblox"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube",
+          "roblox"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400
+      }
+    },
+    {
+      "name": "every_except_deny_with_no_free_content_synthesises_a_blocklist",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "young",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "roblox.com"
+        ],
+        "issuedAt": 0
+      }
+    },
+    {
+      "name": "every_except_undeny_with_no_free_content_stays_none",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "undenySites": [
+          "youtube.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_ban_holds_over_a_paused_free_apps_policy",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "blockApps": [
+          "roblox"
+        ],
+        "unblockApps": [
+          "youtube"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "roblox"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_without_bans_carries_a_paused_free_apps_policy",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "unblockApps": [
+          "youtube"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_deny_holds_over_a_revoked_free_content_clause",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "old.org"
+        ],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "young",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "roblox.com"
+        ],
+        "issuedAt": 0
+      }
+    },
+    {
+      "name": "every_except_undeny_only_carries_a_revoked_free_content_clause",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [],
+        "issuedAt": 1782734400,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "undenySites": [
+          "youtube.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "youtube.com"
+        ],
+        "parentDeny": [],
+        "issuedAt": 1782734400,
+        "revoked": true
+      }
+    },
+    {
+      "name": "every_except_deny_carries_a_paused_free_content_clause",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "paused": true,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com",
+          "roblox.com"
+        ],
+        "issuedAt": 1782734400,
+        "paused": true,
+        "revoked": true
+      }
+    },
+    {
+      "name": "every_except_deny_does_not_open_an_unsupported_version_revoked_free_content",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 2,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 2,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com",
+          "roblox.com"
+        ],
+        "issuedAt": 1782734400,
+        "revoked": true
+      }
+    },
+    {
+      "name": "only_these_apps_make_an_allowlist",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [
+          "bloat"
+        ],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400
+      },
+      "time": {
+        "id": "learning",
+        "label": "Learning",
+        "posture": "onlyThese",
+        "apps": [
+          "khan",
+          "khan",
+          "calc"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [
+          "khan",
+          "calc"
+        ],
+        "askFirst": [],
+        "hidden": [
+          "bloat"
+        ],
+        "issuedAt": 1782734400,
+        "holds": []
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400
+      }
+    },
+    {
+      "name": "only_these_clears_a_paused_apps_policy",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "freeContent": null,
+      "time": {
+        "id": "learning",
+        "label": "Learning",
+        "posture": "onlyThese",
+        "apps": [
+          "khan"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [
+          "khan"
+        ],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "holds": []
+      },
+      "expectContent": null
+    },
+    {
+      "name": "only_these_with_nothing_runs_nothing",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400
+      },
+      "time": {
+        "id": "learning",
+        "label": "Learning",
+        "posture": "onlyThese"
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "holds": []
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400
+      }
+    },
+    {
+      "name": "only_these_sites_make_a_web_allowlist",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "blockCategories": [],
+        "parentAllow": [
+          "old.org"
+        ],
+        "parentDeny": [
+          "tiktok.com",
+          "kastatic.org"
+        ],
+        "issuedAt": 1782734400,
+        "safeSearch": false,
+        "youtubeRestrict": "moderate",
+        "revoked": true
+      },
+      "time": {
+        "id": "learning",
+        "label": "Learning",
+        "posture": "onlyThese",
+        "apps": [
+          "khan"
+        ],
+        "sites": [
+          {
+            "id": "khan-academy",
+            "label": "khan-academy",
+            "kind": "site",
+            "url": "https://khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          },
+          {
+            "id": "youtube",
+            "label": "youtube",
+            "kind": "site",
+            "url": "https://youtube.com/",
+            "domains": [
+              "youtube.com",
+              "googlevideo.com",
+              "ytimg.com"
+            ]
+          }
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [
+          "khan"
+        ],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "holds": []
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "allowlist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "khanacademy.org",
+          "kastatic.org",
+          "kasandbox.org",
+          "youtube.com",
+          "googlevideo.com",
+          "ytimg.com"
+        ],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "safeSearch": false,
+        "youtubeRestrict": "moderate"
+      }
+    },
+    {
+      "name": "only_these_sites_with_no_free_content_synthesise_an_allowlist",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": null,
+      "time": {
+        "id": "learning",
+        "label": "Learning",
+        "posture": "onlyThese",
+        "sites": [
+          {
+            "id": "khan-academy",
+            "label": "khan-academy",
+            "kind": "site",
+            "url": "https://khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          }
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "holds": []
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "allowlist",
+        "ageTier": "young",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "khanacademy.org",
+          "kastatic.org",
+          "kasandbox.org"
+        ],
+        "parentDeny": [],
+        "issuedAt": 0,
+        "safeSearch": true
+      }
+    },
+    {
+      "name": "only_these_sites_dedupe_shared_domains",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [],
+        "issuedAt": 1782734400
+      },
+      "time": {
+        "id": "learning",
+        "label": "Learning",
+        "posture": "onlyThese",
+        "sites": [
+          {
+            "id": "khan-academy",
+            "label": "khan-academy",
+            "kind": "site",
+            "url": "https://khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          },
+          {
+            "id": "khan-kids",
+            "label": "khan-kids",
+            "kind": "site",
+            "url": "https://khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "khankids.org"
+            ]
+          }
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "allowlist",
+        "blocked": [],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "holds": []
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "allowlist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "khanacademy.org",
+          "kastatic.org",
+          "kasandbox.org",
+          "khankids.org"
+        ],
+        "parentDeny": [],
+        "issuedAt": 1782734400
+      }
+    },
+    {
+      "name": "fields_of_the_inactive_posture_are_not_composed",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [],
+        "issuedAt": 1782734400
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "apps": [
+          "khan"
+        ],
+        "sites": [
+          {
+            "id": "khan-academy",
+            "label": "khan-academy",
+            "kind": "site",
+            "url": "https://khanacademy.org/",
+            "domains": [
+              "khanacademy.org",
+              "kastatic.org",
+              "kasandbox.org"
+            ]
+          }
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [],
+        "issuedAt": 1782734400
+      }
+    }
+  ],
+  "params": [
+    {
+      "name": "gift_without_time_is_byte_identical",
+      "kind": "gift",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "id": "gift-1",
+        "minutes": 30,
+        "expiresAt": 1782777600
+      },
+      "expectTime": null
+    },
+    {
+      "name": "gift_with_time",
+      "kind": "gift",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "id": "gift-1",
+        "minutes": 30,
+        "expiresAt": 1782777600,
+        "time": "learning"
+      },
+      "expectTime": "learning"
+    },
+    {
+      "name": "gift_with_unknown_looking_time_still_parses",
+      "kind": "gift",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "id": "gift-1",
+        "minutes": 30,
+        "expiresAt": 1782777600,
+        "time": "no-such-time"
+      },
+      "expectTime": "no-such-time"
+    },
+    {
+      "name": "gift_with_group_and_time",
+      "kind": "gift",
+      "payload": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "id": "gift-1",
+        "minutes": 30,
+        "expiresAt": 1782777600,
+        "groupId": "play",
+        "time": "learning"
+      },
+      "expectTime": "learning"
+    },
+    {
+      "name": "request_without_time_is_byte_identical",
+      "kind": "time.extend.request",
+      "payload": {
+        "minutesRequested": 30,
+        "limitHit": "budget"
+      },
+      "expectTime": null
+    },
+    {
+      "name": "request_with_time",
+      "kind": "time.extend.request",
+      "payload": {
+        "minutesRequested": 30,
+        "limitHit": "schedule",
+        "time": "learning"
+      },
+      "expectTime": "learning"
+    },
+    {
+      "name": "grant_without_time_is_byte_identical",
+      "kind": "time.extend.grant",
+      "payload": {
+        "minutesGranted": 30,
+        "limitHit": "budget"
+      },
+      "expectTime": null
+    },
+    {
+      "name": "grant_echoes_time_verbatim",
+      "kind": "time.extend.grant",
+      "payload": {
+        "minutesGranted": 30,
+        "limitHit": "schedule",
+        "time": "learning"
+      },
+      "expectTime": "learning"
+    },
+    {
+      "name": "zero_grant_closing_an_ask_can_carry_time",
+      "kind": "time.extend.grant",
+      "payload": {
+        "minutesGranted": 0,
+        "limitHit": "schedule",
+        "time": "learning"
+      },
+      "expectTime": "learning"
+    }
+  ]
+}

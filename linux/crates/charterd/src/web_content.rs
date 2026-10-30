@@ -10,7 +10,7 @@
 //! Fail-closed: an unparseable clause evaluates to a locked policy; a port
 //! failure surfaces `Failed` so the daemon can force the lock-down policy.
 
-use charter_content::{evaluate_content_json, CuratorList, EffectiveWebPolicy};
+use charter_content::{evaluate_content, evaluate_content_json, CuratorList, EffectiveWebPolicy};
 use charter_proto::clause::ClauseKind;
 use charter_sys::effects::{DnsFilterOps, WebPolicyOps};
 use charter_sys::persistence::{ClauseStore, CuratorListStore};
@@ -476,6 +476,65 @@ impl WebContentEnforcer {
     /// changed. Fail-closed on an unparseable clause (locked policy); a removed
     /// clause RETRACTS; an unreadable store changes nothing.
     pub async fn reconcile<S: SystemLayer>(&mut self, sys: &S) -> WebReconcile {
+        self.reconcile_with(sys, None).await
+    }
+
+    /// [`reconcile`](Self::reconcile) with the ACTIVE ward's named time folded
+    /// in (§Times). Only an *everything except* time with site departures
+    /// changes anything here: its `denySites`/`undenySites` are composed onto
+    /// Free time's clause (`compose_content`, shared with Android) and the
+    /// machine-wide Firefox policy is re-rendered from the result. That file
+    /// is machine-wide, so the override affects every account while the time
+    /// is in force — the documented Linux caveat. An *only these* time leaves
+    /// `policies.json` untouched: it runs per-user resolver-pinned site
+    /// windows instead, and an unlisted Firefox is swept by its allowlist.
+    ///
+    /// Fail direction as for the plain reconcile: an unparseable Free clause
+    /// LOCKS (the composition is never consulted on a body we cannot read),
+    /// a store read error changes nothing, and an absent Free clause with
+    /// nothing for the time to add retracts.
+    pub async fn reconcile_with<S: SystemLayer>(
+        &mut self,
+        sys: &S,
+        time: Option<&charter_spine::times::NamedTime>,
+    ) -> WebReconcile {
+        let time = time.filter(|t| {
+            t.posture == charter_spine::times::TimePosture::EverythingExcept
+                && (!t.deny_sites.is_empty() || !t.undeny_sites.is_empty())
+        });
+        if let Some(t) = time {
+            let free = match sys.clauses().get_clause(ClauseKind::Content.store_key()) {
+                Ok(Some(j)) => match serde_json::from_str::<charter_content::GrantContent>(&j) {
+                    Ok(c) if c.is_supported_version() => Some(c),
+                    // Unreadable Free clause — or one whose body version this
+                    // build does not implement, which `evaluate_content` reads
+                    // as unreadable too: the same fail-closed lock the plain
+                    // path takes, never a composition over a guess. Checked
+                    // HERE, before `compose_content`, so the Firefox policy
+                    // cannot fail open on a future body even if the shared
+                    // composer ever synthesises over one again.
+                    Ok(_) | Err(_) => {
+                        let policy = EffectiveWebPolicy::locked();
+                        if self.last_applied.as_ref() == Some(&policy) {
+                            return WebReconcile::Unchanged;
+                        }
+                        return self.materialize(sys, policy).await;
+                    }
+                },
+                Ok(None) => None,
+                Err(_) => return WebReconcile::Unavailable,
+            };
+            return match charter_spine::times::compose_content(free.as_ref(), t) {
+                Some(composed) => {
+                    let policy = evaluate_content(&composed, &cached_lists(sys));
+                    if self.last_applied.as_ref() == Some(&policy) {
+                        return WebReconcile::Unchanged;
+                    }
+                    self.materialize(sys, policy).await
+                }
+                None => self.retract(sys).await,
+            };
+        }
         let clause_json = match sys.clauses().get_clause(ClauseKind::Content.store_key()) {
             Ok(Some(j)) => j,
             // The clause was REMOVED: retract what we wrote for it.
@@ -620,6 +679,123 @@ mod tests {
             !pol.contains("solo.example"),
             "a sub-quorum domain must not be admitted"
         );
+    }
+
+    fn chores(json_extra: &str) -> charter_spine::times::NamedTime {
+        serde_json::from_str(&format!(
+            r#"{{"id":"chores","label":"Chores","posture":"everythingExcept"{json_extra}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// §Times: an everything-except time's denied site reaches the machine
+    /// Firefox policy while it is in force, and leaves with it.
+    #[tokio::test]
+    async fn an_everything_except_time_re_renders_the_firefox_policy_with_its_bans() {
+        let sys = MockSystem::new(1000);
+        put_content(
+            &sys,
+            r#"{"v":1,"posture":"blocklist","ageTier":"young","parentDeny":["free-ban.example"],"issuedAt":1}"#,
+        );
+        let m = marker("times-except");
+        let mut e = WebContentEnforcer::with_marker_path(&m);
+        let t = chores(r#","denySites":["games.example"]"#);
+        assert!(matches!(
+            e.reconcile_with(&sys, Some(&t)).await,
+            WebReconcile::Enacted { .. }
+        ));
+        let pol = sys.web_policy().last_policies().unwrap();
+        assert!(pol.contains("games.example"), "the time's ban is enforced");
+        assert!(
+            pol.contains("free-ban.example"),
+            "Free time's bans are inherited"
+        );
+        // Back to Free time: the time's ban is gone again.
+        assert!(matches!(
+            e.reconcile(&sys).await,
+            WebReconcile::Enacted { .. }
+        ));
+        let pol = sys.web_policy().last_policies().unwrap();
+        assert!(!pol.contains("games.example"));
+    }
+
+    /// A time with nothing to say about sites, and any *only these* time,
+    /// leaves the machine policy exactly as Free time has it.
+    #[tokio::test]
+    async fn a_time_without_site_departures_changes_nothing() {
+        let sys = MockSystem::new(1000);
+        put_content(
+            &sys,
+            r#"{"v":1,"posture":"blocklist","ageTier":"young","parentDeny":["free-ban.example"],"issuedAt":1}"#,
+        );
+        let m = marker("times-noop");
+        let mut e = WebContentEnforcer::with_marker_path(&m);
+        e.reconcile(&sys).await;
+        let t = chores(r#","blockApps":["/usr/bin/steam"]"#);
+        assert_eq!(
+            e.reconcile_with(&sys, Some(&t)).await,
+            WebReconcile::Unchanged
+        );
+        let only: charter_spine::times::NamedTime = serde_json::from_str(
+            r#"{"id":"learning","label":"Learning time","posture":"onlyThese","undenySites":["x.example"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            e.reconcile_with(&sys, Some(&only)).await,
+            WebReconcile::Unchanged
+        );
+    }
+
+    /// A time's own ban is never inert: with no Free content clause at all, a
+    /// blocklist carrying it is synthesised; an unreadable Free clause locks.
+    #[tokio::test]
+    async fn a_time_s_ban_lands_without_a_free_clause_and_an_unreadable_one_locks() {
+        let sys = MockSystem::new(1000);
+        let m = marker("times-synth");
+        let mut e = WebContentEnforcer::with_marker_path(&m);
+        let t = chores(r#","denySites":["games.example"]"#);
+        assert!(matches!(
+            e.reconcile_with(&sys, Some(&t)).await,
+            WebReconcile::Enacted { locked: false }
+        ));
+        assert!(sys
+            .web_policy()
+            .last_policies()
+            .unwrap()
+            .contains("games.example"));
+        put_content(&sys, "not json");
+        assert_eq!(
+            e.reconcile_with(&sys, Some(&t)).await,
+            WebReconcile::Enacted { locked: true }
+        );
+    }
+
+    /// A Free content clause whose body version this build does not implement
+    /// locks under a time exactly as an unparseable one does — before any
+    /// composition — including a wide-open shape (`revoked`) that a composer
+    /// reading only v1 fields would otherwise run as unrestricted.
+    #[tokio::test]
+    async fn an_unsupported_version_free_clause_locks_under_a_time_before_composing() {
+        let t = chores(r#","denySites":["games.example"]"#);
+        for body in [
+            r#"{"v":2,"posture":"blocklist","ageTier":"young","issuedAt":1}"#,
+            r#"{"v":2,"posture":"blocklist","ageTier":"young","revoked":true,"issuedAt":1}"#,
+        ] {
+            let sys = MockSystem::new(1000);
+            put_content(&sys, body);
+            let m = marker("times-future-v");
+            let mut e = WebContentEnforcer::with_marker_path(&m);
+            assert_eq!(
+                e.reconcile_with(&sys, Some(&t)).await,
+                WebReconcile::Enacted { locked: true },
+                "{body}"
+            );
+            // Idempotent: the same lock is not re-written.
+            assert_eq!(
+                e.reconcile_with(&sys, Some(&t)).await,
+                WebReconcile::Unchanged
+            );
+        }
     }
 
     /// A per-test marker path, so the durable half of the retraction memory is

@@ -48,7 +48,7 @@ describe("every control still has somewhere to live", () => {
  */
 describe("what a collapsed row says", () => {
   it("says nothing is named yet in the positive", () => {
-    expect(namedTimesSummary([])).toBe("No named times yet");
+    expect(namedTimesSummary([])).toBe("No app allowances yet");
   });
 
   it("counts groups by policy", () => {
@@ -59,7 +59,7 @@ describe("what a collapsed row says", () => {
         { id: "c2", label: "Chat", apps: [], policy: "counted", dailyMinutes: 30 },
         { id: "o", label: "Ask first", apps: [], policy: "onRequest" },
       ]),
-    ).toBe("1 free, 2 counted, 1 on request");
+    ).toBe("1 time-free, 2 counted, 1 ask first");
   });
 
   /**

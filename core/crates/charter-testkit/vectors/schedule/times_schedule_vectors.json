@@ -1,0 +1,1399 @@
+{
+  "note": "Tagged-window schedule evaluation (spec/contract.md §Times). `schedule` is a runtime GrantSchedule body, `times` the device's times clause body (null = none; a body with v != 1 is UNREADABLE and so absent). All schedules are Etc/UTC so spanEnd and secondsToOpen are plain arithmetic. A tagged window beats an untagged one; two tagged windows resolve to the earlier start, then array order; a tag the clause does not define LOCKS its span. nextWindow is the next runnable span to start today or tomorrow; defaultAskIdle is the ward's default ask type for a moment NOT inside a window (most recently ended runnable span today, else next up, else Free = null); the full rule applies the in-window time first, which is the caller's job.",
+  "vectors": [
+    {
+      "name": "untagged_in_window",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782750600,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782759600
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "untagged_before_window_locked",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782745200,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 3600
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782748800,
+        "startHhmm": "16:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "carve_before_edge_is_free_until_the_carve",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782750600,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782752400
+      },
+      "nextWindow": {
+        "time": "learning",
+        "start": 1782752400,
+        "startHhmm": "17:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "carve_start_instant_is_learning",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782752400,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782756000
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782756000,
+        "startHhmm": "18:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "carve_inside_is_learning",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782755940,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782756000
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782756000,
+        "startHhmm": "18:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "carve_end_instant_is_free_again",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782756000,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782759600
+      },
+      "nextWindow": null,
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "carve_with_no_times_clause_locks_the_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782754200,
+      "expect": {
+        "state": "locked",
+        "cause": "unknownTime",
+        "unknownTime": "learning",
+        "secondsToOpen": 1800
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782756000,
+        "startHhmm": "18:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "carve_with_no_times_clause_leaves_free_alone",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782750600,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782752400
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782756000,
+        "startHhmm": "18:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "carve_with_other_ids_only_locks_the_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept"
+          }
+        ]
+      },
+      "now_unix": 1782754200,
+      "expect": {
+        "state": "locked",
+        "cause": "unknownTime",
+        "unknownTime": "learning",
+        "secondsToOpen": 1800
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782756000,
+        "startHhmm": "18:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "carve_with_unreadable_times_clause_locks_the_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "17:00",
+              "end": "18:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 2,
+        "issuedAt": 1,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782754200,
+      "expect": {
+        "state": "locked",
+        "cause": "unknownTime",
+        "unknownTime": "learning",
+        "secondsToOpen": 1800
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782756000,
+        "startHhmm": "18:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "named_window_alone_opens_that_time",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782728100,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782734400
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "named_window_alone_unknown_is_locked",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782728100,
+      "expect": {
+        "state": "locked",
+        "cause": "unknownTime",
+        "unknownTime": "learning",
+        "secondsToOpen": null
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "named_window_alone_then_locked_tomorrow_next",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            }
+          ],
+          "tue": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782738000,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 72000
+      },
+      "nextWindow": {
+        "time": "learning",
+        "start": 1782810000,
+        "startHhmm": "09:00",
+        "dayOffset": 1
+      },
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "tagged_overlap_earlier_start_wins",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "10:00",
+              "end": "12:00",
+              "time": "chores"
+            },
+            {
+              "start": "09:00",
+              "end": "11:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          },
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept"
+          }
+        ]
+      },
+      "now_unix": 1782729000,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782730800
+      },
+      "nextWindow": {
+        "time": "chores",
+        "start": 1782730800,
+        "startHhmm": "11:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "chores"
+    },
+    {
+      "name": "tagged_overlap_later_one_resumes_after",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "10:00",
+              "end": "12:00",
+              "time": "chores"
+            },
+            {
+              "start": "09:00",
+              "end": "11:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          },
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept"
+          }
+        ]
+      },
+      "now_unix": 1782732600,
+      "expect": {
+        "state": "open",
+        "time": "chores",
+        "spanEnd": 1782734400
+      },
+      "nextWindow": null,
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "tagged_overlap_same_start_array_order",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "10:00",
+              "time": "chores"
+            },
+            {
+              "start": "09:00",
+              "end": "11:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          },
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept"
+          }
+        ]
+      },
+      "now_unix": 1782725400,
+      "expect": {
+        "state": "open",
+        "time": "chores",
+        "spanEnd": 1782727200
+      },
+      "nextWindow": {
+        "time": "learning",
+        "start": 1782727200,
+        "startHhmm": "10:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "tagged_overlap_same_start_longer_resumes",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "10:00",
+              "time": "chores"
+            },
+            {
+              "start": "09:00",
+              "end": "11:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          },
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept"
+          }
+        ]
+      },
+      "now_unix": 1782729000,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782730800
+      },
+      "nextWindow": null,
+      "defaultAskIdle": "chores"
+    },
+    {
+      "name": "adjacent_same_time_windows_are_one_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "10:00"
+            },
+            {
+              "start": "10:00",
+              "end": "11:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782725400,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782730800
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "adjacent_same_named_time_windows_are_one_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "10:00",
+              "time": "learning"
+            },
+            {
+              "start": "10:00",
+              "end": "11:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782725400,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782730800
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "adjacent_different_times_split_the_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "10:00",
+              "time": "learning"
+            },
+            {
+              "start": "10:00",
+              "end": "11:00",
+              "time": "chores"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          },
+          {
+            "id": "chores",
+            "label": "Chores",
+            "posture": "everythingExcept"
+          }
+        ]
+      },
+      "now_unix": 1782725400,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782727200
+      },
+      "nextWindow": {
+        "time": "chores",
+        "start": 1782727200,
+        "startHhmm": "10:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "chores"
+    },
+    {
+      "name": "gap_between_same_time_windows_ends_the_span",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "10:00"
+            },
+            {
+              "start": "11:00",
+              "end": "12:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782725400,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782727200
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782730800,
+        "startHhmm": "11:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "override_replaces_weekly_and_keeps_its_tag",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00"
+            }
+          ]
+        },
+        "overrides": {
+          "2026-06-29": [
+            {
+              "start": "13:00",
+              "end": "14:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782739800,
+      "expect": {
+        "state": "open",
+        "time": "learning",
+        "spanEnd": 1782741600
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "override_replaces_weekly_so_weekly_hours_are_locked",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00"
+            }
+          ]
+        },
+        "overrides": {
+          "2026-06-29": [
+            {
+              "start": "13:00",
+              "end": "14:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782727200,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 10800
+      },
+      "nextWindow": {
+        "time": "learning",
+        "start": 1782738000,
+        "startHhmm": "13:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "override_empty_blocks_the_day",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00"
+            }
+          ]
+        },
+        "overrides": {
+          "2026-06-29": []
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782727200,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 601200
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "day_with_no_entry_is_locked",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782813600,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 514800
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "last_minute_of_the_day_span_ends_at_its_window",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "22:00",
+              "end": "23:59"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782774000,
+      "expect": {
+        "state": "open",
+        "time": null,
+        "spanEnd": 1782777540
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "paused_schedule_is_locked",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            }
+          ]
+        },
+        "paused": true,
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782727200,
+      "expect": {
+        "state": "locked",
+        "cause": "paused",
+        "secondsToOpen": null
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "empty_schedule_is_unbounded",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {},
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782702000,
+      "expect": {
+        "state": "unbounded"
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "default_ask_before_anything_is_the_next_up",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            },
+            {
+              "start": "16:00",
+              "end": "19:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782716400,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 7200
+      },
+      "nextWindow": {
+        "time": "learning",
+        "start": 1782723600,
+        "startHhmm": "09:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "default_ask_after_learning_ended_is_learning",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            },
+            {
+              "start": "16:00",
+              "end": "19:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782738000,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 10800
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782748800,
+        "startHhmm": "16:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": "learning"
+    },
+    {
+      "name": "default_ask_after_free_ended_is_free",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            },
+            {
+              "start": "16:00",
+              "end": "19:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782763200,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 565200
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    },
+    {
+      "name": "default_ask_ignores_a_span_that_cannot_run",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "09:00",
+              "end": "12:00",
+              "time": "learning"
+            },
+            {
+              "start": "16:00",
+              "end": "19:00"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": null,
+      "now_unix": 1782738000,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 10800
+      },
+      "nextWindow": {
+        "time": null,
+        "start": 1782748800,
+        "startHhmm": "16:00",
+        "dayOffset": 0
+      },
+      "defaultAskIdle": null
+    },
+    {
+      "name": "next_window_skips_an_unknown_tag",
+      "schedule": {
+        "v": 1,
+        "tz": "Etc/UTC",
+        "weekly": {
+          "mon": [
+            {
+              "start": "16:00",
+              "end": "19:00"
+            },
+            {
+              "start": "20:00",
+              "end": "21:00",
+              "time": "mystery"
+            }
+          ]
+        },
+        "issuedAt": 1782734400
+      },
+      "times": {
+        "v": 1,
+        "issuedAt": 1782734400,
+        "times": [
+          {
+            "id": "learning",
+            "label": "Learning time",
+            "posture": "onlyThese",
+            "apps": [
+              "org.khanacademy"
+            ]
+          }
+        ]
+      },
+      "now_unix": 1782761400,
+      "expect": {
+        "state": "locked",
+        "cause": "outsideWindows",
+        "secondsToOpen": 592200
+      },
+      "nextWindow": null,
+      "defaultAskIdle": null
+    }
+  ]
+}

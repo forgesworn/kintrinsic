@@ -266,6 +266,7 @@ mod tests {
             budget_day_seconds: left_secs,
             budget_week_seconds: -1,
             ask_first: Vec::new(),
+            time: None,
         }
     }
 

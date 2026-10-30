@@ -114,6 +114,11 @@ pub struct ExecAllowParams {
 pub const MAX_EXTEND_MINUTES: u16 = 1440;
 /// Maximum length of the child-authored `reason` string.
 pub const MAX_REASON_LEN: usize = 280;
+/// Most named times one `times` clause may carry (§Times). Parity-pinned with
+/// the guardian PWA in `contract_constants.rs`.
+pub const MAX_NAMED_TIMES: usize = 16;
+/// Longest display label a named time may carry, in characters (§Times).
+pub const MAX_TIME_LABEL_LEN: usize = 60;
 
 /// `time.extend` GRANT params (guardian may grant less than requested). The
 /// grant **echoes `limitHit`** so the params-echo check is exact. When
@@ -128,6 +133,17 @@ pub struct TimeExtendGrantParams {
     pub limit_hit: LimitHit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<String>,
+    /// The named time these minutes buy (§Times), echoed verbatim from the
+    /// request (or set by the guardian when changing the type of an ask).
+    /// Absent = Free time, byte-identical to before times existed.
+    ///
+    /// Parsing is deliberately permissive: any string parses, and whether the
+    /// id names a time this device knows is the ENFORCER's decision (an
+    /// unknown id enacts no extra time — a loosening with an unenforceable
+    /// posture fails safe). A pre-times ward ignores the field and lands the
+    /// minutes as Free time, the same documented gap as `groupId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
 }
 
 impl TimeExtendGrantParams {
@@ -154,6 +170,10 @@ pub struct TimeExtendRequestParams {
     pub limit_hit: LimitHit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<String>,
+    /// The named time the child is asking for more of (§Times). Absent =
+    /// Free time. Permissive on parse, like [`TimeExtendGrantParams::time`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
 }
 
 impl TimeExtendRequestParams {
@@ -407,6 +427,7 @@ mod bucket_and_app_open_tests {
             reason: None,
             limit_hit: LimitHit::Bucket,
             bucket_id: Some("play".into()),
+            time: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"bucketId\":\"play\""), "{json}");
@@ -418,6 +439,7 @@ mod bucket_and_app_open_tests {
             minutes_granted: 20,
             limit_hit: LimitHit::Bucket,
             bucket_id: Some("play".into()),
+            time: None,
         };
         let json = serde_json::to_string(&grant).unwrap();
         assert!(json.contains("\"bucketId\":\"play\""), "{json}");

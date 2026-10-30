@@ -40,7 +40,7 @@ class WardenController(
     private val dnsFilter: DnsFilterOps,
     private val lock: LockController,
     private val warn: WarnNotifier = object : WarnNotifier {
-        override fun warn(level: String) {}
+        override fun warn(level: String, time: String?, then: String?) {}
     },
     private val installAccount: org.forgesworn.charter.enforce.InstallAccountOps =
         org.forgesworn.charter.enforce.PmInstallAccountOps(context),
@@ -96,7 +96,9 @@ class WardenController(
 
     /** Delivers child-facing moments (real notifications in production). */
     interface WarnNotifier {
-        fun warn(level: String)
+        /** [time] names the named time the ward is in and [then] what follows
+         *  ("Free time", "locked"); both null for a ward that uses no times. */
+        fun warn(level: String, time: String? = null, then: String? = null)
         fun granted(minutes: Int) {}
         /** The guardian said no. A ward who asked deserves the answer wherever
          *  they are — an unseen answer is indistinguishable from being ignored. */
@@ -246,6 +248,11 @@ class WardenController(
         // it), so the guardian can pick apps to control by name (D3).
         runCatching {
             CharterCore.setInstalledApps(org.forgesworn.charter.enforce.launchableAppsJson(context))
+        }
+        // The browser an `onlyThese` time that lists sites implies allowed
+        // (§Times). Unknown reports "" and the core adds nothing.
+        runCatching {
+            CharterCore.setDefaultBrowser(org.forgesworn.charter.enforce.defaultBrowserPackage(context))
         }
         return CharterCore.pollOnce(nowUnix)
     }
@@ -560,7 +567,7 @@ class WardenController(
                 // edge / unbounded spell) — delivery is our only job.
                 is CharterCore.Effect.Warn -> {
                     Log.i(TAG, "warn ${e.level}")
-                    warn.warn(e.level)
+                    warn.warn(e.level, e.time, e.then)
                 }
                 is CharterCore.Effect.Granted -> {
                     Log.i(TAG, "granted ${e.minutes}")
@@ -768,7 +775,9 @@ class WardenController(
         guard.run("dns", ward) {
             syncDnsPin(enforcing)
             if (enforcing) {
-                val plan = runCatching { CharterCore.dnsPlan() }.getOrNull()
+                // Composed over the time running NOW (§Times), so the revision
+                // moves at a window boundary and the filter re-dispatches.
+                val plan = runCatching { CharterCore.dnsPlan(nowUnix) }.getOrNull()
                 val rev = plan?.revision ?: ""
                 // A pinned filter whose tunnel is down lets DNS through
                 // unfiltered while every setting still reads "pinned" (05-B7),
@@ -1003,7 +1012,7 @@ class WardenController(
             )
         }
 
-        override fun warn(level: String) {
+        override fun warn(level: String, time: String?, then: String?) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
                 as android.app.NotificationManager
             val channel = android.app.NotificationChannel(
@@ -1012,11 +1021,7 @@ class WardenController(
                 android.app.NotificationManager.IMPORTANCE_HIGH,
             ).apply { description = "Heads-up before screen time runs out" }
             nm.createNotificationChannel(channel)
-            val text = if (level == "one") {
-                "1 minute left — save your game"
-            } else {
-                "10 minutes left"
-            }
+            val text = org.forgesworn.charter.ui.WarnCopy.text(level, time, then)
             nm.notify(
                 if (level == "one") 2002 else 2001,
                 android.app.Notification.Builder(context, "charter-warnings")

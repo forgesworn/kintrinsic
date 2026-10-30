@@ -47,6 +47,8 @@ class LockActivity : Activity() {
     /** One-shot per lock: latched once the ward has asked on THIS lock spell. */
     private var asked = false
     private var askReqId: String? = null
+    /** The type the ward picked for the ask (§Times); null = the default. */
+    private var askTimeId: String? = null
 
     /**
      * The ask's outcome AS THE CORE KNOWS IT, re-read on every render.
@@ -694,18 +696,25 @@ class LockActivity : Activity() {
         // route in on a spare tablet someone picks up when their own phone is
         // flat, which is exactly when they cannot ask from their own phone.
         val askLabel = if (info?.dormant == true) "Ask to use this" else "Ask for more time"
+        // A child with any named time is offered a type for the ask (§Times):
+        // Free time or one of theirs, defaulting by the schedule. None offered
+        // (no named time) is the untyped ask it has always been.
+        val offered = info?.askTimes.orEmpty()
+        val chosen = AskType.resolve(offered, askTimeId, info?.defaultAskTime)
         val askBtn = CharterTheme.primaryButton(this, askLabel).apply {
             setOnClickListener {
                 isEnabled = false
                 asked = true
                 askStatus.text = "Asking…"
                 val limitHit = if (info?.reason == "schedule") "schedule" else "budget"
+                val params = AskType.params(
+                    30,
+                    limitHit,
+                    AskType.resolve(offered, askTimeId, info?.defaultAskTime)?.id,
+                )
                 askWorker.post {
                     val res = runCatching {
-                        CharterCore.submitRequest(
-                            "time.extend",
-                            """{"minutesRequested":30,"reason":"","limitHit":"$limitHit"}""",
-                        )
+                        CharterCore.submitRequest("time.extend", params)
                     }.getOrNull()
                     runOnUiThread {
                         if (res?.reqId != null) {
@@ -726,7 +735,29 @@ class LockActivity : Activity() {
             }
         }
         if (!standDown) {
-            root.addView(askBtn, CharterTheme.stackParams(this, 24))
+            if (chosen != null && offered.size > 1) {
+                root.addView(
+                    CharterTheme.secondaryButton(this, AskType.chooserLabel(chosen), onInk = true).apply {
+                        setOnClickListener {
+                            if (asked) return@setOnClickListener
+                            val labels = offered.map { it.label }.toTypedArray()
+                            android.app.AlertDialog.Builder(this@LockActivity)
+                                .setTitle("Ask for more…")
+                                .setSingleChoiceItems(
+                                    labels,
+                                    offered.indexOfFirst { it.id == chosen.id }.coerceAtLeast(0),
+                                ) { dialog, which ->
+                                    askTimeId = offered[which].id
+                                    text = AskType.chooserLabel(offered[which])
+                                    dialog.dismiss()
+                                }
+                                .show()
+                        }
+                    },
+                    CharterTheme.stackParams(this, 24),
+                )
+            }
+            root.addView(askBtn, CharterTheme.stackParams(this, if (chosen != null && offered.size > 1) 8 else 24))
         }
         root.addView(askStatus)
         paintOpenRow(root, info)

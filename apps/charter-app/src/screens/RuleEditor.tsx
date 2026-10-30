@@ -11,9 +11,12 @@ import { ruleSummaries } from "./ruleSummaries";
 // (`#/ward/<id>/rule/<section>`). The editor page is the real thing: one rule,
 // expanded, with Cancel / Save pinned to the bottom.
 
+// These are FREE TIME's rules (the child's other times start from them). App
+// allowances (the old "Named times" screen) sit with the apps: they decide what
+// counts inside Free time, not when a time runs.
 const GROUPS: { title: string; sections: SectionId[] }[] = [
-  { title: "Time", sections: ["schedule", "budget", "named-times", "listening"] },
-  { title: "Apps & web", sections: ["always-available", "web", "apps"] },
+  { title: "Time", sections: ["schedule", "budget", "listening"] },
+  { title: "Apps & web", sections: ["always-available", "web", "apps", "named-times"] },
   { title: "Safety", sections: ["lifeline", "tethering"] },
 ];
 

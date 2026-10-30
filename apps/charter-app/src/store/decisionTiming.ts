@@ -68,6 +68,10 @@ export function decisionTiming({
           // Named times: echoed verbatim into the GRANT, exactly like
           // limitHit itself — absent for the whole-device dimensions.
           bucketId: req.bucketId,
+          // Times: the kind of time asked for, echoed verbatim too — the
+          // device's params-echo check is exact, so a typed ask answered
+          // without it would be rejected as a different request.
+          ...(req.time !== undefined ? { time: req.time } : {}),
         }
       : undefined;
   // app.open: the plain Decision echo's wire correlation — {pkg,

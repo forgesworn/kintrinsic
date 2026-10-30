@@ -294,6 +294,11 @@ pub struct StatusPayload {
     /// failed. Additive under the open STATUS field-set decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debugging_open: Option<bool>,
+    /// §Times: the id of the NAMED time in force right now. Absent when the
+    /// device is in Free time or locked, so a pre-times payload stays
+    /// byte-identical and a pre-times guardian simply never sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_time: Option<String>,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -508,6 +513,7 @@ mod tests {
             usage_unsaved: None,
             app_lock_armed: None,
             debugging_open: None,
+            active_time: None,
         }
     }
 
@@ -526,6 +532,20 @@ mod tests {
             let back = StatusPayload::from_json(&json).unwrap();
             assert_eq!(back.app_lock_armed, Some(armed));
         }
+    }
+
+    #[test]
+    fn active_time_omits_when_none_and_round_trips_camel_case() {
+        let mut s = sample();
+        assert!(
+            !s.to_json().contains("activeTime"),
+            "absent in Free time or when locked"
+        );
+        s.active_time = Some("learning".into());
+        let json = s.to_json();
+        assert!(json.contains("\"activeTime\":\"learning\""), "{json}");
+        let back = StatusPayload::from_json(&json).unwrap();
+        assert_eq!(back.active_time.as_deref(), Some("learning"));
     }
 
     #[test]

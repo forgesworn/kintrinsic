@@ -73,8 +73,17 @@ pub struct PollResult {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Effect {
-    /// High-priority notification: 10 minutes / 1 minute left.
-    Warn { level: String },
+    /// High-priority notification: 10 minutes / 1 minute left. `time` names the
+    /// named time the ward is in ("Learning time"), and `then` what follows
+    /// ("Free time", "Learning time", "locked"); both absent for a ward that
+    /// uses no times, so a pre-times payload stays byte-identical.
+    Warn {
+        level: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        time: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        then: Option<String>,
+    },
     /// A verified extension just applied — announce the guardian's yes.
     Granted { minutes: u32 },
     /// A guardian answered no. Announced once per request: a ward who asked
@@ -107,6 +116,12 @@ pub struct ChildDecision {
     /// side honours staged bring-up on the level-triggered path, not just the
     /// Rust-stripped effects.
     pub enforce_mode: String,
+    /// The named time in force (§Times), by id and by display label; absent in
+    /// Free time and when locked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_label: Option<String>,
 }
 
 /// The `charterTimeLeft` view. Unknown is LOCKED, never unlimited (I10).
@@ -122,6 +137,9 @@ pub struct TimeLeftView {
     pub extension_secs: i64,
     /// When schedule-locked, seconds until the next window opens.
     pub next_open_secs: Option<i64>,
+    /// The named time in force (§Times); absent in Free time and when locked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_time: Option<String>,
 }
 
 impl TimeLeftView {
@@ -136,6 +154,7 @@ impl TimeLeftView {
             budget_secs: 0,
             extension_secs: 0,
             next_open_secs: None,
+            active_time: None,
         }
     }
 }
@@ -210,4 +229,21 @@ pub struct LockInfo {
     /// needs this to tell them apart: a ward who has had NO time cannot sensibly
     /// be offered "Ask for more time".
     pub dormant: bool,
+    /// The types an ask for more time may name (§Times): Free time first, then
+    /// every named time the device defines. Empty when the child has no named
+    /// time, so the ask is exactly the untyped one it has always been.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ask_times: Vec<AskTime>,
+    /// The id the ask defaults to ("free" or a named time's id); absent with
+    /// no [`LockInfo::ask_times`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_ask_time: Option<String>,
+}
+
+/// One type the ward may ask for more of.
+#[derive(Debug, Clone, Serialize)]
+pub struct AskTime {
+    /// `"free"` for Free time, else the named time's id.
+    pub id: String,
+    pub label: String,
 }

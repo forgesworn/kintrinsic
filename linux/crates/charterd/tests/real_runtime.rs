@@ -73,6 +73,62 @@ fn dbus_op_and_state_mappings_are_total_and_consistent() {
     assert_eq!(state_to_ipc(RequestState::Rejected), ReqState::Rejected);
 }
 
+/// §Times: `SubmitRequest` refuses a `time.extend` whose `time` is not a time
+/// this daemon offers the caller; an untyped ask (Free time) always passes.
+#[test]
+fn submit_request_vets_the_named_time_against_the_caller_s_snapshot() {
+    use charter_ipc::dto::{TimeChoice, TimeLeftView, TimesView};
+    use charterd::dbus_service::check_requested_time;
+    use serde_json::json;
+
+    let mut view = TimeLeftView::unknown();
+    view.time = Some(Box::new(TimesView {
+        ask: vec![
+            TimeChoice {
+                id: "free".into(),
+                label: "Free time".into(),
+            },
+            TimeChoice {
+                id: "learning".into(),
+                label: "Learning time".into(),
+            },
+        ],
+        ..Default::default()
+    }));
+    let ask =
+        |t: serde_json::Value| json!({"minutesRequested": 30, "limitHit": "budget", "time": t});
+    let untyped = json!({"minutesRequested": 30, "limitHit": "budget"});
+
+    assert_eq!(check_requested_time(&untyped, Some(&view)), Ok(()));
+    assert_eq!(
+        check_requested_time(&untyped, None),
+        Ok(()),
+        "Free needs no snapshot"
+    );
+    assert_eq!(
+        check_requested_time(&ask(json!("learning")), Some(&view)),
+        Ok(())
+    );
+    for bad in [
+        json!("chores"),
+        json!("free"),
+        json!("Learning"),
+        json!("x".repeat(33)),
+        json!(""),
+        json!(42),
+        json!(null),
+    ] {
+        assert!(
+            check_requested_time(&ask(bad.clone()), Some(&view)).is_err(),
+            "{bad}"
+        );
+    }
+    // No snapshot for the caller: a typed ask cannot be vouched for.
+    assert!(check_requested_time(&ask(json!("learning")), None).is_err());
+    // A pre-times snapshot offers nothing to name.
+    assert!(check_requested_time(&ask(json!("learning")), Some(&TimeLeftView::unknown())).is_err());
+}
+
 #[test]
 fn record_to_view_projects_without_leaking_hash_or_nonce() {
     use charter_primitives::{Nonce, ReqId};

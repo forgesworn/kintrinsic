@@ -10,6 +10,25 @@ pub enum Action {
     Shutdown,
     Suspend,
     AskMoreTime,
+    /// §Times: cycle which kind of time "Ask for more" names (offered only
+    /// when the child has a named time — Free time plus at least one more).
+    NextAskTime,
+}
+
+/// The "Ask for more" row: the primary's label, and whether a second button
+/// to change the kind of time sits beside it (§Times).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AskRow {
+    pub label: &'static str,
+    pub can_change: bool,
+}
+
+impl AskRow {
+    /// The untyped ask every lock offered before times.
+    pub const PLAIN: AskRow = AskRow {
+        label: "Ask for more time",
+        can_change: false,
+    };
 }
 
 /// A screen rectangle (X11 coordinates: origin top-left, pixels).
@@ -67,8 +86,29 @@ pub fn card_rect(screen_w: u16, screen_h: u16, extra_lines: u16, can_ask: bool) 
 }
 
 /// The buttons: the "Ask for more time" primary (paired only) as a wide row
-/// above the three system escapes along the card's bottom.
+/// above the three system escapes along the card's bottom. The untyped,
+/// pre-times layout — the panel itself now always builds through
+/// [`button_layout_with`], so this survives as the tests' reference shape.
+#[cfg(test)]
 pub fn button_layout(screen_w: u16, screen_h: u16, extra_lines: u16, can_ask: bool) -> Vec<Button> {
+    button_layout_with(
+        screen_w,
+        screen_h,
+        extra_lines,
+        can_ask.then_some(AskRow::PLAIN),
+    )
+}
+
+/// [`button_layout`] with the ask row spelled out (§Times): when the kind of
+/// time can be changed, the primary narrows and a "Other time" button sits at
+/// the row's right end, so the whole row still spans the escapes below it.
+pub fn button_layout_with(
+    screen_w: u16,
+    screen_h: u16,
+    extra_lines: u16,
+    ask: Option<AskRow>,
+) -> Vec<Button> {
+    let can_ask = ask.is_some();
     let specs = [
         ("Log out", Action::Logout),
         ("Shut down", Action::Shutdown),
@@ -80,17 +120,34 @@ pub fn button_layout(screen_w: u16, screen_h: u16, extra_lines: u16, can_ask: bo
     let start_x = card.x + (((card.width as i32) - (total_w as i32)) / 2).max(0) as i16;
     let y = card.y + (card.height - BTN_H - CARD_BTN_INSET) as i16;
     let mut buttons = Vec::with_capacity(4);
-    if can_ask {
+    if let Some(row) = ask {
+        let primary_w = if row.can_change {
+            total_w - BTN_W - BTN_GAP
+        } else {
+            total_w
+        };
         buttons.push(Button {
             rect: Rect {
                 x: start_x,
                 y: y - ASK_STEP as i16,
-                width: total_w,
+                width: primary_w,
                 height: BTN_H,
             },
-            label: "Ask for more time",
+            label: row.label,
             action: Action::AskMoreTime,
         });
+        if row.can_change {
+            buttons.push(Button {
+                rect: Rect {
+                    x: start_x + (primary_w + BTN_GAP) as i16,
+                    y: y - ASK_STEP as i16,
+                    width: BTN_W,
+                    height: BTN_H,
+                },
+                label: "Other time",
+                action: Action::NextAskTime,
+            });
+        }
     }
     buttons.extend(specs.iter().enumerate().map(|(i, (label, action))| {
         let x = start_x + (i as i16) * (BTN_W + BTN_GAP) as i16;
@@ -151,6 +208,43 @@ mod tests {
         assert!(
             (left - right).abs() <= 1,
             "row not centered: {left} vs {right}"
+        );
+    }
+
+    #[test]
+    fn a_changeable_ask_row_splits_into_the_ask_and_other_time_inside_the_card() {
+        let row = AskRow {
+            label: "Ask for more Learning time",
+            can_change: true,
+        };
+        let b = button_layout_with(1920, 1080, 2, Some(row));
+        let card = card_rect(1920, 1080, 2, true);
+        assert_eq!(
+            b.iter().map(|x| x.action).collect::<Vec<_>>(),
+            vec![
+                Action::AskMoreTime,
+                Action::NextAskTime,
+                Action::Logout,
+                Action::Shutdown,
+                Action::Suspend
+            ]
+        );
+        assert_eq!(b[0].label, "Ask for more Learning time");
+        // The two ask buttons share a row and do not overlap.
+        assert_eq!(b[0].rect.y, b[1].rect.y);
+        assert!(b[0].rect.x as i32 + b[0].rect.width as i32 <= b[1].rect.x as i32);
+        // The row ends where the escape row ends, inside the card.
+        assert_eq!(
+            b[1].rect.x as i32 + b[1].rect.width as i32,
+            b[4].rect.x as i32 + b[4].rect.width as i32
+        );
+        assert!(
+            (b[1].rect.x as i32 + b[1].rect.width as i32) <= (card.x as i32 + card.width as i32)
+        );
+        // A plain ask is exactly the pre-times layout.
+        assert_eq!(
+            button_layout_with(1920, 1080, 2, Some(AskRow::PLAIN)),
+            button_layout(1920, 1080, 2, true)
         );
     }
 

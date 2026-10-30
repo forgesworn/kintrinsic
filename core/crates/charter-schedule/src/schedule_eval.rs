@@ -305,6 +305,7 @@ mod parity_tests {
             Some(vec![crate::clause::GrantScheduleWindow {
                 start: start.into(),
                 end: end.into(),
+                time: None,
             }])
         };
         GrantSchedule {
@@ -415,6 +416,7 @@ mod parity_tests {
             Some(vec![crate::clause::GrantScheduleWindow {
                 start: "07:00".into(),
                 end: "08:00".into(),
+                time: None,
             }])
         };
         let sched = GrantSchedule {

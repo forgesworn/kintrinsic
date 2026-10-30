@@ -14,6 +14,7 @@
 import { nip44, verifyEvent, type NostrEvent } from "nostr-tools";
 import { decodeMinutes } from "../insights/minuteSet";
 import { MAX_WRAP_JITTER_SECS } from "./request";
+import { isValidTimeId } from "./times";
 
 export const CHARTER_DEVICE_STATUS = 31114;
 const SEAL = 13;
@@ -60,6 +61,11 @@ export interface DeviceStatus {
    * that is where reflection tips into monitoring.
    */
   groups?: StatusGroup[];
+  /** The id of the named time in force right now (contract §Times). Absent
+   *  when the device is in Free time or locked, and on every pre-times payload
+   *  — which is why absent must never be read as anything but "not a named
+   *  time". */
+  activeTime?: string;
   windowLeftSecs: number;
   quotaLeftSecs: number;
   effectiveSecs: number;
@@ -389,6 +395,9 @@ export function parseStatus(json: string): DeviceStatus | null {
         : undefined,
     updateHealth: parseUpdateHealth(o.updateHealth),
     installWindow: parseInstallWindow(o.installWindow),
+    // Tolerant: an id that isn't a well-formed named-time id is absent, not a
+    // reason to drop the whole STATUS.
+    activeTime: isValidTimeId(o.activeTime) ? o.activeTime : undefined,
     windowLeftSecs: o.windowLeftSecs,
     quotaLeftSecs: o.quotaLeftSecs,
     effectiveSecs: o.effectiveSecs,

@@ -29,6 +29,7 @@ import type {
   LearningPolicy,
   ListeningPolicy,
   Lifeline,
+  NamedTime,
   Tethering,
   AlwaysAvailablePolicy,
 } from "../domain/types";
@@ -38,6 +39,7 @@ import {
   type PolicyOverride,
 } from "../domain/effectivePolicy";
 import type { FreeGroupRecord } from "../domain/namedTimes";
+import { timeLabelFor } from "../domain/times";
 import { resolveChildTz } from "../domain/childTz";
 import { composeDeviceHold } from "../domain/appHolds";
 import { raceRefresh, REFRESH_OFFLINE_NOTICE } from "../domain/refreshDeadline";
@@ -56,7 +58,7 @@ import {
   type ReleaseManifest,
 } from "../release/releaseEvent";
 import { SignerCancelled, type ConfirmGate } from "../signer/mockSigner";
-import type { DecisionContext, InstallDecision, Signer } from "../signer/Signer";
+import type { DecisionContext, GiftOptions, InstallDecision, Signer } from "../signer/Signer";
 import { catalogLookup } from "../data/appCatalog";
 import {
   guardianPubkeyHex,
@@ -582,7 +584,28 @@ export interface CharterContextValue {
   /** Give a child minutes with no ask outstanding (and after a deny). Today
    *  only. `groupId` tops up that named-times group's own pool instead of
    *  the whole-device one. */
-  giveTime: (childId: string, minutes: number, groupId?: string) => Promise<SendResult>;
+  giveTime: (
+    childId: string,
+    minutes: number,
+    groupId?: string,
+    /** Times: which KIND of time the minutes buy (`time` = a named-time id,
+     *  absent = Free) and which devices get them (`deviceIds` = `Device.id`s,
+     *  absent = every paired device, exactly as before). */
+    opts?: GiftOptions,
+  ) => Promise<SendResult>;
+  /**
+   * Answer a `time.extend` ask with a DIFFERENT kind of time than it asked for:
+   * a 0-minute grant closes the ask and a typed gift buys the minutes, both to
+   * the asking device only. Throws when the signer cannot (no connection, a
+   * simulated ask with nothing on the wire to answer, an expired ask).
+   */
+  answerRequestWithOtherTime: (
+    id: string,
+    minutes: number,
+    timeId: string | undefined,
+    /** Ignored: the store names the kind from the child's own times. */
+    timeLabel?: string,
+  ) => Promise<void>;
   /** Ask a ward to finish up now (or, with `lift`, allow them back on). */
   standDown: (childId: string, lift?: boolean) => Promise<SendResult>;
   /** Open a short, signed window during which the ward drops its install lock. */
@@ -659,6 +682,12 @@ export interface CharterContextValue {
       /** Named-times Free-group membership — guardian-side only, never wire
        *  (see `domain/namedTimes.ts` and `Policy.freeGroups`). */
       freeGroups?: FreeGroupRecord[];
+      /** The child's times (Learning time and friends): the REPLACE-THE-SET
+       *  `times` clause. Undefined = leave the clause alone (nothing signed);
+       *  `[]` signs a real empty clause. Whenever tagged windows change, the
+       *  schedule (and any per-device schedules) must be passed in the same
+       *  call so the definition and its windows land together. */
+      times?: NamedTime[];
     },
   ) => Promise<ClauseDelivery>;
   setBlocked: (childId: string, policyId: string, blocked: boolean) => Promise<ClauseDelivery | void>;
@@ -779,7 +808,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // Resolve a child id → the signer's delivery target, reading the LATEST
   // children (so a clause always targets the child's current devices).
   const resolveChild = useCallback(
-    (childId: string) => resolveChildTarget(stateRef.current.children, childId, DEFAULT_RELAYS),
+    (childId: string) =>
+      resolveChildTarget(stateRef.current.children, childId, DEFAULT_RELAYS, deviceStatusRef.current),
     [],
   );
 
@@ -1272,10 +1302,15 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // + a re-signed `apps` clause carrying an AppHold — see `approveAppOpen`
     // and `wire/grant.ts`'s `buildAppOpenGrant`, a different shape than the
     // time.extend ask below.
-    const request =
+    const card =
       r.op === "app.open"
         ? appOpenRequestToCard(r, device, childId, uid("req"), Date.now())
         : timeExtendRequestToCard(r, device, childId, uid("req"), Date.now());
+    // Times: the kind of time the ward asked for more of. Carried onto the card
+    // so it can say so, and echoed verbatim into the GRANT (see decisionTiming).
+    // Absent = Free time, so a pre-times ask is untouched.
+    const request: ChildRequest =
+      r.op === "time.extend" && r.params.time !== undefined ? { ...card, time: r.params.time } : card;
     dispatch({ type: "ADD_REQUEST", request });
     return true;
   }, []);
@@ -1490,7 +1525,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * the schedule, which rewrites a standing rule to solve a one-off.
    */
   const giveTime = useCallback(
-    async (childId: string, minutes: number, groupId?: string): Promise<SendResult> => {
+    async (
+      childId: string,
+      minutes: number,
+      groupId?: string,
+      opts?: GiftOptions,
+    ): Promise<SendResult> => {
       const s = signer.current;
       if (!s?.signGiftClause || !s.status().connected) return false;
       const child = stateRef.current.children.find((c) => c.id === childId);
@@ -1505,7 +1545,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       let wraps: string[] | undefined;
       try {
         try {
-          wraps = (await s.signGiftClause(childId, minutes, tz, groupId)).wraps;
+          wraps = (await s.signGiftClause(childId, minutes, tz, groupId, opts)).wraps;
         } catch (err) {
           if (!(err instanceof QueuedForHomeNetworkError)) throw err;
           queued = queuedDelivery(err);
@@ -1521,9 +1561,22 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         const groupLabel = groupId
           ? devicePolicy?.buckets?.buckets.find((b) => b.id === groupId)?.label
           : undefined;
+        // Times: name the kind and the devices when the gift was narrowed, so the
+        // log says what actually went where ("30 more minutes of Learning time
+        // on Sam's laptop"), not just that some minutes were given.
+        const kind = opts?.time
+          ? ` of ${timeLabelFor(devicePolicy?.times, opts.time) ?? "another kind of time"}`
+          : "";
+        const where =
+          opts?.deviceIds && child
+            ? ` on ${opts.deviceIds
+                .map((id) => child.devices.find((d) => d.id === id)?.label)
+                .filter(Boolean)
+                .join(" and ")}`
+            : "";
         const what = groupLabel
           ? `You gave ${minutes} more minutes to ${groupLabel}`
-          : `You gave ${minutes} more minutes`;
+          : `You gave ${minutes} more minutes${kind}${where}`;
         // Named times (M-2): a gift straight to a group credits its cap the
         // same way an approved bucket extend does — record it structurally.
         addActivity(
@@ -2201,6 +2254,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         alwaysAvailable?: AlwaysAvailablePolicy;
         deviceOverrides?: Record<string, PolicyOverride>;
         freeGroups?: FreeGroupRecord[];
+        times?: NamedTime[];
       },
     ): Promise<ClauseDelivery> => {
       const child = stateRef.current.children.find((c) => c.id === childId);
@@ -2243,6 +2297,10 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // the same reason `deviceOverrides` is: `policyToClauses` never reads
         // it, so it rides the sign call inertly and never reaches the wire.
         freeGroups: next.freeGroups,
+        // The `times` clause rides first on the wire (policyToClauses); left
+        // undefined it signs nothing, so a save that never touched times
+        // stays byte-identical to before.
+        times: next.times,
       };
       const delivery = await signClauseIfConnected(childId, toSign);
       if (delivery.outcome === "cancelled") return delivery;
@@ -2264,6 +2322,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // not a wire artifact, and unsigned controls stay split.
         deviceOverrides: next.deviceOverrides ?? existing?.deviceOverrides,
         freeGroups: next.freeGroups ?? existing?.freeGroups,
+        // `[]` is a real value (every time deleted), so `??` — not `||` — is
+        // what keeps "no times" distinct from "times never used".
+        times: next.times ?? existing?.times,
       };
       dispatch({ type: "SET_POLICY", childId, policy: merged });
       const onlyApps =
@@ -2272,6 +2333,17 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         next.web && !next.schedule && !next.budget && !next.apps && !next.learning;
       const onlyLearning =
         next.learning && !next.schedule && !next.budget && !next.web && !next.apps;
+      // A save of the times alone (a definition changed or renamed, hours
+      // untouched) is about times, not "screen-time limits".
+      const onlyTimes =
+        next.times &&
+        !next.schedule &&
+        !next.budget &&
+        !next.web &&
+        !next.apps &&
+        !next.learning &&
+        !next.buckets &&
+        !next.deviceOverrides;
       addActivity(
         childId,
         "rule-changed",
@@ -2281,7 +2353,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
             ? "You updated the website rules"
             : onlyLearning
               ? "You updated the learning apps"
-              : "You updated the screen-time limits") + undeliveredNote(delivery),
+              : onlyTimes
+                ? "You updated their times"
+                : next.times && next.schedule
+                  ? "You updated their times and hours"
+                  : "You updated the screen-time limits") + undeliveredNote(delivery),
         undefined,
         delivery.outcome === "sent" || delivery.outcome === "queued" ? delivery.wraps : undefined,
       );
@@ -2541,6 +2617,60 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       );
     },
     [signDecisionIfConnected, decisionContext, addActivity],
+  );
+
+  const answerRequestWithOtherTime = useCallback(
+    async (id: string, minutes: number, timeId: string | undefined) => {
+      const req = stateRef.current.requests.find((r) => r.id === id);
+      if (!req) return;
+      if (req.status === "approved" || req.status === "denied") return; // see approveRequest
+      if (req.kind !== "time.extend") return;
+      if (req.requester === "device" && req.reqId && isAskExpired(req.createdAt, Date.now())) {
+        throw new Error(
+          "This ask expired on the device — it's more than a day old and the device won't act on it now.",
+        );
+      }
+      const s = signer.current;
+      const ctx = decisionContext(req, 0);
+      // Only a real, wire-correlated ask has anything to answer: a simulated
+      // one never sat in a device's broker. Say so rather than record a
+      // "yes" that sent nothing.
+      if (!ctx.wire || !s?.answerAskWithOtherTime || !s.status().connected) {
+        throw new Error("Turn on parent approval first, then try again.");
+      }
+      // The label is whatever the guardian's own times call the id; never the
+      // caller's string, never the raw id.
+      const answeredLabel = !timeId
+        ? "Free time"
+        : (timeLabelFor(
+            stateRef.current.children
+              .find((c) => c.id === req.childId)
+              ?.policies.find((p) => p.scope.kind === "device")?.times,
+            timeId,
+          ) ?? "another kind of time");
+      try {
+        await s.answerAskWithOtherTime(id, ctx, minutes, timeId, answeredLabel);
+      } catch (err) {
+        if (err instanceof SignerCancelled) return;
+        if (err instanceof QueuedForHomeNetworkError) {
+          dispatch({ type: "SET_REQUEST_STATUS", id, status: "approved" });
+          addActivity(
+            req.childId,
+            "enacted",
+            `You answered with ${minutes} min of ${answeredLabel} instead${waitingAnswerNote(err.devices)}`,
+          );
+          return;
+        }
+        throw err;
+      }
+      dispatch({ type: "SET_REQUEST_STATUS", id, status: "approved" });
+      addActivity(
+        req.childId,
+        "enacted",
+        `You answered ${req.title} with ${minutes} min of ${answeredLabel} instead`,
+      );
+    },
+    [decisionContext, addActivity],
   );
 
   const denyRequest = useCallback(
@@ -2816,6 +2946,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       refreshing,
       refreshNotice,
       giveTime,
+      answerRequestWithOtherTime,
       standDown,
       openMaintenanceWindow,
       sendCharterUpdate,
@@ -2873,6 +3004,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       refreshing,
       refreshNotice,
       giveTime,
+      answerRequestWithOtherTime,
       standDown,
       openMaintenanceWindow,
       sendCharterUpdate,

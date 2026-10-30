@@ -111,6 +111,11 @@ interface ScheduleWindow {
   /** "HH:MM" — must satisfy `start < end` strictly. No midnight
    *  crossings (split into two day-bound windows). */
   end: string;
+  /** Named-time id (see §Times). Absent = Free time. A tagged window runs
+   *  that time's posture; where it overlaps an untagged window it wins
+   *  (carves). Additive at v1: a pre-times ward ignores it and runs the
+   *  window as Free time (version-gated guardian-side). */
+  time?: string;
 }
 ```
 
@@ -239,7 +244,7 @@ store. The full `ClauseKind` set (wire tag → store key) is `schedule` (1),
 `budget` (2), `content` (3), `apps` (4), `learning` (5), `apprules` (6),
 `tethering` (7), `update` (8), `lifeline` (9), `buckets` (10),
 `maintenance` (11), `gift` (12), `standdown` (13), `listening` (14),
-`alwaysavailable` (15), `debugging` (16). Three device-local, non-clause slots share the same
+`alwaysavailable` (15), `debugging` (16), `times` (17). Three device-local, non-clause slots share the same
 rollback-protected store and never cross the wire: `100` (cached USAGE_SYNC),
 `101` (the stand-down grace pin) and `102` (the install-window span). It is
 parsed and evaluated by the
@@ -482,6 +487,13 @@ interface GiftBody {
   /** The named-times bucket this gift tops up. Absent = the whole-device
    *  schedule/budget pool, exactly as before named times existed. */
   groupId?: string;
+  /** The TIME these minutes buy (§Times): a named-time id. Absent = Free
+   *  time, byte-identical to before. Lands in that time's own extension
+   *  pool; out of any window the device then runs that time's posture.
+   *  Unknown id on a times-aware ward ⇒ no extra time (fail-safe); a
+   *  pre-times ward ignores the field and lands the minutes as Free time,
+   *  the same documented gap as `groupId`. */
+  time?: string;
 }
 ```
 
@@ -873,6 +885,153 @@ so it fails **open** there — the same direction every other version-gated
 capability is required to fail. MyCharter version-gates offering the form at
 all behind capability `cmdlineIdentity` (linux ≥ versionCode 705), exactly like
 `wardenSupport.appHold` gates holds on old wardens.
+
+### Times — Free time, Learning time and other named times (v1 — device-enforced)
+
+The `times` clause (wire tag `"times"`, store key `17`) defines a child's
+**named times**: kinds of screen time with their own posture. **Free time** is
+the background — it has no entry here; it IS the standing `apps` / `content` /
+`apprules` / `buckets` / `learning` clauses, and an untagged `ScheduleWindow`
+runs it. A named time is run by a `ScheduleWindow` tagged with its `id`, or by
+a `gift` / `time.extend` carrying its `id`. A device is in exactly one time at
+any instant, or locked. Design rationale: `docs/times-design.md`.
+
+```ts
+type TimePosture = 'everythingExcept' | 'onlyThese';
+
+interface NamedTime {
+  /** [a-z0-9-]{1,32}; unique within the clause; never "free" (reserved). */
+  id: string;
+  /** Display name, 1..60 chars. */
+  label: string;
+  posture: TimePosture;
+  // everythingExcept — departures from Free time (ignored under onlyThese):
+  blockApps?: string[];   // additionally blocked (AppRule.pkg vocabulary)
+  unblockApps?: string[]; // removed from Free time's `apps.blocked`
+  denySites?: string[];   // additionally denied registrable domains
+  undenySites?: string[]; // removed from Free time's `parentDeny` / category blocks
+  // onlyThese — the whole statement (ignored under everythingExcept):
+  apps?: string[];        // the only apps that run (plus the implied web runtime, below)
+  /** The only sites that resolve: `LearningApp`s of kind `site` (id, label,
+   *  url, verified `domains` closure) — the SAME shape and validation as the
+   *  `learning` clause, so Linux renders each as a resolver-pinned window by
+   *  the existing path and Android's DNS allowlist is the union of every
+   *  `domains`. A bare domain could neither be launched nor pinned. */
+  sites?: LearningApp[];
+  /** Default false: time spent here drains neither the daily/weekly budget
+   *  nor any bucket, and budget exhaustion does not lock this time. */
+  countsAgainstBudget?: boolean;
+}
+
+interface GrantTimes {
+  v: 1;
+  /** Up to MAX_NAMED_TIMES (16); labels up to MAX_TIME_LABEL_LEN (60). */
+  times: NamedTime[];
+  issuedAt: number;
+}
+```
+
+Replace-the-set, per child (sent identically to every device), LWW by
+`issuedAt` under the usual per-(subject, kind) rollback protection. An
+*only these* time with neither `apps` nor `sites` is valid on the wire and
+runs nothing; guardian surfaces refuse to save one.
+
+**Which time is it now** (device, every tick, from the device's own `schedule`
+clause): take today's windows (the date override, else weekly). Inside a tagged
+window ⇒ that time — two tagged windows overlapping resolve to the earlier
+`start`, then array order (guardian surfaces refuse to emit the overlap).
+Else inside an untagged window ⇒ Free time. Else locked by schedule. A tag
+whose id the current `times` clause does not carry, or no `times` clause at
+all, **locks that span** ("Nothing is set up for this time yet"): a named
+window is a restriction relative to Free, and opening it as Free would grant
+exactly what the guardian meant to withhold. An unparseable `times` body, or
+one whose `v` is too high, is treated as absent — every tagged window locks,
+untagged windows are unaffected.
+
+**Per-time extension pools.** The `ExtensionLedger` gains pools keyed by
+named-time id beside the existing whole-device `schedule`/`budget` pools
+(which remain Free time's) and the bucket pools. Inside a window that is not
+otherwise locked, the window decides and no pool burns. When the window's own
+time cannot run — the device is **outside every window**, or the window's
+time is Free (or a `countsAgainstBudget` named time) and the **budget is
+spent** — the device falls through to the pools, in this order: Free's pool
+for the dimension that is locking (schedule pool when outside every window,
+budget pool when budget-locked — exactly today's M7 routing), then the named
+time whose pool was most recently topped up and still has minutes, which the
+device then runs as that named time; nothing left ⇒ locked. So "30 minutes of
+Learning time" given at 17:30 to a child whose Free budget ran out inside the
+16:00–19:00 window unlocks the device *as Learning time*, not as Free. Pools
+are today-only and idempotent by id exactly as before. `windowLeftSecs` under
+any time is the seconds until the end of the contiguous span of that same
+time (a pool-run span ends when the pool does).
+
+**Composition** (pure, in the shared crates; both wardens call it). Given Free
+time's resolved standing policy — `apps` after `effective_at(now)`, and
+`content` — and the active `NamedTime`:
+
+- `everythingExcept`: `apps.blocked := (blocked ∪ blockApps) \ unblockApps`
+  under Free's own posture; `content.parentDeny := (parentDeny ∪ denySites) \
+  undenySites`; `content.parentAllow := parentAllow ∪ undenySites`. All else
+  carries unchanged.
+- `onlyThese`: `apps.posture := allowlist`, `apps.allowed := apps`. When
+  `sites` is non-empty: `content.posture := allowlist`, `curators := []`,
+  `parentAllow := ⋃ sites[].domains`, SafeSearch / YouTube-restrict carried
+  from Free, and the device's **sanctioned web runtime is implied allowed** —
+  Linux renders a resolver-pinned site window per listed site exactly as the
+  `learning` clause does, and **sweeps unsanctioned Chromium-family processes
+  while the time is in force** by the same rule as "any site app in force"
+  (Firefox, unlisted, is swept by the allowlist; `policies.json` is untouched);
+  Android allows its default browser package behind the DNS allowlist. When
+  `sites` is empty, Free's web rules carry and no browser runs unless listed
+  in `apps`. **Linux, unknown inventory:** the `apps` allowlist is scoped to
+  the machine's inventory, and "an empty inventory blocks nothing" would make
+  an `onlyThese` time run as Free until the scan answers — a state a ward can
+  arrange without privilege (see §Apps). While the inventory is UNKNOWN an
+  `onlyThese` time is therefore **locked** (`lockReason: 'schedule'`), the
+  same fail direction as the learning arm that depends on the inventory.
+- **A named time's own additions are never inert.** Under `everythingExcept`:
+  if Free's `apps` is `paused`, the composed clause is un-paused with
+  `blocked := blockApps` only (Free's lists stay off, as the guardian meant);
+  if Free's `content` is `revoked` or absent and the time has `denySites`, a
+  blocklist clause with `parentDeny := denySites` is synthesised; a `paused`
+  content (block ALL web) carries, being the more restrictive state. Over an
+  `allowlist` Free posture, `blockApps` remove from `allowed` and
+  `unblockApps` add to it (as a hold folds). Under `onlyThese` with `sites`,
+  a Free `parentDeny` naming a listed site's domain is dropped (deny would
+  otherwise beat the allow the time just stated).
+- In every time: `apprules`, `buckets`, `hidden` and `alwaysavailable` apply
+  unchanged on top, and sanctioned learning windows survive (the existing
+  `sweep_decision` rule). A named time can never loosen those. Label length
+  is counted in Unicode code points on both stacks.
+- `countsAgainstBudget: false` (the default): usage charges neither the
+  screen budget nor any bucket; budget exhaustion never locks this time. A
+  bucket that is already spent stays blocked (caps apply in every time), but
+  nothing done inside a non-counting time accrues to one — a guardian who
+  wants a weekend *everything except* time to count sets the flag. A named
+  pool never lifts a budget lock the core makes immune to every pool (a
+  paused budget, an unsupported budget `v`, or the fail-safe budget that
+  stands in while usage cannot be saved); a non-counting *window* does open
+  over those states, since it charges and burns nothing and is bounded by a
+  window the guardian signed.
+
+**Ward-facing.** The lock surface says what is next — "Locked until Learning
+time at 09:00" — and the ask-for-more-time affordance offers a type when the
+child has any named time (default: inside a window now ⇒ that window's time;
+else the time whose window most recently ended today, else the next one up
+today, else Free). Unlocked in a named time, the
+ward's status shows "<Time> until HH:MM" and, for *only these*, what is
+allowed; the 10-/1-minute warnings name the time and what follows. A span
+locked because its tag is unknown reports `lockReason: 'schedule'` (so a
+current guardian app parses it) with the ward-facing copy above. STATUS
+gains `activeTime?: string` (the named-time id in force; absent when Free or
+locked) — pre-times payloads stay byte-identical.
+
+**Compatibility.** The `times` clause is new (store key 17); `ScheduleWindow.
+time`, `GiftBody.time` and the `time.extend` `time` field are additive at
+`v: 1`. A pre-times ward ignores all of them and runs tagged windows and typed
+gifts as Free time — a loosening in the documented direction, version-gated
+guardian-side: `wardenSupport.times = { android: 49, linux: 800 }` (ward
+Kintrinsic 0.7.0, charterd 0.8.0).
 
 ### Tethering (v1 — device-enforced, Android)
 
@@ -1300,6 +1459,7 @@ against this table rather than assume parity (MyCharter: `wardenSupport`).
 | `listening` (14) | **stored, inert** | enforced | a Linux lock freezes the slice, so audio stops regardless |
 | `alwaysavailable` (15) | **stored, inert** | enforced (≥ versionCode 39) | a Linux lock freezes the whole user slice, so an exempted app is frozen with everything else regardless of what the clause says |
 | `debugging` (16) | n/a (no adb to govern) | enforced (≥ versionCode 47) | addressed to one device, not to every device of the child |
+| `times` (17) | enforced (≥ 0.8.0 / 800) | enforced (≥ versionCode 49) | tagged schedule windows and typed gifts on an older warden run as Free time — version-gated guardian-side |
 
 "**stored, inert**" means the clause is authenticated against the pinned
 guardian and cached exactly as any other — rollback protection and all — and
@@ -1313,9 +1473,19 @@ approves it by **signing a gift-wrapped GRANT** (the device-brokering surface,
 not a sign-time clause). Frozen wire shape:
 
 ```ts
-interface TimeExtendRequestParams { minutesRequested: number /* u16, 1..=1440 */; reason?: string /* ≤280, private */; limitHit: 'schedule' | 'budget' | 'bucket'; bucketId?: string; }
-interface TimeExtendGrantParams   { minutesGranted: number   /* u16, 0..=1440 */; limitHit: 'schedule' | 'budget' | 'bucket'; bucketId?: string; }
+interface TimeExtendRequestParams { minutesRequested: number /* u16, 1..=1440 */; reason?: string /* ≤280, private */; limitHit: 'schedule' | 'budget' | 'bucket'; bucketId?: string; time?: string /* named-time id, §Times */; }
+interface TimeExtendGrantParams   { minutesGranted: number   /* u16, 0..=1440 */; limitHit: 'schedule' | 'budget' | 'bucket'; bucketId?: string; time?: string /* echoed verbatim */; }
 ```
+
+- **`time` — which kind of time the minutes buy (§Times).** Additive at v1.
+  The ward sets it from the ids its current `times` clause carries (default
+  per §Times); the grant **echoes it verbatim** so the params-echo check stays
+  exact. To answer with a *different* type the guardian surface sends a
+  `minutesGranted: 0` grant (closing the ask) plus a `gift` carrying the wanted
+  `time`, both wrapped to the asking device only. Device-side a typed grant
+  lands in that time's pool (`ExtensionLedger::apply_time`), never Free's;
+  an unknown id enacts no extra time. `time` on a `bucket`-hit grant is
+  ignored (a bucket pool is already a pool).
 
 - `MAX_EXTEND_MINUTES = 1440` (24h); minutes are **`u16`** on both sides.
 - The guardian may grant **less** than requested; `minutesGranted: 0` is a
@@ -1661,6 +1831,7 @@ interface StatusPayload {
   seq?: number;                    // per-device sequence, strictly increasing across restarts (incl. a wipe) — the ORDERING signal once present; see below
   appLockArmed?: boolean;          // Linux: the app lock (fapolicyd) is armed and enforcing right now; a Linux warden that has it always sends true/false
   debuggingOpen?: boolean;         // Android: adb is allowed right now (DISALLOW_DEBUGGING_FEATURES is not set); a ward that implements `debugging` sends true/false, or leaves it out when it cannot read the platform
+  activeTime?: string;             // §Times: the named-time id in force right now; absent when Free time or locked (pre-times payloads stay byte-identical)
 }
 ```
 
@@ -2566,6 +2737,8 @@ you change it in both, or a red test tells you which stack drifted.
 | Grant freshness skew | `300` s | `verify::FRESHNESS_SKEW_SECS` | (device-side only) |
 | Max `time.extend` minutes | `1440` | `MAX_EXTEND_MINUTES` | `MAX_EXTEND_MINUTES` |
 | Max child `reason`/`label` len | `280` | `MAX_REASON_LEN` | `MAX_REASON_LEN` |
+| Max named times per `times` clause | `16` | `MAX_NAMED_TIMES` | `MAX_NAMED_TIMES` |
+| Max named-time label len | `60` | `MAX_TIME_LABEL_LEN` | `MAX_TIME_LABEL_LEN` |
 | Warn thresholds | `600` / `60` s | `enforcer` (10-/1-min) | (device-side only) |
 | STATUS heartbeat | `60` s | warden `STATUS_HEARTBEAT_SECS` | (device-side only) |
 | Kinds | 1059/13/31111/31112/31113/31114/31000/31116/31117/31118/30100 | `primitives::kinds` | `wire/*` |

@@ -49,6 +49,8 @@ import {
   type NamedGroup,
 } from "../domain/namedTimes";
 import { NamedTimesSection } from "./NamedTimes";
+import { allowanceCopy } from "./allowanceCopy";
+import { hasTaggedWindows } from "./timesView";
 import { humanLabelFor, isCmdlineIdentity } from "../domain/launchSignatures";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Banner, Button, Card, Pill, SectionLabel } from "../components/ui";
@@ -80,6 +82,7 @@ import {
   type BucketsPolicy,
   type AlwaysAvailablePolicy,
   type TimeModel,
+  type NamedTime,
 } from "../domain/types";
 
 // ---------------------------------------------------------------------------
@@ -115,9 +118,13 @@ function fmtDuration(mins: number): string {
 export function buildSchedule(src?: Schedule): Schedule {
   const weekly: Partial<Record<Weekday, ScheduleWindow[]>> = {};
   for (const d of WEEKDAYS) {
+    // The `time` tag MUST survive: a window tagged with a time's id runs that
+    // time, and a copy that dropped it would turn every Learning window into
+    // Free time on the next save — the exact loosening the tag exists to stop.
     weekly[d] = (src?.weekly?.[d] ?? []).map((w) => ({
       start: w.start,
       end: w.end,
+      ...(w.time !== undefined ? { time: w.time } : {}),
     }));
   }
   const out: Schedule = {
@@ -193,10 +200,13 @@ export function scheduleSummary(s: Schedule, authored = true): string {
   // nothing is holding it — the one failure this whole card exists to avoid.
   if (!authored) return "No schedule set yet";
   if (s.paused) return "Schedule off — allowed anytime";
-  const open = WEEKDAYS.filter((d) => (s.weekly[d] ?? []).length > 0).length;
+  // Free time's days only: a window tagged for another time (Learning time on
+  // weekday mornings) is that time's, not Free time's.
+  const open = WEEKDAYS.filter((d) => (s.weekly[d] ?? []).some((w) => w.time === undefined)).length;
+  const otherTimes = WEEKDAYS.some((d) => (s.weekly[d] ?? []).some((w) => w.time !== undefined));
   // Not "No time allowed yet" — that reads as a setup the guardian abandoned
   // half-done, when it is in fact the whole point of a spare device.
-  if (open === 0) return "Off — you open it when needed";
+  if (open === 0) return otherTimes ? "Off — only other times run" : "Off — you open it when needed";
   if (open === 7) return "Allowed every day";
   return `Allowed ${open} ${open === 1 ? "day" : "days"} a week`;
 }
@@ -414,20 +424,20 @@ export function appsSummary(a: AppsPolicy, nowUnix: number): string {
   return `${a.blocked.length} app${a.blocked.length === 1 ? "" : "s"} blocked${forAWhile}${alsoRemoved}`;
 }
 
-/** The collapsed-row summary for Named times — a closed row has to say what
+/** The collapsed-row summary for App allowances — a closed row has to say what
  *  it currently means, or collapsing the screen just hides the rules instead
  *  of summarising them. Counts groups by policy rather than trying to name
  *  them all, mirroring the old buckets/learning summaries' "say the shape,
  *  not every detail" approach. */
 export function namedTimesSummary(groups: NamedGroup[]): string {
-  if (groups.length === 0) return "No named times yet";
+  if (groups.length === 0) return "No app allowances yet";
   const free = groups.filter((g) => g.policy === "free").length;
   const counted = groups.filter((g) => g.policy === "counted").length;
   const onRequest = groups.filter((g) => g.policy === "onRequest").length;
   const bits: string[] = [];
-  if (free) bits.push(`${free} free`);
+  if (free) bits.push(`${free} time-free`);
   if (counted) bits.push(`${counted} counted`);
-  if (onRequest) bits.push(`${onRequest} on request`);
+  if (onRequest) bits.push(`${onRequest} ask first`);
   return bits.join(", ");
 }
 
@@ -462,7 +472,10 @@ export type SectionId =
 export const SECTION_TITLE: Record<SectionId, string> = {
   schedule: "Daily schedule",
   budget: "Time limit",
-  "named-times": "Named times",
+  // Was "Named times". A *time* now always means a window with a posture
+  // (Free time, Learning time…); this screen is the apps-within-Free-time
+  // groups, so it says so. The id stays: routes and saved links use it.
+  "named-times": "App allowances",
   listening: "When time's up",
   web: "Websites",
   apps: "Apps",
@@ -479,10 +492,12 @@ export function Toggle({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -490,8 +505,10 @@ export function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       style={{
+        opacity: disabled ? 0.5 : 1,
         width: 46,
         height: 28,
         flex: "0 0 auto",
@@ -608,13 +625,27 @@ const timeInput: CSSProperties = {
 // Schedule editor
 // ---------------------------------------------------------------------------
 
-function ScheduleEditor({
+function PlainScheduleEditor({
   schedule,
   onChange,
+  kind,
+  children,
 }: {
   schedule: Schedule;
   onChange: (next: Schedule) => void;
+  /** Set when this edits ONE named time's windows rather than Free time's:
+   *  only the words change ("Runs" for "Allowed"), never the behaviour. */
+  kind?: string;
+  /** Rendered after the day rows, inside the same stack. */
+  children?: ReactNode;
 }) {
+  const onWord = kind ? "Runs" : "Allowed";
+  const offWord = kind ? "Doesn’t run" : "Blocked";
+  const addWord = kind ? "+ Add another window" : "+ Add another time";
+  const removeWord = kind ? "window" : "time";
+  const dayToggleLabel = (day: Weekday) =>
+    kind ? `Run ${kind} on ${DAY_FULL[day]}` : `Allow screen time on ${DAY_FULL[day]}`;
+  const everyDayLabel = kind ? `Run ${kind} every day` : "Allow screen time every day";
   function setWindows(day: Weekday, windows: ScheduleWindow[]) {
     onChange({ ...schedule, weekly: { ...schedule.weekly, [day]: windows } });
   }
@@ -691,10 +722,10 @@ function ScheduleEditor({
           <div className="row-between">
             <span style={{ fontWeight: 600 }}>Every day</span>
             <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="row-sub">{sharedAllowed ? "Allowed" : "Blocked"}</span>
+              <span className="row-sub">{sharedAllowed ? onWord : offWord}</span>
               <Toggle
                 checked={sharedAllowed}
-                label="Allow screen time every day"
+                label={everyDayLabel}
                 onChange={(on) => setSharedWindows(on ? [{ ...DEFAULT_WINDOW }] : [])}
               />
             </span>
@@ -734,7 +765,7 @@ function ScheduleEditor({
                   <button
                     type="button"
                     style={{ ...roundBtn, fontSize: 18 }}
-                    aria-label="Remove this time"
+                    aria-label={`Remove this ${removeWord}`}
                     onClick={() => setSharedWindows(shared.filter((_, xi) => xi !== i))}
                   >
                     ×
@@ -745,11 +776,12 @@ function ScheduleEditor({
                 variant="ghost"
                 onClick={() => setSharedWindows([...shared, { ...DEFAULT_WINDOW }])}
               >
-                + Add another time
+                {addWord}
               </Button>
             </div>
           )}
         </div>
+        {children}
       </div>
     );
   }
@@ -773,11 +805,11 @@ function ScheduleEditor({
               <span style={{ fontWeight: 600 }}>{DAY_FULL[day]}</span>
               <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span className="row-sub">
-                  {allowed ? "Allowed" : "Blocked"}
+                  {allowed ? onWord : offWord}
                 </span>
                 <Toggle
                   checked={allowed}
-                  label={`Allow screen time on ${DAY_FULL[day]}`}
+                  label={dayToggleLabel(day)}
                   onChange={(on) =>
                     setWindows(day, on ? [{ ...DEFAULT_WINDOW }] : [])
                   }
@@ -824,7 +856,7 @@ function ScheduleEditor({
                     <button
                       type="button"
                       style={{ ...roundBtn, fontSize: 18 }}
-                      aria-label={`Remove this time on ${DAY_FULL[day]}`}
+                      aria-label={`Remove this ${removeWord} on ${DAY_FULL[day]}`}
                       onClick={() =>
                         setWindows(
                           day,
@@ -842,16 +874,147 @@ function ScheduleEditor({
                     setWindows(day, [...windows, { ...DEFAULT_WINDOW }])
                   }
                 >
-                  + Add another time
+                  {addWord}
                 </Button>
               </div>
             )}
           </div>
         );
       })}
+      {children}
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Tagged windows in the schedule editor
+// ---------------------------------------------------------------------------
+
+/** A schedule's TAGGED windows (those that run a named time), by weekday. */
+function taggedByDay(schedule: Schedule): Partial<Record<Weekday, ScheduleWindow[]>> {
+  const out: Partial<Record<Weekday, ScheduleWindow[]>> = {};
+  for (const d of WEEKDAYS) {
+    const t = (schedule.weekly[d] ?? []).filter((w) => w.time !== undefined);
+    if (t.length > 0) out[d] = t;
+  }
+  return out;
+}
+
+/** The schedule as Free time sees it: untagged windows only. The Free editor's
+ *  "same every day" and per-day toggles reason about whole days, and would
+ *  otherwise overwrite or drop a tagged window they cannot see. */
+function freeView(schedule: Schedule): Schedule {
+  const weekly: Schedule["weekly"] = {};
+  for (const d of WEEKDAYS) {
+    weekly[d] = (schedule.weekly[d] ?? []).filter((w) => w.time === undefined);
+  }
+  return { ...schedule, weekly };
+}
+
+/** Put the tagged windows back after an edit of the Free view. */
+function withTagged(
+  edited: Schedule,
+  tagged: Partial<Record<Weekday, ScheduleWindow[]>>,
+): Schedule {
+  const weekly: Schedule["weekly"] = {};
+  for (const d of WEEKDAYS) {
+    weekly[d] = [...(edited.weekly[d] ?? []), ...(tagged[d] ?? [])];
+  }
+  return { ...edited, weekly };
+}
+
+/**
+ * The windows that run another time, drawn apart from Free time's: a tinted
+ * block with the time's name, so a guardian can see at a glance which hours are
+ * Learning time and which are Free. They are edited in the time's own page, not
+ * here — editing them here could not offer the time's apps and sites.
+ */
+function TaggedWindowList({
+  tagged,
+  times,
+}: {
+  tagged: Partial<Record<Weekday, ScheduleWindow[]>>;
+  times: readonly NamedTime[];
+}) {
+  const label = (id: string) => times.find((t) => t.id === id)?.label ?? "A time that isn’t set up";
+  const rows: { key: string; id: string; text: string }[] = [];
+  for (const d of WEEKDAYS) {
+    for (const w of tagged[d] ?? []) {
+      rows.push({
+        key: `${d}-${w.start}-${w.end}-${w.time}`,
+        id: w.time as string,
+        text: `${DAY_FULL[d].slice(0, 3)} ${w.start}–${w.end}`,
+      });
+    }
+  }
+  if (rows.length === 0) return null;
+  return (
+    <ul
+      className="tagged-windows"
+      aria-label="Other times on this schedule"
+      style={{
+        listStyle: "none",
+        margin: "14px 0 0",
+        padding: 0,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}
+    >
+      {rows.map((r) => (
+        <li
+          key={r.key}
+          style={{
+            borderLeft: "4px solid var(--brand, #b8742a)",
+            background: "var(--brand-bg, rgba(184,116,42,0.12))",
+            borderRadius: "var(--radius-control, 8px)",
+            padding: "8px 12px",
+            fontSize: "var(--fs-small, 14px)",
+          }}
+        >
+          <b>{label(r.id)}</b> · {r.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * The schedule editor. Free time's hours are what it edits; windows tagged for
+ * another time pass through untouched and are drawn distinctly beneath. Pass
+ * `kind` to edit ONE time's windows instead (its own editor feeds it a schedule
+ * holding just that time's windows, untagged — the tag is applied on save).
+ */
+export function ScheduleEditor({
+  schedule,
+  onChange,
+  times = [],
+  kind,
+}: {
+  schedule: Schedule;
+  onChange: (next: Schedule) => void;
+  times?: readonly NamedTime[];
+  kind?: string;
+}) {
+  const tagged = taggedByDay(schedule);
+  if (Object.keys(tagged).length === 0) {
+    return <PlainScheduleEditor schedule={schedule} onChange={onChange} kind={kind} />;
+  }
+  return (
+    <PlainScheduleEditor
+      schedule={freeView(schedule)}
+      onChange={(next) => onChange(withTagged(next, tagged))}
+      kind={kind}
+    >
+      <TaggedWindowList tagged={tagged} times={times} />
+      <p className="card-sub" style={{ margin: "6px 0 0" }}>
+        These hours belong to another time, not Free time. Where one overlaps
+        Free time it carves out of it. Change them on that time’s own page.
+      </p>
+    </PlainScheduleEditor>
+  );
+}
+
 
 // ---------------------------------------------------------------------------
 // Budget editor
@@ -918,10 +1081,10 @@ function BudgetEditor({
       {model === "named" && (
         <>
           <Banner tone="info">
-            Nothing costs until you name it in <b>Named times</b>. Several
-            named apps open together still only spend the day once between
-            them. An app you haven't named — including one just
-            installed — is free until you name it.
+            Nothing costs until you put it under <b>App allowances</b>. Several
+            counted apps open together still only spend the day once between
+            them. An app you haven't listed — including one just
+            installed — is free until you do.
           </Banner>
           {timeModelNote && <ParityNote note={timeModelNote} />}
         </>
@@ -1573,7 +1736,7 @@ function parseWebDomain(s: string): { ok: true; value: string } | { ok: false; m
 }
 
 /** Editable list of site domains — add via input, remove via chip. */
-function DomainList({
+export function DomainList({
   label,
   hint,
   items,
@@ -2592,11 +2755,17 @@ function Split<V>({
   shared,
   setShared,
   render,
+  keepSplit,
 }: {
   ctx: SplitCtx;
   control: SplittableControl;
   shared: V;
   setShared: (v: V) => void;
+  /** When set while split, the switch back to one shared rule is held off and
+   *  this says why. Going back to shared keeps only the base value, so it would
+   *  silently delete whatever lives only in the per-device copies (a device's
+   *  Learning time windows, for the schedule). */
+  keepSplit?: string;
   /** `deviceId` is the device this copy is for, or undefined for the one shared
    *  rule. An editor that offers a list of the ward's apps MUST use it — the
    *  shared list spans every device, and half of it can't exist on any one of
@@ -2627,9 +2796,15 @@ function Split<V>({
           <Toggle
             checked={split}
             label="Set separately for each device"
+            disabled={split && keepSplit !== undefined}
             onChange={(on) => (on ? splitOn(control, shared) : splitOff(control))}
           />
         </div>
+      )}
+      {canSplit && split && keepSplit && (
+        <p className="card-sub" style={{ margin: "-4px 0 10px" }}>
+          {keepSplit}
+        </p>
       )}
       {split && canSplit
         ? pairedDevices.map((d) => (
@@ -3212,7 +3387,7 @@ export function DeviceLimits({
       return;
     }
     if (namedTimesErr) {
-      setSaveError(namedTimesErr);
+      setSaveError(allowanceCopy(namedTimesErr));
       return;
     }
     setSaveError(null);
@@ -3304,6 +3479,13 @@ export function DeviceLimits({
     state.signer.connected && !state.signer.autoSign && dirty;
 
   const dormantOn = dormantIntent || (scheduleAuthored && isDormant(draftSchedule));
+  // Hours that run another time anywhere on this child's schedules (base or a
+  // device's own). Free time's editor leaves them alone, and must not offer the
+  // two moves that would destroy them: "off unless I open it" and going back to
+  // one shared schedule.
+  const anyTaggedWindows =
+    hasTaggedWindows(draftSchedule) ||
+    Object.values(draftOverrides).some((o) => hasTaggedWindows(o.schedule));
 
   // The body of every control; the page renders only the one named by `only`.
   // The row summaries live in `ruleSummaries`, for the child page.
@@ -3318,7 +3500,10 @@ export function DeviceLimits({
           {/* The posture comes FIRST because it overrules everything under it: a
               spare device that is off until someone opens it has no daily
               schedule to speak of, and showing one implies a standing allowance
-              that isn't there. */}
+              that isn't there. Not offered once another time (Learning time…)
+              has hours on the schedule: "off unless I open it" would wipe them,
+              and the guardian turns Free time's days off below instead. */}
+          {!anyTaggedWindows && (
           <div className="row-between" style={{ marginBottom: 4 }}>
             <div className="row-main">
               <span className="row-title">Off unless I open it</span>
@@ -3339,6 +3524,7 @@ export function DeviceLimits({
               }}
             />
           </div>
+          )}
           {!dormantOn && (
             <>
               <div className="row-between" style={{ marginBottom: 4 }}>
@@ -3356,7 +3542,14 @@ export function DeviceLimits({
                 control="schedule"
                 shared={draftSchedule}
                 setShared={setDraftSchedule}
-                render={(v, on) => <ScheduleEditor schedule={v} onChange={on} />}
+                keepSplit={
+                  anyTaggedWindows
+                    ? "Another time has hours on a device, so each device keeps its own schedule. Remove those hours to share one again."
+                    : undefined
+                }
+                render={(v, on) => (
+                  <ScheduleEditor schedule={v} onChange={on} times={policy.times ?? []} />
+                )}
               />
             </>
           )}
@@ -3412,14 +3605,14 @@ export function DeviceLimits({
           <ParityNote
             note={parityNote(
               "buckets",
-              "A counted named time",
+              "A counted app allowance",
               "There, those apps come out of the day's screen time like everything else.",
             )}
           />
           <ParityNote
             note={parityNote(
               "learning",
-              "A free named time",
+              "A time-free app allowance",
               "There, those apps spend the day's screen time like anything else.",
             )}
           />
@@ -3436,7 +3629,7 @@ export function DeviceLimits({
                 draftGroups.some(
                   (g) => g.policy === "counted" && g.weeklyMinutes != null && g.dailyMinutes == null,
                 )
-                  ? "Until then, a named time with only a weekly limit switches off every counted named time on it — give each a daily limit too, or update first."
+                  ? "Until then, an allowance with only a weekly limit switches off every counted allowance on it — give each a daily limit too, or update first."
                   : "Until then only the daily limit is honoured there.",
               )}
             />
@@ -3465,7 +3658,7 @@ export function DeviceLimits({
               this screen alone that a split exists. */}
           {appsSplitDevices.length > 0 && (
             <ParityNote
-              note={`${appsSplitDevices.join(" and ")} ${appsSplitDevices.length > 1 ? "have" : "has"} its own separate app rules — on-request apps you add here still reach it, but the rest of its rules are set on the Apps section's per-device split.`}
+              note={`${appsSplitDevices.join(" and ")} ${appsSplitDevices.length > 1 ? "have" : "has"} its own separate app rules — ask-first apps you add here still reach it, but the rest of its rules are set on the Apps section's per-device split.`}
             />
           )}
         </>
@@ -3568,7 +3761,7 @@ export function DeviceLimits({
                 // `humanLabelFor` resolves it to a real name first.
                 .map((pkg) => reportedApps.find((a) => a.pkg === pkg)?.label ?? humanLabelFor(pkg) ?? pkg)
                 .join(", ")}{" "}
-              {managedAppsPkgs.size > 1 ? "are" : "is"} managed in Named times — edit{" "}
+              {managedAppsPkgs.size > 1 ? "are" : "is"} managed in App allowances — edit{" "}
               {managedAppsPkgs.size > 1 ? "them" : "it"} there, not here.
             </p>
           )}

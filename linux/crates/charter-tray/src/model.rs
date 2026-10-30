@@ -148,6 +148,16 @@ pub fn view_for(t: Option<&TimeLeftView>) -> TrayView {
             Some("budget") => "Your time starts again tomorrow.".into(),
             _ => "Click to see when you can come back.".into(),
         };
+        // §Times: the times layer's own lock copy ("Locked until Learning
+        // time at 09:00", "Nothing is set up for this time yet") when it has
+        // one — it knows which window can actually run next.
+        let times = t.time.as_ref();
+        let status_line = times
+            .and_then(|v| v.lock_title.clone())
+            .unwrap_or(status_line);
+        let tooltip_detail = times
+            .and_then(|v| v.lock_detail.clone())
+            .unwrap_or(tooltip_detail);
         return TrayView {
             icon: IconState::Locked,
             title: "Kintrinsic — locked".into(),
@@ -166,6 +176,36 @@ pub fn view_for(t: Option<&TimeLeftView>) -> TrayView {
         };
     }
     let left = humanize(t.effective_seconds);
+    // §Times: in a time, the header says WHICH ("Learning time until 12:00")
+    // and the detail says what is allowed in it and what follows — a ward in
+    // an only-these time needs to know what will open before they try it.
+    if let Some(v) = t.time.as_ref().filter(|v| !v.label.is_empty()) {
+        let status_line = match &v.until {
+            Some(until) => format!("{} until {until}", v.label),
+            None => v.label.clone(),
+        };
+        let mut detail: Vec<String> = Vec::new();
+        if !v.allowed.is_empty() {
+            detail.push(format!("Allowed: {}", v.allowed.join(", ")));
+        }
+        if v.until.is_some() {
+            detail.push(match &v.then {
+                Some(next) => format!("Then {next}"),
+                None => "Then locked".to_string(),
+            });
+        }
+        return TrayView {
+            icon: if t.effective_seconds < LOW_MINUTES * 60 {
+                IconState::Low
+            } else {
+                IconState::Ok
+            },
+            title: format!("Kintrinsic — {} · {left} left", v.label),
+            status_line,
+            asks_enabled: true,
+            tooltip_detail: detail.join(" · "),
+        };
+    }
     TrayView {
         icon: if t.effective_seconds < LOW_MINUTES * 60 {
             IconState::Low
@@ -181,9 +221,18 @@ pub fn view_for(t: Option<&TimeLeftView>) -> TrayView {
 
 /// The `time.extend` request params for an ask of `minutes`, routed to the
 /// wall that is actually hit (M7 — see [`TimeLeftView::limit_hit`]).
+///
+/// §Times: the ask names the daemon's default kind of time for this ward
+/// ([`TimeLeftView::default_ask_time`]) — the window they are in, else the one
+/// that most recently ended — and carries no `time` for Free time, so a child
+/// with no named times asks exactly as before.
 pub fn ask_params(t: Option<&TimeLeftView>, minutes: u16) -> String {
     let limit_hit = t.map(TimeLeftView::limit_hit).unwrap_or("budget");
-    serde_json::json!({ "minutesRequested": minutes, "limitHit": limit_hit }).to_string()
+    let mut params = serde_json::json!({ "minutesRequested": minutes, "limitHit": limit_hit });
+    if let Some(time) = t.and_then(TimeLeftView::default_ask_time) {
+        params["time"] = serde_json::Value::String(time.to_string());
+    }
+    params.to_string()
 }
 
 /// The `time.extend` request params for asking to top up ONE named group —
@@ -356,6 +405,7 @@ mod tests {
             budget_day_seconds: day,
             budget_week_seconds: week,
             ask_first: Vec::new(),
+            time: None,
         }
     }
 
@@ -435,6 +485,7 @@ mod tests {
             budget_day_seconds: -1,
             budget_week_seconds: -1,
             ask_first: Vec::new(),
+            time: None,
         }
     }
 
@@ -640,5 +691,58 @@ mod tests {
         assert!(notice_for(&req(ReqState::Expired, Op::AppOpen)).is_some());
         assert!(notice_for(&req(ReqState::Pending, Op::AppOpen)).is_none());
         assert!(notice_for(&req(ReqState::Cancelled, Op::AppOpen)).is_none());
+    }
+
+    // ---- times (§Times) -------------------------------------------------------
+
+    fn in_time(label: &str, until: Option<&str>, allowed: &[&str]) -> TimeLeftView {
+        let mut v = t(45 * 60, false, None);
+        v.time = Some(Box::new(charter_ipc::dto::TimesView {
+            active: Some("learning".into()),
+            label: label.into(),
+            until: until.map(String::from),
+            then: Some("Free time".into()),
+            allowed: allowed.iter().map(|s| s.to_string()).collect(),
+            ask: vec![charter_ipc::dto::TimeChoice {
+                id: "learning".into(),
+                label: label.into(),
+            }],
+            ask_default: Some("learning".into()),
+            ..Default::default()
+        }));
+        v
+    }
+
+    #[test]
+    fn in_a_named_time_the_tray_says_which_until_when_and_what_is_allowed() {
+        let v = view_for(Some(&in_time(
+            "Learning time",
+            Some("12:00"),
+            &["Khan Academy"],
+        )));
+        assert_eq!(v.status_line, "Learning time until 12:00");
+        assert_eq!(v.tooltip_detail, "Allowed: Khan Academy · Then Free time");
+        assert!(v.title.contains("Learning time"));
+    }
+
+    #[test]
+    fn a_times_lock_shows_the_next_time() {
+        let mut v = t(0, true, Some("schedule"));
+        v.time = Some(Box::new(charter_ipc::dto::TimesView {
+            lock_title: Some("Locked until Learning time at 09:00".into()),
+            ..Default::default()
+        }));
+        assert_eq!(
+            view_for(Some(&v)).status_line,
+            "Locked until Learning time at 09:00"
+        );
+    }
+
+    #[test]
+    fn the_tray_ask_names_the_default_time_and_free_time_stays_untyped() {
+        let typed = ask_params(Some(&in_time("Learning time", None, &[])), 30);
+        assert!(typed.contains("\"time\":\"learning\""), "{typed}");
+        let plain = ask_params(Some(&t(0, true, Some("budget"))), 30);
+        assert!(!plain.contains("\"time\""), "{plain}");
     }
 }

@@ -81,6 +81,7 @@ fn sample() -> TimeLeftView {
         offline: false,
         learning_today_seconds: None,
         used_today_seconds: Some(74 * 60),
+        time: None,
         buckets: vec![
             BucketView {
                 id: "play".into(),

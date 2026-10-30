@@ -22,6 +22,7 @@ import {
 } from "../wire/grant";
 import { isAskExpired } from "../domain/askExpiry";
 import { endAskDecision, tryBeginAskDecision, useAskDecisionInFlight } from "./askDecisionLock";
+import { UNKNOWN_TIME_PHRASE, canUseTimes, timeLabelFor } from "../domain/times";
 
 // One ask from a ward's device, as a card.
 //
@@ -73,22 +74,39 @@ const COMPACT_WINDOW: AppOpenWindow = "1h";
  * than the generic device-phrased `req.title` `ingestDeviceRequest` stores —
  * the group label is only knowable here, joined against the saved policy.
  */
-function displayTitle(req: ChildRequest, bucketLabel: string | undefined): string {
+function displayTitle(
+  req: ChildRequest,
+  bucketLabel: string | undefined,
+  typeLabel?: string,
+): string {
   // Belt and braces (F1 review): `identityDisplayLabel` resolves a raw
   // `cmdline:` string (which should never itself be device-reported, but
   // could ride back on an already-saved policy) to its signature's label
   // rather than showing the needle on the card's heading.
   if (req.kind === "app.open") return `Open ${identityDisplayLabel(req.appLabel, req.appId) ?? "this app"}?`;
   if (bucketLabel) return `More ${bucketLabel} time?`;
+  // Times: the kind of time asked for ("More Learning time?"), named the way a
+  // bucket ask is. Free time is the plain ask and keeps its plain title.
+  if (typeLabel) return `More ${typeLabel}?`;
   return req.title;
 }
 
 /** The compact card's one line: who asks for what, in plain words. */
-function compactTitle(req: ChildRequest, childName: string, bucketLabel: string | undefined): string {
+function compactTitle(
+  req: ChildRequest,
+  childName: string,
+  bucketLabel: string | undefined,
+  typeLabel?: string,
+): string {
   const what = identityDisplayLabel(req.appLabel, req.appId);
   switch (req.kind) {
     case "time.extend":
       if (bucketLabel) return `${childName} wants more ${bucketLabel} time`;
+      if (typeLabel) {
+        return req.minutesRequested
+          ? `${childName} wants ${req.minutesRequested} more minutes of ${typeLabel}`
+          : `${childName} wants more ${typeLabel}`;
+      }
       return req.minutesRequested
         ? `${childName} wants ${req.minutesRequested} more minutes`
         : `${childName} wants more time`;
@@ -158,7 +176,7 @@ export function RequestCard({
   // connected) — the request stays pending and the guardian sees why.
   const [decideError, setDecideError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [sheet, setSheet] = useState<"approve" | "give" | null>(null);
+  const [sheet, setSheet] = useState<"approve" | "give" | "retype" | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   // Busy while THIS card is sending or while any other ask is: only one
@@ -213,6 +231,16 @@ export function RequestCard({
     isExtend && req.limitHit === "bucket"
       ? bucketGroupLabel(req.bucketId, devicePolicy?.buckets?.buckets)
       : undefined;
+  // Times: the kind of time the ward asked for more of. A time deleted since
+  // the ask still has an id on it but nothing to name it, and approving "as
+  // asked" would send a grant for a time the device no longer has (it enacts
+  // nothing), so that case offers only a different kind.
+  const typeLabel = isExtend && req.time ? timeLabelFor(devicePolicy?.times, req.time) : undefined;
+  const unknownType = isExtend && !!req.time && typeLabel === undefined;
+  // Re-typing sends a gift of another kind to the asking device, which an older
+  // (or never-reported) ward would land as Free time whatever was chosen.
+  const askerCanType = !!device && canUseTimes(device, deviceStatus);
+  const hasOtherKinds = ((devicePolicy?.times?.length ?? 0) > 0 || !!req.time) && askerCanType;
   // "45m of 1h today · 2h of 5h this week" — only when THIS device's live
   // STATUS actually reports the group. Caps drop out (raw meters instead)
   // while Counted times is paused.
@@ -294,7 +322,7 @@ export function RequestCard({
       : blockedUnverified
         ? "Can't verify this app"
         : isExtend && askedFor > 0
-          ? `Approve ${granted} min`
+          ? `Approve ${granted} min${typeLabel ? ` of ${typeLabel}` : ""}`
           : isArtifact
             ? `Approve ${artifactVerb(req.kind)} once`
             : "Approve";
@@ -304,6 +332,17 @@ export function RequestCard({
       {sheet === "approve" && (
         <LeverSheet
           mode="approve"
+          child={child}
+          request={req}
+          onClose={(n) => {
+            setSheet(null);
+            if (n) setNote(n);
+          }}
+        />
+      )}
+      {sheet === "retype" && (
+        <LeverSheet
+          mode="retype"
           child={child}
           request={req}
           onClose={(n) => {
@@ -340,7 +379,9 @@ export function RequestCard({
           onClick={() => setExpanded(true)}
         >
           <Avatar name={child.name} color={child.color} size={32} />
-          <span className="request-compact-title">{compactTitle(req, child.name, bucketLabel)}</span>
+          <span className="request-compact-title">
+            {compactTitle(req, child.name, bucketLabel, typeLabel)}
+          </span>
           <span className="request-compact-more">Details ›</span>
         </button>
         {expired && (
@@ -375,7 +416,7 @@ export function RequestCard({
                 >
                   {approving ? "Sending…" : "1 hour"}
                 </Button>
-              ) : (
+              ) : unknownType ? null : (
                 <Button
                   className="lever-primary"
                   disabled={isBusy || blockedUnverified}
@@ -428,7 +469,7 @@ export function RequestCard({
         ✕
       </button>
       <div className="row-between" style={{ alignItems: "flex-start", paddingRight: 40 }}>
-        <h2 className="card-title">{displayTitle(req, bucketLabel)}</h2>
+        <h2 className="card-title">{displayTitle(req, bucketLabel, typeLabel)}</h2>
         <span style={{ fontSize: 22, lineHeight: 1 }} aria-hidden="true">
           {KIND_EMOJI[req.kind]}
         </span>
@@ -450,6 +491,14 @@ export function RequestCard({
         <span aria-hidden="true">·</span>
         <span>{timeAgo(req.createdAt, now)}</span>
       </p>
+
+      {isExtend && req.time && (
+        <p className="card-sub" style={{ marginBottom: 4 }}>
+          {typeLabel
+            ? `${child.name} asks for ${askedFor > 0 ? `${askedFor} min of ` : ""}${typeLabel} on ${deviceLabel}.`
+            : `${child.name} asked for ${UNKNOWN_TIME_PHRASE}.`}
+        </p>
+      )}
 
       {standing && (
         <p className="card-sub" style={{ color: "var(--warn, #9a6516)" }}>
@@ -590,7 +639,7 @@ export function RequestCard({
       )}
 
       <div style={{ display: "flex", gap: 12, marginTop: 18 }}>
-        {!isAppOpen && (
+        {!isAppOpen && !unknownType && (
           <Button
             variant="primary"
             block
@@ -621,6 +670,21 @@ export function RequestCard({
             onClick={() => setSheet("approve")}
           >
             Change amount
+          </button>
+        </div>
+      )}
+      {/* Only a real ask (it has something on the wire to answer) and only when
+          there is another kind to give: Free time instead of Learning time, or
+          the other way round. */}
+      {isExtend && !!req.reqId && askedFor > 0 && !expired && hasOtherKinds && (
+        <div style={{ marginTop: 6, textAlign: "center" }}>
+          <button
+            type="button"
+            className="request-details"
+            disabled={isBusy}
+            onClick={() => setSheet("retype")}
+          >
+            Give a different kind of time
           </button>
         </div>
       )}

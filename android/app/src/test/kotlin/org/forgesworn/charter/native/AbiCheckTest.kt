@@ -15,11 +15,12 @@ import org.junit.Test
  */
 class AbiCheckTest {
 
-    /** ABI 3: the local link entry points (`charterLink*`). Moves together
-     *  with `ABI_VERSION` in android/jni/src/lib.rs. */
+    /** ABI 5: times (§Times) — `charterDnsPlan` takes the clock and
+     *  `charterSetDefaultBrowser` is new. Moves together with `ABI_VERSION`
+     *  in android/jni/src/lib.rs. */
     @Test
-    fun thisBuildExpectsAbiThree() {
-        assertEquals(4, CharterCore.EXPECTED_ABI_VERSION)
+    fun thisBuildExpectsAbiFive() {
+        assertEquals(5, CharterCore.EXPECTED_ABI_VERSION)
     }
 
     @Test

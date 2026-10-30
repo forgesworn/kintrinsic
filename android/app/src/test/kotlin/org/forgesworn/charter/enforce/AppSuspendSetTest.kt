@@ -202,4 +202,32 @@ class AppSuspendSetTest {
             appSuspendSet(launchable, true, null, emptySet(), emptySet(), emptySet(), emptySet()),
         )
     }
+
+    /**
+     * §Times: an `onlyThese` time that lists sites arrives from the core as an
+     * allowlist that already names the device's default browser. The browser
+     * must survive the suspend set (or its sites could never be opened), and
+     * everything else not named must not.
+     */
+    @Test
+    fun `a composed only-these allowlist leaves its apps and the implied browser running`() {
+        val composed = policy("allowlist", allowed = listOf("com.school", "com.browser"))
+        val out = appSuspendSet(
+            launchable + "com.browser",
+            locked = false,
+            appPolicy = composed,
+            ruleSuspensions = emptySet(),
+        )
+        assertEquals(setOf("com.game", "com.book", "com.chat"), out)
+        assertFalse("com.browser" in out)
+        assertFalse("com.school" in out)
+    }
+
+    /** With the browser unknown nothing is added: the sites are unreachable, not guessed. */
+    @Test
+    fun `an unknown browser is not allowed`() {
+        val composed = policy("allowlist", allowed = listOf("com.school"))
+        val out = appSuspendSet(launchable + "com.browser", false, composed, emptySet())
+        assertTrue("com.browser" in out)
+    }
 }

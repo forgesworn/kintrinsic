@@ -39,6 +39,17 @@ pub struct ChartedClause {
 pub struct GrantScheduleWindow {
     pub start: String,
     pub end: String,
+    /// Named-time id this window runs (§Times). Absent = Free time. A tagged
+    /// window wins over an untagged one where they overlap (it carves), and a
+    /// tag the device's `times` clause does not carry LOCKS its span.
+    ///
+    /// Additive at `v: 1`: serde drops nothing here, but the OLD evaluators
+    /// ([`evaluate_grant_schedule`](crate::evaluate_grant_schedule) and
+    /// friends) read only `start`/`end` and so run a tagged window as Free —
+    /// exactly what a pre-times ward does. Anything that must honour tags
+    /// calls [`evaluate_times`](crate::evaluate_times) instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
 }
 
 /// Recurring weekly windows.

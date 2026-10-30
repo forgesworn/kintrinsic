@@ -9,6 +9,7 @@
 
 import { nip44, verifyEvent, type NostrEvent } from "nostr-tools";
 import { MAX_EXTEND_MINUTES } from "./grant";
+import { isValidTimeId } from "./times";
 import type { AppOpenRequestParams, TimeExtendLimitHit, TimeExtendRequestParams } from "./types";
 
 export const CHARTER_DEVICE_REQUEST = 31111;
@@ -175,6 +176,10 @@ export function parseRequest(json: string): DeviceRequest | null {
   }
   if (!LIMITS.includes(p.limitHit as TimeExtendLimitHit)) return null;
   if (p.bucketId !== undefined && !validBucketId(p.bucketId)) return null;
+  // The named time asked for (contract §Times). A malformed id drops the whole
+  // ask, as a malformed bucketId does; "free" is reserved and never sent (Free
+  // is an ABSENT field), so a request that says it is not one a real ward made.
+  if (p.time !== undefined && !isValidTimeId(p.time)) return null;
   return {
     v: 1,
     op: "time.extend",
@@ -188,6 +193,7 @@ export function parseRequest(json: string): DeviceRequest | null {
       reason: typeof p.reason === "string" ? p.reason : undefined,
       limitHit: p.limitHit as TimeExtendLimitHit,
       bucketId: typeof p.bucketId === "string" ? p.bucketId : undefined,
+      time: typeof p.time === "string" ? p.time : undefined,
     },
   };
 }

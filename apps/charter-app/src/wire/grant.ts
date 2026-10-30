@@ -27,6 +27,13 @@ export type TimeExtendGrantPayload = GrantPayload & {
 
 export const MAX_EXTEND_MINUTES = 1440;
 
+/** Most named times one `times` clause carries (§5.6 parity — pinned in
+ *  `contractConstants.test.ts` against the Rust `MAX_NAMED_TIMES`). */
+export const MAX_NAMED_TIMES = 16;
+
+/** Longest named-time label, in characters (§5.6 parity, as above). */
+export const MAX_TIME_LABEL_LEN = 60;
+
 /** Clamp granted minutes onto the wire's u16 range (0..=1440), flooring fractions. */
 export function clampGrantMinutes(minutes: number): number {
   if (!Number.isFinite(minutes)) return 0;
@@ -112,7 +119,7 @@ export function currentDayKey(nowSecs: number, tz?: string): string {
 
 /** The tz-local calendar day + seconds-into-day at `atSecs`. Throws on a tz the
  *  runtime doesn't know (caller falls back to the local tz). */
-function tzDayParts(atSecs: number, tz?: string): { dayKey: string; secsIntoDay: number } {
+export function tzDayParts(atSecs: number, tz?: string): { dayKey: string; secsIntoDay: number } {
   const fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz, // undefined = the runtime's local tz
     hourCycle: "h23",
@@ -224,6 +231,9 @@ export interface TimeExtendDecision {
    *  specific named-times group the extension credits. Absent for the
    *  whole-device dimensions, exactly like the REQUEST side. */
   bucketId?: string;
+  /** Echoed verbatim from the REQUEST — the named time (contract §Times) whose
+   *  pool the minutes land in. Absent = Free time. */
+  time?: string;
   /** Unix seconds now — becomes the grant `ts`. */
   ts: number;
   /** The tz the grant's "natural" end-of-day is computed in (`pickExtendTz`'s
@@ -262,6 +272,10 @@ export function buildTimeExtendGrant(d: TimeExtendDecision): TimeExtendGrantPayl
   };
   // Echoed regardless of allow/deny — exactly like limitHit itself.
   if (d.bucketId !== undefined) params.bucketId = d.bucketId;
+  // Same rule for the named time: the device's params-echo check is exact, so
+  // the grant repeats the request's `time` byte for byte, or omits it exactly
+  // when the request did (a Free-time grant stays byte-identical to before).
+  if (d.time !== undefined) params.time = d.time;
   return {
     v: 1,
     op: "time.extend",

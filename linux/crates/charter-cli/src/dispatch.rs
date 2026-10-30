@@ -3,6 +3,7 @@
 //! codes: 0 ok, 2 usage, 3 not-paired, 4 not-found, 5 daemon-unavailable, 6
 //! denied, 7 offline.
 
+use charter_ipc::dto::FREE_TIME_CHOICE;
 use charter_ipc::{CharterdClient, ExecProbe, IpcError, Op, PairingSink};
 
 use crate::render;
@@ -123,7 +124,9 @@ pub async fn dispatch(
         },
         "ask-for-more" => {
             let Some(min_s) = positional(1) else {
-                return usage("usage: charter ask-for-more <minutes> [--bucket <id>]");
+                return usage(
+                    "usage: charter ask-for-more <minutes> [--bucket <id> | --time <id|free>]",
+                );
             };
             let Ok(minutes) = min_s.parse::<u16>() else {
                 return usage("minutes must be a number");
@@ -148,14 +151,59 @@ pub async fn dispatch(
             // M7 routing is shared (TimeLeftView::limit_hit) so the tray and
             // the CLI cannot fork the rule. A failed read defaults to
             // "budget" rather than aborting the request.
-            let limit_hit = match client.time_left().await {
-                Ok(t) => t.limit_hit(),
-                Err(_) => "budget",
+            let time_left = client.time_left().await;
+            let limit_hit = time_left
+                .as_ref()
+                .map(|t| t.limit_hit())
+                .unwrap_or("budget");
+            // §Times: WHICH kind of time the ask is for. `--time <id>` names it
+            // (the lock card's picker passes it, `free` included); with no flag
+            // the daemon's own default for this ward right now is used, the
+            // same rule the tray follows (`TimeLeftView::default_ask_time`).
+            // Free time is the ABSENCE of the field, so an untyped ask — and
+            // every ask on a pre-times daemon — is byte-identical to before.
+            let time = match flag_value("--time") {
+                Some(id) if id == FREE_TIME_CHOICE => None,
+                // A named id must be one the daemon offers this ward right
+                // now (`TimeLeftView::check_ask_time`, the same check
+                // charterd makes before it publishes). Refused here, with the
+                // choices, rather than sent to the guardian as an ask for a
+                // time that does not exist. An unreadable snapshot cannot
+                // vouch for any id, so a typed ask fails closed.
+                Some(id) => match &time_left {
+                    Ok(t) => match t.check_ask_time(&id) {
+                        Ok(()) => Some(id),
+                        Err(why) => return usage(&format!("error: {why}")),
+                    },
+                    Err(e) => {
+                        return CliOutcome {
+                            code: exit_code(e),
+                            rendered: format!(
+                                "error: couldn't check which times this computer offers ({e}) \
+                                 — try again, or ask without --time"
+                            ),
+                        }
+                    }
+                },
+                None => time_left
+                    .as_ref()
+                    .ok()
+                    .and_then(|t| t.default_ask_time())
+                    .map(str::to_string),
             };
-            let params =
-                serde_json::json!({"minutesRequested": minutes, "limitHit": limit_hit}).to_string();
-            match client.submit_request(Op::TimeExtend, params).await {
-                Ok(id) => ok(format!("requested {minutes}m ({id})")),
+            let mut params =
+                serde_json::json!({"minutesRequested": minutes, "limitHit": limit_hit});
+            if let Some(time) = &time {
+                params["time"] = serde_json::Value::String(time.clone());
+            }
+            match client
+                .submit_request(Op::TimeExtend, params.to_string())
+                .await
+            {
+                Ok(id) => ok(match &time {
+                    Some(t) => format!("requested {minutes}m of {t} ({id})"),
+                    None => format!("requested {minutes}m ({id})"),
+                }),
                 Err(e) => err_out(e),
             }
         }

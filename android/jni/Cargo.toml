@@ -22,6 +22,9 @@ jni = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono-tz = { version = "0.10", default-features = false }
+# HH:MM of an instant in the schedule's tz, for "<Time> until 12:00" copy.
+# Already in the graph via chrono-tz; named so the copy does not hand-roll tz math.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 # The broker's async port traits (SystemLayer effects, TransportFacade).
 async-trait = "0.1"
 # CLOCK_BOOTTIME for the monotonic clock (counts across doze/suspend).

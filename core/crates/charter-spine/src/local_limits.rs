@@ -126,6 +126,7 @@ impl DeviceLimits {
         vec![GrantScheduleWindow {
             start: self.wake.clone(),
             end: self.bedtime.clone(),
+            time: None,
         }]
     }
 
@@ -134,6 +135,7 @@ impl DeviceLimits {
             Some(w) => vec![GrantScheduleWindow {
                 start: w.wake.clone(),
                 end: w.bedtime.clone(),
+                time: None,
             }],
             None => self.weekday_window(),
         }
