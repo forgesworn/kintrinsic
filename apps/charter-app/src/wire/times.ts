@@ -34,11 +34,26 @@ function isStringList(v: unknown): v is string[] {
 }
 
 /**
+ * Mirror of the Rust `charter_content::domain::is_valid_domain` applied after
+ * `normalize_domain`, on top of the learning clause's host-characters guard
+ * (alphanumerics, `.` and `-` ONLY, checked on the raw string — a `/`, `:` or
+ * space would otherwise be cut off by normalisation and pass). One bad domain
+ * makes the device drop the whole `times` clause, so it is refused here.
+ */
+function domainFault(d: string): boolean {
+  if (!/^[A-Za-z0-9.-]+$/.test(d)) return true;
+  let host = d.toLowerCase().replace(/\.+$/, "");
+  if (host.startsWith("www.")) host = host.slice(4);
+  return host.length === 0 || host.length > 253 || host.split(".").some((l) => l.length === 0 || l.length > 63);
+}
+
+/**
  * Why a site entry would be refused, or `null` if it is fine. The SAME rules
- * as a `learning` site app (contract §Learning: "site apps require `url` +
- * non-empty `domains`; ids must be [a-z0-9-] slugs"), plus `kind: "site"` —
- * a native entry has no resolver pin, so a time that listed one could not
- * constrain the web at all.
+ * as a `learning` site app (the Rust `validate_app`, shared with `times`): a
+ * slug id, a name, an `https://` launch URL with no whitespace or comma (it is
+ * interpolated into a Chromium command line), and at least one well-formed
+ * domain. Plus `kind: "site"` — a native entry has no resolver pin, so a time
+ * that listed one could not constrain the web at all.
  */
 export function siteFault(a: unknown): string | null {
   if (typeof a !== "object" || a === null) return "a site entry must be an object";
@@ -48,20 +63,14 @@ export function siteFault(a: unknown): string | null {
     return "a site id must be a [a-z0-9-] slug";
   }
   if (typeof s.label !== "string" || s.label.trim().length === 0) return "a site needs a name";
-  if (typeof s.url !== "string" || s.url.trim().length === 0) return "a site needs a launch address";
-  // The device's `valid_learning_url`: the raw string reaches the resolver sink,
-  // so https only, and no whitespace or comma to smuggle a second rule in.
-  if (!s.url.startsWith("https://") || /[\s,]/u.test(s.url)) {
-    return "a site's launch address must start with https:// and contain no spaces or commas";
+  if (typeof s.url !== "string" || s.url.length === 0) return "a site needs a launch address";
+  if (!s.url.startsWith("https://") || /[\s,]/.test(s.url)) {
+    return "a site's address must start with https:// and contain no spaces or commas";
   }
-  if (!isStringList(s.domains) || s.domains.length === 0 || s.domains.some((d) => d.trim() === "")) {
+  if (!isStringList(s.domains) || s.domains.length === 0) {
     return "a site needs at least one verified domain";
   }
-  // Hostname characters only (the device's injection guard): `a.org/, EXCLUDE *`
-  // would otherwise pass a check that cuts at the first `/`.
-  if (s.domains.some((d) => !/^[A-Za-z0-9.-]+$/.test(d))) {
-    return "a site's domains must be plain host names";
-  }
+  if (s.domains.some(domainFault)) return "a site has a domain that isn't a plain web address";
   return null;
 }
 

@@ -72,6 +72,8 @@ const status = (locked: boolean) => ({
   effectiveSecs: 0,
   locked,
   source: "schedule",
+  // Both platforms' times gate: charterd 800 / Android 49 (800 clears either).
+  appVersionCode: 800,
 });
 
 describe("More time with times", () => {
@@ -103,7 +105,7 @@ describe("More time with times", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(MON_10);
     for (const fn of Object.values(ctx)) if (typeof fn === "function") (fn as ReturnType<typeof vi.fn>).mockReset();
-    ctx.deviceStatus = {};
+    ctx.deviceStatus = { [LAPTOP]: status(false), [PHONE]: status(false) };
     ctx.giveTime.mockResolvedValue(true);
     ctx.answerRequestWithOtherTime.mockResolvedValue(undefined);
     onClose.mockReset();
@@ -166,7 +168,7 @@ describe("More time with times", () => {
 
   it("will not give a typed kind to a device too old to run times, and says why", async () => {
     // The phone reports an Android build below 49.
-    ctx.deviceStatus = { [PHONE]: { ...status(false), appVersionCode: 40 } };
+    ctx.deviceStatus = { [LAPTOP]: status(false), [PHONE]: { ...status(false), appVersionCode: 40 } };
     mount(<LeverSheet mode="give" child={sam([LEARNING])} onClose={onClose} />);
     expect(boxes()[1].disabled).toBe(true);
     expect(boxes()[1].checked).toBe(false);

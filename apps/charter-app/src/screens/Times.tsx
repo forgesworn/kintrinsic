@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Banner, Button } from "../components/ui";
-import { canUseTimes, unknownTimeTags } from "../domain/times";
+import { canUseTimes, timesGate, unknownTimeTags } from "../domain/times";
 import { MAX_NAMED_TIMES, MAX_TIME_LABEL_LEN } from "../wire/grant";
 import type { Child, Device } from "../domain/types";
 import { wardPath } from "../domain/wardRoute";
@@ -37,9 +37,10 @@ export function TimesSection({ child }: { child: Child }) {
   const times = policy.times ?? [];
   const paired = child.devices.filter((d) => d.pairing === "paired");
   const capable = paired.filter((d) => canUseTimes(d, deviceStatus));
-  // Reported as too old: named, never counted (silence is not incapacity — a
-  // device that has not reported yet is assumed capable, as everywhere else).
-  const tooOld = paired.filter((d) => !canUseTimes(d, deviceStatus));
+  // Named, never counted. Unlike other features a device that has not reported
+  // is NOT assumed capable: an old ward would run a tagged window as Free time.
+  const tooOld = paired.filter((d) => timesGate(d, deviceStatus) === "old");
+  const unreported = paired.filter((d) => timesGate(d, deviceStatus) === "unreported");
   const orphaned = unknownTimeTags(policy);
   const full = times.length >= MAX_NAMED_TIMES;
   const hasLearning = times.some((t) => t.id === "learning");
@@ -54,6 +55,13 @@ export function TimesSection({ child }: { child: Child }) {
           {tooOld.map((d) => d.label).join(" and ")} {tooOld.length > 1 ? "need" : "needs"} updating to
           use times. Until then {tooOld.length > 1 ? "they keep" : "it keeps"} running Free time only:
           nothing you set for another time reaches {tooOld.length > 1 ? "them" : "it"}.
+        </Banner>
+      )}
+      {unreported.length > 0 && (
+        <Banner tone="warn">
+          {unreported.map((d) => d.label).join(" and ")} {unreported.length > 1 ? "need" : "needs"} to
+          check in once before {unreported.length > 1 ? "they" : "it"} can run times. Open Kintrinsic on{" "}
+          {unreported.length > 1 ? "them" : "it"}; this turns on by itself when it reports.
         </Banner>
       )}
       {orphaned.length > 0 && (

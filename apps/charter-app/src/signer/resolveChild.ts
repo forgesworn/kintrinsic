@@ -6,11 +6,17 @@
 import type { Child } from "../domain/types";
 import type { ChildTarget } from "./realSigner";
 import { deviceRelays } from "./pairingRelays";
+import { canUseTimes } from "../domain/times";
+import type { DeviceStatus } from "../wire/status";
 
 export function resolveChildTarget(
   children: Child[],
   childId: string,
   defaultRelays: string[],
+  /** Live STATUS by device pubkey. When given, each device is stamped with
+   *  whether it may be sent a named time (`TargetDevice.timesCapable`), so the
+   *  signer can refuse one rather than trust every caller to have checked. */
+  deviceStatus?: Record<string, DeviceStatus>,
 ): ChildTarget | undefined {
   const child = children.find((c) => c.id === childId);
   if (!child) return undefined;
@@ -31,6 +37,7 @@ export function resolveChildTarget(
     id: d.id,
     pubkey: d.devicePubkey as string,
     platform: d.platform,
+    ...(deviceStatus ? { timesCapable: canUseTimes(d, deviceStatus) } : {}),
   }));
   // Each device's OWN relays (from its pairing), unioned with the defaults —
   // never just the current defaults, so a device paired under an older

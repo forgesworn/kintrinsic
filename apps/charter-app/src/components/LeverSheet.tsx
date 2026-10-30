@@ -32,7 +32,7 @@ import { Button } from "./ui";
 import { useCharter } from "../store/store";
 import { standingFor, standingNote } from "../domain/standing";
 import { deliverableDevices, wardenSupport } from "../domain/wardenSupport";
-import { canUseTimes } from "../domain/times";
+import { canUseTimes, timesGate } from "../domain/times";
 import { isAskExpired } from "../domain/askExpiry";
 import type { Child, ChildRequest } from "../domain/types";
 import { endAskDecision, tryBeginAskDecision } from "./askDecisionLock";
@@ -360,7 +360,9 @@ function GiveBody({ child, onClose }: { child: Child; onClose: (note?: string) =
                       <span aria-hidden="true">{d.platform === "android" ? "📱" : "💻"}</span> {d.label}
                       {!can && (
                         <span className="card-sub" style={{ display: "block", margin: 0 }}>
-                          Needs updating to run {timeLabel ?? "this kind of time"}
+                          {timesGate(d, deviceStatus) === "unreported"
+                            ? `Needs to check in once before it can run ${timeLabel ?? "this kind of time"}`
+                            : `Needs updating to run ${timeLabel ?? "this kind of time"}`}
                         </span>
                       )}
                     </span>

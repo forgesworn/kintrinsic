@@ -163,16 +163,33 @@ export function defaultExtendTime(
   const sched = schedule as Schedule;
   const { dayKey, secsIntoDay } = localParts(nowSecs, sched.tz);
   const usable = windowsOn(sched, dayKey).filter((w) => isKnown(w, times ?? []));
+  // On a tie (two windows ending, or starting, together) the TAGGED one wins:
+  // that is the span the device carves out of Free time, so it is the time that
+  // actually ran last / runs next (Free 16-19 + Learning 17-19, asked at 19:30
+  // ⇒ Learning, not Free).
+  const tagWins = (a: ScheduleWindow, b: ScheduleWindow) => a.time !== undefined && b.time === undefined;
   let ended: ScheduleWindow | undefined;
   for (const w of usable) {
     if (minutesOf(w.end) * 60 > secsIntoDay) continue;
-    if (!ended || minutesOf(w.end) > minutesOf(ended.end)) ended = w;
+    if (
+      !ended ||
+      minutesOf(w.end) > minutesOf(ended.end) ||
+      (minutesOf(w.end) === minutesOf(ended.end) && tagWins(w, ended))
+    ) {
+      ended = w;
+    }
   }
   if (ended) return ended.time;
   let next: ScheduleWindow | undefined;
   for (const w of usable) {
     if (minutesOf(w.start) * 60 <= secsIntoDay) continue;
-    if (!next || minutesOf(w.start) < minutesOf(next.start)) next = w;
+    if (
+      !next ||
+      minutesOf(w.start) < minutesOf(next.start) ||
+      (minutesOf(w.start) === minutesOf(next.start) && tagWins(w, next))
+    ) {
+      next = w;
+    }
   }
   return next?.time;
 }
@@ -277,23 +294,41 @@ export function findTaggedOverlaps(schedule: Schedule | undefined): TaggedOverla
 // The gate: which devices may be given tagged windows or typed gifts
 // ---------------------------------------------------------------------------
 
+/** Where a device stands on running times. */
+export type TimesGate = "ok" | "old" | "unreported";
+
 /**
- * May this device be sent a tagged window or a typed gift? The same
- * `wardenSupport` answer as every other additive feature: a device that
- * REPORTS a Kintrinsic older than Android 49 / charterd 800 is out; one that
- * has not reported yet is assumed capable ("silence is not incapacity").
- *
- * That is weaker than the design's "a tagged window never reaches an ungated
- * device" for a device that has simply never reported: an old ward would run the
- * window as Free time. It is the house doctrine for every version gate, and a
- * paired ward reports within minutes; pass a stricter check upstream if a
- * caller ever needs one.
+ * Pure rule shared with the signer (which has a version code but no STATUS):
+ * a version code that is absent is NOT capable. Times differ from the other
+ * additive features here on purpose — an old ward runs a tagged window as FREE
+ * time, a loosening of exactly the span the guardian meant to restrict, so the
+ * house rule "silence is not incapacity" would put the unsafe default on the
+ * wrong side.
+ */
+export function timesGateFor(platform: Device["platform"], reported: number | undefined): TimesGate {
+  if (reported == null) return "unreported";
+  const probe = { id: "", label: "", platform, pairing: "paired", devicePubkey: "p" } as Device;
+  const ok = wardenSupport([probe], { p: { appVersionCode: reported } as DeviceStatus }, "times").canSend;
+  return ok ? "ok" : "old";
+}
+
+/** The device's gate, from the live STATUS by device pubkey. */
+export function timesGate(device: Device, deviceStatus: Record<string, DeviceStatus> = {}): TimesGate {
+  const reported = device.devicePubkey ? deviceStatus[device.devicePubkey]?.appVersionCode : undefined;
+  return timesGateFor(device.platform, reported);
+}
+
+/**
+ * May this device be sent a tagged window or a typed gift? Only a device that
+ * has REPORTED a Kintrinsic at or past Android 49 / charterd 800. One that has
+ * never reported is out ("needs to check in once"), and so is one that reports
+ * older ("needs updating"); use `timesGate` to tell the two apart for copy.
  */
 export function canUseTimes(
   device: Device,
   deviceStatus: Record<string, DeviceStatus> = {},
 ): boolean {
-  return wardenSupport([device], deviceStatus, "times").canSend;
+  return timesGate(device, deviceStatus) === "ok";
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +464,8 @@ export type TimeWindows = Partial<Record<Weekday, Array<{ start: string; end: st
  *  - the time must be one the child defines (else the span would lock);
  *  - the device must pass the `times` gate (`canUseTimes`) — a pre-times ward
  *    would run the window as Free time;
- *  - the device must hold its OWN schedule first. If the schedule is still
+ *  - with two or more paired devices the device must hold its OWN schedule
+ *    first (a lone paired device just takes the base). If the schedule is still
  *    shared, it is split (`setControlSplit`, seeding EVERY device with the
  *    shared value) so the siblings keep an untagged schedule; and if it is
  *    already split but this device follows the base, it is split the same way,
@@ -453,7 +489,11 @@ export function setTimeWindows(
   }
   const device = devices.find((d) => d.id === deviceId);
   if (!device) throw new Error("That device isn't one of this child's.");
-  if (!canUseTimes(device, deviceStatus)) {
+  const gate = timesGate(device, deviceStatus);
+  if (gate === "unreported") {
+    throw new Error(`${device.label} needs to check in once before it can run a time.`);
+  }
+  if (gate === "old") {
     throw new Error(`${device.label} needs the latest Kintrinsic before it can run a time.`);
   }
   for (const day of WEEKDAYS) {
@@ -465,13 +505,23 @@ export function setTimeWindows(
   }
 
   let next = policy;
-  if (next.deviceOverrides?.[deviceId]?.schedule === undefined) {
+  // A child with ONE paired device has one schedule: the Rules screen edits the
+  // base for them (it only offers a split from two devices up), and a split
+  // here would put the hours into an override that the Free-hour editor never
+  // touches again. So write the base. From two devices up, split first.
+  const soleDevice =
+    next.deviceOverrides?.[deviceId]?.schedule === undefined &&
+    devices.filter((d) => d.pairing === "paired").length <= 1;
+  if (!soleDevice && next.deviceOverrides?.[deviceId]?.schedule === undefined) {
     if (!next.schedule) {
       throw new Error("Set up a schedule for this child before adding a time to it.");
     }
     next = setControlSplit(next, "schedule", devices.map((d) => d.id));
   }
-  const own = next.deviceOverrides?.[deviceId]?.schedule as Schedule;
+  if (soleDevice && !next.schedule) {
+    throw new Error("Set up a schedule for this child before adding a time to it.");
+  }
+  const own = (soleDevice ? next.schedule : next.deviceOverrides?.[deviceId]?.schedule) as Schedule;
   if (own.paused) {
     throw new Error(`${device.label}'s schedule is switched off, so a time would have no effect. Switch it on first.`);
   }
@@ -490,7 +540,7 @@ export function setTimeWindows(
       `Two times overlap on ${overlap.day} (${overlap.a.start}-${overlap.a.end} and ${overlap.b.start}-${overlap.b.end}). Move one so they don't run at the same time.`,
     );
   }
-  return setDeviceControl(next, deviceId, "schedule", schedule);
+  return soleDevice ? { ...next, schedule } : setDeviceControl(next, deviceId, "schedule", schedule);
 }
 
 /** `stripTag` for the weekly pattern only (date overrides keep their tags). */

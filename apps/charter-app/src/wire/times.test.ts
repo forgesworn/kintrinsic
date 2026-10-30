@@ -84,6 +84,39 @@ describe("site validation (the learning clause's rules, site kind only)", () => 
     expect(siteFault({ ...khan, id: "Khan Academy" })).not.toBeNull();
     expect(siteFault({ ...khan, label: "" })).not.toBeNull();
   });
+  it("mirrors the Rust domain rules: no empty labels, labels <= 63, host <= 253, host chars only", () => {
+    const d = (domain: string) => siteFault({ ...khan, domains: [domain] });
+    expect(d("khanacademy.org")).toBeNull();
+    expect(d("Khan.Academy.ORG")).toBeNull(); // upper case is normalised on the device
+    expect(d("www.khanacademy.org")).toBeNull();
+    expect(d("d35aaqx5ub95lt.cloudfront.net")).toBeNull();
+    expect(d("a..b.org")).not.toBeNull();
+    expect(d(".org")).not.toBeNull();
+    expect(d("a".repeat(63) + ".org")).toBeNull();
+    expect(d("a".repeat(64) + ".org")).not.toBeNull();
+    expect(d(Array(5).fill("a".repeat(60)).concat("org").join("."))).not.toBeNull(); // > 253
+    expect(d("www.www.")).toBeNull(); // the root dot goes, then one www. — what is left is a host
+    expect(d(".")).not.toBeNull(); // nothing left once the root dot goes
+    expect(d("example.org/x")).not.toBeNull(); // would be cut at "/" by normalisation
+    expect(d("example.org:8080")).not.toBeNull();
+    expect(d("exa mple.org")).not.toBeNull();
+    expect(d("exämple.org")).not.toBeNull();
+    expect(d("")).not.toBeNull();
+  });
+  it("requires an https:// launch address with no whitespace or comma", () => {
+    expect(siteFault({ ...khan, url: "http://khanacademy.org/" })).not.toBeNull();
+    expect(siteFault({ ...khan, url: "khanacademy.org" })).not.toBeNull();
+    expect(siteFault({ ...khan, url: "https://khan academy.org" })).not.toBeNull();
+    expect(siteFault({ ...khan, url: "https://a.org/,b" })).not.toBeNull();
+  });
+  it("timesToGrant trims what the guardian typed before the device sees it", () => {
+    const g = timesToGrant(
+      [{ ...learning, sites: [{ ...khan, url: " https://www.khanacademy.org/ ", domains: [" khanacademy.org "] }] }],
+      AT,
+    );
+    expect(g.times[0].sites![0].url).toBe("https://www.khanacademy.org/");
+    expect(g.times[0].sites![0].domains).toEqual(["khanacademy.org"]);
+  });
   it("is enforced through the time that carries it", () => {
     expect(namedTimeFault({ ...learning, sites: [{ ...khan, domains: [] }] })).not.toBeNull();
   });

@@ -18,6 +18,10 @@ import type { Child, NamedTime } from "../domain/types";
 
 const LAPTOP = "a".repeat(64);
 const PHONE = "b".repeat(64);
+const CAPABLE = {
+  [LAPTOP]: { ts: Date.now() / 1000, appVersionCode: 800 },
+  [PHONE]: { ts: Date.now() / 1000, appVersionCode: 49 },
+};
 const LEARNING: NamedTime = {
   id: "learning",
   label: "Learning time",
@@ -99,7 +103,7 @@ describe("Times section", () => {
   beforeEach(() => {
     localStorage.clear();
     window.location.hash = "";
-    spies.deviceStatus = {};
+    spies.deviceStatus = CAPABLE;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -160,7 +164,7 @@ describe("Times section", () => {
 
   describe("a device that cannot run times yet", () => {
     it("is named, told to update, and offered no hours", () => {
-      spies.deviceStatus = { [PHONE]: { ts: Date.now() / 1000, appVersionCode: 40 } };
+      spies.deviceStatus = { ...CAPABLE, [PHONE]: { ts: Date.now() / 1000, appVersionCode: 40 } };
       mount(<TimesSection child={sam([LEARNING])} />);
       expect(text()).toContain("Sam's phone needs updating to use times");
       expect(text()).toContain("nothing you set for another time reaches it");
@@ -169,9 +173,17 @@ describe("Times section", () => {
       expect(text()).toContain("Sam's laptop: ");
     });
 
-    it("says nothing when every device is fine, or has not reported yet", () => {
+    it("says nothing when every device is fine", () => {
       mount(<TimesSection child={sam([LEARNING])} />);
       expect(text()).not.toContain("needs updating");
+      expect(text()).not.toContain("check in");
+    });
+
+    it("a device that has never reported must check in once; it is not assumed capable", () => {
+      spies.deviceStatus = { ...CAPABLE, [PHONE]: undefined };
+      mount(<TimesSection child={sam([LEARNING])} />);
+      expect(text()).toContain("Sam's phone needs to check in once before it can run times");
+      expect(text()).not.toContain("Sam's phone: ");
     });
   });
 

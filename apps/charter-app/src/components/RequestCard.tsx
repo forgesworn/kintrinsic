@@ -22,6 +22,7 @@ import {
 } from "../wire/grant";
 import { isAskExpired } from "../domain/askExpiry";
 import { endAskDecision, tryBeginAskDecision, useAskDecisionInFlight } from "./askDecisionLock";
+import { canUseTimes } from "../domain/times";
 
 // One ask from a ward's device, as a card.
 //
@@ -237,7 +238,10 @@ export function RequestCard({
   const typeLabel =
     isExtend && req.time ? devicePolicy?.times?.find((t) => t.id === req.time)?.label : undefined;
   const unknownType = isExtend && !!req.time && typeLabel === undefined;
-  const hasOtherKinds = (devicePolicy?.times?.length ?? 0) > 0 || !!req.time;
+  // Re-typing sends a gift of another kind to the asking device, which an older
+  // (or never-reported) ward would land as Free time whatever was chosen.
+  const askerCanType = !!device && canUseTimes(device, deviceStatus);
+  const hasOtherKinds = ((devicePolicy?.times?.length ?? 0) > 0 || !!req.time) && askerCanType;
   // "45m of 1h today · 2h of 5h this week" — only when THIS device's live
   // STATUS actually reports the group. Caps drop out (raw meters instead)
   // while Counted times is paused.

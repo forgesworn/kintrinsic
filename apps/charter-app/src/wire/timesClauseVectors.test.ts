@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Policy } from "../domain/types";
-import { policyToClauses, timesToGrant } from "./clause";
+import { giftToGrant, policyToClauses, timesToGrant } from "./clause";
 import { buildTimeExtendGrant } from "./grant";
 import { parseRequest } from "./request";
 import { parseGrantTimes } from "./times";
@@ -119,9 +119,17 @@ describe("times clause golden vectors (Kintrinsic <-> warden contract)", () => {
         // Absent stays absent: the byte-identical rows have no `time` key at all.
         expect("time" in grant.params).toBe(v.expectTime !== null);
       } else {
-        // A gift body is assembled inside the signer (covered by
-        // realSigner.times.test.ts); the vector pins only its field here.
-        expect((v.payload.time as string | undefined) ?? null).toBe(v.expectTime);
+        // Assert what THIS side emits for the vector's inputs, not the vector
+        // against itself: the gift body the signer sends is `giftToGrant`'s.
+        const body = giftToGrant({
+          id: "g1",
+          issuedAt: 1782734400,
+          minutes: (v.payload.minutes as number | undefined) ?? 15,
+          expiresAt: 1782777600,
+          ...(typeof v.payload.time === "string" ? { time: v.payload.time } : {}),
+        });
+        expect(body.time ?? null).toBe(v.expectTime);
+        expect("time" in body).toBe(v.expectTime !== null);
       }
     });
   }

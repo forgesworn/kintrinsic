@@ -7,6 +7,8 @@ import {
   addNamedTime,
   canUseTimes,
   customTimeTemplate,
+  timesGate,
+  timesGateFor,
   defaultExtendTime,
   findTaggedOverlaps,
   learningTimeTemplate,
@@ -173,6 +175,21 @@ describe("defaultExtendTime", () => {
     expect(defaultExtendTime(lateOnly, times, utc(MON, "07:00"))).toBeUndefined();
   });
 
+  it("on a tie the TAGGED window wins: it is the span the device carves out of Free", () => {
+    const ends: Schedule = {
+      tz: "UTC",
+      weekly: { mon: [{ start: "16:00", end: "19:00" }, { start: "17:00", end: "19:00", time: "learning" }] },
+    };
+    expect(defaultExtendTime(ends, times, utc(MON, "19:30"))).toBe("learning");
+    const reversed: Schedule = { tz: "UTC", weekly: { mon: [ends.weekly.mon![1], ends.weekly.mon![0]] } };
+    expect(defaultExtendTime(reversed, times, utc(MON, "19:30"))).toBe("learning");
+    const starts: Schedule = {
+      tz: "UTC",
+      weekly: { mon: [{ start: "16:00", end: "19:00" }, { start: "16:00", end: "17:00", time: "quiet" }] },
+    };
+    expect(defaultExtendTime(starts, times, utc(MON, "07:00"))).toBe("quiet");
+  });
+
   it("no windows today (or no schedule): Free", () => {
     expect(defaultExtendTime(sched, times, utc(TUE, "10:00"))).toBeUndefined();
     expect(defaultExtendTime(undefined, times, utc(MON, "10:00"))).toBeUndefined();
@@ -313,9 +330,23 @@ describe("canUseTimes / wardenSupport.times", () => {
     expect(canUseTimes(laptop, status(laptop.devicePubkey!, 712))).toBe(false);
     expect(wardenSupport([phone], status(phone.devicePubkey!, 48), "times").tooOld).toEqual([phone]);
   });
-  it("a device that has not reported is assumed capable (house doctrine: silence is not incapacity)", () => {
-    expect(canUseTimes(phone)).toBe(true);
-    expect(canUseTimes(laptop, {})).toBe(true);
+  it("a device that has never reported is NOT capable: an old ward would run a tagged window as Free", () => {
+    expect(canUseTimes(phone)).toBe(false);
+    expect(canUseTimes(laptop, {})).toBe(false);
+    expect(timesGate(phone, {})).toBe("unreported");
+    expect(timesGate(phone, status(phone.devicePubkey!, 40))).toBe("old");
+    expect(timesGate(phone, status(phone.devicePubkey!, 49))).toBe("ok");
+    expect(timesGateFor("linux", undefined)).toBe("unreported");
+    expect(timesGateFor("linux", 799)).toBe("old");
+    expect(timesGateFor("linux", 800)).toBe("ok");
+  });
+
+  it("setTimeWindows says which: check in once, or update", () => {
+    const w = { mon: [{ start: "09:00", end: "10:00" }] };
+    expect(() => setTimeWindows(base, "learning", "laptop", w, both, {})).toThrow(/check in once/);
+    expect(() => setTimeWindows(base, "learning", "laptop", w, both, status(laptop.devicePubkey!, 712))).toThrow(
+      /latest Kintrinsic/,
+    );
   });
 });
 
@@ -406,19 +437,53 @@ describe("setTimeWindows", () => {
 
   it("refuses an undefined time, an unknown device, a bad window, an overlap, no schedule, a lifted schedule", () => {
     const w = { mon: [{ start: "09:00", end: "10:00" }] };
-    expect(() => setTimeWindows(base, "ghost", "laptop", w, both)).toThrow(/no time/i);
-    expect(() => setTimeWindows(base, "free", "laptop", w, both)).toThrow();
-    expect(() => setTimeWindows(base, "learning", "nope", w, both)).toThrow(/isn't one of/i);
-    expect(() => setTimeWindows(base, "learning", "laptop", { mon: [{ start: "10:00", end: "09:00" }] }, both)).toThrow(/start before/);
-    expect(() => setTimeWindows(base, "learning", "laptop", { mon: [{ start: "9:00", end: "10:00" }] }, both)).toThrow();
+    expect(() => setTimeWindows(base, "ghost", "laptop", w, both, bothNew)).toThrow(/no time/i);
+    expect(() => setTimeWindows(base, "free", "laptop", w, both, bothNew)).toThrow();
+    expect(() => setTimeWindows(base, "learning", "nope", w, both, bothNew)).toThrow(/isn't one of/i);
+    expect(() => setTimeWindows(base, "learning", "laptop", { mon: [{ start: "10:00", end: "09:00" }] }, both, bothNew)).toThrow(/start before/);
+    expect(() => setTimeWindows(base, "learning", "laptop", { mon: [{ start: "9:00", end: "10:00" }] }, both, bothNew)).toThrow();
     const withQuiet = setTimeWindows(base, "quiet", "laptop", { mon: [{ start: "09:00", end: "11:00" }] }, both, bothNew);
     expect(() => setTimeWindows(withQuiet, "learning", "laptop", { mon: [{ start: "10:00", end: "12:00" }] }, both, bothNew)).toThrow(
       /overlap/i,
     );
-    expect(() => setTimeWindows({ ...base, schedule: undefined }, "learning", "laptop", w, both)).toThrow(/schedule/i);
+    expect(() => setTimeWindows({ ...base, schedule: undefined }, "learning", "laptop", w, both, bothNew)).toThrow(/schedule/i);
     expect(() =>
-      setTimeWindows({ ...base, schedule: { ...base.schedule!, paused: true } }, "learning", "laptop", w, both),
+      setTimeWindows({ ...base, schedule: { ...base.schedule!, paused: true } }, "learning", "laptop", w, both, bothNew),
     ).toThrow(/switched off/i);
+  });
+
+  it("a child with ONE paired device gets the hours in the BASE schedule, no split", () => {
+    const one = [laptop];
+    const out = setTimeWindows(base, "learning", "laptop", { mon: [{ start: "09:00", end: "12:00" }] }, one, bothNew);
+    expect(out.deviceOverrides).toBeUndefined();
+    expect(out.schedule!.weekly.mon).toEqual([
+      { start: "16:00", end: "19:00" },
+      { start: "09:00", end: "12:00", time: "learning" },
+    ]);
+    // ... and it reaches that device on the wire without any override.
+    const sched = policyToClauses(null, effectivePolicyForDevice(out, "laptop"), 1).find((c) => c.kind === "schedule");
+    expect(JSON.stringify(sched)).toContain('"time":"learning"');
+    // Replacing and clearing work the same way on the base.
+    const moved = setTimeWindows(out, "learning", "laptop", { tue: [{ start: "09:00", end: "10:00" }] }, one, bothNew);
+    expect(moved.schedule!.weekly.mon).toEqual([{ start: "16:00", end: "19:00" }]);
+    expect(moved.schedule!.weekly.tue!.some((w) => w.time === "learning")).toBe(true);
+    // Unpaired devices do not count towards "more than one".
+    const pending = { ...phone, pairing: "pending" as Device["pairing"] };
+    expect(setTimeWindows(base, "learning", "laptop", { mon: [{ start: "09:00", end: "10:00" }] }, [laptop, pending], bothNew).deviceOverrides).toBeUndefined();
+  });
+
+  it("a sole device still needs a schedule, and a lifted one is refused", () => {
+    const w = { mon: [{ start: "09:00", end: "10:00" }] };
+    expect(() => setTimeWindows({ ...base, schedule: undefined }, "learning", "laptop", w, [laptop], bothNew)).toThrow(/schedule/i);
+    expect(() =>
+      setTimeWindows({ ...base, schedule: { ...base.schedule!, paused: true } }, "learning", "laptop", w, [laptop], bothNew),
+    ).toThrow(/switched off/i);
+  });
+
+  it("with two paired devices it still splits (the sibling keeps untagged hours)", () => {
+    const out = setTimeWindows(base, "learning", "laptop", { mon: [{ start: "09:00", end: "10:00" }] }, both, bothNew);
+    expect(out.schedule).toEqual(base.schedule);
+    expect(out.deviceOverrides!.laptop).toBeDefined();
   });
 
   it("an empty window set clears the time's windows on that device", () => {

@@ -31,6 +31,8 @@ import type {
   GrantListening,
   GrantLifeline,
   GrantTimes,
+  GrantGift,
+  LearningApp,
   GrantUpdate,
   UpdateManifest,
 } from "./types";
@@ -279,10 +281,49 @@ export function appsToGrant(apps: AppsPolicy, issuedAt: number): GrantApps {
  * runs nothing); it is the editor's job, not this mapper's, to refuse one.
  */
 export function timesToGrant(times: NamedTime[], issuedAt: number): GrantTimes {
-  const cleaned = times.map((t) => ({ ...t, label: typeof t.label === "string" ? t.label.trim() : t.label }));
+  // Trim what the guardian typed BEFORE checking it: the device checks the raw
+  // bytes, and we send the trimmed ones, so those are what must be valid.
+  const trimSite = (a: LearningApp): LearningApp =>
+    a && typeof a === "object"
+      ? {
+          ...a,
+          url: typeof a.url === "string" ? a.url.trim() : a.url,
+          domains: Array.isArray(a.domains) ? a.domains.map((d) => (typeof d === "string" ? d.trim() : d)) : a.domains,
+        }
+      : a;
+  const cleaned = times.map((t) => ({
+    ...t,
+    label: typeof t.label === "string" ? t.label.trim() : t.label,
+    ...(Array.isArray(t.sites) ? { sites: t.sites.map(trimSite) } : {}),
+  }));
   const fault = timesFault(cleaned);
   if (fault) throw new Error(`times can't be sent: ${fault}`);
   return { v: 1, times: cleaned.map(normaliseNamedTime), issuedAt };
+}
+
+/**
+ * The wire `GrantGift` body. `groupId` and `time` ride only when set, so a plain
+ * gift is byte-identical to before either existed. (A gift tops up ONE pool, so
+ * the signer refuses both together before this is reached.)
+ */
+export function giftToGrant(g: {
+  id: string;
+  issuedAt: number;
+  minutes: number;
+  expiresAt: number;
+  groupId?: string;
+  time?: string;
+}): GrantGift {
+  const body: GrantGift = {
+    v: 1,
+    issuedAt: g.issuedAt,
+    id: g.id,
+    minutes: g.minutes,
+    expiresAt: g.expiresAt,
+  };
+  if (g.groupId) body.groupId = g.groupId;
+  if (g.time) body.time = g.time;
+  return body;
 }
 
 /**

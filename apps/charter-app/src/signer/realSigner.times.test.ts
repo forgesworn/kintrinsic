@@ -15,6 +15,10 @@ import { unwrapClause, unwrapGrant, type GuardianOps } from "../wire/giftwrap";
 import type { GrantGift } from "../wire/types";
 import type { DecisionContext } from "./Signer";
 import { RealSigner, type ChildTarget } from "./realSigner";
+import { QueuedForHomeNetworkError } from "./routePublish";
+import { resolveChildTarget } from "./resolveChild";
+import type { Child } from "../domain/types";
+import type { DeviceStatus } from "../wire/status";
 
 beforeEach(() => localStorage.clear());
 
@@ -310,5 +314,97 @@ describe("answerAskWithOtherTime", () => {
       signer.answerAskWithOtherTime!("r", askCtx({ tz: undefined }), 30, "learning"),
     ).rejects.toThrow(/time zone is unknown/i);
     expect(published).toHaveLength(0);
+  });
+});
+
+describe("answerAskWithOtherTime — delivery", () => {
+  /** A signer whose publish rejects the GRANT as the carrier would for a ward
+   *  that is away from the home network, and records everything it was given. */
+  function withGrantFailure(make: () => Error) {
+    const seen: { kind?: string; event: NostrEvent }[] = [];
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async (_relays: string[], event: NostrEvent, meta?: { kind: string }) => {
+        seen.push({ kind: meta?.kind, event });
+        if (meta?.kind === "grant") throw make();
+      },
+      resolveChild: () => TARGET,
+      now: () => 1_700_000_000,
+      confirmGate: () => true,
+    });
+    return { signer, seen };
+  }
+
+  it("a grant held for the home network does not stop the gift, and the answer is reported as held", async () => {
+    const { signer, seen } = withGrantFailure(() => new QueuedForHomeNetworkError(["Sam's laptop"]));
+    await signer.connect("signet");
+    await expect(signer.answerAskWithOtherTime!("r", askCtx(), 30, "learning")).rejects.toBeInstanceOf(
+      QueuedForHomeNetworkError,
+    );
+    // The gift still went out behind the held grant ...
+    const gifts = seen.filter((p) => p.kind === "clause");
+    expect(gifts).toHaveLength(1);
+    expect(giftFor(gifts, DEV1)).toMatchObject({ minutes: 30, time: "learning" });
+    // ... and nothing reached the sibling.
+    expect(seen.every((p) => { try { unwrapGrant(p.event, DEV2, GUARDIAN); return false; } catch { return true; } })).toBe(true);
+  });
+
+  it("a grant that genuinely fails stops BEFORE any minutes are given", async () => {
+    const { signer, seen } = withGrantFailure(() => new Error("relay said no"));
+    await signer.connect("signet");
+    await expect(signer.answerAskWithOtherTime!("r", askCtx(), 30, "learning")).rejects.toThrow("relay said no");
+    expect(seen.filter((p) => p.kind === "clause")).toHaveLength(0);
+  });
+});
+
+describe("typed gifts and answers refuse a device that cannot run times", () => {
+  const OLD: ChildTarget = {
+    subject: SUBJECT,
+    devices: [
+      { id: "laptop", pubkey: DPK1, timesCapable: true },
+      { id: "phone", pubkey: DPK2, timesCapable: false },
+    ],
+    relays: RELAYS,
+  };
+
+  it("refuses a typed gift to it, sending nothing; a Free gift still goes", async () => {
+    const { signer, published } = setup(OLD);
+    await signer.connect("signet");
+    await expect(
+      signer.signGiftClause!("c", 10, "UTC", undefined, { time: "learning", deviceIds: ["laptop", "phone"] }),
+    ).rejects.toThrow(/can't run this kind of time/i);
+    expect(published).toHaveLength(0);
+    await signer.signGiftClause!("c", 10, "UTC", undefined, { deviceIds: ["phone"] });
+    expect(published).toHaveLength(1);
+    await signer.signGiftClause!("c", 10, "UTC", undefined, { time: "learning", deviceIds: ["laptop"] });
+    expect(published).toHaveLength(2);
+  });
+
+  it("refuses to re-type an ask from it", async () => {
+    const { signer, published } = setup(OLD, () => true);
+    await signer.connect("signet");
+    await expect(
+      signer.answerAskWithOtherTime!("r", askCtx({ wire: { reqId: REQ_ID, nonce: NONCE, machine: DPK2, subject: SUBJECT, limitHit: "budget" } }), 30, "learning"),
+    ).rejects.toThrow(/can't run this kind of time/i);
+    expect(published).toHaveLength(0);
+  });
+
+  it("resolveChildTarget stamps each device from its live STATUS (never-reported = not capable)", () => {
+    const child = {
+      id: "c",
+      name: "Sam",
+      color: "#000",
+      dependantPubkey: SUBJECT,
+      devices: [
+        { id: "laptop", label: "L", platform: "linux", pairing: "paired", devicePubkey: DPK1 },
+        { id: "phone", label: "P", platform: "android", pairing: "paired", devicePubkey: DPK2 },
+      ],
+      policies: [],
+    } as unknown as Child;
+    const st = { [DPK1]: { appVersionCode: 800 } as DeviceStatus };
+    const t = resolveChildTarget([child], "c", RELAYS, st)!;
+    expect(t.devices.map((d) => [d.id, d.timesCapable])).toEqual([["laptop", true], ["phone", false]]);
+    // Without a status map nothing is stamped (demo and tests).
+    expect(resolveChildTarget([child], "c", RELAYS)!.devices.every((d) => !("timesCapable" in d))).toBe(true);
   });
 });

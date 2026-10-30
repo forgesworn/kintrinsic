@@ -31,9 +31,11 @@ describe("which devices More time is aimed at", () => {
   });
 
   it("a typed gift lists only devices that can run times", () => {
-    // A phone reporting an Android build below 49 cannot; the laptop has not
-    // reported, which counts as capable.
-    const st = { [PHONE.devicePubkey!]: status({ appVersionCode: 40 }) };
+    // A phone reporting an Android build below 49 cannot; a laptop at 800 can.
+    const st = {
+      [LAPTOP.devicePubkey!]: status({ appVersionCode: 800 }),
+      [PHONE.devicePubkey!]: status({ appVersionCode: 40 }),
+    };
     expect(giftDevices([LAPTOP, PHONE], st, true).map((d) => d.id)).toEqual(["d1"]);
     expect(giftDevices([LAPTOP, PHONE], st, false).map((d) => d.id)).toEqual(["d1", "d2"]);
   });

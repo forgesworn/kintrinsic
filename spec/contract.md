@@ -1004,7 +1004,15 @@ time's resolved standing policy — `apps` after `effective_at(now)`, and
   `sweep_decision` rule). A named time can never loosen those. Label length
   is counted in Unicode code points on both stacks.
 - `countsAgainstBudget: false` (the default): usage charges neither the
-  screen budget nor any bucket; budget exhaustion never locks this time.
+  screen budget nor any bucket; budget exhaustion never locks this time. A
+  bucket that is already spent stays blocked (caps apply in every time), but
+  nothing done inside a non-counting time accrues to one — a guardian who
+  wants a weekend *everything except* time to count sets the flag. A named
+  pool never lifts a budget lock the core makes immune to every pool (a
+  paused budget, an unsupported budget `v`, or the fail-safe budget that
+  stands in while usage cannot be saved); a non-counting *window* does open
+  over those states, since it charges and burns nothing and is bounded by a
+  window the guardian signed.
 
 **Ward-facing.** The lock surface says what is next — "Locked until Learning
 time at 09:00" — and the ask-for-more-time affordance offers a type when the

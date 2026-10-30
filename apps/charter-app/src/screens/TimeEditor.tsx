@@ -14,6 +14,7 @@ import {
   removeNamedTime,
   setTimeWindows,
   timeSlug,
+  timesGate,
   updateNamedTime,
   type TimeWindows,
 } from "../domain/times";
@@ -198,7 +199,8 @@ function TimeEditorForm({
 
   const paired = child.devices.filter((d) => d.pairing === "paired");
   const capable = paired.filter((d) => canUseTimes(d, deviceStatus));
-  const tooOld = paired.filter((d) => !canUseTimes(d, deviceStatus));
+  const tooOld = paired.filter((d) => timesGate(d, deviceStatus) === "old");
+  const unreported = paired.filter((d) => timesGate(d, deviceStatus) === "unreported");
 
   // Hours per device, as the guardian is editing them. Seeded from what the
   // device's schedule says now (nothing, for a new time).
@@ -518,6 +520,13 @@ function TimeEditorForm({
           {tooOld.map((d) => d.label).join(" and ")} {tooOld.length > 1 ? "need" : "needs"} updating to use
           times, so {tooOld.length > 1 ? "they have" : "it has"} no hours here. Update{" "}
           {tooOld.length > 1 ? "them" : "it"} and this will turn on by itself.
+        </Banner>
+      )}
+      {unreported.length > 0 && (
+        <Banner tone="warn">
+          {unreported.map((d) => d.label).join(" and ")} {unreported.length > 1 ? "need" : "needs"} to check
+          in once before {unreported.length > 1 ? "they" : "it"} can run times, so{" "}
+          {unreported.length > 1 ? "they have" : "it has"} no hours here yet.
         </Banner>
       )}
       {capable.length === 0 ? (

@@ -72,6 +72,8 @@ describe("RequestCard for a typed ask", () => {
   beforeEach(() => {
     for (const k of ["approveRequest", "denyRequest", "answerRequestWithOtherTime", "giveTime"] as const) ctx[k].mockReset();
     ctx.approveRequest.mockResolvedValue(undefined);
+    // The asking laptop has reported a build that can run times (charterd 800).
+    ctx.deviceStatus = { ["a".repeat(64)]: { appVersionCode: 800 } } as never;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -111,6 +113,15 @@ describe("RequestCard for a typed ask", () => {
     expect(button("Give a different kind of time")).toBeTruthy();
     // No times at all and an untyped ask: nothing to switch to.
     mount(<RequestCard request={ask()} child={child(undefined)} />);
+    expect(text()).not.toContain("Give a different kind of time");
+  });
+
+  it("does not offer it when the asking device is too old, or has never reported", () => {
+    ctx.deviceStatus = { ["a".repeat(64)]: { appVersionCode: 712 } } as never;
+    mount(<RequestCard request={ask({ time: "learning" })} child={child([LEARNING])} />);
+    expect(text()).not.toContain("Give a different kind of time");
+    ctx.deviceStatus = {} as never;
+    mount(<RequestCard request={ask({ time: "learning" })} child={child([LEARNING])} />);
     expect(text()).not.toContain("Give a different kind of time");
   });
 

@@ -806,7 +806,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // Resolve a child id → the signer's delivery target, reading the LATEST
   // children (so a clause always targets the child's current devices).
   const resolveChild = useCallback(
-    (childId: string) => resolveChildTarget(stateRef.current.children, childId, DEFAULT_RELAYS),
+    (childId: string) =>
+      resolveChildTarget(stateRef.current.children, childId, DEFAULT_RELAYS, deviceStatusRef.current),
     [],
   );
 

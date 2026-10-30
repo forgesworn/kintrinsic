@@ -24,6 +24,10 @@ import type { Child, NamedTime, Policy } from "../domain/types";
 
 const LAPTOP = "a".repeat(64);
 const PHONE = "b".repeat(64);
+const CAPABLE = {
+  [LAPTOP]: { ts: Date.now() / 1000, appVersionCode: 800 },
+  [PHONE]: { ts: Date.now() / 1000, appVersionCode: 49 },
+};
 
 const READING: NamedTime = { id: "reading", label: "Reading time", posture: "onlyThese", apps: ["org.example.books"] };
 const LEARNING: NamedTime = {
@@ -95,7 +99,7 @@ describe("TimeEditor", () => {
     localStorage.clear();
     window.location.hash = "";
     spies.savePolicy.mockReset().mockResolvedValue({ outcome: "sent" });
-    spies.deviceStatus = {};
+    spies.deviceStatus = CAPABLE;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -240,7 +244,7 @@ describe("TimeEditor", () => {
     });
 
     it("lists only devices that can run times, and says the others need updating", () => {
-      spies.deviceStatus = { [PHONE]: { ts: Date.now() / 1000, appVersionCode: 40 } };
+      spies.deviceStatus = { ...CAPABLE, [PHONE]: { ts: Date.now() / 1000, appVersionCode: 40 } };
       mount(<TimeEditor childId="c1" template="learning" />);
       expect(text()).toContain("Sam's phone needs updating to use times");
       expect(text()).toContain("Sam's laptop");

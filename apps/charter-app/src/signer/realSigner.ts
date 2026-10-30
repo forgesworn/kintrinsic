@@ -9,9 +9,9 @@
 
 import type { NostrEvent } from "nostr-tools";
 import type { Policy, SignerKind, SignerState } from "../domain/types";
-import { appRulesToGrant, debUpdateToGrant, debuggingToGrant, policyToClauses, updateToGrant } from "../wire/clause";
+import { appRulesToGrant, debUpdateToGrant, debuggingToGrant, giftToGrant, policyToClauses, updateToGrant } from "../wire/clause";
 import { effectivePolicyForDevice } from "../domain/effectivePolicy";
-import type { ClausePayload, GrantGift, GrantStandDown, UpdateManifest } from "../wire/types";
+import type { ClausePayload, GrantStandDown, UpdateManifest } from "../wire/types";
 import {
   giftWrapClause,
   giftWrapGrant,
@@ -54,6 +54,11 @@ export interface TargetDevice {
    *  `update` slot is one per ward on each device, so an Android update must
    *  never land in a laptop's slot, nor a Linux one in a phone's. */
   platform?: "linux" | "android";
+  /** Whether this device has REPORTED a Kintrinsic that can run named times
+   *  (`canUseTimes`). Absent = not worked out by the caller (demo and tests);
+   *  `false` makes the signer refuse a typed gift or answer to it, because an
+   *  older ward would land the minutes as Free time. */
+  timesCapable?: boolean;
 }
 
 /** Where one child's clauses must be delivered. */
@@ -505,6 +510,7 @@ export class RealSigner implements Signer {
     // Default = every paired device, exactly as before. A subset narrows the
     // recipients (and so what must be reachable); an empty one is refused.
     const recipients = this.giftRecipients(target, childId, opts?.deviceIds);
+    if (time) this.requireTimesCapable(recipients);
     this.requireDeliverable({ ...target, devices: recipients }, childId);
     const what = time ? ` of ${opts?.timeLabel ?? time}` : "";
     const where = opts?.deviceIds ? ` on ${this.joinNames(recipients.map((d) => d.pubkey))}` : "";
@@ -514,6 +520,18 @@ export class RealSigner implements Signer {
     );
     await this.sendGift(target, guardian, recipients, { minutes, tz, groupId, time }, held);
     return this.settle(held);
+  }
+
+  /** A typed gift (or an answer that buys another kind of time) must not go to a
+   *  device that cannot run times: it would land the minutes as Free time, the
+   *  opposite of what the guardian chose. */
+  private requireTimesCapable(devices: TargetDevice[]): void {
+    const no = devices.filter((d) => d.timesCapable === false);
+    if (no.length > 0) {
+      throw new Error(
+        `${this.joinNames(no.map((d) => d.pubkey))} can't run this kind of time yet — it needs to check in once, or update, first.`,
+      );
+    }
   }
 
   /** The devices a gift is sealed to: all of them, or exactly the ones named. */
@@ -549,26 +567,22 @@ export class RealSigner implements Signer {
     const bytes = new Uint8Array(8);
     crypto.getRandomValues(bytes);
     const id = `${issuedAt}-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
-    const body: GrantGift = {
-      v: 1,
-      issuedAt,
+    // `groupId` (named-times bucket pool; an old ward ignores it and lands the
+    // gift as device time, errs generous) and `time` (the TYPE of time; absent
+    // = Free, a pre-times ward lands Free minutes, a times-aware one with an id
+    // it does not know enacts nothing — so `time` is only ever an id the child's
+    // `times` clause defines) ride only when set.
+    const body = giftToGrant({
       id,
+      issuedAt,
       minutes: clampGrantMinutes(g.minutes),
       // End of day in the CHILD's tz, exactly like a granted ask's exp — never
       // the guardian phone's midnight, which can land on the wrong side of the
       // device's own day roll.
       expiresAt: endOfDayUnix(issuedAt, g.tz),
-    };
-    // Named times: top up THAT group's own extension pool rather than the
-    // whole-device one. Additive (`v: 1` unchanged) — an old ward just ignores
-    // the key and lands the gift as device time anyway (errs generous).
-    if (g.groupId) body.groupId = g.groupId;
-    // Times: the TYPE of time these minutes buy. Absent = Free, byte-identical
-    // to before. A pre-times ward ignores it and lands Free minutes (the same
-    // documented gap as `groupId`); a times-aware one with an id it does not
-    // know enacts nothing — which is why `time` is only ever an id the child's
-    // `times` clause defines (the picker offers no other).
-    if (g.time) body.time = g.time;
+      groupId: g.groupId,
+      time: g.time,
+    });
     const clause: ClausePayload = { v: 1, kind: "gift", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of devices) {
@@ -618,6 +632,9 @@ export class RealSigner implements Signer {
       );
     }
     const time = giftTime(timeId);
+    // Re-typing an ask is only meaningful on a ward that understands types: an
+    // older one would land the gift as Free time whatever was chosen.
+    this.requireTimesCapable([device]);
     const held = new SendBatch();
     this.requireDeliverable({ ...target, devices: [device] }, ctx.childId);
     await this.authorize(
@@ -627,7 +644,14 @@ export class RealSigner implements Signer {
     );
     // The echo of the REQUEST's own `time` (wire.time) stays in the grant even
     // though the gift buys a different one: the params-echo check is exact.
-    await this.sendTimeExtendGrant("approved", { ...ctx, minutesGranted: 0 }, wire);
+    //
+    // The grant goes through the same routed send as every other wrap. A ward
+    // away from the home network makes the publish throw
+    // `QueuedForHomeNetworkError` (the carrier is holding the wrap), and that
+    // must NOT stop the gift going out behind it — it is recorded in `held`
+    // and `settle` reports it. A genuine failure still stops here, before any
+    // minutes are given (the ask stays open to be answered again).
+    await this.sendTimeExtendGrant("approved", { ...ctx, minutesGranted: 0 }, wire, held);
     await this.sendGift(target, guardian, [device], { minutes, tz: ctx.tz, time }, held);
     return this.settle(held);
   }
@@ -958,6 +982,7 @@ export class RealSigner implements Signer {
     decision: "approved" | "denied",
     ctx: DecisionContext,
     wire: NonNullable<DecisionContext["wire"]>,
+    batch?: SendBatch,
   ): Promise<{ ok: true }> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
@@ -1004,7 +1029,20 @@ export class RealSigner implements Signer {
     });
     // The GRANT answers exactly ONE device — the machine that brokered the ask.
     const wrap = await giftWrapGrant(payload, wire.machine, guardian, ts);
-    await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: wire.reqId });
+    const meta: PublishMeta = { kind: "grant", reqId: wire.reqId };
+    if (!batch) {
+      await this.deps.publish(target.relays, wrap, meta);
+      return { ok: true };
+    }
+    await this.send(target.relays, wrap, meta, batch);
+    // `send` records a failure instead of throwing; here a failed grant must
+    // stop the caller (see `answerAskWithOtherTime`).
+    const failure = batch.failed[0];
+    if (failure) {
+      throw failure.cause instanceof Error
+        ? failure.cause
+        : new Error(failure.error ?? "The answer couldn't be sent.");
+    }
     return { ok: true };
   }
 }
