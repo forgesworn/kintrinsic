@@ -1181,6 +1181,268 @@
       "expectContent": null
     },
     {
+      "name": "every_except_ban_holds_over_a_paused_free_apps_policy",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "blockApps": [
+          "roblox"
+        ],
+        "unblockApps": [
+          "youtube"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "roblox"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_without_bans_carries_a_paused_free_apps_policy",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "freeContent": null,
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "unblockApps": [
+          "youtube"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400,
+        "paused": true
+      },
+      "expectContent": null
+    },
+    {
+      "name": "every_except_deny_holds_over_a_revoked_free_content_clause",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "old.org"
+        ],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "young",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "roblox.com"
+        ],
+        "issuedAt": 0
+      }
+    },
+    {
+      "name": "every_except_undeny_only_carries_a_revoked_free_content_clause",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [],
+        "issuedAt": 1782734400,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "undenySites": [
+          "youtube.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [
+          "youtube.com"
+        ],
+        "parentDeny": [],
+        "issuedAt": 1782734400,
+        "revoked": true
+      }
+    },
+    {
+      "name": "every_except_deny_carries_a_paused_free_content_clause",
+      "freeApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "freeContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com"
+        ],
+        "issuedAt": 1782734400,
+        "paused": true,
+        "revoked": true
+      },
+      "time": {
+        "id": "chores",
+        "label": "Chores",
+        "posture": "everythingExcept",
+        "denySites": [
+          "roblox.com"
+        ]
+      },
+      "expectApps": {
+        "v": 1,
+        "posture": "blocklist",
+        "blocked": [
+          "minecraft",
+          "youtube"
+        ],
+        "allowed": [],
+        "askFirst": [],
+        "hidden": [],
+        "issuedAt": 1782734400
+      },
+      "expectContent": {
+        "v": 1,
+        "posture": "blocklist",
+        "ageTier": "older",
+        "curators": [],
+        "blockCategories": [],
+        "parentAllow": [],
+        "parentDeny": [
+          "tiktok.com",
+          "roblox.com"
+        ],
+        "issuedAt": 1782734400,
+        "paused": true,
+        "revoked": true
+      }
+    },
+    {
       "name": "only_these_apps_make_an_allowlist",
       "freeApps": {
         "v": 1,

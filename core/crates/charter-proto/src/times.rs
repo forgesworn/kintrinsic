@@ -254,7 +254,13 @@ fn dedup(items: impl IntoIterator<Item = String>) -> Vec<String> {
 ///   `allowed` (a ban removes from it, an un-ban adds to it) — the way a hold
 ///   is folded — rather than leaving the time's bans silently inert. Anything
 ///   un-banned also leaves `askFirst`, which must stay a subset of `blocked`.
-///   All else (including `paused`) carries unchanged.
+///   All else carries unchanged — with ONE exception: a time's own additions
+///   are never inert. If Free's `apps` is `paused` (its lists switched off by
+///   the guardian) and the time has `blockApps`, the composed clause is
+///   UN-paused as a blocklist with `blocked := blockApps` only: Free's lists
+///   stay off, as intended, but the time's own bans hold. Carrying `paused`
+///   would silently discard a ban the guardian wrote for this time (the
+///   fail-open direction). With no `blockApps` a paused clause carries.
 /// - `onlyThese`: `posture := allowlist`, `allowed := apps`, `holds` emptied,
 ///   and `paused` CLEARED. `paused` lifts the whole per-app policy, so
 ///   carrying it would run every app inside a time that promised to run only
@@ -265,6 +271,13 @@ fn dedup(items: impl IntoIterator<Item = String>) -> Vec<String> {
 pub fn compose_apps(free_resolved: &GrantApps, t: &NamedTime) -> GrantApps {
     let mut out = free_resolved.clone();
     match t.posture {
+        TimePosture::EverythingExcept if free_resolved.is_paused() && !t.block_apps.is_empty() => {
+            out.paused = None;
+            out.posture = AppPosture::Blocklist;
+            out.blocked = dedup(t.block_apps.iter().cloned());
+            out.allowed = Vec::new();
+            out.ask_first = Vec::new();
+        }
         TimePosture::EverythingExcept => {
             out.blocked = dedup(
                 free_resolved
@@ -333,7 +346,12 @@ fn synthetic_content(posture: Posture) -> GrantContent {
 ///   Free clause is returned as it is. When Free time has no content clause
 ///   and the time DENIES sites, a blocklist clause is synthesised to carry the
 ///   ban: returning `None` would silently drop a ban the guardian wrote.
-///   (Nothing to un-deny ⇒ `None` stays `None`.)
+///   (Nothing to un-deny ⇒ `None` stays `None`.) The same holds when Free's
+///   clause is `revoked` ("unrestricted") and the time has `denySites`: the
+///   time's bans must hold, so a blocklist clause is synthesised carrying
+///   them (Free's lists stay off, `revoked` cleared) rather than composing
+///   onto a clause that would ignore them. A `paused` Free clause (block ALL
+///   web) carries unchanged — it is the more restrictive state.
 /// - `onlyThese`: with `sites` non-empty, `posture := allowlist`,
 ///   `curators := []`, `parentAllow := ⋃ sites[].domains`, SafeSearch and
 ///   YouTube-restrict carried from Free (a synthesised clause takes SafeSearch
@@ -355,6 +373,9 @@ pub fn compose_content(free: Option<&GrantContent>, t: &NamedTime) -> Option<Gra
                 return free.cloned();
             }
             let mut out = match free {
+                Some(f) if f.is_revoked() && !f.is_paused() && !t.deny_sites.is_empty() => {
+                    synthetic_content(Posture::Blocklist)
+                }
                 Some(f) => f.clone(),
                 None if !t.deny_sites.is_empty() => synthetic_content(Posture::Blocklist),
                 None => return None,
@@ -568,6 +589,36 @@ mod tests {
     }
 
     #[test]
+    fn every_except_bans_hold_over_a_paused_free_apps_policy() {
+        let mut free = free_apps();
+        free.paused = Some(true);
+        let mut t = time(TimePosture::EverythingExcept);
+        t.block_apps = vec!["roblox".into()];
+        let out = compose_apps(&free, &t);
+        assert_eq!(out.paused, None);
+        assert_eq!(out.posture, AppPosture::Blocklist);
+        assert_eq!(out.blocked, vec!["roblox".to_string()]);
+        // No bans of its own: a paused clause carries.
+        t.block_apps = vec![];
+        assert_eq!(compose_apps(&free, &t).paused, Some(true));
+    }
+
+    #[test]
+    fn every_except_denies_hold_over_a_revoked_free_content_clause() {
+        let mut t = time(TimePosture::EverythingExcept);
+        t.deny_sites = vec!["roblox.com".into()];
+        let out = compose_content(Some(&free_content()), &t).unwrap();
+        assert_eq!(out.revoked, None);
+        assert_eq!(out.posture, Posture::Blocklist);
+        assert_eq!(out.parent_deny, vec!["roblox.com".to_string()]);
+        // A paused clause (block all web) carries.
+        let mut paused = free_content();
+        paused.paused = Some(true);
+        let out = compose_content(Some(&paused), &t).unwrap();
+        assert_eq!(out.paused, Some(true));
+    }
+
+    #[test]
     fn only_these_is_an_allowlist_and_lifts_a_pause() {
         let mut t = time(TimePosture::OnlyThese);
         t.apps = vec!["khan".into()];
@@ -591,10 +642,12 @@ mod tests {
 
     #[test]
     fn content_departures_normalise_domains() {
+        let mut unrevoked = free_content();
+        unrevoked.revoked = None;
         let mut t = time(TimePosture::EverythingExcept);
         t.deny_sites = vec!["roblox.com".into()];
         t.undeny_sites = vec!["youtube.com".into()];
-        let out = compose_content(Some(&free_content()), &t).unwrap();
+        let out = compose_content(Some(&unrevoked), &t).unwrap();
         assert_eq!(
             out.parent_deny,
             vec!["tiktok.com".to_string(), "roblox.com".into()]

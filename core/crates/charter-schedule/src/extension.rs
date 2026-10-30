@@ -56,7 +56,8 @@ struct TimePool {
 /// routing, and burns the pool it is running off with
 /// [`burn_schedule`](Self::burn_schedule) / [`burn_time`](Self::burn_time) —
 /// wall clock, never usage, so an idle ward cannot stretch a pool. A pool-run
-/// span ends when the pool does.
+/// span ends when the pool does. A `time` riding on a bucket-hit grant is
+/// ignored: bucket routing wins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionLedger {
     tz: String,

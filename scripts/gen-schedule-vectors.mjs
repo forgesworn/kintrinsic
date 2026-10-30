@@ -318,7 +318,14 @@ const freeContent = (o = {}) => ({ v: 1, posture: "blocklist", ageTier: "older",
 function refComposeApps(free, t) {
   const out = JSON.parse(JSON.stringify(free));
   const has = (xs, x) => xs.includes(x);
-  if (t.posture === "everythingExcept") {
+  if (t.posture === "everythingExcept" && free.paused && (t.blockApps ?? []).length > 0) {
+    // A time's own bans are never inert: un-pause as a blocklist of blockApps only.
+    delete out.paused;
+    out.posture = "blocklist";
+    out.blocked = uniq(t.blockApps);
+    out.allowed = [];
+    out.askFirst = [];
+  } else if (t.posture === "everythingExcept") {
     const block = t.blockApps ?? [];
     const unblock = t.unblockApps ?? [];
     out.blocked = uniq([...free.blocked, ...block].filter((p) => !has(unblock, p)));
@@ -341,7 +348,8 @@ function refComposeContent(free, t) {
     const undeny = t.undenySites ?? [];
     if (deny.length === 0 && undeny.length === 0) return free;
     let out;
-    if (free) out = JSON.parse(JSON.stringify(free));
+    if (free && free.revoked && !free.paused && deny.length > 0) out = synth("blocklist");
+    else if (free) out = JSON.parse(JSON.stringify(free));
     else if (deny.length > 0) out = synth("blocklist");
     else return null;
     const undenyKeys = undeny.map(normDomain);
@@ -376,6 +384,11 @@ const compCases = [
   ["every_except_without_site_departures_returns_free_content_as_is", freeApps(), freeContent({ parentDeny: ["tiktok.com"] }), namedTime("chores", "Chores", "everythingExcept", { blockApps: ["roblox"] })],
   ["every_except_deny_with_no_free_content_synthesises_a_blocklist", freeApps(), null, namedTime("chores", "Chores", "everythingExcept", { denySites: ["roblox.com"] })],
   ["every_except_undeny_with_no_free_content_stays_none", freeApps(), null, namedTime("chores", "Chores", "everythingExcept", { undenySites: ["youtube.com"] })],
+  ["every_except_ban_holds_over_a_paused_free_apps_policy", freeApps({ paused: true, blocked: ["minecraft"] }), null, namedTime("chores", "Chores", "everythingExcept", { blockApps: ["roblox"], unblockApps: ["youtube"] })],
+  ["every_except_without_bans_carries_a_paused_free_apps_policy", freeApps({ paused: true }), null, namedTime("chores", "Chores", "everythingExcept", { unblockApps: ["youtube"] })],
+  ["every_except_deny_holds_over_a_revoked_free_content_clause", freeApps(), freeContent({ revoked: true, parentDeny: ["tiktok.com"], parentAllow: ["old.org"] }), namedTime("chores", "Chores", "everythingExcept", { denySites: ["roblox.com"] })],
+  ["every_except_undeny_only_carries_a_revoked_free_content_clause", freeApps(), freeContent({ revoked: true }), namedTime("chores", "Chores", "everythingExcept", { undenySites: ["youtube.com"] })],
+  ["every_except_deny_carries_a_paused_free_content_clause", freeApps(), freeContent({ paused: true, revoked: true, parentDeny: ["tiktok.com"] }), namedTime("chores", "Chores", "everythingExcept", { denySites: ["roblox.com"] })],
   ["only_these_apps_make_an_allowlist", freeApps({ hidden: ["bloat"] }), freeContent({ parentDeny: ["tiktok.com"] }), namedTime("learning", "Learning", "onlyThese", { apps: ["khan", "khan", "calc"] })],
   ["only_these_clears_a_paused_apps_policy", freeApps({ paused: true }), null, namedTime("learning", "Learning", "onlyThese", { apps: ["khan"] })],
   ["only_these_with_nothing_runs_nothing", freeApps(), freeContent({ parentDeny: ["tiktok.com"] }), namedTime("learning", "Learning", "onlyThese", {})],
