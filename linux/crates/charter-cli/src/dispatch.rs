@@ -151,7 +151,7 @@ pub async fn dispatch(
             // M7 routing is shared (TimeLeftView::limit_hit) so the tray and
             // the CLI cannot fork the rule. A failed read defaults to
             // "budget" rather than aborting the request.
-            let time_left = client.time_left().await.ok();
+            let time_left = client.time_left().await;
             let limit_hit = time_left
                 .as_ref()
                 .map(|t| t.limit_hit())
@@ -164,9 +164,30 @@ pub async fn dispatch(
             // every ask on a pre-times daemon — is byte-identical to before.
             let time = match flag_value("--time") {
                 Some(id) if id == FREE_TIME_CHOICE => None,
-                Some(id) => Some(id),
+                // A named id must be one the daemon offers this ward right
+                // now (`TimeLeftView::check_ask_time`, the same check
+                // charterd makes before it publishes). Refused here, with the
+                // choices, rather than sent to the guardian as an ask for a
+                // time that does not exist. An unreadable snapshot cannot
+                // vouch for any id, so a typed ask fails closed.
+                Some(id) => match &time_left {
+                    Ok(t) => match t.check_ask_time(&id) {
+                        Ok(()) => Some(id),
+                        Err(why) => return usage(&format!("error: {why}")),
+                    },
+                    Err(e) => {
+                        return CliOutcome {
+                            code: exit_code(e),
+                            rendered: format!(
+                                "error: couldn't check which times this computer offers ({e}) \
+                                 — try again, or ask without --time"
+                            ),
+                        }
+                    }
+                },
                 None => time_left
                     .as_ref()
+                    .ok()
                     .and_then(|t| t.default_ask_time())
                     .map(str::to_string),
             };

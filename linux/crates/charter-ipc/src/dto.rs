@@ -203,6 +203,21 @@ pub struct TimeChoice {
 /// never collide with a real time.
 pub const FREE_TIME_CHOICE: &str = "free";
 
+/// Longest named-time id, in bytes — the contract's `^[a-z0-9-]{1,32}$`.
+pub const MAX_TIME_ID_LEN: usize = 32;
+
+/// Whether `id` has the shape the contract gives a named-time id,
+/// `^[a-z0-9-]{1,32}$`. Mirrors `charter_proto::times`' own (private) check,
+/// which this crate does not depend on; the clause parser there rejects any
+/// other id, so nothing outside this shape can ever be a time a ward is in.
+pub fn is_time_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_TIME_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// The ward-facing account of times (§Times): every string is already in the
 /// child's words and the child's tz, so a surface renders it verbatim and
 /// needs no policy read of its own.
@@ -282,6 +297,47 @@ impl TimeLeftView {
             .ask_default
             .as_deref()
             .filter(|id| *id != FREE_TIME_CHOICE)
+    }
+
+    /// Whether a ward may name `id` as the `time` of a `time.extend` ask
+    /// (§Times): a well-formed named-time id ([`is_time_id`], never
+    /// [`FREE_TIME_CHOICE`] — Free time is the ABSENCE of the field) that the
+    /// daemon currently offers this ward in [`TimesView::ask`]. Shared by the
+    /// CLI (before it submits) and charterd's `SubmitRequest` (before it
+    /// publishes) so the two cannot fork. `Err` carries ward-readable copy.
+    ///
+    /// Fails CLOSED: a snapshot with no times view (a pre-times daemon, an
+    /// unknown readout) offers nothing to name. An unknown id would enact no
+    /// extra time on the device anyway, but it would still reach the
+    /// guardian as an ask for a kind of time that does not exist.
+    pub fn check_ask_time(&self, id: &str) -> Result<(), String> {
+        if !is_time_id(id) || id == FREE_TIME_CHOICE {
+            return Err(format!(
+                "{id:?} is not a time id (lowercase letters, digits and '-', at most 32)"
+            ));
+        }
+        let offered: Vec<&str> = self
+            .time
+            .as_ref()
+            .map(|t| {
+                t.ask
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .filter(|c| *c != FREE_TIME_CHOICE)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if offered.contains(&id) {
+            return Ok(());
+        }
+        Err(if offered.is_empty() {
+            format!("there is no {id:?} time on this computer — ask for Free time instead")
+        } else {
+            format!(
+                "there is no {id:?} time on this computer — choose one of: free, {}",
+                offered.join(", ")
+            )
+        })
     }
 
     /// An "unknown" snapshot — explicitly NOT "unlimited" (fail-safe).
@@ -531,5 +587,43 @@ mod tests {
         assert!(wire.contains("\"ask_first\""), "{wire}");
         let back: TimeLeftView = serde_json::from_str(&wire).unwrap();
         assert_eq!(back.ask_first, t2.ask_first);
+    }
+
+    #[test]
+    fn an_ask_may_name_only_a_well_formed_time_the_daemon_offers() {
+        let mut t = TimeLeftView::unknown();
+        // No times view at all: nothing can be named (fail closed).
+        assert!(t.check_ask_time("learning").is_err());
+        t.time = Some(Box::new(TimesView {
+            ask: vec![
+                TimeChoice {
+                    id: FREE_TIME_CHOICE.into(),
+                    label: "Free time".into(),
+                },
+                TimeChoice {
+                    id: "learning".into(),
+                    label: "Learning time".into(),
+                },
+            ],
+            ..Default::default()
+        }));
+        assert_eq!(t.check_ask_time("learning"), Ok(()));
+        let e = t.check_ask_time("chores").unwrap_err();
+        assert!(e.contains("free, learning"), "{e}");
+        // Free is the absence of the field, never a named id on the wire.
+        assert!(t.check_ask_time(FREE_TIME_CHOICE).is_err());
+        for bad in [
+            "",
+            "Learning",
+            "learning time",
+            "a/b",
+            &"x".repeat(33),
+            "lé",
+        ] {
+            assert!(!is_time_id(bad), "{bad:?}");
+            assert!(t.check_ask_time(bad).is_err(), "{bad:?}");
+        }
+        assert!(is_time_id(&"x".repeat(32)));
+        assert!(is_time_id("homework-2"));
     }
 }

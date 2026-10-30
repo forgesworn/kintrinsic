@@ -505,10 +505,15 @@ impl WebContentEnforcer {
         if let Some(t) = time {
             let free = match sys.clauses().get_clause(ClauseKind::Content.store_key()) {
                 Ok(Some(j)) => match serde_json::from_str::<charter_content::GrantContent>(&j) {
-                    Ok(c) => Some(c),
-                    // Unreadable Free clause: the same fail-closed lock the
-                    // plain path takes, never a composition over a guess.
-                    Err(_) => {
+                    Ok(c) if c.is_supported_version() => Some(c),
+                    // Unreadable Free clause — or one whose body version this
+                    // build does not implement, which `evaluate_content` reads
+                    // as unreadable too: the same fail-closed lock the plain
+                    // path takes, never a composition over a guess. Checked
+                    // HERE, before `compose_content`, so the Firefox policy
+                    // cannot fail open on a future body even if the shared
+                    // composer ever synthesises over one again.
+                    Ok(_) | Err(_) => {
                         let policy = EffectiveWebPolicy::locked();
                         if self.last_applied.as_ref() == Some(&policy) {
                             return WebReconcile::Unchanged;
@@ -763,6 +768,34 @@ mod tests {
             e.reconcile_with(&sys, Some(&t)).await,
             WebReconcile::Enacted { locked: true }
         );
+    }
+
+    /// A Free content clause whose body version this build does not implement
+    /// locks under a time exactly as an unparseable one does — before any
+    /// composition — including a wide-open shape (`revoked`) that a composer
+    /// reading only v1 fields would otherwise run as unrestricted.
+    #[tokio::test]
+    async fn an_unsupported_version_free_clause_locks_under_a_time_before_composing() {
+        let t = chores(r#","denySites":["games.example"]"#);
+        for body in [
+            r#"{"v":2,"posture":"blocklist","ageTier":"young","issuedAt":1}"#,
+            r#"{"v":2,"posture":"blocklist","ageTier":"young","revoked":true,"issuedAt":1}"#,
+        ] {
+            let sys = MockSystem::new(1000);
+            put_content(&sys, body);
+            let m = marker("times-future-v");
+            let mut e = WebContentEnforcer::with_marker_path(&m);
+            assert_eq!(
+                e.reconcile_with(&sys, Some(&t)).await,
+                WebReconcile::Enacted { locked: true },
+                "{body}"
+            );
+            // Idempotent: the same lock is not re-written.
+            assert_eq!(
+                e.reconcile_with(&sys, Some(&t)).await,
+                WebReconcile::Unchanged
+            );
+        }
     }
 
     /// A per-test marker path, so the durable half of the retraction memory is

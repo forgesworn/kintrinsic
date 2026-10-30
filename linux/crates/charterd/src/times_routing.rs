@@ -22,7 +22,9 @@
 //!   lock is a dimension a named time is entitled to ignore: the budget, for
 //!   a named window that does not count against it; or the schedule/budget
 //!   dimension, for a named pool the guardian topped up. A stand-down or a
-//!   malformed clause outranks every time — nothing here lifts those.
+//!   malformed clause outranks every time — nothing here lifts those. Nor
+//!   does any named POOL run while the budget is one the core makes immune to
+//!   every extension pool (see [`budget_pool_proof`]).
 //!
 //! Everything else keeps the core's verdict, byte for byte. A family with no
 //! `times` clause and no tagged window never reaches a branch that differs
@@ -32,8 +34,8 @@ use charter_ipc::dto::{TimeChoice, TimesView, FREE_TIME_CHOICE};
 use charter_proto::status::AppRef;
 use charter_proto::{LearningApp, LearningAppKind};
 use charter_schedule::{
-    Activity, Dimension, EnforcerEffect, GrantSchedule, LockCause, LockReason, Remaining,
-    TimedStatus, WarnLevel,
+    Activity, Dimension, EnforcerEffect, GrantBudget, GrantSchedule, LockCause, LockReason,
+    Remaining, TimedStatus, WarnLevel,
 };
 use charter_spine::multi_child::{ChildDecision, PendingExtension};
 use charter_spine::times::{GrantTimes, NamedTime, TimePosture};
@@ -120,7 +122,36 @@ pub struct Inputs<'a> {
     pub times: Option<&'a GrantTimes>,
     pub inventory_known: bool,
     pub pool: Option<(&'a str, u64)>,
+    /// The budget in force is one no extension pool may lift (see
+    /// [`budget_pool_proof`]): no named pool runs, whatever the lock reason.
+    pub budget_pool_proof: bool,
     pub now: i64,
+}
+
+/// Whether the budget in force is one the core makes immune to EVERY
+/// extension pool: a guardian `paused` budget, a body version this build does
+/// not implement, or a fail-safe stand-in — an unreadable slot or garbage
+/// body (`resolve_effective` substitutes the paused `fail_safe_budget`, so it
+/// arrives here as `paused`) and the `usageUnsaved` stand-in while the usage
+/// ledger cannot be saved. The core answers all of these with a zero budget
+/// that Free's own pools cannot buy out; a named pool must not either.
+///
+/// Fails CLOSED. `Remaining` cannot tell these from a budget that is simply
+/// spent — both read `LockReason::Budget`, or `Schedule` outside every window
+/// (the schedule-wins tiebreak) — and running a named pool over them would
+/// unlock the device on exactly the states that exist to keep it locked. The
+/// `usageUnsaved` case is the sharp one: the pool's burn is saved to the same
+/// failing disk, so every reboot would refill it.
+///
+/// Mirrors the order `quota_parts_signed_pooled` judges in: an unsupported
+/// version zeroes whatever else the body says; `revoked` (no cap) outranks
+/// `paused`. `usage_unsaved` is the core's own answer
+/// (`MultiChildEnforcer::usage_unsaved`), true only while a budget is in force.
+pub fn budget_pool_proof(budget: Option<&GrantBudget>, usage_unsaved: bool) -> bool {
+    usage_unsaved
+        || budget.is_some_and(|b| {
+            !b.is_supported_version() || (b.revoked != Some(true) && b.paused == Some(true))
+        })
 }
 
 /// A named time, run — unless it is *only these* and the inventory is
@@ -145,7 +176,17 @@ fn run_named(i: &Inputs, t: &NamedTime, from_pool: bool, span_end: i64, ends_at:
 /// So here: only when the core's lock is one of `dims` (never a stand-down
 /// or a malformed clause), the most recently topped-up named pool runs AS
 /// that named time; nothing left ⇒ the core's lock stands.
+///
+/// A pool-proof budget ([`budget_pool_proof`]) stops the fall-through
+/// outright, not just its `Budget` dimension: such a budget is always zero,
+/// and outside every window the core's schedule-wins tiebreak reports it as a
+/// `Schedule` lock — dropping only `Budget` from `dims` would let the named
+/// pool lift it there. The core's own rule is the same: a paused budget
+/// locks even while Free's schedule pool is running.
 fn fall_through(i: &Inputs, dims: &[LockReason]) -> Verdict {
+    if i.budget_pool_proof {
+        return Verdict::Core { span_end: None };
+    }
     let dimension_lock = i.core.locked && i.core.reason.is_some_and(|r| dims.contains(&r));
     if !dimension_lock {
         return Verdict::Core { span_end: None };
@@ -196,7 +237,9 @@ pub fn decide(i: &Inputs) -> Verdict {
             }
             match core.reason {
                 // `countsAgainstBudget: false`: budget exhaustion never locks
-                // this time — the window decides and no pool burns.
+                // this time — the window decides and no pool burns. This holds
+                // over a pool-proof budget too (the WINDOW is the guardian's
+                // own grant of that time, not an extension; judged defensible).
                 Some(LockReason::Budget) if !counts => run_named(i, t, false, *span_end, *span_end),
                 // A counting time whose budget is spent cannot run: fall
                 // through exactly as Free time would.
@@ -265,6 +308,7 @@ pub fn resolve(
     core: &Remaining,
     inventory_known: bool,
     pool: Option<(&str, u64)>,
+    budget_pool_proof: bool,
     now: i64,
 ) -> TimesState {
     let timed = match schedule {
@@ -278,6 +322,7 @@ pub fn resolve(
         times,
         inventory_known,
         pool,
+        budget_pool_proof,
         now,
     });
     // A Free span is only "cut short" when a DIFFERENT time (or an unknown
@@ -389,10 +434,14 @@ pub fn adjusted_remaining(
 /// discarded, so a clause that lands later today still honours them.
 ///
 /// `stand_down_secs` is a guardian stand-down's countdown when one stands
-/// (see [`apply_stand_down`]).
+/// (see [`apply_stand_down`]). `budget` is the child's effective budget
+/// clause (the policy's, fail-safe stand-in included), read for
+/// [`budget_pool_proof`].
+#[allow(clippy::too_many_arguments)]
 pub fn state_for(
     multi: &charter_spine::multi_child::MultiChildEnforcer,
     schedule: Option<&GrantSchedule>,
+    budget: Option<&GrantBudget>,
     times: Option<&GrantTimes>,
     inventory_known: bool,
     stand_down_secs: Option<i64>,
@@ -404,7 +453,8 @@ pub fn state_for(
     let pool = pool_id
         .as_deref()
         .map(|id| (id, multi.time_extra(uid, id, now).unwrap_or(0)));
-    let mut st = resolve(schedule, times, &core, inventory_known, pool, now);
+    let proof = budget_pool_proof(budget, multi.usage_unsaved(uid));
+    let mut st = resolve(schedule, times, &core, inventory_known, pool, proof, now);
     apply_stand_down(&mut st, stand_down_secs, now);
     Some(st)
 }
@@ -467,7 +517,8 @@ pub fn apply_to_decision(d: &mut ChildDecision, s: &TimesState) {
 /// screen/learning credit, every named-bucket credit and the unrecognised
 /// meter on `activity.counts()`. A named time with `countsAgainstBudget:
 /// false` therefore charges as `Idle` — usage in it drains neither the budget
-/// nor any bucket. Every other state charges exactly as before.
+/// nor any bucket. `Idle` also quiets the learning and unrecognised meters for
+/// that span (accepted for v1). Every other state charges exactly as before.
 pub fn charge_activity(base: Activity, v: &Verdict) -> Activity {
     match v {
         Verdict::Named { counts: false, .. } if base.counts() => Activity::Idle,
@@ -937,6 +988,7 @@ mod tests {
             &open_core(3 * H, -1),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         assert_eq!(
@@ -953,6 +1005,7 @@ mod tests {
             &open_core(H, -1),
             true,
             None,
+            false,
             MON + 17 * H + 60,
         );
         assert_eq!(
@@ -966,6 +1019,7 @@ mod tests {
             &open_core(3 * H, -1),
             true,
             None,
+            false,
             MON + 16 * H,
         );
         assert_eq!(
@@ -991,6 +1045,7 @@ mod tests {
             &open_core(H, -1),
             true,
             Some(("learning", 1800)),
+            false,
             MON + 17 * H + 60,
         );
         assert_eq!(
@@ -1009,6 +1064,7 @@ mod tests {
             &open_core(3 * H, -1),
             true,
             None,
+            false,
             MON + 9 * H,
         );
         assert!(matches!(
@@ -1028,6 +1084,7 @@ mod tests {
             &locked_core(LockReason::Budget),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         assert!(matches!(
@@ -1052,6 +1109,7 @@ mod tests {
             &locked_core(LockReason::Budget),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         assert_eq!(st.verdict, Verdict::Core { span_end: None });
@@ -1068,6 +1126,7 @@ mod tests {
                 &locked_core(reason),
                 true,
                 Some(("learning", 3600)),
+                false,
                 MON + 10 * H,
             );
             assert_eq!(st.verdict, Verdict::Core { span_end: None }, "{reason:?}");
@@ -1087,6 +1146,7 @@ mod tests {
             &open_core(3 * H, -1),
             false,
             None,
+            false,
             MON + 10 * H,
         );
         assert_eq!(
@@ -1102,6 +1162,7 @@ mod tests {
             &open_core(3 * H, -1),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         assert!(matches!(st.verdict, Verdict::Named { .. }));
@@ -1114,6 +1175,7 @@ mod tests {
             &open_core(3 * H, -1),
             false,
             None,
+            false,
             MON + 10 * H,
         );
         assert!(matches!(st.verdict, Verdict::Named { .. }));
@@ -1128,6 +1190,7 @@ mod tests {
             &locked_core(LockReason::Schedule),
             false,
             Some(("learning", 1800)),
+            false,
             MON + 20 * H,
         );
         assert_eq!(
@@ -1149,6 +1212,7 @@ mod tests {
             &open_core(900, -1),
             true,
             Some(("learning", 1800)),
+            false,
             MON + 20 * H,
         );
         assert_eq!(st.verdict, Verdict::Core { span_end: None });
@@ -1169,6 +1233,7 @@ mod tests {
             &locked_core(LockReason::Schedule),
             true,
             Some(("learning", 1800)),
+            false,
             MON + 20 * H,
         );
         assert_eq!(
@@ -1203,6 +1268,7 @@ mod tests {
             &locked_core(LockReason::Budget),
             true,
             Some(("learning", 1800)),
+            false,
             MON + 17 * H + 1800,
         );
         assert!(
@@ -1220,6 +1286,7 @@ mod tests {
                 &locked_core(LockReason::Schedule),
                 true,
                 pool,
+                false,
                 MON + 20 * H,
             );
             assert_eq!(st.verdict, Verdict::Core { span_end: None });
@@ -1237,6 +1304,7 @@ mod tests {
             &locked_core(LockReason::Schedule),
             true,
             Some(("learning", 1800)),
+            false,
             MON + 17 * H,
         );
         assert_eq!(st.verdict, Verdict::Core { span_end: None });
@@ -1257,6 +1325,7 @@ mod tests {
             &open_core(90 * 60, -1),
             true,
             None,
+            false,
             MON + 18 * H,
         );
         assert_eq!(st.verdict, Verdict::Core { span_end: None });
@@ -1304,6 +1373,7 @@ mod tests {
             &open_core(60, -1),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         apply_stand_down(&mut st, Some(60), MON + 10 * H);
@@ -1324,6 +1394,7 @@ mod tests {
             &open_core(900, 900),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         assert!(matches!(
@@ -1359,6 +1430,7 @@ mod tests {
             &open_core(3 * H, -1),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         let mut d = decision(false, None);
@@ -1376,6 +1448,7 @@ mod tests {
             &locked_core(LockReason::Budget),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         let mut d = decision(true, Some(LockReason::Budget));
@@ -1388,7 +1461,7 @@ mod tests {
     fn a_family_with_no_times_keeps_the_core_decision_and_warnings_untouched() {
         let s = sched(vec![win("16:00", "19:00", None)]);
         let core = open_core(H, 2 * H);
-        let st = resolve(Some(&s), None, &core, true, None, MON + 18 * H);
+        let st = resolve(Some(&s), None, &core, true, None, false, MON + 18 * H);
         assert!(!st.in_play);
         assert_eq!(st.remaining, core);
         let mut d = decision(false, None);
@@ -1403,27 +1476,32 @@ mod tests {
         budget_daily: Option<u16>,
         now: i64,
     ) -> charter_spine::multi_child::MultiChildEnforcer {
-        use charter_spine::child_policy::{EffectivePolicy, PolicySource};
         let budget = budget_daily.map(|d| {
-            serde_json::from_value::<charter_schedule::GrantBudget>(serde_json::json!({
+            budget_json(serde_json::json!({
                 "v": 1, "tz": "Etc/UTC", "dailyMinutes": d, "issuedAt": 1
             }))
-            .expect("budget")
         });
-        let mut multi = charter_spine::multi_child::MultiChildEnforcer::new();
-        multi.sync(
-            &[(
-                UID,
-                EffectivePolicy {
-                    schedule: Some(schedule),
-                    budget,
-                    learning: None,
-                    source: PolicySource::Guardian,
-                },
-            )],
+        enforcer_with_policy(
+            charter_spine::child_policy::EffectivePolicy {
+                schedule: Some(schedule),
+                budget,
+                learning: None,
+                source: charter_spine::child_policy::PolicySource::Guardian,
+            },
             now,
-            |_| (None, None),
-        );
+        )
+    }
+
+    fn budget_json(v: serde_json::Value) -> GrantBudget {
+        serde_json::from_value::<GrantBudget>(v).expect("budget")
+    }
+
+    fn enforcer_with_policy(
+        policy: charter_spine::child_policy::EffectivePolicy,
+        now: i64,
+    ) -> charter_spine::multi_child::MultiChildEnforcer {
+        let mut multi = charter_spine::multi_child::MultiChildEnforcer::new();
+        multi.sync(&[(UID, policy)], now, |_| (None, None));
         multi
     }
 
@@ -1437,11 +1515,11 @@ mod tests {
         let mut multi = enforcer_with(s.clone(), None, now);
         multi.tick(Some(UID), now, 0);
         // Locked outside every window, nothing in any pool.
-        let st = state_for(&multi, Some(&s), Some(&t), true, None, UID, now).unwrap();
+        let st = state_for(&multi, Some(&s), None, Some(&t), true, None, UID, now).unwrap();
         assert!(st.remaining.locked);
         // A grant for a time this device does not define enacts NOTHING…
         assert!(multi.apply_time_extension(UID, now, "req-chores", 30, "chores"));
-        let st = state_for(&multi, Some(&s), Some(&t), true, None, UID, now).unwrap();
+        let st = state_for(&multi, Some(&s), None, Some(&t), true, None, UID, now).unwrap();
         assert!(st.remaining.locked, "unknown time id ⇒ no extra time");
         // …and is not run as Free either: Free's own pool is untouched.
         assert_eq!(multi.remaining(UID, now).unwrap().extension_secs, 0);
@@ -1451,14 +1529,24 @@ mod tests {
             panic!("typed grant must route to its time");
         };
         assert!(multi.apply_time_extension(UID, now, &p.req_id, p.minutes, id));
-        let st = state_for(&multi, Some(&s), Some(&t), true, None, UID, now).unwrap();
+        let st = state_for(&multi, Some(&s), None, Some(&t), true, None, UID, now).unwrap();
         assert!(
             matches!(st.verdict, Verdict::Named { ref id, from_pool: true, .. } if id == "learning")
         );
         assert_eq!(st.remaining.effective_secs, 30 * 60);
         // It burns wall clock while it runs, and locks again when spent.
         multi.burn_time_pool(UID, now, "learning", 30 * 60);
-        let st = state_for(&multi, Some(&s), Some(&t), true, None, UID, now + 30 * 60).unwrap();
+        let st = state_for(
+            &multi,
+            Some(&s),
+            None,
+            Some(&t),
+            true,
+            None,
+            UID,
+            now + 30 * 60,
+        )
+        .unwrap();
         assert!(st.remaining.locked);
     }
 
@@ -1475,7 +1563,7 @@ mod tests {
         let open: Vec<String> = vec!["play".into()];
         for step in 1..=10 {
             let at = now + step * 60;
-            let st = state_for(&multi, Some(&s), Some(&t), true, None, UID, at).unwrap();
+            let st = state_for(&multi, Some(&s), None, Some(&t), true, None, UID, at).unwrap();
             let charge = charge_activity(Activity::Active, &st.verdict);
             multi.tick_open_with(
                 charge,
@@ -1501,7 +1589,7 @@ mod tests {
         let free_at = MON + 16 * H;
         for step in 1..=10 {
             let at = free_at + step * 60;
-            let st = state_for(&multi, Some(&s), Some(&t), true, None, UID, at).unwrap();
+            let st = state_for(&multi, Some(&s), None, Some(&t), true, None, UID, at).unwrap();
             let charge = charge_activity(Activity::Active, &st.verdict);
             multi.tick_open_with(
                 charge,
@@ -1514,6 +1602,190 @@ mod tests {
             );
         }
         assert_eq!(multi.used_today(UID, free_at + 600), Some(600));
+    }
+
+    // ---- pool-proof budgets ---------------------------------------------------
+
+    #[test]
+    fn budget_pool_proof_names_every_state_the_core_makes_immune_to_pools() {
+        let b = |extra: serde_json::Value| {
+            let mut v =
+                serde_json::json!({"v": 1, "tz": "Etc/UTC", "dailyMinutes": 60, "issuedAt": 1});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            budget_json(v)
+        };
+        assert!(
+            !budget_pool_proof(None, false),
+            "no budget: nothing to guard"
+        );
+        assert!(!budget_pool_proof(Some(&b(serde_json::json!({}))), false));
+        assert!(budget_pool_proof(
+            Some(&b(serde_json::json!({"paused": true}))),
+            false
+        ));
+        assert!(budget_pool_proof(
+            Some(&b(serde_json::json!({"v": 2}))),
+            false
+        ));
+        // An unsupported version zeroes whatever else it says, revoked included.
+        assert!(budget_pool_proof(
+            Some(&b(serde_json::json!({"v": 2, "revoked": true}))),
+            false
+        ));
+        // `revoked` outranks `paused` in the core: no cap, so nothing to guard.
+        assert!(!budget_pool_proof(
+            Some(&b(serde_json::json!({"paused": true, "revoked": true}))),
+            false
+        ));
+        assert!(budget_pool_proof(Some(&b(serde_json::json!({}))), true));
+    }
+
+    #[test]
+    fn a_pool_proof_budget_stops_a_named_pool_in_a_free_window_and_outside_every_window() {
+        let t = learning_only_these(false);
+        let s = sched(vec![win("16:00", "19:00", None)]);
+        // Inside Free: the core says Budget. Outside every window: the
+        // schedule-wins tiebreak says Schedule, though the budget is zero too.
+        for (core, now) in [
+            (locked_core(LockReason::Budget), MON + 17 * H),
+            (locked_core(LockReason::Schedule), MON + 20 * H),
+        ] {
+            let st = resolve(
+                Some(&s),
+                Some(&t),
+                &core,
+                true,
+                Some(("learning", 3600)),
+                true,
+                now,
+            );
+            assert_eq!(st.verdict, Verdict::Core { span_end: None }, "{now}");
+            assert!(st.remaining.locked);
+            assert_eq!(burning_pool(&st.verdict), None, "no pool burns");
+        }
+    }
+
+    #[test]
+    fn a_pool_proof_budget_keeps_a_non_counting_window_open() {
+        // Accepted behaviour: the WINDOW is the guardian's own grant of that
+        // time, not an extension, and it opens over a Budget lock regardless.
+        let t = learning_only_these(false);
+        let st = resolve(
+            Some(&day()),
+            Some(&t),
+            &locked_core(LockReason::Budget),
+            true,
+            Some(("learning", 3600)),
+            true,
+            MON + 10 * H,
+        );
+        assert!(matches!(
+            st.verdict,
+            Verdict::Named {
+                from_pool: false,
+                ..
+            }
+        ));
+    }
+
+    /// End to end through the live enforcer: a 60-minute Learning gift on a
+    /// child whose budget is in each immune state locks inside Free (budget
+    /// lock) and outside every window (schedule lock); the same gift on an
+    /// ordinary budget runs (control).
+    #[test]
+    fn a_named_pool_never_runs_over_a_paused_unsupported_fail_safe_or_unsaved_budget() {
+        use charter_proto::ClauseKind;
+        use charter_spine::child_policy::{resolve_effective, EffectivePolicy, PolicySource};
+        use charter_sys::persistence::ChildClauses;
+        let s = sched(vec![win("16:00", "19:00", None)]);
+        let t = learning_only_these(false);
+        let sched_json = serde_json::to_string(&s).unwrap();
+        let plain = || {
+            budget_json(serde_json::json!({
+                "v": 1, "tz": "Etc/UTC", "dailyMinutes": 60, "issuedAt": 1
+            }))
+        };
+        let with_budget = |b: GrantBudget| EffectivePolicy {
+            schedule: Some(s.clone()),
+            budget: Some(b),
+            learning: None,
+            source: PolicySource::Guardian,
+        };
+        let mut paused = plain();
+        paused.paused = Some(true);
+        let mut future = plain();
+        future.v = 2;
+        let garbage = resolve_effective(
+            &ChildClauses {
+                clauses: vec![
+                    (ClauseKind::Schedule.store_key(), sched_json.clone()),
+                    (ClauseKind::Budget.store_key(), "garbage".into()),
+                ],
+                unreadable: vec![],
+            },
+            None,
+            None,
+        );
+        let unreadable = resolve_effective(
+            &ChildClauses {
+                clauses: vec![(ClauseKind::Schedule.store_key(), sched_json)],
+                unreadable: vec![ClauseKind::Budget.store_key()],
+            },
+            None,
+            None,
+        );
+        let cases: Vec<(&str, EffectivePolicy, bool)> = vec![
+            ("paused", with_budget(paused), false),
+            ("unsupported v", with_budget(future), false),
+            ("garbage body", garbage, false),
+            ("unreadable slot", unreadable, false),
+            ("usage unsaved", with_budget(plain()), true),
+        ];
+        let start = MON + 16 * H;
+        for (name, pol, unsaved) in cases {
+            for now in [MON + 17 * H, MON + 20 * H] {
+                let mut multi = enforcer_with_policy(pol.clone(), start);
+                multi.set_usage_unsaved(UID, unsaved);
+                multi.tick(Some(UID), now, 0);
+                assert!(multi.apply_time_extension(UID, now, "gift:1", 60, "learning"));
+                let st = state_for(
+                    &multi,
+                    Some(&s),
+                    pol.budget.as_ref(),
+                    Some(&t),
+                    true,
+                    None,
+                    UID,
+                    now,
+                )
+                .unwrap();
+                assert!(st.remaining.locked, "{name} at {now}: must stay locked");
+                assert_eq!(burning_pool(&st.verdict), None, "{name} at {now}");
+            }
+        }
+        // Control: the same gift on an ordinary, unspent budget runs outside
+        // every window as Learning time.
+        let pol = with_budget(plain());
+        let now = MON + 20 * H;
+        let mut multi = enforcer_with_policy(pol.clone(), start);
+        multi.tick(Some(UID), now, 0);
+        assert!(multi.apply_time_extension(UID, now, "gift:1", 60, "learning"));
+        let st = state_for(
+            &multi,
+            Some(&s),
+            pol.budget.as_ref(),
+            Some(&t),
+            true,
+            None,
+            UID,
+            now,
+        )
+        .unwrap();
+        assert!(
+            matches!(st.verdict, Verdict::Named { ref id, from_pool: true, .. } if id == "learning")
+        );
     }
 
     // ---- inbox drain ------------------------------------------------------------
@@ -1573,6 +1845,7 @@ mod tests {
             &locked_core(LockReason::Schedule),
             true,
             None,
+            false,
             MON + 7 * H,
         );
         let (title, detail) = lock_copy(&st, Some(&day()), Some(&t), MON + 7 * H).unwrap();
@@ -1585,6 +1858,7 @@ mod tests {
             &open_core(H, -1),
             true,
             None,
+            false,
             MON + 17 * H + 60,
         );
         let (title, detail) = lock_copy(&st, Some(&day()), Some(&t), MON + 17 * H + 60).unwrap();
@@ -1597,6 +1871,7 @@ mod tests {
             &locked_core(LockReason::Schedule),
             true,
             None,
+            false,
             MON + 20 * H,
         );
         assert_eq!(
@@ -1615,7 +1890,7 @@ mod tests {
             win("16:00", "19:00", None),
         ]);
         let at = |now: i64, core: &Remaining| {
-            let st = resolve(Some(&s), Some(&t), core, true, None, now);
+            let st = resolve(Some(&s), Some(&t), core, true, None, false, now);
             default_ask(&st, Some(&s), Some(&t), now)
         };
         // Inside Learning, locked or not: Learning.
@@ -1659,6 +1934,7 @@ mod tests {
             &open_core(4 * H, -1),
             true,
             None,
+            false,
             MON + 10 * H,
         );
         let v = times_view(&st, Some(&s), Some(&t), &inv, chrono_tz::UTC, MON + 10 * H).unwrap();
@@ -1680,6 +1956,7 @@ mod tests {
             &open_core(H, -1),
             true,
             None,
+            false,
             MON + 18 * H,
         );
         assert_eq!(

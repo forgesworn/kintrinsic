@@ -2869,6 +2869,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 crate::times_routing::state_for(
                     &multi,
                     pol.schedule.as_ref(),
+                    pol.budget.as_ref(),
                     times_by_uid.get(&uid),
                     inventory_known,
                     stand_downs.get(&uid).copied(),
@@ -2971,6 +2972,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                         crate::times_routing::state_for(
                             &multi,
                             pol.schedule.as_ref(),
+                            pol.budget.as_ref(),
                             times_by_uid.get(uid),
                             inventory_known,
                             stand_downs.get(uid).copied(),
@@ -4580,6 +4582,7 @@ mod tests {
         let st = crate::times_routing::state_for(
             &multi,
             Some(&schedule),
+            None,
             times.as_ref(),
             true,
             None,

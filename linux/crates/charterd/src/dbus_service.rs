@@ -37,6 +37,33 @@ pub type TimeLeftSnapshots = Arc<Mutex<BTreeMap<u32, TimeLeftView>>>;
 
 // ---- pure DTO mappings (unit-tested) --------------------------------------
 
+/// Vet the `time` a ward's `time.extend` names (§Times) before anything is
+/// published: absent is Free time and always fine; present, it must be a
+/// string naming a time this daemon currently offers THIS caller
+/// (`TimeLeftView::check_ask_time` — the shape `^[a-z0-9-]{1,32}$`, never
+/// `"free"`, and membership in the caller's `TimesView.ask`). `snapshot` is
+/// the caller's own readout, looked up by the kernel-attested uid.
+///
+/// Fails CLOSED: no snapshot (an unidentifiable caller, or none built yet)
+/// vouches for no id. The ward used to be able to put any string here; an
+/// unknown id enacts no extra time on the device, but it still went to the
+/// guardian as an ask for a kind of time that does not exist.
+pub fn check_requested_time(
+    params: &serde_json::Value,
+    snapshot: Option<&TimeLeftView>,
+) -> Result<(), String> {
+    let Some(raw) = params.get("time") else {
+        return Ok(());
+    };
+    let Some(id) = raw.as_str() else {
+        return Err("time: must be a string naming a time".into());
+    };
+    match snapshot {
+        Some(view) => view.check_ask_time(id).map_err(|e| format!("time: {e}")),
+        None => Err("time: couldn't check which times this computer offers".into()),
+    }
+}
+
 /// Parse a dotted op wire string into an [`OpType`].
 pub fn op_from_wire(op: &str) -> Option<OpType> {
     match op {
@@ -297,6 +324,22 @@ impl CharterInterface {
         // granted, it just is not listed to a non-root reader. `exec.allow`
         // refuses outright, having no managed tree to check the path against.
         let caller = caller_uid(conn, &hdr).await;
+
+        // §Times: a typed `time.extend` may only name a time this daemon
+        // offers this caller right now — checked against the caller's own
+        // snapshot (the same `TimesView.ask` their lock card and tray read)
+        // before anything is published.
+        if op == OpType::TimeExtend {
+            let snapshot = caller.and_then(|uid| {
+                self.snapshots
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&uid)
+                    .cloned()
+            });
+            check_requested_time(&params, snapshot.as_ref())
+                .map_err(zbus::fdo::Error::InvalidArgs)?;
+        }
 
         let (params, source_path) = if op == OpType::ExecAllow {
             let uid = caller.ok_or_else(|| {
