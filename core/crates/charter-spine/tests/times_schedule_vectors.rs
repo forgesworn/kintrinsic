@@ -88,8 +88,8 @@ fn tagged_window_vectors_agree_with_the_reference() {
         }
         assert_eq!(
             default_ask_time(&sched, times.as_ref(), now).as_deref(),
-            v["defaultAsk"].as_str(),
-            "{name}: defaultAsk"
+            v["defaultAskIdle"].as_str(),
+            "{name}: defaultAskIdle"
         );
     }
 }

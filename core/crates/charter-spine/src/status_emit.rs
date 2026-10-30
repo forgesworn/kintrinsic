@@ -227,6 +227,9 @@ pub fn should_emit_status(
                 // wait out a heartbeat. It changes at most once per boot, so
                 // it can never become a source of churn.
                 || prev.enforcement_gap != cur.enforcement_gap
+                // A Free -> Learning (or back) transition while unlocked is news
+                // to the guardian's "Now" card; it must not wait out a heartbeat.
+                || prev.active_time != cur.active_time
                 || cur.ts < prev.ts
                 || cur.ts.abs_diff(prev.ts) >= heartbeat_secs
         }
@@ -327,6 +330,12 @@ mod tests {
         locked.locked = true;
         locked.lock_reason = Some(StatusLockReason::Schedule);
         assert!(should_emit_status(Some(&base), &locked, 60));
+
+        // A change of active time while unlocked is immediate news too.
+        let mut typed = base.clone();
+        typed.active_time = Some("learning".into());
+        assert!(should_emit_status(Some(&base), &typed, 60));
+        assert!(!should_emit_status(Some(&typed), &typed.clone(), 60));
     }
 
     /// B7: a backwards clock step must not silence the feed. With a

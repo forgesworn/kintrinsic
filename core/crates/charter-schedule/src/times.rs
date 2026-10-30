@@ -354,14 +354,19 @@ pub fn next_window(
     None
 }
 
-/// The ward's default "ask for more" type: the time whose window **most
-/// recently ended today**, else the **next one up today**, else Free.
-/// `None` means Free time. Only spans that can run count (an unknown tag is not
+/// The ward's default "ask for more" type **when it is not inside a window**:
+/// the time whose window **most recently ended today**, else the **next one up
+/// today**, else Free. `None` means Free time.
+///
+/// This is ONLY the not-in-window half of the design's rule. The full rule
+/// applies "inside a window that cannot run (budget spent) => that window's
+/// time" FIRST, from [`evaluate_times`]; a caller must not use this function
+/// alone as the default while a window is open. Only spans that can run count (an unknown tag is not
 /// a time the child could be given more of).
 ///
-/// Literal to the design: a span still in progress has not "ended", so inside a
-/// Free window that follows a finished Learning window the default is Learning.
-/// A caller that wants "more of what I am in" reads [`evaluate_times`] first.
+/// A span still in progress has not "ended", so called inside a Free window
+/// that follows a finished Learning window this returns Learning: another
+/// reason the in-window rule must be applied first.
 pub fn default_ask_time(
     sched: &GrantSchedule,
     known: &dyn Fn(&str) -> bool,

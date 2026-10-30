@@ -48,7 +48,8 @@ struct TimePool {
 ///    outside every window, the budget pool when budget-locked (today's
 ///    routing, unchanged).
 /// 2. Otherwise the named pool most recently topped up that still has minutes
-///    ([`most_recent_named_pool_with_minutes`](Self::most_recent_named_pool_with_minutes)),
+///    ([`most_recent_named_pool_among`](Self::most_recent_named_pool_among),
+///    restricted to the ids the device's `times` clause defines),
 ///    which the device then runs AS THAT NAMED TIME.
 /// 3. Nothing left: locked.
 ///
@@ -328,15 +329,17 @@ impl ExtensionLedger {
     /// minutes — step 2 of the fall-through order in the type docs. `None` if
     /// no named pool has time left (or the day rolled).
     ///
-    /// Takes every pool at its word; a warden that knows the child's `times`
-    /// clause should use [`most_recent_named_pool_among`](Self::most_recent_named_pool_among)
-    /// so a pool for an id it does not know can never be picked.
-    pub fn most_recent_named_pool_with_minutes(&self, now_unix: i64) -> Option<String> {
+    /// Test-only: takes every pool at its word. Enforcement must use
+    /// [`most_recent_named_pool_among`](Self::most_recent_named_pool_among) so a
+    /// pool for an id the device does not define can never be picked.
+    #[cfg(test)]
+    pub(crate) fn most_recent_named_pool_with_minutes(&self, now_unix: i64) -> Option<String> {
         self.most_recent_named_pool_among(now_unix, |_| true)
     }
 
-    /// As [`most_recent_named_pool_with_minutes`](Self::most_recent_named_pool_with_minutes),
-    /// restricted to ids for which `known` holds. Pools for other ids are
+    /// The named time whose pool was most recently topped up and still has
+    /// minutes (step 2 of the fall-through order), restricted to ids for which
+    /// `known` holds. Pools for other ids are
     /// skipped, not discarded. An unknown time's minutes enact nothing — a
     /// loosening with an unenforceable posture fails safe — but are kept, so a
     /// `times` clause that arrives later the same day still honours them.

@@ -1,5 +1,5 @@
 {
-  "note": "Tagged-window schedule evaluation (spec/contract.md §Times). `schedule` is a runtime GrantSchedule body, `times` the device's times clause body (null = none; a body with v != 1 is UNREADABLE and so absent). All schedules are Etc/UTC so spanEnd and secondsToOpen are plain arithmetic. A tagged window beats an untagged one; two tagged windows resolve to the earlier start, then array order; a tag the clause does not define LOCKS its span. nextWindow is the next runnable span to start today or tomorrow; defaultAsk is the ward's default ask type (null = Free time).",
+  "note": "Tagged-window schedule evaluation (spec/contract.md §Times). `schedule` is a runtime GrantSchedule body, `times` the device's times clause body (null = none; a body with v != 1 is UNREADABLE and so absent). All schedules are Etc/UTC so spanEnd and secondsToOpen are plain arithmetic. A tagged window beats an untagged one; two tagged windows resolve to the earlier start, then array order; a tag the clause does not define LOCKS its span. nextWindow is the next runnable span to start today or tomorrow; defaultAskIdle is the ward's default ask type for a moment NOT inside a window (most recently ended runnable span today, else next up, else Free = null); the full rule applies the in-window time first, which is the caller's job.",
   "vectors": [
     {
       "name": "untagged_in_window",
@@ -24,7 +24,7 @@
         "spanEnd": 1782759600
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "untagged_before_window_locked",
@@ -67,7 +67,7 @@
         "startHhmm": "16:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "carve_before_edge_is_free_until_the_carve",
@@ -115,7 +115,7 @@
         "startHhmm": "17:00",
         "dayOffset": 0
       },
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "carve_start_instant_is_learning",
@@ -163,7 +163,7 @@
         "startHhmm": "18:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "carve_inside_is_learning",
@@ -211,7 +211,7 @@
         "startHhmm": "18:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "carve_end_instant_is_free_again",
@@ -254,7 +254,7 @@
         "spanEnd": 1782759600
       },
       "nextWindow": null,
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "carve_with_no_times_clause_locks_the_span",
@@ -290,7 +290,7 @@
         "startHhmm": "18:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "carve_with_no_times_clause_leaves_free_alone",
@@ -325,7 +325,7 @@
         "startHhmm": "18:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "carve_with_other_ids_only_locks_the_span",
@@ -371,7 +371,7 @@
         "startHhmm": "18:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "carve_with_unreadable_times_clause_locks_the_span",
@@ -420,7 +420,7 @@
         "startHhmm": "18:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "named_window_alone_opens_that_time",
@@ -459,7 +459,7 @@
         "spanEnd": 1782734400
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "named_window_alone_unknown_is_locked",
@@ -486,7 +486,7 @@
         "secondsToOpen": null
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "named_window_alone_then_locked_tomorrow_next",
@@ -537,7 +537,7 @@
         "startHhmm": "09:00",
         "dayOffset": 1
       },
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "tagged_overlap_earlier_start_wins",
@@ -591,7 +591,7 @@
         "startHhmm": "11:00",
         "dayOffset": 0
       },
-      "defaultAsk": "chores"
+      "defaultAskIdle": "chores"
     },
     {
       "name": "tagged_overlap_later_one_resumes_after",
@@ -640,7 +640,7 @@
         "spanEnd": 1782734400
       },
       "nextWindow": null,
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "tagged_overlap_same_start_array_order",
@@ -694,7 +694,7 @@
         "startHhmm": "10:00",
         "dayOffset": 0
       },
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "tagged_overlap_same_start_longer_resumes",
@@ -743,7 +743,7 @@
         "spanEnd": 1782730800
       },
       "nextWindow": null,
-      "defaultAsk": "chores"
+      "defaultAskIdle": "chores"
     },
     {
       "name": "adjacent_same_time_windows_are_one_span",
@@ -772,7 +772,7 @@
         "spanEnd": 1782730800
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "adjacent_same_named_time_windows_are_one_span",
@@ -816,7 +816,7 @@
         "spanEnd": 1782730800
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "adjacent_different_times_split_the_span",
@@ -870,7 +870,7 @@
         "startHhmm": "10:00",
         "dayOffset": 0
       },
-      "defaultAsk": "chores"
+      "defaultAskIdle": "chores"
     },
     {
       "name": "gap_between_same_time_windows_ends_the_span",
@@ -904,7 +904,7 @@
         "startHhmm": "11:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "override_replaces_weekly_and_keeps_its_tag",
@@ -951,7 +951,7 @@
         "spanEnd": 1782741600
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "override_replaces_weekly_so_weekly_hours_are_locked",
@@ -1003,7 +1003,7 @@
         "startHhmm": "13:00",
         "dayOffset": 0
       },
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "override_empty_blocks_the_day",
@@ -1044,7 +1044,7 @@
         "secondsToOpen": 601200
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "day_with_no_entry_is_locked",
@@ -1082,7 +1082,7 @@
         "secondsToOpen": 514800
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "last_minute_of_the_day_span_ends_at_its_window",
@@ -1107,7 +1107,7 @@
         "spanEnd": 1782777540
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "paused_schedule_is_locked",
@@ -1147,7 +1147,7 @@
         "secondsToOpen": null
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "empty_schedule_is_unbounded",
@@ -1176,7 +1176,7 @@
         "state": "unbounded"
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "default_ask_before_anything_is_the_next_up",
@@ -1224,7 +1224,7 @@
         "startHhmm": "09:00",
         "dayOffset": 0
       },
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "default_ask_after_learning_ended_is_learning",
@@ -1272,7 +1272,7 @@
         "startHhmm": "16:00",
         "dayOffset": 0
       },
-      "defaultAsk": "learning"
+      "defaultAskIdle": "learning"
     },
     {
       "name": "default_ask_after_free_ended_is_free",
@@ -1315,7 +1315,7 @@
         "secondsToOpen": 565200
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "default_ask_ignores_a_span_that_cannot_run",
@@ -1350,7 +1350,7 @@
         "startHhmm": "16:00",
         "dayOffset": 0
       },
-      "defaultAsk": null
+      "defaultAskIdle": null
     },
     {
       "name": "next_window_skips_an_unknown_tag",
@@ -1393,7 +1393,7 @@
         "secondsToOpen": 592200
       },
       "nextWindow": null,
-      "defaultAsk": null
+      "defaultAskIdle": null
     }
   ]
 }

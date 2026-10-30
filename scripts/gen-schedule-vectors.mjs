@@ -133,7 +133,7 @@ function refTimes(schedule, timesClause, nowUnix) {
   const minute = Math.floor((nowUnix - dayStart) / 60);
   const hasAny =
     Object.values(schedule.weekly ?? {}).some((w) => w.length > 0) || Object.keys(schedule.overrides ?? {}).length > 0;
-  const out = { expect: null, nextWindow: null, defaultAsk: null };
+  const out = { expect: null, nextWindow: null, defaultAskIdle: null };
   if (schedule.paused) {
     out.expect = { state: "locked", cause: "paused", secondsToOpen: null };
     return out;
@@ -179,7 +179,7 @@ function refTimes(schedule, timesClause, nowUnix) {
       }
     }
   }
-  // Default ask type: most recently ended runnable span today, else next up, else Free (null).
+  // Default ask type when idle (not inside a window): most recently ended runnable span today, else next up, else Free (null).
   const spans = [];
   for (let m = 0; m < 1440; ) {
     const l = labelAt(wins, known, m);
@@ -190,7 +190,7 @@ function refTimes(schedule, timesClause, nowUnix) {
   }
   const ended = spans.filter((sp) => sp.e <= minute).sort((a, b) => b.e - a.e)[0];
   const upcoming = spans.filter((sp) => sp.s > minute).sort((a, b) => a.s - b.s)[0];
-  out.defaultAsk = (ended ?? upcoming)?.time ?? null;
+  out.defaultAskIdle = (ended ?? upcoming)?.time ?? null;
   return out;
 }
 
@@ -239,14 +239,14 @@ const timesCases = [
 
 const timesScheduleVectors = timesCases.map(([name, schedule, times, now]) => {
   const r = refTimes(schedule, times && times.v === 1 ? times : null, now);
-  return { name, schedule, times, now_unix: now, expect: r.expect, nextWindow: r.nextWindow, defaultAsk: r.defaultAsk };
+  return { name, schedule, times, now_unix: now, expect: r.expect, nextWindow: r.nextWindow, defaultAskIdle: r.defaultAskIdle };
 });
 const timesSchedPath = join(OUT_DIR, "times_schedule_vectors.json");
 writeFileSync(
   timesSchedPath,
   JSON.stringify(
     {
-      note: "Tagged-window schedule evaluation (spec/contract.md §Times). `schedule` is a runtime GrantSchedule body, `times` the device's times clause body (null = none; a body with v != 1 is UNREADABLE and so absent). All schedules are Etc/UTC so spanEnd and secondsToOpen are plain arithmetic. A tagged window beats an untagged one; two tagged windows resolve to the earlier start, then array order; a tag the clause does not define LOCKS its span. nextWindow is the next runnable span to start today or tomorrow; defaultAsk is the ward's default ask type (null = Free time).",
+      note: "Tagged-window schedule evaluation (spec/contract.md §Times). `schedule` is a runtime GrantSchedule body, `times` the device's times clause body (null = none; a body with v != 1 is UNREADABLE and so absent). All schedules are Etc/UTC so spanEnd and secondsToOpen are plain arithmetic. A tagged window beats an untagged one; two tagged windows resolve to the earlier start, then array order; a tag the clause does not define LOCKS its span. nextWindow is the next runnable span to start today or tomorrow; defaultAskIdle is the ward's default ask type for a moment NOT inside a window (most recently ended runnable span today, else next up, else Free = null); the full rule applies the in-window time first, which is the caller's job.",
       vectors: timesScheduleVectors,
     },
     null,
@@ -348,7 +348,7 @@ function refComposeContent(free, t) {
     const undeny = t.undenySites ?? [];
     if (deny.length === 0 && undeny.length === 0) return free;
     let out;
-    if (free && free.revoked && !free.paused && deny.length > 0) out = synth("blocklist");
+    if (free && free.v === 1 && free.revoked && !free.paused && deny.length > 0) out = synth("blocklist");
     else if (free) out = JSON.parse(JSON.stringify(free));
     else if (deny.length > 0) out = synth("blocklist");
     else return null;
@@ -389,6 +389,7 @@ const compCases = [
   ["every_except_deny_holds_over_a_revoked_free_content_clause", freeApps(), freeContent({ revoked: true, parentDeny: ["tiktok.com"], parentAllow: ["old.org"] }), namedTime("chores", "Chores", "everythingExcept", { denySites: ["roblox.com"] })],
   ["every_except_undeny_only_carries_a_revoked_free_content_clause", freeApps(), freeContent({ revoked: true }), namedTime("chores", "Chores", "everythingExcept", { undenySites: ["youtube.com"] })],
   ["every_except_deny_carries_a_paused_free_content_clause", freeApps(), freeContent({ paused: true, revoked: true, parentDeny: ["tiktok.com"] }), namedTime("chores", "Chores", "everythingExcept", { denySites: ["roblox.com"] })],
+  ["every_except_deny_does_not_open_an_unsupported_version_revoked_free_content", freeApps(), freeContent({ v: 2, revoked: true, parentDeny: ["tiktok.com"] }), namedTime("chores", "Chores", "everythingExcept", { denySites: ["roblox.com"] })],
   ["only_these_apps_make_an_allowlist", freeApps({ hidden: ["bloat"] }), freeContent({ parentDeny: ["tiktok.com"] }), namedTime("learning", "Learning", "onlyThese", { apps: ["khan", "khan", "calc"] })],
   ["only_these_clears_a_paused_apps_policy", freeApps({ paused: true }), null, namedTime("learning", "Learning", "onlyThese", { apps: ["khan"] })],
   ["only_these_with_nothing_runs_nothing", freeApps(), freeContent({ parentDeny: ["tiktok.com"] }), namedTime("learning", "Learning", "onlyThese", {})],

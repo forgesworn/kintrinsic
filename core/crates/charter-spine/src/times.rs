@@ -49,8 +49,10 @@ pub fn next_window(
     charter_schedule::next_window(sched, &known_in(times), now_unix)
 }
 
-/// The ward's default "ask for more" type: the time whose window most recently
-/// ended today, else the next one up today, else Free (`None`).
+/// The ward's default "ask for more" type when NOT inside a window: the time
+/// whose window most recently ended today, else the next one up today, else
+/// Free (`None`). The in-window half of the rule ("that window's time") is the
+/// caller's, from [`evaluate_times`]; see the schedule crate's doc.
 pub fn default_ask_time(
     sched: &GrantSchedule,
     times: Option<&GrantTimes>,

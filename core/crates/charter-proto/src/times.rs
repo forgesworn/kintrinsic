@@ -350,7 +350,9 @@ fn synthetic_content(posture: Posture) -> GrantContent {
 ///   clause is `revoked` ("unrestricted") and the time has `denySites`: the
 ///   time's bans must hold, so a blocklist clause is synthesised carrying
 ///   them (Free's lists stay off, `revoked` cleared) rather than composing
-///   onto a clause that would ignore them. A `paused` Free clause (block ALL
+///   onto a clause that would ignore them. A Free clause whose `v` this build
+///   does not implement is NOT treated as revoked: it reads as unreadable and
+///   stays locked under the time too. A `paused` Free clause (block ALL
 ///   web) carries unchanged — it is the more restrictive state.
 /// - `onlyThese`: with `sites` non-empty, `posture := allowlist`,
 ///   `curators := []`, `parentAllow := ⋃ sites[].domains`, SafeSearch and
@@ -373,7 +375,12 @@ pub fn compose_content(free: Option<&GrantContent>, t: &NamedTime) -> Option<Gra
                 return free.cloned();
             }
             let mut out = match free {
-                Some(f) if f.is_revoked() && !f.is_paused() && !t.deny_sites.is_empty() => {
+                Some(f)
+                    if f.is_supported_version()
+                        && f.is_revoked()
+                        && !f.is_paused()
+                        && !t.deny_sites.is_empty() =>
+                {
                     synthetic_content(Posture::Blocklist)
                 }
                 Some(f) => f.clone(),
@@ -616,6 +623,17 @@ mod tests {
         paused.paused = Some(true);
         let out = compose_content(Some(&paused), &t).unwrap();
         assert_eq!(out.paused, Some(true));
+    }
+
+    #[test]
+    fn an_unsupported_version_free_content_stays_locked_under_a_time() {
+        let mut t = time(TimePosture::EverythingExcept);
+        t.deny_sites = vec!["roblox.com".into()];
+        let mut future = free_content(); // revoked: true
+        future.v = 2;
+        let out = compose_content(Some(&future), &t).unwrap();
+        assert_eq!(out.v, 2, "must stay unreadable, not become a v1 blocklist");
+        assert_eq!(out.revoked, Some(true));
     }
 
     #[test]
