@@ -39,6 +39,7 @@ import {
   type PolicyOverride,
 } from "../domain/effectivePolicy";
 import type { FreeGroupRecord } from "../domain/namedTimes";
+import { timeLabelFor } from "../domain/times";
 import { resolveChildTz } from "../domain/childTz";
 import { composeDeviceHold } from "../domain/appHolds";
 import { raceRefresh, REFRESH_OFFLINE_NOTICE } from "../domain/refreshDeadline";
@@ -602,6 +603,7 @@ export interface CharterContextValue {
     id: string,
     minutes: number,
     timeId: string | undefined,
+    /** Ignored: the store names the kind from the child's own times. */
     timeLabel?: string,
   ) => Promise<void>;
   /** Ask a ward to finish up now (or, with `lift`, allow them back on). */
@@ -1562,7 +1564,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // Times: name the kind and the devices when the gift was narrowed, so the
         // log says what actually went where ("30 more minutes of Learning time
         // on Sam's laptop"), not just that some minutes were given.
-        const kind = opts?.time ? ` of ${opts.timeLabel ?? opts.time}` : "";
+        const kind = opts?.time
+          ? ` of ${timeLabelFor(devicePolicy?.times, opts.time) ?? "another kind of time"}`
+          : "";
         const where =
           opts?.deviceIds && child
             ? ` on ${opts.deviceIds
@@ -2616,7 +2620,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   const answerRequestWithOtherTime = useCallback(
-    async (id: string, minutes: number, timeId: string | undefined, timeLabel?: string) => {
+    async (id: string, minutes: number, timeId: string | undefined) => {
       const req = stateRef.current.requests.find((r) => r.id === id);
       if (!req) return;
       if (req.status === "approved" || req.status === "denied") return; // see approveRequest
@@ -2634,8 +2638,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       if (!ctx.wire || !s?.answerAskWithOtherTime || !s.status().connected) {
         throw new Error("Turn on parent approval first, then try again.");
       }
+      // The label is whatever the guardian's own times call the id; never the
+      // caller's string, never the raw id.
+      const answeredLabel = !timeId
+        ? "Free time"
+        : (timeLabelFor(
+            stateRef.current.children
+              .find((c) => c.id === req.childId)
+              ?.policies.find((p) => p.scope.kind === "device")?.times,
+            timeId,
+          ) ?? "another kind of time");
       try {
-        await s.answerAskWithOtherTime(id, ctx, minutes, timeId, timeLabel);
+        await s.answerAskWithOtherTime(id, ctx, minutes, timeId, answeredLabel);
       } catch (err) {
         if (err instanceof SignerCancelled) return;
         if (err instanceof QueuedForHomeNetworkError) {
@@ -2643,7 +2657,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           addActivity(
             req.childId,
             "enacted",
-            `You answered with ${minutes} min of ${timeLabel ?? "another kind of time"} instead${waitingAnswerNote(err.devices)}`,
+            `You answered with ${minutes} min of ${answeredLabel} instead${waitingAnswerNote(err.devices)}`,
           );
           return;
         }
@@ -2653,7 +2667,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       addActivity(
         req.childId,
         "enacted",
-        `You answered ${req.title} with ${minutes} min of ${timeLabel ?? "Free time"} instead`,
+        `You answered ${req.title} with ${minutes} min of ${answeredLabel} instead`,
       );
     },
     [decisionContext, addActivity],

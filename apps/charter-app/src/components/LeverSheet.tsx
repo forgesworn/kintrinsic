@@ -32,7 +32,7 @@ import { Button } from "./ui";
 import { useCharter } from "../store/store";
 import { standingFor, standingNote } from "../domain/standing";
 import { deliverableDevices, wardenSupport } from "../domain/wardenSupport";
-import { canUseTimes, timesGate } from "../domain/times";
+import { UNKNOWN_TIME_PHRASE, canUseTimes, timeLabelFor, timesGate } from "../domain/times";
 import { isAskExpired } from "../domain/askExpiry";
 import type { Child, ChildRequest } from "../domain/types";
 import { endAskDecision, tryBeginAskDecision } from "./askDecisionLock";
@@ -497,8 +497,8 @@ function ApproveBody({
       {request.time && (
         <p className="card-sub" style={{ margin: "0 0 10px" }}>
           This is for{" "}
-          {child.policies.find((p) => p.scope.kind === "device")?.times?.find((t) => t.id === request.time)
-            ?.label ?? "a kind of time that isn’t set up any more"}
+          {timeLabelFor(child.policies.find((p) => p.scope.kind === "device")?.times, request.time) ??
+            UNKNOWN_TIME_PHRASE}
           .
         </p>
       )}

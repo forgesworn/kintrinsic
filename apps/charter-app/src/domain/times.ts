@@ -79,6 +79,21 @@ function unixAtLocal(dayStart: number, secsOfDay: number, tz: string): number {
 const inside = (w: ScheduleWindow, secs: number): boolean =>
   minutesOf(w.start) * 60 <= secs && secs < minutesOf(w.end) * 60;
 
+/**
+ * The words for a time id the guardian never defined. A time id on the wire is
+ * ward- or device-supplied, so it is NEVER shown: its label is looked up in the
+ * child's own `times`, and anything that is not there reads as this.
+ */
+export const UNKNOWN_TIME_PHRASE = "a kind of time this app doesn’t recognise";
+
+/** The guardian-defined label for a time id, or `undefined` when the child's
+ *  `times` has no such id. The only sanctioned way to turn a wire time id into
+ *  copy; callers fall back to `UNKNOWN_TIME_PHRASE`, never to the raw id. */
+export function timeLabelFor(times: readonly NamedTime[] | undefined, id: string | undefined): string | undefined {
+  if (id === undefined) return undefined;
+  return times?.find((t) => t.id === id)?.label;
+}
+
 /** A tagged window whose tag the child has not defined (so its span is locked). */
 const isKnown = (w: ScheduleWindow, times: readonly NamedTime[]): boolean =>
   w.time === undefined || times.some((t) => t.id === w.time);

@@ -22,7 +22,7 @@ import {
 } from "../wire/grant";
 import { isAskExpired } from "../domain/askExpiry";
 import { endAskDecision, tryBeginAskDecision, useAskDecisionInFlight } from "./askDecisionLock";
-import { canUseTimes } from "../domain/times";
+import { UNKNOWN_TIME_PHRASE, canUseTimes, timeLabelFor } from "../domain/times";
 
 // One ask from a ward's device, as a card.
 //
@@ -235,8 +235,7 @@ export function RequestCard({
   // the ask still has an id on it but nothing to name it, and approving "as
   // asked" would send a grant for a time the device no longer has (it enacts
   // nothing), so that case offers only a different kind.
-  const typeLabel =
-    isExtend && req.time ? devicePolicy?.times?.find((t) => t.id === req.time)?.label : undefined;
+  const typeLabel = isExtend && req.time ? timeLabelFor(devicePolicy?.times, req.time) : undefined;
   const unknownType = isExtend && !!req.time && typeLabel === undefined;
   // Re-typing sends a gift of another kind to the asking device, which an older
   // (or never-reported) ward would land as Free time whatever was chosen.
@@ -417,10 +416,10 @@ export function RequestCard({
                 >
                   {approving ? "Sending…" : "1 hour"}
                 </Button>
-              ) : (
+              ) : unknownType ? null : (
                 <Button
                   className="lever-primary"
-                  disabled={isBusy || blockedUnverified || unknownType}
+                  disabled={isBusy || blockedUnverified}
                   onClick={() => void onApprove()}
                 >
                   {approveLabel}
@@ -497,7 +496,7 @@ export function RequestCard({
         <p className="card-sub" style={{ marginBottom: 4 }}>
           {typeLabel
             ? `${child.name} asks for ${askedFor > 0 ? `${askedFor} min of ` : ""}${typeLabel} on ${deviceLabel}.`
-            : `${child.name} asked for a kind of time that isn’t set up any more.`}
+            : `${child.name} asked for ${UNKNOWN_TIME_PHRASE}.`}
         </p>
       )}
 
@@ -640,12 +639,12 @@ export function RequestCard({
       )}
 
       <div style={{ display: "flex", gap: 12, marginTop: 18 }}>
-        {!isAppOpen && (
+        {!isAppOpen && !unknownType && (
           <Button
             variant="primary"
             block
             className="lever-primary"
-            disabled={isBusy || blockedUnverified || expired || unknownType}
+            disabled={isBusy || blockedUnverified || expired}
             onClick={() => void onApprove()}
           >
             {approveLabel}

@@ -512,7 +512,7 @@ export class RealSigner implements Signer {
     const recipients = this.giftRecipients(target, childId, opts?.deviceIds);
     if (time) this.requireTimesCapable(recipients);
     this.requireDeliverable({ ...target, devices: recipients }, childId);
-    const what = time ? ` of ${opts?.timeLabel ?? time}` : "";
+    const what = time ? ` of ${opts?.timeLabel ?? "another kind of time"}` : "";
     const where = opts?.deviceIds ? ` on ${this.joinNames(recipients.map((d) => d.pubkey))}` : "";
     await this.authorize(
       "clause",
@@ -639,7 +639,7 @@ export class RealSigner implements Signer {
     this.requireDeliverable({ ...target, devices: [device] }, ctx.childId);
     await this.authorize(
       "decision",
-      `Answer request ${requestId}: give ${minutes} minutes${time ? ` of ${timeLabel ?? time}` : ""} on ${this.nameOf(device.pubkey)} instead of what was asked`,
+      `Answer request ${requestId}: give ${minutes} minutes${time ? ` of ${timeLabel ?? "another kind of time"}` : ""} on ${this.nameOf(device.pubkey)} instead of what was asked`,
       "approved",
     );
     // The echo of the REQUEST's own `time` (wire.time) stays in the grant even

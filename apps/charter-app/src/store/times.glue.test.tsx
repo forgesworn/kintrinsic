@@ -152,6 +152,9 @@ describe("times glue in the store", () => {
 
   it("giveTime hands the signer the kind and the devices, and leaves the old call alone without them", async () => {
     await act(async () => {
+      await api.savePolicy("c1", "p1", { times: [LEARNING] });
+    });
+    await act(async () => {
       await api.giveTime("c1", 30, undefined, { time: "learning", timeLabel: "Learning time", deviceIds: ["d1"] });
     });
     expect(fake.signGiftClause).toHaveBeenLastCalledWith("c1", 30, expect.anything(), undefined, {
@@ -161,10 +164,17 @@ describe("times glue in the store", () => {
     });
     expect(stored().activity[0].summary).toContain("of Learning time on Sam's laptop");
 
+    // A time id the guardian never defined is never written into the log raw.
+    await act(async () => {
+      await api.giveTime("c1", 30, undefined, { time: "<script>", timeLabel: "<script>", deviceIds: ["d1"] });
+    });
+    expect(stored().activity[0].summary).toContain("of another kind of time");
+    expect(stored().activity[0].summary).not.toContain("<script>");
+
     await act(async () => {
       await api.giveTime("c1", 15);
     });
-    expect(fake.signGiftClause.mock.calls[1][4]).toBeUndefined();
+    expect(fake.signGiftClause.mock.calls.at(-1)?.[4]).toBeUndefined();
     expect(stored().activity[0].summary).toBe("You gave 15 more minutes");
   });
 

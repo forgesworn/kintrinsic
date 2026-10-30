@@ -140,8 +140,28 @@ describe("RequestCard for a typed ask", () => {
 
   it("an ask for a time that was deleted cannot be approved as asked, only answered otherwise", () => {
     mount(<RequestCard request={ask({ time: "gone" })} child={child([LEARNING])} />);
-    expect(text()).toContain("asked for a kind of time that isn’t set up any more");
-    expect(button("Approve 30 min").disabled).toBe(true);
+    expect(text()).toContain("asked for a kind of time this app doesn’t recognise");
+    expect(container.textContent).not.toContain("gone");
+    expect(() => button("Approve 30 min")).toThrow();
     expect(button("Give a different kind of time").disabled).toBe(false);
   });
+
+  // The id is ward-supplied: it must never be shown, whatever it holds.
+  it.each(["<script>alert(1)</script>", "Free time (approved by your partner)", "unknown-slug"])(
+    "never renders a time id the guardian did not define (%s)",
+    (garbage) => {
+      for (const compact of [false, true]) {
+        mount(<RequestCard request={ask({ time: garbage })} child={child([LEARNING])} compact={compact} />);
+        expect(text()).not.toContain(garbage);
+        expect(text()).not.toContain("script");
+        expect(container.querySelector("script")).toBeNull();
+        if (compact) expect(text()).toContain("Sam wants 30 more minutes");
+        expect(() => button("Approve 30 min")).toThrow();
+        expect(() => button("Approve")).toThrow();
+      }
+      mount(<RequestCard request={ask({ time: garbage })} child={child([LEARNING])} />);
+      expect(text()).toContain("this app doesn’t recognise");
+      expect(button("Give a different kind of time")).toBeTruthy();
+    },
+  );
 });
