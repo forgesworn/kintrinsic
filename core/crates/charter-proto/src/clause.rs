@@ -84,12 +84,17 @@ pub enum ClauseKind {
     /// `tethering`; unlike the other kinds the guardian gift-wraps it to a
     /// single device's key, so only that device ever caches it.
     Debugging,
+    /// A child's NAMED TIMES (§Times): kinds of screen time with their own
+    /// posture ("Learning time: only these apps and sites"). Free time is the
+    /// background and has no entry; a `schedule` window tagged with a time's id
+    /// runs it. Replace-the-set, per child, like `apprules`.
+    Times,
 }
 
 /// Store key for the latest verified USAGE_SYNC view in the per-(subject, key)
 /// rollback-protected store. Not a clause — but the store's monotonic floor is
 /// exactly the `ts`-replay protection the contract requires, and `clear_for`
-/// on release wipes it with the clauses. Clause kinds own 1..=16; keep this
+/// on release wipes it with the clauses. Clause kinds own 1..=17; keep this
 /// well clear of them.
 pub const USAGE_SYNC_STORE_KEY: u16 = 100;
 
@@ -141,6 +146,7 @@ impl ClauseKind {
             ClauseKind::Listening => 14,
             ClauseKind::AlwaysAvailable => 15,
             ClauseKind::Debugging => 16,
+            ClauseKind::Times => 17,
         }
     }
 }
@@ -1047,6 +1053,14 @@ pub struct GiftBody {
     /// existing gifts from before named-times keep working unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// The TIME these minutes buy (§Times): a named-time id. Absent = Free
+    /// time, byte-identical to before times existed. Parsing is permissive —
+    /// any string — and whether it names a time this device knows is the
+    /// enforcer's decision: an unknown id enacts NO extra time (a loosening
+    /// with an unenforceable posture fails safe). A pre-times ward ignores
+    /// the field and lands the minutes as Free time, like `group_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
 }
 
 /// A gift is a day's worth of leeway at most. Anything beyond this is a
@@ -1206,6 +1220,7 @@ mod gift_tests {
             minutes,
             expires_at,
             group_id: None,
+            time: None,
         }
     }
 

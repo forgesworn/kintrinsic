@@ -119,6 +119,61 @@ fn valid_learning_url(url: &str) -> bool {
     url.starts_with("https://") && !url.chars().any(|c| c.is_whitespace() || c == ',')
 }
 
+/// Validate one learning app, fail-closed: a site needs `url` + non-empty
+/// verified `domains` (with the injection guards on both), a native needs
+/// `exec`, and the id must be a slug. Shared with the `times` clause, whose
+/// `sites` are this very shape and must never be checked more loosely.
+pub(crate) fn validate_app(app: &LearningApp) -> Result<(), ProtoError> {
+    if !valid_id(&app.id) {
+        return Err(ProtoError::BadParams(format!(
+            "learning app id {:?} is not a [a-z0-9-] slug",
+            app.id
+        )));
+    }
+    match app.kind {
+        LearningAppKind::Site => {
+            let url = app.url.as_deref().unwrap_or("");
+            if url.is_empty() || app.domains.is_empty() {
+                return Err(ProtoError::BadParams(format!(
+                    "site learning app {:?} needs url + non-empty domains",
+                    app.id
+                )));
+            }
+            if !valid_learning_url(url) {
+                return Err(ProtoError::BadParams(format!(
+                        "site learning app {:?} has a bad url {:?}: must start https:// with no whitespace or comma",
+                        app.id, url
+                    )));
+            }
+            // The raw string is what reaches the resolver sink, and
+            // `parse_domain` cuts at the first `/`, `?` or `:` before
+            // validating, so `example.org/, EXCLUDE *` would pass it
+            // alone. Hostname characters only; `www.` and upper case
+            // stay accepted so existing clauses survive an upgrade.
+            for d in &app.domains {
+                let host_chars = d
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+                if !host_chars || parse_domain(d).is_none() {
+                    return Err(ProtoError::BadParams(format!(
+                        "site learning app {:?} has an invalid domain {:?}",
+                        app.id, d
+                    )));
+                }
+            }
+        }
+        LearningAppKind::Native => {
+            if app.exec.as_deref().unwrap_or("").is_empty() {
+                return Err(ProtoError::BadParams(format!(
+                    "native learning app {:?} needs exec",
+                    app.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl GrantLearning {
     /// Parse from a clause body JSON value (fail-closed on version/shape:
     /// site apps require `url` + non-empty `domains`; native require `exec`).
@@ -129,53 +184,7 @@ impl GrantLearning {
             return Err(ProtoError::BadVersion(g.v));
         }
         for app in &g.apps {
-            if !valid_id(&app.id) {
-                return Err(ProtoError::BadParams(format!(
-                    "learning app id {:?} is not a [a-z0-9-] slug",
-                    app.id
-                )));
-            }
-            match app.kind {
-                LearningAppKind::Site => {
-                    let url = app.url.as_deref().unwrap_or("");
-                    if url.is_empty() || app.domains.is_empty() {
-                        return Err(ProtoError::BadParams(format!(
-                            "site learning app {:?} needs url + non-empty domains",
-                            app.id
-                        )));
-                    }
-                    if !valid_learning_url(url) {
-                        return Err(ProtoError::BadParams(format!(
-                            "site learning app {:?} has a bad url {:?}: must start https:// with no whitespace or comma",
-                            app.id, url
-                        )));
-                    }
-                    // The raw string is what reaches the resolver sink, and
-                    // `parse_domain` cuts at the first `/`, `?` or `:` before
-                    // validating, so `example.org/, EXCLUDE *` would pass it
-                    // alone. Hostname characters only; `www.` and upper case
-                    // stay accepted so existing clauses survive an upgrade.
-                    for d in &app.domains {
-                        let host_chars = d
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
-                        if !host_chars || parse_domain(d).is_none() {
-                            return Err(ProtoError::BadParams(format!(
-                                "site learning app {:?} has an invalid domain {:?}",
-                                app.id, d
-                            )));
-                        }
-                    }
-                }
-                LearningAppKind::Native => {
-                    if app.exec.as_deref().unwrap_or("").is_empty() {
-                        return Err(ProtoError::BadParams(format!(
-                            "native learning app {:?} needs exec",
-                            app.id
-                        )));
-                    }
-                }
-            }
+            validate_app(app)?;
         }
         Ok(g)
     }

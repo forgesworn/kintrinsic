@@ -41,6 +41,14 @@ pub struct PendingExtension {
     /// The named bucket this credits, for a per-group (`LimitHit::Bucket`)
     /// `time.extend` grant. `None` for the ordinary whole-device routing.
     pub bucket_id: Option<String>,
+    /// The NAMED TIME this credits (§Times): the grant's `time`, verbatim.
+    /// `Some` only when `dim` and `bucket_id` are both `None` — a typed grant
+    /// credits that time's own pool ([`MultiChildEnforcer::apply_time_extension`]),
+    /// never Free's whole-device pools. A drain that predates times matches
+    /// `(None, None)` and does nothing, which is the safe failure: no extra time
+    /// rather than the wrong kind of it. Whether the id names a time the device
+    /// defines is the drain's decision at routing time.
+    pub time_id: Option<String>,
     pub at: i64,
 }
 
@@ -861,6 +869,61 @@ impl MultiChildEnforcer {
         }
     }
 
+    /// Today's unspent pool for one NAMED TIME for a tracked child (§Times).
+    /// `None` if the uid isn't tracked.
+    pub fn time_extra(&self, uid: u32, time_id: &str, now: i64) -> Option<u64> {
+        Some(
+            self.children
+                .get(&uid)?
+                .extension
+                .time_extra_secs(now, time_id),
+        )
+    }
+
+    /// Apply a today-only additive extension to a tracked child's pool for the
+    /// named time `time_id`, idempotent by `req_id` — the per-time mirror of
+    /// [`apply_bucket_extension`](Self::apply_bucket_extension). Returns true
+    /// if newly applied; a no-op (false) if the uid isn't currently tracked.
+    /// Like the bucket mirror it does NOT call `note_budget_baseline`.
+    pub fn apply_time_extension(
+        &mut self,
+        uid: u32,
+        now: i64,
+        req_id: &str,
+        minutes: u16,
+        time_id: &str,
+    ) -> bool {
+        match self.children.get_mut(&uid) {
+            Some(c) => c.extension.apply_time(now, req_id, minutes, time_id),
+            None => false,
+        }
+    }
+
+    /// Burn `elapsed_secs` of wall clock off a tracked child's pool for
+    /// `time_id` — call only while the device is running that time off its
+    /// pool. No-op if the uid isn't tracked.
+    pub fn burn_time_pool(&mut self, uid: u32, now: i64, time_id: &str, elapsed_secs: u64) {
+        if let Some(c) = self.children.get_mut(&uid) {
+            c.extension.burn_time(now, time_id, elapsed_secs);
+        }
+    }
+
+    /// The named time whose pool was most recently topped up and still has
+    /// minutes, restricted to ids `known` accepts — see the fall-through order
+    /// on [`ExtensionLedger`](charter_schedule::ExtensionLedger). `None` if the
+    /// uid isn't tracked or nothing qualifies.
+    pub fn most_recent_time_pool(
+        &self,
+        uid: u32,
+        now: i64,
+        known: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        self.children
+            .get(&uid)?
+            .extension
+            .most_recent_named_pool_among(now, known)
+    }
+
     /// The learning apps in force for one tracked child (empty when no clause /
     /// paused) — the loop feeds these to foreground attribution.
     pub fn learning_apps(&self, uid: u32) -> Vec<charter_proto::LearningApp> {
@@ -1030,6 +1093,29 @@ mod tests {
             Some(600),
             "a UTC midnight that is not a local one must not refill the day"
         );
+    }
+
+    #[test]
+    fn a_typed_extension_lands_in_its_own_time_pool_and_not_in_frees() {
+        let now = wed_at(21);
+        let mut e = MultiChildEnforcer::new();
+        e.sync(&[(YOUNGER, after_bedtime_policy())], now, |_| (None, None));
+        assert!(e.apply_time_extension(YOUNGER, now, "r1", 30, "learning"));
+        assert!(!e.apply_time_extension(YOUNGER, now, "r1", 30, "learning"));
+        assert_eq!(e.time_extra(YOUNGER, "learning", now), Some(30 * 60));
+        assert_eq!(e.time_extra(YOUNGER, "free", now), Some(0));
+        assert_eq!(
+            e.most_recent_time_pool(YOUNGER, now, |id| id == "learning")
+                .as_deref(),
+            Some("learning")
+        );
+        // An id the device does not define is never picked.
+        assert_eq!(e.most_recent_time_pool(YOUNGER, now, |_| false), None);
+        e.burn_time_pool(YOUNGER, now + 60, "learning", 60);
+        assert_eq!(e.time_extra(YOUNGER, "learning", now + 60), Some(29 * 60));
+        // An untracked child is a no-op, not a panic.
+        assert!(!e.apply_time_extension(9999, now, "r2", 5, "learning"));
+        assert_eq!(e.time_extra(9999, "learning", now), None);
     }
 
     /// A guardian policy that is out of window right now, with a budget —

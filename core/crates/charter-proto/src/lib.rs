@@ -16,6 +16,7 @@ pub mod params;
 pub mod release;
 pub mod request;
 pub mod status;
+pub mod times;
 pub mod usage_sync;
 
 pub use apps::{
@@ -38,7 +39,8 @@ pub use learning::{GrantLearning, LearningApp, LearningAppKind, LEARNING_VERSION
 pub use op::{Decision, LimitHit, OpType};
 pub use params::{
     AppOpenGrantParams, AppOpenRequestParams, ExecAllowParams, GrantParams, InstallFlatpakParams,
-    Remote, TimeExtendGrantParams, TimeExtendRequestParams, MAX_EXTEND_MINUTES, MAX_REASON_LEN,
+    Remote, TimeExtendGrantParams, TimeExtendRequestParams, MAX_EXTEND_MINUTES, MAX_NAMED_TIMES,
+    MAX_REASON_LEN, MAX_TIME_LABEL_LEN,
 };
 pub use release::ReleasePayload;
 pub use request::{RequestPayload, REQUEST_VERSION};
@@ -46,5 +48,9 @@ pub use status::{
     AppRef, EnforcementGap, GroupSpent, InstallChange, InstallChangeKind, InstallWindowReport,
     StatusLockReason, StatusPayload, StatusSource, MAX_STATUS_APPS, MAX_STATUS_GROUPS,
     STATUS_VERSION,
+};
+pub use times::{
+    compose_apps, compose_content, GrantTimes, NamedTime, TimePosture, FREE_TIME_ID,
+    MAX_TIME_ID_LEN, TIMES_VERSION,
 };
 pub use usage_sync::{UsageSyncPayload, USAGE_SYNC_VERSION};

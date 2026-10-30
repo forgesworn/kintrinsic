@@ -12,6 +12,7 @@ pub mod extension;
 pub mod minutes;
 pub mod schedule_eval;
 pub mod tethering;
+pub mod times;
 pub mod usage;
 
 pub use buckets::{
@@ -41,5 +42,8 @@ pub use schedule_eval::{
 };
 pub use tethering::{
     evaluate_tethering, GrantTethering, TetherAllow, TetherMode, TETHERING_VERSION,
+};
+pub use times::{
+    default_ask_time, evaluate_times, next_window, LockCause, NextWindow, TimedStatus,
 };
 pub use usage::{Activity, Bucket, UsageLedger};

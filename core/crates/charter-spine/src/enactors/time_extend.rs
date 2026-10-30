@@ -89,6 +89,51 @@ impl Enactor for TimeExtendEnactor {
             ));
         }
 
+        // Typed routing (§Times): a grant carrying `time` credits THAT time's
+        // own pool, never Free's whole-device pools — landing "30 minutes of
+        // Learning time" in the schedule pool would unlock the device as Free,
+        // the opposite of what the guardian chose. The id is taken as given
+        // and deposited verbatim: whether this device defines it is decided by
+        // the drain at routing time (an unknown time enacts nothing). An older
+        // drain matches `(None, None)` and does nothing, so no extra time
+        // beats the wrong kind. A bucket-hit grant keeps its bucket routing
+        // (below): a `time` riding on one is not a thing a guardian emits.
+        if params.limit_hit != LimitHit::Bucket {
+            if let Some(time_id) = params.time.clone() {
+                let applied = {
+                    let mut e = self.enforcer.lock().expect("enforcer lock");
+                    e.apply_time(
+                        now,
+                        &grant.req_id().to_hex(),
+                        params.minutes_granted,
+                        &time_id,
+                    )
+                };
+                // Unconditional, for the reason given on the whole-device arm
+                // below: the destination ledger dedupes by reqId itself.
+                if let Some(inbox) = &self.inbox {
+                    inbox.lock().expect("inbox lock").push(PendingExtension {
+                        req_id: grant.req_id().to_hex(),
+                        minutes: params.minutes_granted,
+                        dim: None,
+                        bucket_id: None,
+                        time_id: Some(time_id),
+                        at: now,
+                    });
+                }
+                return Ok(EnactOutcome {
+                    detail: Some(
+                        if applied {
+                            "extended"
+                        } else {
+                            "already applied"
+                        }
+                        .into(),
+                    ),
+                });
+            }
+        }
+
         // Per-bucket routing: a Bucket-hit grant credits the named bucket's
         // OWN pool via `ExtensionLedger::apply_bucket`, never the whole-device
         // schedule/budget pool — crediting the wrong one would leave the
@@ -120,6 +165,7 @@ impl Enactor for TimeExtendEnactor {
                     minutes: params.minutes_granted,
                     dim: None,
                     bucket_id: Some(bucket_id),
+                    time_id: None,
                     at: now,
                 });
             }
@@ -172,6 +218,7 @@ impl Enactor for TimeExtendEnactor {
                 minutes: params.minutes_granted,
                 dim: Some(dim),
                 bucket_id: None,
+                time_id: None,
                 at: now,
             });
         }

@@ -26,6 +26,7 @@ pub mod multi_child;
 pub mod ports;
 pub mod standdown;
 pub mod status_emit;
+pub mod times;
 pub mod transport_facade;
 pub mod usage_pool;
 

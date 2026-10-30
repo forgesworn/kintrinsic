@@ -11,7 +11,10 @@
 //! Source of truth: `spec/contract.md` §5.6.
 
 use charter_primitives::kinds;
-use charter_proto::params::{MAX_EXTEND_MINUTES, MAX_REASON_LEN};
+use charter_proto::params::{
+    MAX_EXTEND_MINUTES, MAX_NAMED_TIMES, MAX_REASON_LEN, MAX_TIME_LABEL_LEN,
+};
+use charter_proto::ClauseKind;
 use charter_transport::nip59::MAX_JITTER_SECS;
 use charter_verify::FRESHNESS_SKEW_SECS;
 
@@ -30,6 +33,21 @@ fn grant_freshness_skew_is_300s() {
 fn time_extend_bounds() {
     assert_eq!(MAX_EXTEND_MINUTES, 1440);
     assert_eq!(MAX_REASON_LEN, 280);
+}
+
+#[test]
+fn named_times_bounds() {
+    assert_eq!(MAX_NAMED_TIMES, 16);
+    assert_eq!(MAX_TIME_LABEL_LEN, 60);
+}
+
+#[test]
+fn times_clause_store_key_and_tag() {
+    assert_eq!(ClauseKind::Times.store_key(), 17);
+    assert_eq!(
+        serde_json::to_string(&ClauseKind::Times).unwrap(),
+        "\"times\""
+    );
 }
 
 #[test]

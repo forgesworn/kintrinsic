@@ -48,6 +48,7 @@ fn grant_roundtrips_echoing_limit_hit() {
         minutes_granted: 45,
         limit_hit: LimitHit::Schedule,
         bucket_id: None,
+        time: None,
     };
     let json = serde_json::to_string(&g).unwrap();
     assert!(json.contains("\"limitHit\":\"schedule\""));

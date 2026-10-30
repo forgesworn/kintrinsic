@@ -143,6 +143,7 @@ mod tests {
         GrantScheduleWindow {
             start: start.into(),
             end: end.into(),
+            time: None,
         }
     }
 

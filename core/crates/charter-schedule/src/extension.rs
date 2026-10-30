@@ -15,7 +15,48 @@ pub enum Dimension {
     Budget,
 }
 
+/// One named time's extension pool (§Times).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct TimePool {
+    /// Seconds granted today.
+    secs: u64,
+    /// Wall-clock seconds of `secs` already SPENT while the device was running
+    /// this time off the pool (see [`ExtensionLedger::burn_time`]).
+    #[serde(default)]
+    consumed: u64,
+    /// Top-up order: the ledger's `time_topup_seq` at this pool's latest
+    /// grant. A counter rather than a clock reading, so two grants within one
+    /// second still order, and a clock that stepped back cannot reorder them.
+    #[serde(default)]
+    seq: u64,
+}
+
 /// Today-only additive extension pools.
+///
+/// # Pools and the fall-through order (§Times)
+///
+/// There are four kinds of pool. The whole-device `schedule` and `budget`
+/// pools are FREE time's. Bucket pools top up one named app bucket. **Time
+/// pools** (`apply_time`) top up a named time by id.
+///
+/// Inside a window that can run, the window decides and NO pool burns. When
+/// the window's own time cannot run — the device is outside every window, or
+/// the window's time is Free (or a `countsAgainstBudget` named time) and the
+/// budget is spent — the warden falls through the pools in this order:
+///
+/// 1. Free's pool for the dimension that is locking: the schedule pool when
+///    outside every window, the budget pool when budget-locked (today's
+///    routing, unchanged).
+/// 2. Otherwise the named pool most recently topped up that still has minutes
+///    ([`most_recent_named_pool_with_minutes`](Self::most_recent_named_pool_with_minutes)),
+///    which the device then runs AS THAT NAMED TIME.
+/// 3. Nothing left: locked.
+///
+/// The ledger only stores and orders the pools; the warden implements the
+/// routing, and burns the pool it is running off with
+/// [`burn_schedule`](Self::burn_schedule) / [`burn_time`](Self::burn_time) —
+/// wall clock, never usage, so an idle ward cannot stretch a pool. A pool-run
+/// span ends when the pool does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionLedger {
     tz: String,
@@ -67,6 +108,15 @@ pub struct ExtensionLedger {
     /// than failing to parse.
     #[serde(default)]
     bucket_extra: std::collections::BTreeMap<String, u64>,
+    /// Today-only additive pools keyed by NAMED-TIME id (§Times). A separate
+    /// map from `bucket_extra`: a bucket and a time may legitimately share an
+    /// id, and must not share minutes. `#[serde(default)]` so older snapshots
+    /// restore with no time pools.
+    #[serde(default)]
+    time_pools: std::collections::BTreeMap<String, TimePool>,
+    /// Monotonic top-up counter ordering the time pools; see [`TimePool::seq`].
+    #[serde(default)]
+    time_topup_seq: u64,
 }
 
 /// The `YYYY-MM-DD` calendar-date key for `now_unix` in `tz` — the daily reset
@@ -95,6 +145,8 @@ impl ExtensionLedger {
             schedule_deduct_secs: 0,
             budget_deduct_secs: 0,
             bucket_extra: std::collections::BTreeMap::new(),
+            time_pools: std::collections::BTreeMap::new(),
+            time_topup_seq: 0,
         }
     }
 
@@ -149,6 +201,8 @@ impl ExtensionLedger {
             self.schedule_deduct_secs = 0;
             self.budget_deduct_secs = 0;
             self.bucket_extra.clear();
+            self.time_pools.clear();
+            self.time_topup_seq = 0;
         }
     }
 
@@ -216,6 +270,88 @@ impl ExtensionLedger {
         } else {
             self.bucket_extra.get(bucket_id).copied().unwrap_or(0)
         }
+    }
+
+    /// Apply a `minutes` extension for `req_id` to the named time `time_id`'s
+    /// pool (§Times). Idempotent by `req_id`, today-only — the per-time mirror
+    /// of [`apply`](Self::apply).
+    ///
+    /// Shares the ONE `applied` list with every other pool kind, so a reqId
+    /// lands exactly once whichever pool it targets. The id is stored as given:
+    /// whether it names a time this device knows is the warden's decision at
+    /// routing time (an unknown id is never run — see
+    /// [`most_recent_named_pool_among`](Self::most_recent_named_pool_among)),
+    /// so a grant for a time that is defined LATER today is not lost. Returns
+    /// true if newly applied.
+    pub fn apply_time(&mut self, now_unix: i64, req_id: &str, minutes: u16, time_id: &str) -> bool {
+        self.roll(now_unix);
+        if self.applied.iter().any(|r| r == req_id) {
+            return false;
+        }
+        self.applied.push(req_id.to_string());
+        self.time_topup_seq += 1;
+        let seq = self.time_topup_seq;
+        let pool = self.time_pools.entry(time_id.to_string()).or_default();
+        pool.secs = pool.secs.saturating_add(minutes as u64 * 60);
+        pool.seq = seq;
+        true
+    }
+
+    /// Extra seconds still unspent in `time_id`'s pool (0 after the day rolls,
+    /// or if the time has never received a grant).
+    pub fn time_extra_secs(&self, now_unix: i64, time_id: &str) -> u64 {
+        if day_key(self.tz(), now_unix) != self.day_key {
+            return 0;
+        }
+        self.time_pools
+            .get(time_id)
+            .map(|p| p.secs.saturating_sub(p.consumed))
+            .unwrap_or(0)
+    }
+
+    /// Burn `elapsed_secs` of wall clock off `time_id`'s pool. The enforcing
+    /// tick calls this ONLY while the device is running that time off its pool
+    /// (outside any window able to run it); while a window decides, the pool is
+    /// untouched. Saturating; day-scoped via roll — the per-time twin of
+    /// [`burn_schedule`](Self::burn_schedule), and for the same reason: an
+    /// out-of-window "+30 minutes" that never counts down is unlocked to
+    /// midnight.
+    pub fn burn_time(&mut self, now_unix: i64, time_id: &str, elapsed_secs: u64) {
+        self.roll(now_unix);
+        if let Some(p) = self.time_pools.get_mut(time_id) {
+            p.consumed = p.consumed.saturating_add(elapsed_secs).min(p.secs);
+        }
+    }
+
+    /// The named time whose pool was most recently topped up and still has
+    /// minutes — step 2 of the fall-through order in the type docs. `None` if
+    /// no named pool has time left (or the day rolled).
+    ///
+    /// Takes every pool at its word; a warden that knows the child's `times`
+    /// clause should use [`most_recent_named_pool_among`](Self::most_recent_named_pool_among)
+    /// so a pool for an id it does not know can never be picked.
+    pub fn most_recent_named_pool_with_minutes(&self, now_unix: i64) -> Option<String> {
+        self.most_recent_named_pool_among(now_unix, |_| true)
+    }
+
+    /// As [`most_recent_named_pool_with_minutes`](Self::most_recent_named_pool_with_minutes),
+    /// restricted to ids for which `known` holds. Pools for other ids are
+    /// skipped, not discarded. An unknown time's minutes enact nothing — a
+    /// loosening with an unenforceable posture fails safe — but are kept, so a
+    /// `times` clause that arrives later the same day still honours them.
+    pub fn most_recent_named_pool_among(
+        &self,
+        now_unix: i64,
+        known: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        if day_key(self.tz(), now_unix) != self.day_key {
+            return None;
+        }
+        self.time_pools
+            .iter()
+            .filter(|(id, p)| p.secs > p.consumed && known(id))
+            .max_by_key(|(_, p)| p.seq)
+            .map(|(id, _)| id.clone())
     }
 
     /// Take `minutes` back off today's allowance for `dim`. Idempotent by
@@ -455,5 +591,95 @@ mod tests {
         l.apply_bucket(NOON, "req-p", 30, "play");
         let r = ExtensionLedger::from_snapshot(&l.snapshot()).unwrap();
         assert_eq!(r.bucket_extra_secs(NOON, "play"), 30 * 60);
+    }
+
+    #[test]
+    fn time_pools_are_per_time_idempotent_shared_applied_and_today_only() {
+        let mut l = ExtensionLedger::new(TZ, NOON);
+        assert!(l.apply_time(NOON, "req-a", 30, "learning"));
+        assert!(!l.apply_time(NOON, "req-a", 30, "learning")); // replay
+        assert!(!l.apply(NOON, "req-a", 30, Dimension::Budget)); // one id, one pool
+        assert!(!l.apply_bucket(NOON, "req-a", 30, "learning"));
+        assert!(l.apply_time(NOON, "req-b", 15, "learning"));
+        assert!(l.apply_time(NOON, "req-c", 10, "chores"));
+        assert_eq!(l.time_extra_secs(NOON, "learning"), 45 * 60);
+        assert_eq!(l.time_extra_secs(NOON, "chores"), 10 * 60);
+        assert_eq!(l.time_extra_secs(NOON, "other"), 0);
+        // Free's pools and the bucket pools are untouched, and a bucket may
+        // share an id with a time without sharing minutes.
+        assert_eq!(l.budget_extra_secs(NOON), 0);
+        assert_eq!(l.schedule_extra_secs(NOON), 0);
+        assert_eq!(l.bucket_extra_secs(NOON, "learning"), 0);
+        assert_eq!(l.time_extra_secs(NOON + 24 * 3600, "learning"), 0); // day roll
+        assert_eq!(
+            l.most_recent_named_pool_with_minutes(NOON + 24 * 3600),
+            None
+        );
+    }
+
+    #[test]
+    fn time_pool_burns_with_wall_clock_and_saturates() {
+        let mut l = ExtensionLedger::new(TZ, NOON);
+        l.apply_time(NOON, "req-a", 30, "learning");
+        l.burn_time(NOON + 600, "learning", 600);
+        assert_eq!(l.time_extra_secs(NOON + 600, "learning"), 20 * 60);
+        l.burn_time(NOON + 4000, "learning", 99_999);
+        assert_eq!(l.time_extra_secs(NOON + 4000, "learning"), 0);
+        // Burning a pool that does not exist is a no-op, never a panic.
+        l.burn_time(NOON + 4000, "nope", 60);
+        // A later top-up stacks on the unburned remainder (here, nothing).
+        l.apply_time(NOON + 4000, "req-b", 5, "learning");
+        assert_eq!(l.time_extra_secs(NOON + 4000, "learning"), 5 * 60);
+    }
+
+    #[test]
+    fn most_recent_named_pool_is_by_top_up_order_and_needs_minutes() {
+        let mut l = ExtensionLedger::new(TZ, NOON);
+        assert_eq!(l.most_recent_named_pool_with_minutes(NOON), None);
+        l.apply_time(NOON, "req-a", 30, "learning");
+        l.apply_time(NOON, "req-b", 30, "chores"); // same second: counter orders
+        assert_eq!(
+            l.most_recent_named_pool_with_minutes(NOON).as_deref(),
+            Some("chores")
+        );
+        // Spent pools drop out; the earlier one is next.
+        l.burn_time(NOON + 1800, "chores", 1800);
+        assert_eq!(
+            l.most_recent_named_pool_with_minutes(NOON + 1800)
+                .as_deref(),
+            Some("learning")
+        );
+        // Topping learning up again makes it the most recent, and a restriction
+        // to known ids skips an id the device has no definition for.
+        l.apply_time(NOON + 1800, "req-c", 5, "mystery");
+        assert_eq!(
+            l.most_recent_named_pool_among(NOON + 1800, |id| id != "mystery")
+                .as_deref(),
+            Some("learning")
+        );
+        assert_eq!(
+            l.most_recent_named_pool_with_minutes(NOON + 1800)
+                .as_deref(),
+            Some("mystery")
+        );
+    }
+
+    #[test]
+    fn time_pools_survive_snapshot_and_old_snapshots_restore_empty() {
+        let mut l = ExtensionLedger::new(TZ, NOON);
+        l.apply_time(NOON, "req-a", 30, "learning");
+        l.burn_time(NOON + 60, "learning", 60);
+        let r = ExtensionLedger::from_snapshot(&l.snapshot()).unwrap();
+        assert_eq!(r.time_extra_secs(NOON + 60, "learning"), 29 * 60);
+        assert_eq!(
+            r.most_recent_named_pool_with_minutes(NOON + 60).as_deref(),
+            Some("learning")
+        );
+        let mut v: serde_json::Value = serde_json::from_str(&l.snapshot()).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("time_pools");
+        o.remove("time_topup_seq");
+        let old = ExtensionLedger::from_snapshot(&v.to_string()).expect("restores");
+        assert_eq!(old.time_extra_secs(NOON, "learning"), 0);
     }
 }

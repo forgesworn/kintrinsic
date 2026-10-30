@@ -210,6 +210,16 @@ impl EnforcerRuntime {
             .apply_bucket(now_unix, req_id, minutes, bucket_id)
     }
 
+    /// Phase-7 seam mirror for a typed (`time`-carrying) `time.extend`: push a
+    /// today-only additive entry into the named time's own pool via
+    /// `ExtensionLedger::apply_time` (§Times). Returns true if newly applied.
+    /// Free's schedule/budget pools are untouched, and — as with the bucket
+    /// mirror — no budget baseline is recorded.
+    pub fn apply_time(&mut self, now_unix: i64, req_id: &str, minutes: u16, time_id: &str) -> bool {
+        self.extension
+            .apply_time(now_unix, req_id, minutes, time_id)
+    }
+
     /// The current time-left breakdown (for the D-Bus `TimeLeft`).
     pub fn time_left<S: SystemLayer>(&self, sys: &S) -> Remaining {
         let now = sys.clock().now_utc() as i64;
