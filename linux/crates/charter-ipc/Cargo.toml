@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 # real-only system-bus client proxy.
-zbus = { version = "4.4", optional = true, default-features = false, features = [
+zbus = { version = "5.18", optional = true, default-features = false, features = [
     "tokio",
 ] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = [
