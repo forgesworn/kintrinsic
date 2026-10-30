@@ -458,6 +458,28 @@ pub struct Warden {
     announced_denials: Option<std::collections::HashSet<String>>,
 }
 
+/// Whether Free time's own (already hold-resolved) `apps` clause would let
+/// `pkg` run: not in `blocked` under a blocklist, in `allowed` under an
+/// allowlist, and not `hidden`. `None` (no clause) restricts nothing. A paused
+/// clause lifts its posture lists (see [`Warden::app_policy`]) but never
+/// `hidden`. Used to bound what an `onlyThese` time may IMPLY allowed: it
+/// must not grant a browser Free time itself denies.
+fn free_time_would_run(free: Option<charter_proto::GrantApps>, pkg: &str) -> bool {
+    let Some(g) = free else {
+        return true;
+    };
+    if g.hidden.iter().any(|h| h == pkg) {
+        return false;
+    }
+    if g.is_paused() {
+        return true;
+    }
+    match g.posture {
+        charter_proto::AppPosture::Blocklist => !g.blocked.iter().any(|b| b == pkg),
+        charter_proto::AppPosture::Allowlist => g.allowed.iter().any(|a| a == pkg),
+    }
+}
+
 impl Warden {
     pub fn init(
         base_dir: &str,
@@ -1303,10 +1325,24 @@ impl Warden {
         // is the default browser package; if Kotlin has not reported one,
         // nothing is added and the sites are unreachable rather than a
         // browser being guessed (the closed direction).
+        //
+        // The implication reaches only a browser Free time would itself run:
+        // `compose_apps` has already cleared Free's `blocked` list, so adding
+        // the default browser blindly would turn a browser the guardian
+        // blocked (one with a built-in proxy, say) into a runnable one the
+        // moment the ward set it as default. Free blocking it, not listing it
+        // under an allowlist, or hiding it means no browser at all in this
+        // time: the sites stay unreachable (fail closed).
         if let Some(t) = named {
             if t.posture == charter_proto::TimePosture::OnlyThese && !t.sites.is_empty() {
                 if let Some(b) = &self.default_browser {
-                    if !eff.allowed.contains(b) {
+                    let free = self.stored_apps_clause_checked()?;
+                    let free_runs_it = free_time_would_run(
+                        free.as_ref()
+                            .map(|g| g.effective_at(now_unix.max(0) as u64)),
+                        b,
+                    );
+                    if free_runs_it && !eff.allowed.contains(b) {
                         eff.allowed.push(b.clone());
                     }
                 }
@@ -2952,16 +2988,20 @@ impl Warden {
         // default) charges neither the screen budget nor any bucket. The
         // interval being credited is the PRIOR tick's, so the PRIOR verdict
         // decides (`last_counts_against_budget`; `true` after a restart, the
-        // strict direction). It lands on the time-free meter rather than being
-        // dropped, so the active minutes the guardian's picture and the
-        // cross-device union rule read still see the use.
+        // strict direction).
+        //
+        // It is credited as NOTHING (an `Idle` credit, which still rolls the
+        // day), not to the `Learning` bucket: every credited second, in any
+        // bucket, marks the active-minutes journal, and that journal is both
+        // what STATUS reports and what `budget::pooled_used` unions across
+        // devices. Journalled minutes would charge the budget on every device
+        // by the back door ("a time that does not count counts", spec §Times).
+        // The Learning meter itself is read nowhere on Android, so nothing
+        // but that journal was being fed. Fail direction: a use that is not
+        // recorded can only under-count the pool, never wrongly lock.
         let counts = self.last_counts_against_budget;
         if let Some(u) = self.usage.as_mut() {
-            if activity.counts() && !counts {
-                u.credit_bucket(now, activity, charter_schedule::Bucket::Learning, elapsed);
-            } else {
-                u.credit(now, activity, elapsed);
-            }
+            u.credit(now, if counts { activity } else { Activity::Idle }, elapsed);
         }
 
         // The named-times bucket the foreground app belongs to, if any, is
@@ -10991,6 +11031,94 @@ mod times_tests {
     }
 
     #[test]
+    fn use_in_a_non_counting_time_is_not_journalled_or_pooled() {
+        // The active-minutes journal is what STATUS reports and what the
+        // budget's cross-device union reads, so a second of it is a second of
+        // budget on every device.
+        let (mut w, hex) = warden("nojournal", carved(), Some(times_body(false)));
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 600, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        let t = T0 - 55 * 60; // 17:05, inside Learning (17:00-18:00)
+        for i in 0..50 {
+            w.tick(Some(&hex), true, t + i * 60, None);
+        }
+        let u = w.usage.as_ref().unwrap();
+        let end = t + 50 * 60;
+        assert!(
+            u.minutes_today(end).is_empty(),
+            "a time that does not count journals nothing"
+        );
+        assert_eq!(u.used_today(end), 0);
+        // So a sibling's view cannot be charged for it: the union of an empty
+        // journal with an empty elsewhere-view is empty.
+        assert_eq!(
+            u.minutes_today(end)
+                .union(&charter_schedule::MinuteSet::default())
+                .count(),
+            0
+        );
+        let st = w.build_status(end as u64).expect("status");
+        assert!(st.active_minutes_today.is_none());
+
+        // The same ticks in Free time ARE journalled (the control).
+        let (mut w, hex) = warden(
+            "journal",
+            json!([{ "start": "16:00", "end": "19:00" }]),
+            Some(times_body(false)),
+        );
+        for i in 0..50 {
+            w.tick(Some(&hex), true, t + i * 60, None);
+        }
+        assert!(!w.usage.as_ref().unwrap().minutes_today(end).is_empty());
+    }
+
+    #[test]
+    fn a_spent_budget_outside_every_window_burns_one_pool_not_two() {
+        let (mut w, hex) = warden(
+            "single-burn",
+            json!([{ "start": "16:00", "end": "17:00" }]),
+            Some(times_body(false)),
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 5, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        // Spend the 5 minutes inside the 16:00-17:00 window.
+        let t = T0 - 75 * 60; // 16:45
+        w.tick(Some(&hex), true, t, None);
+        w.tick(Some(&hex), true, t + 290, None);
+        w.tick(Some(&hex), true, t + 590, None);
+        // 17:30: the window has closed and the budget is spent. Top up both
+        // Free's schedule pool and Learning time's pool.
+        let now = T0 - 30 * 60;
+        assert!(locked(&w.tick(Some(&hex), true, now, None)));
+        {
+            let e = w.extension.as_mut().unwrap();
+            assert!(e.apply(now, "s1", 10, charter_schedule::Dimension::Schedule));
+            assert!(e.apply_time(now, "t1", 30, "learning"));
+        }
+        let d = w.tick(Some(&hex), true, now + 60, None);
+        assert_eq!(d[0].active_time.as_deref(), Some("learning"));
+        let e = w.extension.as_ref().unwrap();
+        assert_eq!(
+            e.schedule_extra_secs(now + 60),
+            600,
+            "Free's pool is untouched while the named pool runs the device"
+        );
+        assert_eq!(e.time_extra_secs(now + 60, "learning"), 1800 - 60);
+    }
+
+    #[test]
     fn budget_exhaustion_never_locks_a_non_counting_time() {
         let (mut w, hex) = warden("exempt", carved(), Some(times_body(false)));
         put(
@@ -11051,6 +11179,62 @@ mod times_tests {
         w.set_default_browser("");
         let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
         assert_eq!(p["allowed"], json!(["com.khan.app"]));
+    }
+
+    #[test]
+    fn the_implied_browser_is_never_one_free_time_denies() {
+        let browser = "org.example.browser";
+        let allowed_in = |w: &Warden, now: i64| -> bool {
+            let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
+            p["allowed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == browser)
+        };
+        let now = T0 - 30 * 60; // Learning time: onlyThese, lists sites
+        let cases = [
+            // (Free's apps clause, expected implied)
+            (
+                json!({"v": 1, "posture": "blocklist", "blocked": [browser], "issuedAt": 1}),
+                false,
+            ),
+            (
+                json!({"v": 1, "posture": "blocklist", "blocked": ["com.game"], "issuedAt": 1}),
+                true,
+            ),
+            (
+                json!({"v": 1, "posture": "allowlist", "allowed": ["com.other"], "issuedAt": 1}),
+                false,
+            ),
+            (
+                json!({"v": 1, "posture": "allowlist", "allowed": [browser], "issuedAt": 1}),
+                true,
+            ),
+            (
+                json!({"v": 1, "posture": "blocklist", "hidden": [browser], "issuedAt": 1}),
+                false,
+            ),
+        ];
+        for (i, (free, expected)) in cases.into_iter().enumerate() {
+            let (mut w, hex) = warden(&format!("browser-{i}"), carved(), Some(times_body(false)));
+            put(&w, &hex, ClauseKind::Apps, free.clone());
+            w.set_default_browser(browser);
+            w.tick(Some(&hex), true, now, None);
+            assert_eq!(allowed_in(&w, now), expected, "{free}");
+            // Only-these still runs the time's own apps either way.
+            let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
+            assert!(p["allowed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "com.khan.app"));
+        }
+        // No Free apps clause at all restricts nothing, so the browser is implied.
+        let (mut w, hex) = warden("browser-none", carved(), Some(times_body(false)));
+        w.set_default_browser(browser);
+        w.tick(Some(&hex), true, now, None);
+        assert!(allowed_in(&w, now));
     }
 
     #[test]

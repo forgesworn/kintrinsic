@@ -81,7 +81,9 @@ pub struct Verdict {
     /// time, a counting named time, and whenever locked: the strict direction.
     pub counts_against_budget: bool,
     /// The schedule is closed this tick (outside every window, paused, or an
-    /// unknown tag): Free's schedule pool is what burns, as today.
+    /// unknown tag) AND no named pool is carrying the device: Free's schedule
+    /// pool is what burns, as today. Never true together with a
+    /// [`Run::NamedPool`] run: one interval burns one pool.
     pub burn_schedule_pool: bool,
 }
 
@@ -219,7 +221,7 @@ pub fn assess(inp: &TimesInputs) -> Verdict {
             sched_ext.saturating_sub(sched_deduct).min(eod) as i64
         }
     };
-    let burn_schedule_pool = matches!(status, Some(TimedStatus::Locked { .. }));
+    let mut burn_schedule_pool = matches!(status, Some(TimedStatus::Locked { .. }));
 
     let charter_secs = min_unbounded(schedule_secs, b.budget_secs);
     let (effective, stood_down) = match inp.stand_down {
@@ -302,6 +304,12 @@ pub fn assess(inp: &TimesInputs) -> Verdict {
             rem.schedule_secs = eff;
             rem.next_open_secs = None;
             run = Run::NamedPool(id.clone());
+            // The named pool is what carries the device this tick, so it is
+            // the only pool that burns: Free's schedule pool (spent or
+            // withheld by a budget lock) stays put for when it is the one
+            // running the device. Burning both drained two pools for one
+            // interval of wall-clock.
+            burn_schedule_pool = false;
             active_time = Some(id.clone());
             counts_against_budget = inp
                 .times
@@ -773,6 +781,34 @@ mod tests {
         assert!(!v.rem.locked);
         assert_eq!(v.active_time, None, "Free's 10 minutes first, as Free");
         assert_eq!(v.rem.effective_secs, 600);
+        assert_eq!(v.run, Run::Window);
+        assert!(v.burn_schedule_pool);
+    }
+
+    #[test]
+    fn only_the_pool_running_the_device_burns() {
+        // Closed schedule, budget spent, BOTH Free's schedule pool and a named
+        // pool topped up. Free's pool cannot carry it (the budget is spent),
+        // so the named pool runs the device and is the only one to burn.
+        let s = sched(vec![win("16:00", "17:00", None)]);
+        let b = budget(60);
+        let t = times_clause(false);
+        let mut f = fx(MON_1800);
+        f.usage
+            .credit(MON_1800, charter_schedule::Activity::Active, 3600);
+        f.ext.apply(MON_1800, "s1", 10, Dimension::Schedule);
+        f.ext.apply_time(MON_1800, "t1", 30, "learning");
+        let v = run(&f, MON_1800, Some(&s), Some(&b), Some(&t));
+        assert_eq!(v.run, Run::NamedPool("learning".into()));
+        assert!(
+            !v.burn_schedule_pool,
+            "one interval burns one pool: the named one"
+        );
+        // Free running off its own schedule pool still burns that pool.
+        let mut f = fx(MON_1800);
+        f.ext.apply(MON_1800, "s1", 10, Dimension::Schedule);
+        f.ext.apply_time(MON_1800, "t1", 30, "learning");
+        let v = run(&f, MON_1800, Some(&s), None, Some(&t));
         assert_eq!(v.run, Run::Window);
         assert!(v.burn_schedule_pool);
     }
