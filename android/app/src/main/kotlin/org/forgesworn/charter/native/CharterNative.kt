@@ -116,8 +116,20 @@ object CharterNative {
      */
     external fun charterSetDebuggingOpen(state: Int): String
 
-    /** The ward's effective web-content policy as a DNS plan (`{"revision","plan":{…}}` JSON), or "" when unpaired. */
-    external fun charterDnsPlan(): String
+    /**
+     * The ward's effective web-content policy as a DNS plan (`{"revision","plan":{…}}`
+     * JSON), or "" when unpaired. Takes the clock because the policy is composed
+     * over the TIME running at that instant (§Times): an `onlyThese` time that
+     * lists sites is an allowlist of the union of their domains.
+     */
+    external fun charterDnsPlan(nowUnix: Long): String
+
+    /**
+     * Report the device's default browser package ("" = unknown). An `onlyThese`
+     * time that lists sites implies it allowed (§Times); unknown adds nothing,
+     * so the sites cannot be opened rather than a browser being guessed.
+     */
+    external fun charterSetDefaultBrowser(pkg: String): String
 
     /** The ward's lifeline numbers (`[{"label","number"}]` JSON), or "" when
      *  none. One lock-screen call button per entry (spec D9). */

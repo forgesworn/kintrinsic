@@ -461,6 +461,37 @@ fun launchableAppsPairs(context: Context): List<Pair<String, String>> {
     return out
 }
 
+/**
+ * The package the platform would open an `http` link with, or null when it
+ * cannot say. Pure so the "no default chosen" case is host-testable.
+ *
+ * When no default browser is set the platform answers with its own chooser
+ * (package `android`); that is not a browser and must never be allowlisted.
+ * Null means the core adds nothing: an `onlyThese` time that lists sites then
+ * cannot reach them rather than a browser being guessed (§Times — the closed
+ * direction).
+ */
+fun browserPackageOrNull(resolved: String?): String? =
+    resolved?.trim()?.takeIf { it.isNotEmpty() && it != "android" }
+
+/**
+ * The device's default browser package, for an `onlyThese` time that lists
+ * sites (§Times): the web runtime it implies allowed. Asked of the package
+ * manager (the app holds QUERY_ALL_PACKAGES) on the slow tick; a throw reads
+ * as unknown.
+ */
+fun defaultBrowserPackage(context: Context): String? = runCatching {
+    val intent = android.content.Intent(
+        android.content.Intent.ACTION_VIEW,
+        android.net.Uri.parse("http://example.com/"),
+    ).addCategory(android.content.Intent.CATEGORY_BROWSABLE)
+    val ri = context.packageManager.resolveActivity(
+        intent,
+        android.content.pm.PackageManager.MATCH_DEFAULT_ONLY,
+    )
+    browserPackageOrNull(ri?.activityInfo?.packageName)
+}.getOrNull()
+
 /** Installed launchable apps as JSON `[{"pkg":…,"label":…}]`, excluding the
  *  deny-list — the guardian's app-picker source (rides STATUS). Deduped by
  *  package; labels are the friendly display names.

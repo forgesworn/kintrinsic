@@ -55,7 +55,10 @@ object CharterCore {
     data class ClauseResult(val accepted: Boolean, val kind: String?, val reason: String)
 
     sealed interface Effect {
-        data class Warn(val level: String) : Effect
+        /** [time] is the display label of the named time the ward is in
+         *  ("Learning time") and [then] what follows ("Free time", "locked");
+         *  both null for a ward that uses no times (§Times). */
+        data class Warn(val level: String, val time: String? = null, val then: String? = null) : Effect
         data class Granted(val minutes: Int) : Effect
         data class Audit(val outcome: String) : Effect
         /** The guardian answered no — announced once per ask. */
@@ -81,6 +84,10 @@ object CharterCore {
         /** A signed charter EXISTS for this ward — the restriction gate (I17/I28). */
         val configured: Boolean,
         val enforceMode: Mode,
+        /** The named time in force (§Times), by id and by label; null in Free
+         *  time and when locked. */
+        val activeTime: String? = null,
+        val activeLabel: String? = null,
     )
 
     data class TimeLeft(
@@ -89,6 +96,8 @@ object CharterCore {
         val reason: String,
         val effectiveSecs: Long,
         val nextOpenSecs: Long?,
+        /** The named time in force (§Times); null in Free time and when locked. */
+        val activeTime: String? = null,
     )
 
     data class LockInfo(
@@ -101,7 +110,21 @@ object CharterCore {
          *  a closed window. Same `reason` as any schedule lock (the grant
          *  routing needs that), so the shade tells them apart by this. */
         val dormant: Boolean,
+        /** The types an ask for more time may name (§Times): Free time first,
+         *  then every named time the device defines. Empty when the child has
+         *  no named time, so the ask is exactly the untyped one it always was. */
+        val askTimes: List<AskTime> = emptyList(),
+        /** The id the ask defaults to ([FREE_TIME_ID] or a named time's id);
+         *  null with no [askTimes]. */
+        val defaultAskTime: String? = null,
     )
+
+    /** One type the ward may ask for more of. [id] is [FREE_TIME_ID] for Free time. */
+    data class AskTime(val id: String, val label: String)
+
+    /** Free time's own id on the wire. Reserved: no named time may take it, and
+     *  an ask for it carries NO `time` field (byte-identical to before times). */
+    const val FREE_TIME_ID = "free"
 
     private const val TAG = "CharterCore"
 
@@ -109,7 +132,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 4
+    const val EXPECTED_ABI_VERSION = 5
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -516,8 +539,8 @@ object CharterCore {
     )
 
     /** Parse the current DNS plan; null when not paired (blank) or malformed. */
-    fun dnsPlan(): DnsPlan? {
-        val raw = jni().charterDnsPlan()
+    fun dnsPlan(nowUnix: Long = System.currentTimeMillis() / 1000): DnsPlan? {
+        val raw = jni().charterDnsPlan(nowUnix)
         if (raw.isBlank()) return null
         return try {
             val root = JSONObject(raw)
@@ -546,6 +569,12 @@ object CharterCore {
             // Fail-closed: an unparseable plan is treated as locked by the resolver.
             DnsPlan("", "locked", emptyList(), emptyList(), emptyList(), emptyList(), true, "off", emptyList())
         }
+    }
+
+    /** Report the device's default browser package ("" = unknown) — implied
+     *  allowed by an `onlyThese` time that lists sites (§Times). */
+    fun setDefaultBrowser(pkg: String?) {
+        jni().charterSetDefaultBrowser(pkg.orEmpty())
     }
 
     /** Report the device's installed launchable apps (JSON `[{pkg,label}]`). */
@@ -579,20 +608,30 @@ object CharterCore {
         nowUnix: Long,
         foregroundPkg: String? = null,
     ): List<ChildDecision> {
-        val arr = JSONArray(
+        return parseDecisions(
             jni().charterTick(activeSubjectHex, screenInteractive, nowUnix, foregroundPkg),
         )
+    }
+
+    /** [tick]'s parse, pure so it is host-testable. */
+    fun parseDecisions(raw: String): List<ChildDecision> {
+        val arr = JSONArray(raw)
         return (0 until arr.length()).map { parseDecision(arr.getJSONObject(it)) }
     }
 
-    fun timeLeft(subjectHex: String?, nowUnix: Long): TimeLeft {
-        val o = JSONObject(jni().charterTimeLeft(subjectHex, nowUnix))
+    fun timeLeft(subjectHex: String?, nowUnix: Long): TimeLeft =
+        parseTimeLeft(jni().charterTimeLeft(subjectHex, nowUnix))
+
+    /** [timeLeft]'s parse, pure so it is host-testable. */
+    fun parseTimeLeft(raw: String): TimeLeft {
+        val o = JSONObject(raw)
         return TimeLeft(
             known = o.optBoolean("known", false),
             locked = o.optBoolean("locked", true),
             reason = o.optString("reason", "unknown"),
             effectiveSecs = o.optLong("effectiveSecs", 0),
             nextOpenSecs = if (o.isNull("nextOpenSecs")) null else o.optLong("nextOpenSecs"),
+            activeTime = o.optStringOrNull("activeTime"),
         )
     }
 
@@ -623,8 +662,13 @@ object CharterCore {
         }
     }
 
-    fun lockInfo(subjectHex: String?, nowUnix: Long): LockInfo {
-        val o = JSONObject(jni().charterLockInfo(subjectHex, nowUnix))
+    fun lockInfo(subjectHex: String?, nowUnix: Long): LockInfo =
+        parseLockInfo(jni().charterLockInfo(subjectHex, nowUnix))
+
+    /** [lockInfo]'s parse, pure so it is host-testable. */
+    fun parseLockInfo(raw: String): LockInfo {
+        val o = JSONObject(raw)
+        val ask = o.optJSONArray("askTimes")
         return LockInfo(
             locked = o.optBoolean("locked", true),
             reason = o.optString("reason", "unknown"),
@@ -635,6 +679,14 @@ object CharterCore {
             // the shade exactly as it was, rather than mislabelling a normal
             // schedule lock as a device that is off.
             dormant = o.optBoolean("dormant", false),
+            // Additive: an older core sends neither, which parses to the
+            // untyped ask the shade has always offered.
+            askTimes = (0 until (ask?.length() ?: 0)).mapNotNull {
+                val a = ask!!.optJSONObject(it) ?: return@mapNotNull null
+                val id = a.optString("id", "")
+                if (id.isEmpty()) null else AskTime(id, a.optString("label", id))
+            },
+            defaultAskTime = o.optStringOrNull("defaultAskTime"),
         )
     }
 
@@ -755,11 +807,21 @@ object CharterCore {
          *  meaningful together via [GroupMirror.outOfHoursLine]. */
         val outOfHoursNightsWeek: Int = 0,
         val outOfHoursWeekSecs: Long = 0,
+        /** §Times: the named time in force, by id and label; null in Free time
+         *  and when locked. */
+        val activeTime: String? = null,
+        val activeLabel: String? = null,
+        /** "Learning time until 12:00", built by the core in the schedule's tz. */
+        val timeLine: String? = null,
+        /** For an `onlyThese` time, what it allows (app and site labels). */
+        val allowed: List<String> = emptyList(),
     )
 
     /** Null when no charter is configured yet ("no charter yet", never a guess). */
-    fun scheduleView(nowUnix: Long): ScheduleView? {
-        val raw = jni().charterScheduleView(nowUnix)
+    fun scheduleView(nowUnix: Long): ScheduleView? = parseScheduleView(jni().charterScheduleView(nowUnix))
+
+    /** [scheduleView]'s parse, pure so it is host-testable. */
+    fun parseScheduleView(raw: String): ScheduleView? {
         if (raw.isEmpty()) return null
         return runCatching {
             val o = JSONObject(raw)
@@ -777,6 +839,12 @@ object CharterCore {
                 lines = lines,
                 outOfHoursNightsWeek = o.optInt("outOfHoursNightsWeek", 0),
                 outOfHoursWeekSecs = o.optLong("outOfHoursWeekSecs", 0),
+                activeTime = o.optStringOrNull("activeTime"),
+                activeLabel = o.optStringOrNull("activeLabel"),
+                timeLine = o.optStringOrNull("timeLine"),
+                allowed = o.optJSONArray("allowed")?.let { arr ->
+                    (0 until arr.length()).map { arr.optString(it, "") }.filter { it.isNotEmpty() }
+                } ?: emptyList(),
             )
         }.getOrNull()
     }
@@ -898,11 +966,17 @@ object CharterCore {
             // toward keeping restrictions, never toward tearing them down.
             configured = o.optBoolean("configured", true),
             enforceMode = Mode.parse(o.optString("enforceMode", "enforce")),
+            activeTime = o.optStringOrNull("activeTime"),
+            activeLabel = o.optStringOrNull("activeLabel"),
         )
     }
 
     private fun parseEffect(o: JSONObject): Effect? = when (o.optString("kind")) {
-        "warn" -> Effect.Warn(o.optString("level", "ten"))
+        "warn" -> Effect.Warn(
+            o.optString("level", "ten"),
+            o.optStringOrNull("time"),
+            o.optStringOrNull("then"),
+        )
         "granted" -> Effect.Granted(o.optInt("minutes", 0))
         "audit" -> Effect.Audit(o.optString("outcome", ""))
         "denied" -> Effect.Denied

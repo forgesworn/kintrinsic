@@ -123,6 +123,7 @@ dependencies = [
  "charter-transport",
  "charter-verify",
  "charter-webpolicy",
+ "chrono",
  "chrono-tz",
  "getrandom 0.2.17",
  "jni",

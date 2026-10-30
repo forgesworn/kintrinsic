@@ -12,8 +12,7 @@ use charter_proto::ClausePayload;
 use charter_proto::StatusPayload;
 use charter_schedule::clause::WeekStart;
 use charter_schedule::enforcer::{
-    enforcement_tz_of, AuditKind, EnforcerCore, EnforcerEffect, EnforcerInputs, LockReason,
-    WarnLevel,
+    enforcement_tz_of, AuditKind, EnforcerEffect, LockReason, WarnLevel,
 };
 use charter_schedule::extension::ExtensionLedger;
 use charter_schedule::usage::{Activity, UsageLedger};
@@ -149,6 +148,128 @@ impl EnforceMode {
 /// (`charterShutdown` then `charterInit`) never reuses a generation an old
 /// one's link may still be ingesting under.
 static LINK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A live gift, as the tick routes it.
+pub struct GiftNow {
+    /// Namespaced so it can never collide with a reqId in the ledger.
+    pub id: String,
+    pub minutes: u16,
+    /// The bucket it tops up, verbatim from the wire.
+    pub group_id: Option<String>,
+    /// The named time it buys (§Times), verbatim from the wire.
+    pub time: Option<String>,
+}
+
+/// What a 10-/1-minute warning says about times: which time the ward is in
+/// and what follows. Both `None` for a ward that uses no times, so the warning
+/// payload is byte-identical to a pre-times one.
+#[derive(Default)]
+struct WarnCtx {
+    time: Option<String>,
+    then: Option<String>,
+}
+
+impl WarnCtx {
+    fn for_verdict(
+        v: &crate::times::Verdict,
+        schedule: Option<&GrantSchedule>,
+        times: Option<&charter_proto::GrantTimes>,
+        extension: &ExtensionLedger,
+        now: i64,
+    ) -> WarnCtx {
+        let tagged = schedule.is_some_and(crate::times::has_tagged_window);
+        if v.active_time.is_none() && !tagged {
+            return WarnCtx::default();
+        }
+        let time = v
+            .active_time
+            .as_deref()
+            .map(|id| crate::times::label_of(times, Some(id)));
+        let then = match (&v.run, &v.status) {
+            // A pool-run span ends when the pool does; nothing opens behind it.
+            (crate::times::Run::NamedPool(_), _) => Some("locked".to_string()),
+            // The window is what is running out (not the budget): say what the
+            // schedule does at the span's end.
+            (
+                crate::times::Run::Window,
+                Some(charter_schedule::TimedStatus::Open { span_end, .. }),
+            ) if v.rem.budget_secs < 0 || v.rem.schedule_secs <= v.rem.budget_secs => {
+                schedule.map(|s| crate::times::then_label(s, times, extension, *span_end))
+            }
+            _ => None,
+        };
+        let _ = now;
+        WarnCtx { time, then }
+    }
+}
+
+/// The clauses one assessment reads, resolved once so a tick's decision is
+/// internally consistent.
+struct TimesCtx {
+    schedule: Option<GrantSchedule>,
+    budget: Option<GrantBudget>,
+    /// `None` = no usable `times` clause (absent, unparseable, `v` too high):
+    /// every tagged window locks.
+    times: Option<charter_proto::GrantTimes>,
+}
+
+impl TimesCtx {
+    fn from_clauses(clauses: &[(u16, String)], fallback_tz: &str) -> TimesCtx {
+        let (schedule, budget) = resolve_effective(clauses, fallback_tz);
+        TimesCtx {
+            schedule,
+            budget,
+            times: times_from(clauses),
+        }
+    }
+}
+
+/// The `times` clause out of the clauses already read this tick. Unparseable or
+/// a `v` this build does not implement reads as ABSENT, not as an error: the
+/// fail direction for a clause we cannot read is that every tagged window locks.
+fn times_from(clauses: &[(u16, String)]) -> Option<charter_proto::GrantTimes> {
+    let key = charter_proto::ClauseKind::Times.store_key();
+    clauses
+        .iter()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, body)| charter_proto::GrantTimes::parse_or_absent(body))
+}
+
+/// Land a time-typed grant or gift (§Times), returning the minutes to announce.
+///
+/// The OPPOSITE of an unknown `groupId`, which falls back to whole-device
+/// routing: an unknown `time` enacts NO extra time (a loosening with an
+/// unenforceable posture fails safe). The minutes are still stored under the id
+/// as given, so a `times` clause arriving later the same day honours them, but
+/// nothing is announced and nothing runs until the device defines the id.
+/// `"free"` is Free time's own id and routes like an untyped grant.
+fn land_typed(
+    e: &mut ExtensionLedger,
+    now: i64,
+    req_id: &str,
+    minutes: u16,
+    time: &str,
+    known: &dyn Fn(&str) -> bool,
+    schedule_closed: bool,
+) -> u32 {
+    if time == charter_proto::FREE_TIME_ID {
+        let dim = if schedule_closed {
+            charter_schedule::Dimension::Schedule
+        } else {
+            charter_schedule::Dimension::Budget
+        };
+        return if e.apply(now, req_id, minutes, dim) {
+            minutes as u32
+        } else {
+            0
+        };
+    }
+    if e.apply_time(now, req_id, minutes, time) && known(time) {
+        minutes as u32
+    } else {
+        0
+    }
+}
 
 /// The whole warden. One per process; behind a global Mutex — the single-writer
 /// discipline the file stores assume (persistence.rs:408-414).
@@ -308,7 +429,18 @@ pub struct Warden {
     machine_clauses: RealClauseStore,
     mode: EnforceMode,
 
-    enforcer: EnforcerCore,
+    /// The lock/warning edge machine over [`crate::times::assess`]'s verdict.
+    enforcer: crate::times::EdgeMachine,
+    /// Whether the interval just ended charged the budget and buckets: the
+    /// verdict of the PRIOR tick, because the credit at the top of a tick is
+    /// for the interval since the last one. `true` at start: a first tick
+    /// after a restart charges (the strict direction).
+    last_counts_against_budget: bool,
+    /// The device's default browser package, reported by Kotlin each slow
+    /// tick. An `onlyThese` time that lists sites implies it allowed; unknown
+    /// adds nothing, so the sites are unreachable rather than the browser
+    /// being guessed.
+    default_browser: Option<String>,
     usage: Option<UsageLedger>,
     extension: Option<ExtensionLedger>,
     ledger_tz: String,
@@ -408,7 +540,9 @@ impl Warden {
             link_home: &WARDEN,
             link_allow_loopback: false,
             mode: EnforceMode::parse(enforce_mode),
-            enforcer: EnforcerCore::new(),
+            enforcer: crate::times::EdgeMachine::new(),
+            last_counts_against_budget: true,
+            default_browser: None,
             usage: None,
             extension: None,
             ledger_tz: "UTC".into(),
@@ -714,7 +848,8 @@ impl Warden {
         // still goes out; the link then stops (nothing is paired any more).
         self.retire_link(std::time::Duration::from_millis(1500), true);
         self.last_status = None;
-        self.enforcer = EnforcerCore::new();
+        self.enforcer = crate::times::EdgeMachine::new();
+        self.last_counts_against_budget = true;
         self.usage = None;
         self.extension = None;
         self.last_tick_unix = None;
@@ -803,7 +938,7 @@ impl Warden {
     /// ledger's applied-list — the two share one pool by design (a gift and a
     /// granted ask are the same thing to the enforcer), but they must never be
     /// mistaken for each other.
-    pub fn gift_now(&self, now: u64) -> Option<(String, u16, Option<String>)> {
+    pub fn gift_now(&self, now: u64) -> Option<GiftNow> {
         let subject = self.subject?;
         let stored = self
             .child_clauses
@@ -814,7 +949,12 @@ impl Warden {
             .ok()??;
         let body = serde_json::from_str::<charter_proto::GiftBody>(&stored).ok()?;
         let minutes = body.minutes_now(now)?;
-        Some((format!("gift:{}", body.id), minutes, body.group_id))
+        Some(GiftNow {
+            id: format!("gift:{}", body.id),
+            minutes,
+            group_id: body.group_id,
+            time: body.time,
+        })
     }
 
     /// The guardian's standing stand-down as enforcement needs it, or `None`.
@@ -993,13 +1133,21 @@ impl Warden {
     /// empty and the ask affordance would be permanently dead (found in
     /// review) — a pkg is offered instead whenever it is NOT in `allowed`.
     fn ask_first_now(&self, now_unix: i64) -> Vec<(String, String)> {
-        let Some(g) = self.apps_clause() else {
+        // §Times: the composed clause, so an `onlyThese` time (which clears
+        // the ask-first hints) offers none and an `everythingExcept` time
+        // offers only those still blocked.
+        let Some(effective) = self
+            .composed_apps(now_unix)
+            .ok()
+            .and_then(|(c, _)| c)
+            .filter(|g| !g.is_paused())
+        else {
             return Vec::new();
         };
-        if g.ask_first.is_empty() {
+        if effective.ask_first.is_empty() {
             return Vec::new();
         }
-        let effective = g.effective_at(now_unix.max(0) as u64);
+        let g = &effective;
         let gated = |pkg: &str| -> bool {
             match effective.posture {
                 charter_proto::AppPosture::Blocklist => effective.blocked.iter().any(|b| b == pkg),
@@ -1144,10 +1292,26 @@ impl Warden {
     /// policy": Kotlin keeps the suspended and hidden sets it last applied
     /// until a read succeeds, rather than lifting every block for the tick.
     pub fn app_policy(&self, now_unix: i64) -> Result<String, String> {
-        let Some(g) = self.stored_apps_clause_checked()? else {
+        // §Times: composed over the active named time (Free time's own clause,
+        // unchanged, when none is running).
+        let (composed, named) = self.composed_apps(now_unix)?;
+        let Some(mut eff) = composed else {
             return Ok(String::new());
         };
-        let mut eff = g.effective_at(now_unix.max(0) as u64);
+        // An `onlyThese` time that lists sites implies the device's sanctioned
+        // web runtime allowed, or its sites could never be opened. Android's
+        // is the default browser package; if Kotlin has not reported one,
+        // nothing is added and the sites are unreachable rather than a
+        // browser being guessed (the closed direction).
+        if let Some(t) = named {
+            if t.posture == charter_proto::TimePosture::OnlyThese && !t.sites.is_empty() {
+                if let Some(b) = &self.default_browser {
+                    if !eff.allowed.contains(b) {
+                        eff.allowed.push(b.clone());
+                    }
+                }
+            }
+        }
         if eff.is_paused() {
             if eff.hidden.is_empty() {
                 return Ok(String::new());
@@ -1359,7 +1523,7 @@ impl Warden {
             .as_ref()
             .map(|u| (u.out_of_hours_nights_week(), u.out_of_hours_week_secs()))
             .unwrap_or((0, 0));
-        serde_json::to_string(&serde_json::json!({
+        let mut view = serde_json::json!({
             "locked": tl.locked,
             // -1 (never a clamped 0) when the WHOLE DEVICE carries no time
             // wall at all — a buckets-only ward, or (pre-existing, same fix)
@@ -1374,8 +1538,38 @@ impl Warden {
             "lines": info.lines,
             "outOfHoursNightsWeek": oh_nights,
             "outOfHoursWeekSecs": oh_week_secs,
-        }))
-        .unwrap_or_default()
+        });
+        // §Times: unlocked in a named time, the home surface says which, until
+        // when, and (for `onlyThese`) what is allowed. Keys are added only
+        // then, so a ward that uses no times gets a byte-identical view.
+        if let Some((ctx, verdict)) = self.read_verdict(now) {
+            if let (Some(id), Some(times)) = (verdict.active_time.as_deref(), ctx.times.as_ref()) {
+                if let Some(named) = times.get(id) {
+                    let tz = ctx
+                        .schedule
+                        .as_ref()
+                        .map(|s| s.tz.as_str())
+                        .unwrap_or(self.ledger_tz.as_str());
+                    view["activeTime"] = serde_json::json!(id);
+                    view["activeLabel"] = serde_json::json!(named.label);
+                    if verdict.rem.schedule_secs >= 0 {
+                        let until = crate::times::hhmm_at(tz, now + verdict.rem.schedule_secs);
+                        view["timeLine"] =
+                            serde_json::json!(format!("{} until {until}", named.label));
+                    }
+                    let allowed = crate::times::allowed_labels(named, |pkg| {
+                        self.installed_apps
+                            .iter()
+                            .find(|a| a.pkg == pkg)
+                            .map(|a| a.label.clone())
+                    });
+                    if !allowed.is_empty() {
+                        view["allowed"] = serde_json::json!(allowed);
+                    }
+                }
+            }
+        }
+        serde_json::to_string(&view).unwrap_or_default()
     }
 
     /// The ward's lifeline numbers (`lifeline` clause, store_key 9) as JSON
@@ -1557,9 +1751,31 @@ impl Warden {
     /// `{"revision":<hex8>,"plan":{…}}` JSON, or "" when not paired. Kotlin
     /// applies the plan in a DO-pinned VpnService. Fail-closed: an undecodable
     /// or paused clause evaluates to `DnsMode::Locked` (block-all + exceptions).
+    #[cfg(test)]
     pub fn web_dns_plan(&self) -> String {
+        self.web_dns_plan_at((now_unix_ms() / 1000) as i64)
+    }
+
+    /// [`Warden::web_dns_plan`] at `now`: Free time's `content` clause composed
+    /// with the named time running at that instant (§Times). An `onlyThese`
+    /// time with `sites` turns the plan into an allowlist of the union of every
+    /// site's `domains`; an `everythingExcept` time's `denySites` /
+    /// `undenySites` move the deny and allow lists. Free time (and any ward
+    /// with no times) takes today's path byte for byte.
+    pub fn web_dns_plan_at(&self, now: i64) -> String {
         let Some(subject) = self.subject else {
             return String::new();
+        };
+        let locked_plan = || {
+            wrap_plan(&charter_webpolicy::render_dns_filter(
+                &charter_content::EffectiveWebPolicy::locked(),
+            ))
+        };
+        // Which time is running. A clause store that will not read is not
+        // "Free time": it fails CLOSED like every other read error here.
+        let named = match self.active_named_time(now) {
+            Ok(n) => n,
+            Err(_) => return locked_plan(),
         };
         // Cached, signature-verified curator lists (ingested by the broker).
         let lists: Vec<charter_content::CuratorList> = self
@@ -1570,29 +1786,60 @@ impl Warden {
             .filter_map(|j| serde_json::from_str::<charter_content::CuratorList>(j).ok())
             .collect();
         // The stored content clause; absent ⇒ unrestricted (no web constraint yet).
-        let clause_json = match self.stored_content_clause(&subject) {
-            Ok(Some(body)) => body,
-            // No content clause for this ward → no web constraint.
-            Ok(None) => {
+        let stored = match self.stored_content_clause(&subject) {
+            Ok(body) => body,
+            // A store/envelope read error is fail-CLOSED: block all (minus
+            // exceptions) rather than silently drop web filtering while the
+            // device still appears enforced.
+            Err(_) => return locked_plan(),
+        };
+        let clause_json = match (stored, named) {
+            // Free time: the clause as stored, or no web constraint yet.
+            (None, None) => {
                 let plan = charter_webpolicy::render_dns_filter(
                     &charter_content::EffectiveWebPolicy::unrestricted(),
                 );
                 return wrap_plan(&plan);
             }
-            // A store/envelope read error is fail-CLOSED: block all (minus
-            // exceptions) rather than silently drop web filtering while the
-            // device still appears enforced.
-            Err(_) => {
-                let plan = charter_webpolicy::render_dns_filter(
-                    &charter_content::EffectiveWebPolicy::locked(),
-                );
-                return wrap_plan(&plan);
+            (Some(body), None) => body,
+            (stored, Some(t)) => {
+                // A Free clause that will not parse stays fail-CLOSED: a named
+                // time composes over a policy it can read, never over a guess.
+                let free = match stored
+                    .as_deref()
+                    .map(serde_json::from_str::<charter_content::GrantContent>)
+                {
+                    None => None,
+                    Some(Ok(c)) => Some(c),
+                    Some(Err(_)) => return locked_plan(),
+                };
+                match charter_proto::compose_content(free.as_ref(), &t) {
+                    Some(c) => serde_json::to_string(&c).unwrap_or_default(),
+                    // Nothing to constrain: Free has no content clause and the
+                    // time adds none.
+                    None => {
+                        let plan = charter_webpolicy::render_dns_filter(
+                            &charter_content::EffectiveWebPolicy::unrestricted(),
+                        );
+                        return wrap_plan(&plan);
+                    }
+                }
             }
         };
         // evaluate_content_json fails CLOSED (locked) on any decode error.
         let eff = charter_content::evaluate_content_json(&clause_json, &lists);
         let plan = charter_webpolicy::render_dns_filter(&eff);
         wrap_plan(&plan)
+    }
+
+    /// Kotlin reports the device's default browser package (resolved from the
+    /// platform's `http` handler) each slow tick. `None`/blank clears it. It is
+    /// only ever ADDED to an `onlyThese` time's allowed apps when that time
+    /// lists sites; unknown means the sites cannot be opened, not that some
+    /// browser is guessed.
+    pub fn set_default_browser(&mut self, pkg: &str) {
+        let pkg = pkg.trim();
+        self.default_browser = (!pkg.is_empty() && pkg.len() <= 256).then(|| pkg.to_string());
     }
 
     /// The ward's content clause, from whichever of its two homes holds the
@@ -2254,6 +2501,14 @@ impl Warden {
                         .last_status
                         .as_ref()
                         .is_some_and(|last| last.debugging_open != status.debugging_open)
+                    // The named time in force (§Times) changes only at a window
+                    // boundary or when a pool starts or ends, so the guardian's
+                    // "Now" card is not left naming the wrong time for a
+                    // heartbeat. Core's throttle compares lock state only.
+                    || self
+                        .last_status
+                        .as_ref()
+                        .is_some_and(|last| last.active_time != status.active_time)
             });
         // Only a status that is actually going out takes a number, stored
         // before it is published (a number spent on an emit that reaches no
@@ -2325,38 +2580,45 @@ impl Warden {
             PolicySource::Unconstrained
         };
         let (usage, extension) = (self.usage.as_ref(), self.extension.as_ref());
+        // The same verdict the tick enforces (§Times), so STATUS cannot say
+        // "unlocked" for a span the tick locked (or the reverse) at a
+        // named-time boundary.
+        let times = times_from(&clauses);
         // Before the first tick the ledgers are unloaded; report zeros rather
         // than skip — the heartbeat must beat even on an idle, fresh boot.
-        let (used_today, remaining) = match (usage, extension) {
+        let (used_today, verdict) = match (usage, extension) {
             (Some(u), Some(e)) => {
                 let pooled = charter_spine::usage_pool::load_consolidated_from(
                     &self.child_clauses,
                     &subject.to_hex(),
                 );
-                let rem = charter_schedule::enforcer::compute_remaining(&EnforcerInputs {
-                    stand_down: self.stand_down_now(now),
-                    now_unix: now as i64,
+                let v = crate::times::assess(&crate::times::TimesInputs {
+                    now: now as i64,
                     schedule: schedule.as_ref(),
                     budget: budget.as_ref(),
+                    times: times.as_ref(),
                     usage: u,
                     extension: e,
                     consolidated: pooled.as_ref(),
+                    stand_down: self.stand_down_now(now),
                 });
-                (u.used_today(now as i64), rem)
+                (u.used_today(now as i64), v)
             }
             _ => (
                 0,
-                charter_schedule::enforcer::compute_remaining(&EnforcerInputs {
-                    stand_down: self.stand_down_now(now),
-                    now_unix: now as i64,
+                crate::times::assess(&crate::times::TimesInputs {
+                    now: now as i64,
                     schedule: schedule.as_ref(),
                     budget: budget.as_ref(),
+                    times: times.as_ref(),
                     usage: &UsageLedger::new(&self.ledger_tz, self.ledger_week_start, now as i64),
                     extension: &ExtensionLedger::new(&self.ledger_tz, now as i64),
                     consolidated: None,
+                    stand_down: self.stand_down_now(now),
                 }),
             ),
         };
+        let remaining = verdict.rem;
         let tz: chrono_tz::Tz = self.ledger_tz.parse().unwrap_or(chrono_tz::UTC);
         let mut status = charter_spine::status_emit::build_status(
             subject,
@@ -2369,6 +2631,9 @@ impl Warden {
             None,
             source,
         );
+        // §Times: the named time in force (absent in Free time and when
+        // locked), stamped here because `build_status` knows only the numbers.
+        status.active_time = verdict.active_time.clone();
         // The union-rule input (B3): today's active-minutes journal, omitted
         // while empty rather than sent as an all-zero bitmap.
         if let Some(u) = self.usage.as_ref() {
@@ -2595,6 +2860,8 @@ impl Warden {
                     remaining_secs: -1,
                     configured: false,
                     enforce_mode: self.mode.as_str().into(),
+                    active_time: None,
+                    active_label: None,
                 }]
             }
             Some(s) => s,
@@ -2633,6 +2900,8 @@ impl Warden {
                 remaining_secs: -1,
                 configured: false,
                 enforce_mode: self.mode.as_str().into(),
+                active_time: None,
+                active_label: None,
             }];
         }
         // A charter exists for this ward — latch it so a later unreadable tick
@@ -2679,8 +2948,20 @@ impl Warden {
         } else {
             Activity::Idle
         };
+        // Time in a named time that does not count against the budget (the
+        // default) charges neither the screen budget nor any bucket. The
+        // interval being credited is the PRIOR tick's, so the PRIOR verdict
+        // decides (`last_counts_against_budget`; `true` after a restart, the
+        // strict direction). It lands on the time-free meter rather than being
+        // dropped, so the active minutes the guardian's picture and the
+        // cross-device union rule read still see the use.
+        let counts = self.last_counts_against_budget;
         if let Some(u) = self.usage.as_mut() {
-            u.credit(now, activity, elapsed);
+            if activity.counts() && !counts {
+                u.credit_bucket(now, activity, charter_schedule::Bucket::Learning, elapsed);
+            } else {
+                u.credit(now, activity, elapsed);
+            }
         }
 
         // The named-times bucket the foreground app belongs to, if any, is
@@ -2693,8 +2974,11 @@ impl Warden {
         // foreground-package probe Kotlin already made for the screen credit;
         // no second probe. Fail-safe: no bucket clause, no match, or a
         // paused/malformed clause credits nothing (`bucket_for_app` already
-        // fails safe on that internally).
-        if activity == Activity::Active {
+        // fails safe on that internally). And, like the screen credit, nothing
+        // in a time that does not count (§Times): the bucket's CAP still
+        // applies there (`bucket_suspensions` is untouched), it just is not
+        // spent by that time.
+        if activity == Activity::Active && counts {
             if let Some(fg) = foreground_pkg {
                 if let Some(bk) = buckets.as_ref() {
                     if let Some(b) = charter_schedule::bucket_for_app(bk, fg) {
@@ -2707,11 +2991,24 @@ impl Warden {
             }
         }
 
+        let times = times_from(&clauses);
+        let known = crate::times::known_in(times.as_ref());
+        // Is the schedule closed right now, by the TIMES evaluator? An unknown
+        // tag is closed (the classic evaluator calls it open), so the routing
+        // of a Free grant below keys off this, not off the classic status.
+        let schedule_closed = schedule.as_ref().is_some_and(|s| {
+            matches!(
+                crate::times::timed_status(s, times.as_ref(), now),
+                charter_schedule::TimedStatus::Locked { .. }
+            )
+        });
+
         // Drain verified time-extensions (broker enactor deposits) into the
         // ONE enforcing ledger — idempotent by reqId (I13). Newly-applied
         // minutes ride the decision as a Granted effect so the child hears
         // the yes even away from the lock screen. A per-group grant
-        // (`bucket_id` set) credits that bucket's own pool; the ordinary
+        // (`bucket_id` set) credits that bucket's own pool; a typed grant
+        // (`time_id` set, §Times) credits that time's own pool; the ordinary
         // whole-device routing credits the schedule/budget pool the enactor
         // decided on (mirrors charterd's drain, runtime.rs ~1467).
         let mut granted_minutes: u32 = 0;
@@ -2723,16 +3020,30 @@ impl Warden {
                 .unwrap_or_default();
             if let Some(e) = self.extension.as_mut() {
                 for p in pending {
-                    let applied = match (&p.bucket_id, p.dim) {
-                        (Some(bucket_id), _) => {
-                            e.apply_bucket(p.at, &p.req_id, p.minutes, bucket_id)
+                    match (&p.bucket_id, p.dim, &p.time_id) {
+                        (Some(bucket_id), _, _) => {
+                            if e.apply_bucket(p.at, &p.req_id, p.minutes, bucket_id) {
+                                granted_minutes += p.minutes as u32;
+                            }
                         }
-                        (None, Some(dim)) => e.apply(p.at, &p.req_id, p.minutes, dim),
-                        // Malformed deposit (neither set) — nothing to apply.
-                        (None, None) => false,
-                    };
-                    if applied {
-                        granted_minutes += p.minutes as u32;
+                        (None, Some(dim), _) => {
+                            if e.apply(p.at, &p.req_id, p.minutes, dim) {
+                                granted_minutes += p.minutes as u32;
+                            }
+                        }
+                        (None, None, Some(time_id)) => {
+                            granted_minutes += land_typed(
+                                e,
+                                p.at,
+                                &p.req_id,
+                                p.minutes,
+                                time_id,
+                                &known,
+                                schedule_closed,
+                            );
+                        }
+                        // Malformed deposit (none set) — nothing to apply.
+                        (None, None, None) => {}
                     }
                 }
             }
@@ -2743,14 +3054,21 @@ impl Warden {
         // math, the time-left readout and STATUS all need no new cases. The
         // clause is re-read every tick; the ledger's idempotency (by the gift's
         // own id) is what makes that apply exactly once.
-        if let Some((gift_id, minutes, group_id)) = self.gift_now(now as u64) {
+        if let Some(gift) = self.gift_now(now as u64) {
+            let GiftNow {
+                id: gift_id,
+                minutes,
+                group_id,
+                time: gift_time,
+            } = gift;
             // A named-times gift (`groupId` set, and the bucket still exists in
             // the ward's CURRENT `buckets` clause) tops up that bucket's own
             // pool. An unknown/deleted group — or no group at all — falls back
             // to the ordinary whole-device routing, exactly like a groupId-less
             // gift always has: "Mum gave me time and nothing happened" is the
             // one failure this must never produce (mirrors charterd's
-            // `gift_route`).
+            // `gift_route`). A bucket hit wins over `time`: a `time` riding on
+            // a bucket-hit gift is ignored.
             let live_bucket = group_id.as_deref().filter(|gid| {
                 buckets
                     .as_ref()
@@ -2762,20 +3080,21 @@ impl Warden {
                         granted_minutes += minutes as u32;
                     }
                 }
+            } else if let Some(time) = gift_time.as_deref() {
+                // Typed (§Times): its own pool, and an unknown id enacts
+                // nothing — NOT the groupId fallback above.
+                if let Some(e) = self.extension.as_mut() {
+                    granted_minutes +=
+                        land_typed(e, now, &gift_id, minutes, time, &known, schedule_closed);
+                }
             } else {
                 // Route like the shade's ask does: minutes charged to the
                 // budget pool while a CLOSED window is what's holding them out
                 // would never unlock anything (M7).
-                let dim = match schedule.as_ref() {
-                    Some(s)
-                        if matches!(
-                            charter_schedule::evaluate_grant_schedule(s, now),
-                            charter_schedule::ScheduleStatus::Locked { .. }
-                        ) =>
-                    {
-                        charter_schedule::Dimension::Schedule
-                    }
-                    _ => charter_schedule::Dimension::Budget,
+                let dim = if schedule_closed {
+                    charter_schedule::Dimension::Schedule
+                } else {
+                    charter_schedule::Dimension::Budget
                 };
                 if let Some(e) = self.extension.as_mut() {
                     if e.apply(now, &gift_id, minutes, dim) {
@@ -2785,11 +3104,39 @@ impl Warden {
             }
         }
 
-        // Out-of-window, a granted schedule extension burns wall-clock (the
-        // fail-open fix: "+30m past curfew" must count down and re-lock, not
-        // freeze at 30:00 until midnight).
-        if let Some(e) = self.extension.as_mut() {
-            charter_schedule::burn_schedule_extension(e, schedule.as_ref(), now, elapsed);
+        // The broker-verified cross-device usage view (USAGE_SYNC, B3): the
+        // budget draws down the POOLED spend; absent/stale → local-only.
+        let pooled =
+            charter_spine::usage_pool::load_consolidated_from(&self.child_clauses, &subject_hex);
+
+        // Out-of-window, a granted extension burns wall-clock (the fail-open
+        // fix: "+30m past curfew" must count down and re-lock, not freeze at
+        // 30:00 until midnight). What burns is whatever the device is running
+        // OFF this tick: Free's schedule pool while the schedule is closed
+        // (an unknown tag included), or the named pool carrying it as that
+        // time. Never both, and nothing while a window decides.
+        if elapsed > 0 {
+            let pre = match (self.usage.as_ref(), self.extension.as_ref()) {
+                (Some(u), Some(e)) => Some(crate::times::assess(&crate::times::TimesInputs {
+                    now,
+                    schedule: schedule.as_ref(),
+                    budget: budget.as_ref(),
+                    times: times.as_ref(),
+                    usage: u,
+                    extension: e,
+                    consolidated: pooled.as_ref(),
+                    stand_down,
+                })),
+                _ => None,
+            };
+            if let (Some(pre), Some(e)) = (pre, self.extension.as_mut()) {
+                if pre.burn_schedule_pool {
+                    e.burn_schedule(now, elapsed);
+                }
+                if let crate::times::Run::NamedPool(id) = &pre.run {
+                    e.burn_time(now, id, elapsed);
+                }
+            }
         }
 
         // Ledgers were just ensured; if somehow absent, hold rather than panic.
@@ -2797,24 +3144,31 @@ impl Warden {
             (Some(u), Some(e)) => (u, e),
             _ => return self.hold_decision(&subject_hex),
         };
-        // The broker-verified cross-device usage view (USAGE_SYNC, B3): the
-        // budget draws down the POOLED spend; absent/stale → local-only.
-        let pooled =
-            charter_spine::usage_pool::load_consolidated_from(&self.child_clauses, &subject_hex);
-        let effs = self.enforcer.tick(&EnforcerInputs {
-            stand_down,
-            now_unix: now,
+        let verdict = crate::times::assess(&crate::times::TimesInputs {
+            now,
             schedule: schedule.as_ref(),
             budget: budget.as_ref(),
+            times: times.as_ref(),
             usage,
             extension,
             consolidated: pooled.as_ref(),
+            stand_down,
         });
+        let effs = self.enforcer.tick(&verdict.rem);
+        let warn_ctx =
+            WarnCtx::for_verdict(&verdict, schedule.as_ref(), times.as_ref(), extension, now);
+        let active_label = verdict
+            .active_time
+            .as_deref()
+            .map(|id| crate::times::label_of(times.as_ref(), Some(id)));
+        self.last_counts_against_budget = verdict.counts_against_budget;
 
         self.persist_ledgers();
         self.last_tick_unix = Some(now);
 
-        let mut decision = self.map_effects(subject_hex, effs);
+        let mut decision = self.map_effects(subject_hex, effs, &warn_ctx);
+        decision.active_time = verdict.active_time.clone();
+        decision.active_label = active_label;
         if granted_minutes > 0 {
             decision.effects.push(dto::Effect::Granted {
                 minutes: granted_minutes,
@@ -2936,15 +3290,20 @@ impl Warden {
             &self.child_clauses,
             &subject.to_hex(),
         );
-        let rem = charter_schedule::enforcer::compute_remaining(&EnforcerInputs {
-            stand_down,
-            now_unix: now,
+        // The same verdict the tick enforces (§Times): the classic
+        // `compute_remaining` would run a tagged window as Free.
+        let times = times_from(&clauses);
+        let verdict = crate::times::assess(&crate::times::TimesInputs {
+            now,
             schedule: schedule.as_ref(),
             budget: budget.as_ref(),
+            times: times.as_ref(),
             usage,
             extension,
             consolidated: pooled.as_ref(),
+            stand_down,
         });
+        let rem = verdict.rem;
         dto::TimeLeftView {
             known: true,
             locked: rem.locked,
@@ -2954,6 +3313,7 @@ impl Warden {
             budget_secs: rem.budget_secs,
             extension_secs: rem.extension_secs,
             next_open_secs: rem.next_open_secs,
+            active_time: verdict.active_time,
         }
     }
 
@@ -3001,6 +3361,47 @@ impl Warden {
             _ => ("Unlocked".to_string(), String::new()),
         };
         let used_line = self.used_line(now);
+        // §Times: on a schedule that uses times the lock says what is NEXT
+        // ("Locked until Learning time at 09:00"), and the ask offers a type.
+        let mut title = title;
+        let mut ask_times = Vec::new();
+        let mut default_ask_time = None;
+        if let Some((ctx, verdict)) = self.read_verdict(now) {
+            if tl.locked && tl.reason == "schedule" && !dormant {
+                if let (Some(sched), Some(status)) =
+                    (ctx.schedule.as_ref(), verdict.status.as_ref())
+                {
+                    if let Some(t) =
+                        crate::times::locked_title(sched, ctx.times.as_ref(), status, now)
+                    {
+                        title = t;
+                    }
+                }
+            }
+            if let Some(t) = ctx.times.as_ref().filter(|t| !t.times.is_empty()) {
+                ask_times.push(dto::AskTime {
+                    id: charter_proto::FREE_TIME_ID.to_string(),
+                    label: crate::times::label_of(Some(t), None),
+                });
+                ask_times.extend(t.times.iter().map(|n| dto::AskTime {
+                    id: n.id.clone(),
+                    label: n.label.clone(),
+                }));
+                // Inside a window now (the device is budget-locked in it) the
+                // window's own time; else the time whose window most recently
+                // ended today, else the next one up today, else Free.
+                let known = crate::times::known_in(Some(t));
+                let id = match &verdict.status {
+                    Some(charter_schedule::TimedStatus::Open { time, .. }) => time.clone(),
+                    _ => ctx
+                        .schedule
+                        .as_ref()
+                        .and_then(|s| charter_schedule::default_ask_time(s, &known, now)),
+                };
+                default_ask_time =
+                    Some(id.unwrap_or_else(|| charter_proto::FREE_TIME_ID.to_string()));
+            }
+        }
         dto::LockInfo {
             locked: tl.locked,
             reason: tl.reason,
@@ -3008,6 +3409,8 @@ impl Warden {
             come_back,
             used_line,
             dormant,
+            ask_times,
+            default_ask_time,
         }
     }
 
@@ -3147,6 +3550,118 @@ impl Warden {
         resolve_effective(&clauses, &self.ledger_tz).0
     }
 
+    /// The sole ward's schedule, budget and `times` clause, plus the verdict
+    /// over them at `now` — the one assessment every reader shares. `None` when
+    /// unpaired or the clause store will not read (callers then fall back to
+    /// their own fail-safe, which for enforcement is a held tick).
+    ///
+    /// Before the first tick the ledgers are unloaded: fresh ones stand in, so
+    /// a window still decides what time it is (pools are unknown until then).
+    fn read_verdict(&self, now: i64) -> Option<(TimesCtx, crate::times::Verdict)> {
+        self.read_verdict_checked(now).ok().flatten()
+    }
+
+    /// [`Warden::read_verdict`], keeping an unreadable clause store distinct
+    /// from "unpaired" (F1): the ONE read of the store, so a caller that
+    /// enforces cannot pass a readability gate and then be handed Free time by
+    /// a second read that failed.
+    fn read_verdict_checked(
+        &self,
+        now: i64,
+    ) -> Result<Option<(TimesCtx, crate::times::Verdict)>, String> {
+        let Some(subject) = self.subject else {
+            return Ok(None);
+        };
+        let clauses = self
+            .child_clauses
+            .clauses_for_strict(&subject.to_hex())
+            .map_err(|e| format!("clauses unreadable: {e:?}"))?;
+        let ctx = TimesCtx::from_clauses(&clauses, &self.ledger_tz);
+        let (tmp_u, tmp_e);
+        let (usage, extension) = match (self.usage.as_ref(), self.extension.as_ref()) {
+            (Some(u), Some(e)) => (u, e),
+            _ => {
+                tmp_u = UsageLedger::new(&self.ledger_tz, self.ledger_week_start, now);
+                tmp_e = ExtensionLedger::new(&self.ledger_tz, now);
+                (&tmp_u, &tmp_e)
+            }
+        };
+        let pooled = charter_spine::usage_pool::load_consolidated_from(
+            &self.child_clauses,
+            &subject.to_hex(),
+        );
+        let verdict = crate::times::assess(&crate::times::TimesInputs {
+            now,
+            schedule: ctx.schedule.as_ref(),
+            budget: ctx.budget.as_ref(),
+            times: ctx.times.as_ref(),
+            usage,
+            extension,
+            consolidated: pooled.as_ref(),
+            stand_down: self.stand_down_now(now.max(0) as u64),
+        });
+        Ok(Some((ctx, verdict)))
+    }
+
+    /// The named time the device is running right now, if any, for composing
+    /// the standing app and web policy over it.
+    ///
+    /// `Err` when the clause store will not read: not "Free time". A caller
+    /// that enforces keeps what it last applied (apps) or fails closed (web)
+    /// rather than composing against a guess.
+    fn active_named_time(&self, now: i64) -> Result<Option<charter_proto::NamedTime>, String> {
+        self.require_readable_pairing()?;
+        // One read, `Err` on an unreadable store: never "Free time" (which
+        // under an `onlyThese` time would open every app it withheld).
+        Ok(self.read_verdict_checked(now)?.and_then(|(ctx, v)| {
+            let id = v.active_time?;
+            ctx.times?.times.into_iter().find(|n| n.id == id)
+        }))
+    }
+
+    /// The sole ward's standing `apps` policy as ENFORCED at `now`: Free time's
+    /// clause after holds, composed with the active named time if one is
+    /// running (§Times). `None` when nothing applies.
+    ///
+    /// Free time's clause being absent or unreadable does not stop a named
+    /// time composing: an empty blocklist stands in, so an `onlyThese` time
+    /// still allowlists and an `everythingExcept` time's own bans still hold.
+    fn composed_apps(
+        &self,
+        now: i64,
+    ) -> Result<
+        (
+            Option<charter_proto::GrantApps>,
+            Option<charter_proto::NamedTime>,
+        ),
+        String,
+    > {
+        let free = self.stored_apps_clause_checked()?;
+        let named = self.active_named_time(now)?;
+        let at = now.max(0) as u64;
+        let composed = match (free, &named) {
+            (None, None) => None,
+            (Some(g), None) => Some(g.effective_at(at)),
+            (g, Some(t)) => {
+                let base =
+                    g.map(|g| g.effective_at(at))
+                        .unwrap_or_else(|| charter_proto::GrantApps {
+                            v: charter_proto::APPS_VERSION,
+                            posture: charter_proto::AppPosture::Blocklist,
+                            blocked: Vec::new(),
+                            allowed: Vec::new(),
+                            paused: None,
+                            holds: Vec::new(),
+                            ask_first: Vec::new(),
+                            hidden: Vec::new(),
+                            issued_at: 0,
+                        });
+                Some(charter_proto::compose_apps(&base, t))
+            }
+        };
+        Ok((composed, named))
+    }
+
     fn ensure_ledgers(&mut self, tz: &str, week_start: WeekStart, now: i64) {
         if self.usage.is_none() {
             let restored = self
@@ -3241,6 +3756,8 @@ impl Warden {
             remaining_secs: 0,
             configured: self.ever_configured,
             enforce_mode: self.mode.as_str().into(),
+            active_time: None,
+            active_label: None,
         }]
     }
 
@@ -3248,7 +3765,12 @@ impl Warden {
     /// `locked` + `enforce_mode` (not from edges), so this only surfaces the
     /// notification/audit effects. Audit always fires (the parent-side signal,
     /// I18/I19); warnings fire only in Enforce mode.
-    fn map_effects(&self, subject_hex: String, effs: Vec<EnforcerEffect>) -> dto::ChildDecision {
+    fn map_effects(
+        &self,
+        subject_hex: String,
+        effs: Vec<EnforcerEffect>,
+        warn_ctx: &WarnCtx,
+    ) -> dto::ChildDecision {
         let mut out = Vec::new();
         let mut locked = self.enforcer.is_locked();
         let mut reason = if locked {
@@ -3268,6 +3790,8 @@ impl Warden {
                                 WarnLevel::Ten => "ten".into(),
                                 WarnLevel::One => "one".into(),
                             },
+                            time: warn_ctx.time.clone(),
+                            then: warn_ctx.then.clone(),
                         });
                     }
                 }
@@ -3295,6 +3819,8 @@ impl Warden {
             remaining_secs,
             configured: true,
             enforce_mode: self.mode.as_str().into(),
+            active_time: None,
+            active_label: None,
         }
     }
 }
@@ -10060,6 +10586,594 @@ mod link_loop_tests {
         assert!(
             rig.wait(10, || !peer.exists()),
             "link state wiped on unpair"
+        );
+    }
+}
+
+/// Times (§Times) on the Android ward: the routing, the fail directions and the
+/// ward-facing copy, end to end through `tick` / `time_left` / STATUS /
+/// `app_policy` / `web_dns_plan`. The pure arithmetic is pinned in
+/// `times::tests`; this module pins that the WARDEN wires it.
+#[cfg(test)]
+mod times_tests {
+    use super::*;
+    use charter_proto::ClauseKind;
+    use serde_json::json;
+
+    // Mon 2026-06-29, Europe/London (BST): T0 is 18:00 local.
+    const T0: i64 = 1_782_752_400;
+    const H: i64 = 3600;
+
+    fn warden(
+        tag: &str,
+        windows: serde_json::Value,
+        times: Option<serde_json::Value>,
+    ) -> (Warden, String) {
+        let base =
+            std::env::temp_dir().join(format!("charter-times-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 1).expect("warden");
+        let subject = charter_primitives::PubKey::from_bytes([0x44; 32]);
+        w.subject = Some(subject);
+        let hex = subject.to_hex();
+        put(
+            &w,
+            &hex,
+            ClauseKind::Schedule,
+            json!({
+                "v": 1, "tz": "Europe/London", "weekly": { "mon": windows }, "issuedAt": 1
+            }),
+        );
+        if let Some(t) = times {
+            put(&w, &hex, ClauseKind::Times, t);
+        }
+        (w, hex)
+    }
+
+    fn put(w: &Warden, hex: &str, kind: ClauseKind, body: serde_json::Value) {
+        w.child_clauses
+            .put_child_clause(hex, kind.store_key(), 1, &body.to_string())
+            .expect("stored");
+    }
+
+    fn times_body(counts: bool) -> serde_json::Value {
+        json!({
+            "v": 1, "issuedAt": 1,
+            "times": [
+                { "id": "learning", "label": "Learning time", "posture": "onlyThese",
+                  "apps": ["com.khan.app"],
+                  "sites": [{ "id": "khan-academy", "label": "Khan Academy", "kind": "site",
+                              "url": "https://www.khanacademy.org/",
+                              "domains": ["khanacademy.org", "kastatic.org"] }],
+                  "countsAgainstBudget": counts },
+                { "id": "reading", "label": "Reading time", "posture": "everythingExcept",
+                  "blockApps": ["com.video"], "unblockApps": ["com.game"] }
+            ]
+        })
+    }
+
+    /// Free 16:00-19:00 carved by Learning 17:00-18:00.
+    fn carved() -> serde_json::Value {
+        json!([
+            { "start": "16:00", "end": "19:00" },
+            { "start": "17:00", "end": "18:00", "time": "learning" }
+        ])
+    }
+
+    fn locked(d: &[dto::ChildDecision]) -> bool {
+        d[0].locked
+    }
+
+    #[test]
+    fn a_tagged_window_runs_its_time_and_every_reader_agrees() {
+        let (mut w, hex) = warden("window", carved(), Some(times_body(false)));
+        let d = w.tick(Some(&hex), true, T0 - 90 * 60, None);
+        assert!(!locked(&d), "16:30 is Free time");
+        assert_eq!(d[0].active_time, None);
+
+        let now = T0 - 30 * 60; // 17:30
+        let d = w.tick(Some(&hex), true, now, None);
+        assert!(!locked(&d));
+        assert_eq!(d[0].active_time.as_deref(), Some("learning"));
+        assert_eq!(d[0].active_label.as_deref(), Some("Learning time"));
+        let st = w.build_status(now as u64).expect("status");
+        assert_eq!(st.active_time.as_deref(), Some("learning"));
+        assert_eq!(st.window_left_secs, 1800, "to the end of the Learning span");
+        assert_eq!(w.time_left(now).active_time.as_deref(), Some("learning"));
+
+        // The home view names the time, when it ends and what it allows.
+        let v: serde_json::Value = serde_json::from_str(&w.schedule_view(now)).unwrap();
+        assert_eq!(v["timeLine"], "Learning time until 18:00");
+        let allowed = v["allowed"].as_array().unwrap();
+        assert!(allowed.iter().any(|a| a == "Khan Academy"), "{allowed:?}");
+
+        // Back to Free after the carve, and STATUS drops activeTime.
+        let d = w.tick(Some(&hex), true, T0 + 30 * 60, None);
+        assert_eq!(d[0].active_time, None);
+        assert_eq!(
+            w.build_status((T0 + 1800) as u64).unwrap().active_time,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_tag_locks_at_the_tick_and_the_lock_says_so() {
+        // No `times` clause at all: the classic evaluator calls this window
+        // open, which is exactly the fail-open this must not repeat.
+        let (mut w, hex) = warden(
+            "unknown",
+            json!([{ "start": "16:00", "end": "19:00", "time": "ghost" }]),
+            None,
+        );
+        let now = T0 - 30 * 60;
+        let d = w.tick(Some(&hex), true, now, None);
+        assert!(locked(&d), "an undefined time never opens as Free");
+        assert_eq!(d[0].reason, "schedule");
+        assert!(w.time_left(now).locked);
+        assert!(w.build_status(now as u64).unwrap().locked);
+        assert_eq!(
+            w.lock_info(now).title,
+            "Nothing is set up for this time yet"
+        );
+    }
+
+    #[test]
+    fn the_lock_names_the_next_time() {
+        let (mut w, hex) = warden(
+            "next",
+            json!([
+                { "start": "09:00", "end": "12:00", "time": "learning" },
+                { "start": "16:00", "end": "19:00" }
+            ]),
+            Some(times_body(false)),
+        );
+        let now = T0 - 10 * H; // 08:00
+        assert!(locked(&w.tick(Some(&hex), true, now, None)));
+        assert_eq!(
+            w.lock_info(now).title,
+            "Locked until Learning time at 09:00"
+        );
+        let now = T0 - 3 * H; // 15:00
+        w.tick(Some(&hex), true, now, None);
+        assert_eq!(w.lock_info(now).title, "Locked until Free time at 16:00");
+        // A ward that uses no times keeps the classic copy.
+        let (mut w, hex) = warden(
+            "classic",
+            json!([{ "start": "16:00", "end": "19:00" }]),
+            None,
+        );
+        w.tick(Some(&hex), true, T0 + 3 * H, None);
+        assert_eq!(w.lock_info(T0 + 3 * H).title, "Outside allowed hours");
+    }
+
+    #[test]
+    fn the_ask_offers_types_and_defaults_by_the_schedule() {
+        let (mut w, hex) = warden("ask", carved(), Some(times_body(false)));
+        // After the Learning span ended, inside the Free window that follows it.
+        let now = T0 + 30 * 60; // 18:30
+        w.tick(Some(&hex), true, now, None);
+        // Not locked, so ask copy is not shown, but the offer is still derived.
+        let info = w.lock_info(now);
+        let ids: Vec<&str> = info.ask_times.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["free", "learning", "reading"]);
+        assert_eq!(info.ask_times[0].label, "Free time");
+        // Inside a window the default is that window's time.
+        assert_eq!(info.default_ask_time.as_deref(), Some("free"));
+        // A child with no named time sees the untyped ask it always had.
+        let (mut w, hex) = warden(
+            "ask-none",
+            json!([{ "start": "16:00", "end": "17:00" }]),
+            None,
+        );
+        w.tick(Some(&hex), true, T0, None);
+        let info = w.lock_info(T0);
+        assert!(info.ask_times.is_empty() && info.default_ask_time.is_none());
+    }
+
+    fn gift(w: &Warden, hex: &str, id: &str, time: Option<&str>) {
+        let mut body = json!({
+            "v": 1, "issuedAt": 1, "id": id, "minutes": 30,
+            "expiresAt": T0 as u64 + 6 * 3600
+        });
+        if let Some(t) = time {
+            body["time"] = json!(t);
+        }
+        put(w, hex, ClauseKind::Gift, body);
+    }
+
+    #[test]
+    fn a_typed_gift_lands_in_its_pool_and_runs_as_that_time() {
+        let (mut w, hex) = warden(
+            "gift",
+            json!([{ "start": "16:00", "end": "17:00" }]),
+            Some(times_body(false)),
+        );
+        assert!(
+            locked(&w.tick(Some(&hex), true, T0, None)),
+            "18:00 is outside"
+        );
+        gift(&w, &hex, "g1", Some("learning"));
+        let d = w.tick(Some(&hex), true, T0 + 1, None);
+        assert!(!locked(&d), "30 minutes of Learning time unlock the device");
+        assert_eq!(d[0].active_time.as_deref(), Some("learning"));
+        assert!(
+            d[0].effects
+                .iter()
+                .any(|e| matches!(e, dto::Effect::Granted { minutes: 30 })),
+            "the ward hears the yes"
+        );
+        // Free's own pools were not touched: it lands in the TIME's pool.
+        let e = w.extension.as_ref().unwrap();
+        assert_eq!(e.schedule_extra_secs(T0 + 1), 0);
+        assert!(e.time_extra_secs(T0 + 1, "learning") > 0);
+        // It burns off wall clock while it carries the device, and re-locks.
+        w.tick(Some(&hex), true, T0 + 61, None);
+        let left = w
+            .extension
+            .as_ref()
+            .unwrap()
+            .time_extra_secs(T0 + 61, "learning");
+        assert!(left <= 1800 - 60, "burned, got {left}");
+        // (A tick credits at most MAX_TICK_ELAPSED_SECS, so walk the clock.)
+        let mut t = T0 + 61;
+        let mut last = false;
+        while t < T0 + 2400 {
+            t += 120;
+            last = locked(&w.tick(Some(&hex), true, t, None));
+        }
+        assert!(last, "the pool ran out, so it locks again");
+    }
+
+    #[test]
+    fn a_gift_naming_an_unknown_time_enacts_nothing() {
+        let (mut w, hex) = warden(
+            "gift-unknown",
+            json!([{ "start": "16:00", "end": "17:00" }]),
+            Some(times_body(false)),
+        );
+        w.tick(Some(&hex), true, T0, None);
+        gift(&w, &hex, "g1", Some("ghost"));
+        let d = w.tick(Some(&hex), true, T0 + 1, None);
+        assert!(locked(&d), "an unknown id is NOT the groupId fallback");
+        assert!(!d[0]
+            .effects
+            .iter()
+            .any(|e| matches!(e, dto::Effect::Granted { .. })));
+        assert_eq!(w.extension.as_ref().unwrap().schedule_extra_secs(T0 + 1), 0);
+    }
+
+    #[test]
+    fn an_untyped_gift_and_a_free_typed_one_land_on_frees_schedule_pool() {
+        for (tag, time) in [("gift-free-a", None), ("gift-free-b", Some("free"))] {
+            let (mut w, hex) = warden(
+                tag,
+                json!([{ "start": "16:00", "end": "17:00" }]),
+                Some(times_body(false)),
+            );
+            w.tick(Some(&hex), true, T0, None);
+            gift(&w, &hex, "g1", time);
+            let d = w.tick(Some(&hex), true, T0 + 1, None);
+            assert!(!locked(&d), "{tag}");
+            assert_eq!(d[0].active_time, None, "{tag}: Free time");
+            assert!(
+                w.extension.as_ref().unwrap().schedule_extra_secs(T0 + 1) > 0,
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_typed_time_extend_grant_lands_in_its_pool_and_an_unknown_id_in_none() {
+        use charter_spine::multi_child::PendingExtension;
+        for (tag, time, expect_unlocked) in [
+            ("grant-known", "learning", true),
+            ("grant-unknown", "ghost", false),
+        ] {
+            let (mut w, hex) = warden(
+                tag,
+                json!([{ "start": "16:00", "end": "17:00" }]),
+                Some(times_body(false)),
+            );
+            w.tick(Some(&hex), true, T0, None);
+            w.inbox.lock().unwrap().push(PendingExtension {
+                req_id: format!("req-{tag}"),
+                minutes: 30,
+                dim: None,
+                bucket_id: None,
+                time_id: Some(time.to_string()),
+                at: T0 + 1,
+            });
+            let d = w.tick(Some(&hex), true, T0 + 1, None);
+            assert_eq!(!locked(&d), expect_unlocked, "{tag}");
+            if expect_unlocked {
+                assert_eq!(d[0].active_time.as_deref(), Some("learning"));
+            }
+            assert_eq!(
+                w.extension.as_ref().unwrap().schedule_extra_secs(T0 + 1),
+                0,
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_budget_spent_child_is_unlocked_by_a_named_pool_as_that_time() {
+        let (mut w, hex) = warden(
+            "budget-pool",
+            json!([{ "start": "16:00", "end": "19:00" }]),
+            Some(times_body(false)),
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 5, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        let t = T0 - 30 * 60;
+        // Spend the 5 minutes.
+        w.tick(Some(&hex), true, t, None);
+        w.tick(Some(&hex), true, t + 290, None);
+        w.tick(Some(&hex), true, t + 590, None);
+        let d = w.tick(Some(&hex), true, t + 600, None);
+        assert!(locked(&d), "budget spent inside a Free window");
+        assert_eq!(d[0].reason, "budget");
+        gift(&w, &hex, "g1", Some("learning"));
+        let d = w.tick(Some(&hex), true, t + 601, None);
+        assert!(!locked(&d));
+        assert_eq!(d[0].active_time.as_deref(), Some("learning"));
+    }
+
+    fn used_today(w: &Warden, now: i64) -> u64 {
+        w.usage.as_ref().unwrap().used_today(now)
+    }
+
+    #[test]
+    fn a_time_that_does_not_count_charges_neither_the_budget_nor_a_bucket() {
+        let buckets = json!({"v": 1, "tz": "Europe/London", "paused": false, "issuedAt": 1,
+            "buckets": [{"id": "play", "label": "Play", "apps": ["com.play"], "dailyMinutes": 60}]});
+        // Learning (17:00-18:00) is the window: tick across it with the
+        // bucketed app in the foreground.
+        let (mut w, hex) = warden("nocharge", carved(), Some(times_body(false)));
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 600, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        put(&w, &hex, ClauseKind::Buckets, buckets.clone());
+        let t = T0 - 50 * 60; // 17:10
+        for i in 0..3 {
+            w.tick(Some(&hex), true, t + i * 60, Some("com.play"));
+        }
+        assert_eq!(
+            used_today(&w, t + 120),
+            0,
+            "Learning time is not charged to the budget"
+        );
+        assert_eq!(
+            w.usage
+                .as_ref()
+                .unwrap()
+                .app_bucket_today_secs(t + 120, "play"),
+            0
+        );
+
+        // The same ticks in plain Free time ARE charged.
+        let (mut w, hex) = warden(
+            "charge",
+            json!([{ "start": "16:00", "end": "19:00" }]),
+            Some(times_body(false)),
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 600, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        put(&w, &hex, ClauseKind::Buckets, buckets);
+        for i in 0..3 {
+            w.tick(Some(&hex), true, t + i * 60, Some("com.play"));
+        }
+        assert_eq!(used_today(&w, t + 120), 120);
+        assert_eq!(
+            w.usage
+                .as_ref()
+                .unwrap()
+                .app_bucket_today_secs(t + 120, "play"),
+            120
+        );
+    }
+
+    #[test]
+    fn budget_exhaustion_never_locks_a_non_counting_time() {
+        let (mut w, hex) = warden("exempt", carved(), Some(times_body(false)));
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 1, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        // Spend the budget in the Free part of the window...
+        let t = T0 - 85 * 60; // 16:35
+        w.tick(Some(&hex), true, t, None);
+        w.tick(Some(&hex), true, t + 60, None);
+        let d = w.tick(Some(&hex), true, t + 120, None);
+        assert!(locked(&d), "spent in Free time");
+        // ...and Learning time still runs.
+        let d = w.tick(Some(&hex), true, T0 - 30 * 60, None);
+        assert!(!locked(&d));
+        assert_eq!(d[0].active_time.as_deref(), Some("learning"));
+    }
+
+    #[test]
+    fn the_app_policy_is_composed_over_the_running_time() {
+        let (mut w, hex) = warden("apps", carved(), Some(times_body(false)));
+        put(
+            &w,
+            &hex,
+            ClauseKind::Apps,
+            json!({
+                "v": 1, "posture": "blocklist", "blocked": ["com.game", "com.other"], "issuedAt": 1
+            }),
+        );
+        w.set_default_browser("com.browser");
+        let now = T0 - 30 * 60;
+        w.tick(Some(&hex), true, now, None);
+
+        // Learning time (onlyThese): only these, plus the implied browser
+        // because the time lists sites.
+        let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
+        assert_eq!(p["posture"], "allowlist");
+        let allowed: Vec<&str> = p["allowed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        assert_eq!(allowed, ["com.khan.app", "com.browser"]);
+
+        // Free time: Free's own policy, untouched.
+        let free = T0 - 90 * 60;
+        let p: serde_json::Value = serde_json::from_str(&w.app_policy(free).unwrap()).unwrap();
+        assert_eq!(p["posture"], "blocklist");
+        assert_eq!(p["blocked"], json!(["com.game", "com.other"]));
+
+        // Unknown default browser: nothing is added (the sites are simply
+        // unreachable; no browser is guessed).
+        w.set_default_browser("");
+        let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
+        assert_eq!(p["allowed"], json!(["com.khan.app"]));
+    }
+
+    #[test]
+    fn an_unreadable_clause_store_is_an_error_never_free_time() {
+        let (mut w, hex) = warden("apps-unreadable", carved(), Some(times_body(false)));
+        let now = T0 - 30 * 60;
+        w.tick(Some(&hex), true, now, None);
+        assert!(w.app_policy(now).is_ok());
+        // Break the store: a clause file that is a directory cannot be read.
+        let dir = w.base.join("children").join(&hex).join("clauses");
+        let broken = dir.join(format!("{}.json", ClauseKind::Times.store_key()));
+        std::fs::remove_file(&broken).unwrap();
+        std::fs::create_dir(&broken).unwrap();
+        assert!(
+            w.app_policy(now).is_err(),
+            "Kotlin keeps what it last applied; it is never handed Free's clause alone"
+        );
+        // The web plan fails CLOSED too.
+        let v: serde_json::Value = serde_json::from_str(&w.web_dns_plan_at(now)).unwrap();
+        assert_eq!(v["plan"]["mode"], "locked", "{v}");
+    }
+
+    #[test]
+    fn an_only_these_time_allowlists_even_with_no_free_apps_clause() {
+        let (mut w, hex) = warden("apps-none", carved(), Some(times_body(false)));
+        let now = T0 - 30 * 60;
+        w.tick(Some(&hex), true, now, None);
+        // No apps clause in Free time used to read as "no policy" (""), which
+        // would have left every app running inside a time that promised only
+        // these.
+        let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
+        assert_eq!(p["posture"], "allowlist");
+        assert_eq!(
+            w.app_policy(T0 - 90 * 60).unwrap(),
+            "",
+            "Free time with none: unchanged"
+        );
+    }
+
+    #[test]
+    fn an_everything_except_time_moves_the_bans_both_ways() {
+        let (mut w, hex) = warden(
+            "apps-except",
+            json!([{ "start": "16:00", "end": "17:00", "time": "reading" }]),
+            Some(times_body(false)),
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Apps,
+            json!({
+                "v": 1, "posture": "blocklist", "blocked": ["com.game"], "issuedAt": 1
+            }),
+        );
+        let now = T0 - 90 * 60;
+        w.tick(Some(&hex), true, now, None);
+        let p: serde_json::Value = serde_json::from_str(&w.app_policy(now).unwrap()).unwrap();
+        assert_eq!(
+            p["blocked"],
+            json!(["com.video"]),
+            "game un-banned, video banned"
+        );
+    }
+
+    #[test]
+    fn the_dns_allowlist_is_the_union_of_every_sites_domains() {
+        let (mut w, hex) = warden("dns", carved(), Some(times_body(false)));
+        let now = T0 - 30 * 60;
+        w.tick(Some(&hex), true, now, None);
+        let v: serde_json::Value = serde_json::from_str(&w.web_dns_plan_at(now)).unwrap();
+        assert_eq!(v["plan"]["mode"], "allowlist", "{v}");
+        let allow: Vec<&str> = v["plan"]["allowDomains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        for d in ["khanacademy.org", "kastatic.org"] {
+            assert!(allow.contains(&d), "{d} missing from {allow:?}");
+        }
+        // Free time with no content clause: no web constraint.
+        let v: serde_json::Value = serde_json::from_str(&w.web_dns_plan_at(T0 - 90 * 60)).unwrap();
+        assert_eq!(v["plan"]["mode"], "unrestricted", "{v}");
+    }
+
+    #[test]
+    fn the_ten_minute_warning_names_the_time_and_what_follows() {
+        let (mut w, hex) = warden("warn", carved(), Some(times_body(false)));
+        let t = T0 - 15 * 60; // 17:45, Learning until 18:00
+        w.tick(Some(&hex), true, t, None);
+        let d = w.tick(Some(&hex), true, t + 5 * 60 + 30, None); // 17:50:30
+        let warn = d[0]
+            .effects
+            .iter()
+            .find_map(|e| match e {
+                dto::Effect::Warn { level, time, then } => {
+                    Some((level.clone(), time.clone(), then.clone()))
+                }
+                _ => None,
+            })
+            .expect("a warning");
+        assert_eq!(warn.0, "ten");
+        assert_eq!(warn.1.as_deref(), Some("Learning time"));
+        assert_eq!(warn.2.as_deref(), Some("Free time"));
+
+        // A ward that uses no times gets a payload with neither key.
+        let (mut w, hex) = warden(
+            "warn-classic",
+            json!([{ "start": "16:00", "end": "18:00" }]),
+            None,
+        );
+        w.tick(Some(&hex), true, T0 - 15 * 60, None);
+        let d = w.tick(Some(&hex), true, T0 - 9 * 60, None);
+        let json = serde_json::to_value(&d[0].effects).unwrap();
+        let warn = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "warn")
+            .expect("warn");
+        assert!(
+            warn.get("time").is_none() && warn.get("then").is_none(),
+            "{warn}"
         );
     }
 }

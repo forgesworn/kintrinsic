@@ -12,6 +12,7 @@ mod link;
 pub mod outbox;
 pub mod relay;
 pub mod system;
+mod times;
 mod warden;
 
 use jni::objects::{JClass, JObject, JString};
@@ -26,7 +27,10 @@ use warden::{Warden, WARDEN};
 ///    `charterLinkState`.
 /// 4: the `debugging` clause — `charterDebuggingUntil` (and its
 ///    [`DEBUGGING_HOLD`] answer) and `charterSetDebuggingOpen`.
-pub const ABI_VERSION: jint = 4;
+/// 5: times (§Times) — `charterDnsPlan` takes the clock (the web policy is
+///    composed over the time running at that instant) and
+///    `charterSetDefaultBrowser` is new.
+pub const ABI_VERSION: jint = 5;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -523,13 +527,30 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterB
 pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterDnsPlan(
     env: JNIEnv,
     _class: JClass,
+    now_unix: jlong,
 ) -> jstring {
     // N1: with the pairing unreadable there is no subject, and the plan would
     // be "" — "not paired", which the VPN serves as unrestricted. An error
     // instead: Kotlin's `dnsPlan` reads that as the locked (block-all) plan.
     with_warden(&env, |w| match w.require_readable_pairing() {
-        Ok(()) => w.web_dns_plan(),
+        Ok(()) => w.web_dns_plan_at(now_unix),
         Err(e) => err_json(&e),
+    })
+}
+
+/// Report the device's default browser package (resolved by Kotlin from the
+/// platform's `http` handler; "" = unknown). An `onlyThese` time that lists
+/// sites implies it allowed (§Times). `{"ok":true}`.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterSetDefaultBrowser(
+    mut env: JNIEnv,
+    _class: JClass,
+    pkg: JString,
+) -> jstring {
+    let pkg = opt_jstr(&mut env, pkg).unwrap_or_default();
+    with_warden_mut(&env, |w| {
+        w.set_default_browser(&pkg);
+        "{\"ok\":true}".to_string()
     })
 }
 

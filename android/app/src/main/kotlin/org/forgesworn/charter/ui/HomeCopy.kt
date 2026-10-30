@@ -36,6 +36,22 @@ object HomeCopy {
     }
 
     /**
+     * §Times: the lines the home surface adds while the ward is in a named
+     * time — which one and until when ("Learning time until 12:00") and, for an
+     * *only these* time, what it allows ("Allowed: Khan Academy, YouTube").
+     * Empty in Free time and for a ward that uses no times, so their screen is
+     * exactly what it was. The core builds the clock in the schedule's own
+     * timezone; nothing here does tz math.
+     */
+    fun timeLines(view: CharterCore.ScheduleView?): List<String> {
+        if (view == null || view.activeTime == null) return emptyList()
+        return buildList {
+            view.timeLine?.takeIf { it.isNotBlank() }?.let { add(it) }
+            if (view.allowed.isNotEmpty()) add("Allowed: " + view.allowed.joinToString(", "))
+        }
+    }
+
+    /**
      * The ward's own line when the guardian has opened USB debugging (the
      * `debugging` clause): a ward can always see what is being enforced.
      * [until] is the core's `debuggingUntil`: negative (blocked, or held on a
