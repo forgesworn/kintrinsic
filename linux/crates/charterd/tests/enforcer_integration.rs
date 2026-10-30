@@ -35,6 +35,7 @@ fn after_school_json() -> String {
             mon: Some(vec![GrantScheduleWindow {
                 start: "16:00".into(),
                 end: "20:00".into(),
+                time: None,
             }]),
             ..Default::default()
         },

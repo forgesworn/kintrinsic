@@ -44,6 +44,7 @@ pub mod self_update;
 pub mod site_app;
 pub mod state_file;
 pub mod status_seq;
+pub mod times_routing;
 pub mod usage_save_guard;
 pub mod version;
 pub mod watchdog;

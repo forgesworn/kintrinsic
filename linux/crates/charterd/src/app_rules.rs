@@ -343,6 +343,7 @@ mod tests {
             Some(vec![GrantScheduleWindow {
                 start: start.into(),
                 end: end.into(),
+                time: None,
             }])
         };
         GrantSchedule {

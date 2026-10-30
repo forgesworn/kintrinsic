@@ -60,14 +60,74 @@ pub fn blocked_pkgs_from_apps(
     // Live holds folded into the lists — enforcement below reads lists, exactly
     // as it does on Android, and a reboot inside a hold extends nothing.
     let effective = g.effective_at(now_unix.max(0) as u64);
+    blocked_pkgs_from_effective(&effective, inventory_pkgs)
+}
+
+/// The `pkg`s an ALREADY-RESOLVED `apps` clause (holds folded in by
+/// `effective_at`, or composed for a named time) says must not run. The
+/// posture rules are [`blocked_pkgs_from_apps`]'s, verbatim — one
+/// implementation, so Free time and every named time sweep alike. A paused
+/// clause blocks nothing here, as it always has (the composition un-pauses a
+/// clause whenever a named time's own additions must bite).
+pub fn blocked_pkgs_from_effective(
+    effective: &GrantApps,
+    inventory_pkgs: &[String],
+) -> Vec<String> {
+    if effective.is_paused() {
+        return Vec::new();
+    }
     match effective.posture {
-        AppPosture::Blocklist => effective.blocked,
+        AppPosture::Blocklist => effective.blocked.clone(),
         AppPosture::Allowlist => inventory_pkgs
             .iter()
             .filter(|p| !effective.allowed.contains(p))
             .cloned()
             .collect(),
     }
+}
+
+/// Free time's `apps` clause resolved at `now_unix` (holds folded), as the
+/// composition's input (§Times). Absent, unparseable or an unknown version is
+/// an EMPTY BLOCKLIST rather than "nothing": Free blocks nothing on such a
+/// clause (the fail-safe above), and a named time's own additions — its
+/// `blockApps`, or an *only these* allowlist — must still bite on top of it.
+/// Treating a garbage Free clause as "no time posture either" would run an
+/// *only these* time as Free.
+pub fn free_apps_resolved(apps_json: Option<&str>, now_unix: i64) -> GrantApps {
+    let parsed = apps_json
+        .and_then(|j| serde_json::from_str::<GrantApps>(j).ok())
+        .filter(|g| g.v == APPS_VERSION);
+    match parsed {
+        Some(g) => g.effective_at(now_unix.max(0) as u64),
+        None => GrantApps {
+            v: APPS_VERSION,
+            posture: AppPosture::Blocklist,
+            blocked: Vec::new(),
+            allowed: Vec::new(),
+            paused: None,
+            holds: Vec::new(),
+            ask_first: Vec::new(),
+            hidden: Vec::new(),
+            issued_at: 0,
+        },
+    }
+}
+
+/// The `pkg`s that must not run while the named time `t` is in force: Free
+/// time's resolved clause composed with the time (`compose_apps`, shared with
+/// Android), then swept by the same posture rules. Under *only these* the
+/// allowlist is scoped to `inventory_pkgs`; the caller LOCKS such a time while
+/// the inventory is unknown (see `times_routing::TimesLock::InventoryUnknown`)
+/// rather than let "an empty inventory blocks nothing" run it as Free.
+pub fn blocked_pkgs_for_time(
+    apps_json: Option<&str>,
+    t: &charter_spine::times::NamedTime,
+    inventory_pkgs: &[String],
+    now_unix: i64,
+) -> Vec<String> {
+    let free = free_apps_resolved(apps_json, now_unix);
+    let composed = charter_spine::times::compose_apps(&free, t);
+    blocked_pkgs_from_effective(&composed, inventory_pkgs)
 }
 
 /// The `askFirst` apps still gated right now, labelled from `inventory` where
@@ -374,5 +434,63 @@ mod tests {
         assert!(ask_first_apps_from_apps(Some(&json), &[], T0 + 60).is_empty());
         let out = ask_first_apps_from_apps(Some(&json), &[], T0 + 3600);
         assert_eq!(out[0].pkg, "com.mojang.minecraftpe");
+    }
+
+    // ---- named times (§Times) ------------------------------------------------
+
+    fn named(json: &str) -> charter_spine::times::NamedTime {
+        serde_json::from_str(json).expect("named time")
+    }
+
+    #[test]
+    fn an_only_these_time_blocks_every_inventory_app_it_does_not_list() {
+        let t = named(
+            r#"{"id":"learning","label":"Learning time","posture":"onlyThese","apps":["/usr/bin/gcompris"]}"#,
+        );
+        let inventory = inv(&[
+            "/usr/bin/gcompris",
+            "/usr/bin/firefox",
+            "/usr/bin/minecraft",
+        ]);
+        let free = r#"{"v":1,"posture":"blocklist","blocked":["/usr/bin/minecraft"],"issuedAt":1}"#;
+        let mut out = blocked_pkgs_for_time(Some(free), &t, &inventory, T0);
+        out.sort();
+        assert_eq!(out, inv(&["/usr/bin/firefox", "/usr/bin/minecraft"]));
+    }
+
+    #[test]
+    fn an_only_these_time_still_bites_over_an_absent_garbage_or_paused_free_clause() {
+        let t = named(
+            r#"{"id":"learning","label":"Learning time","posture":"onlyThese","apps":["/usr/bin/gcompris"]}"#,
+        );
+        let inventory = inv(&["/usr/bin/gcompris", "/usr/bin/firefox"]);
+        for free in [
+            None,
+            Some("garbage"),
+            Some(r#"{"v":9,"posture":"blocklist","issuedAt":1}"#),
+            Some(r#"{"v":1,"posture":"blocklist","paused":true,"issuedAt":1}"#),
+        ] {
+            assert_eq!(
+                blocked_pkgs_for_time(free, &t, &inventory, T0),
+                inv(&["/usr/bin/firefox"]),
+                "{free:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_everything_except_time_adds_and_lifts_bans_over_free_time() {
+        let t = named(
+            r#"{"id":"chores","label":"Chores","posture":"everythingExcept","blockApps":["/usr/bin/steam"],"unblockApps":["/usr/bin/minecraft"]}"#,
+        );
+        let free = r#"{"v":1,"posture":"blocklist","blocked":["/usr/bin/minecraft","/usr/bin/vlc"],"issuedAt":1}"#;
+        let mut out = blocked_pkgs_for_time(Some(free), &t, &[], T0);
+        out.sort();
+        assert_eq!(out, inv(&["/usr/bin/steam", "/usr/bin/vlc"]));
+        // Over no Free clause at all, its own ban still lands.
+        assert_eq!(
+            blocked_pkgs_for_time(None, &t, &[], T0),
+            inv(&["/usr/bin/steam"])
+        );
     }
 }

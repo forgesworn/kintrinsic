@@ -183,6 +183,7 @@ async fn ask_for_more_routes_schedule_lock_to_schedule_pool() {
         budget_day_seconds: -1,
         budget_week_seconds: -1,
         ask_first: Vec::new(),
+        time: None,
     });
     let out = dispatch(
         &client,
@@ -220,6 +221,7 @@ async fn ask_for_more_degraded_snapshot_defaults_budget() {
         budget_day_seconds: -1,
         budget_week_seconds: -1,
         ask_first: Vec::new(),
+        time: None,
     });
     let out = dispatch(
         &client,
@@ -332,4 +334,62 @@ fn exit_code_mapping_covers_all() {
     assert_eq!(exit_code(&IpcError::Denied), EXIT_DENIED);
     assert_eq!(exit_code(&IpcError::Offline), EXIT_OFFLINE);
     assert_eq!(exit_code(&IpcError::Invalid("x".into())), EXIT_USAGE);
+}
+
+/// §Times: the lock card's picker names the kind of time with `--time`; Free
+/// time is the ABSENCE of the field, so `--time free` asks exactly as before.
+#[tokio::test]
+async fn ask_for_more_with_a_time_flag_puts_the_time_on_the_request() {
+    let client = MockCharterdClient::new();
+    let out = dispatch(
+        &client,
+        &MockPairingSink::new(true),
+        &MockExecProbe::new(),
+        &argv(&["ask-for-more", "30", "--time", "learning"]),
+    )
+    .await;
+    assert_eq!(out.code, EXIT_OK);
+    let subs = client.submitted();
+    assert!(subs[0].1.contains("\"time\":\"learning\""), "{}", subs[0].1);
+
+    let client = MockCharterdClient::new();
+    dispatch(
+        &client,
+        &MockPairingSink::new(true),
+        &MockExecProbe::new(),
+        &argv(&["ask-for-more", "30", "--time", "free"]),
+    )
+    .await;
+    let subs = client.submitted();
+    assert!(!subs[0].1.contains("\"time\""), "{}", subs[0].1);
+}
+
+/// §Times: with no flag, the ask names the daemon's default for this ward.
+#[tokio::test]
+async fn ask_for_more_without_a_flag_uses_the_daemon_s_default_time() {
+    let mut t = TimeLeftView::unknown();
+    t.time = Some(Box::new(charter_ipc::dto::TimesView {
+        ask: vec![
+            charter_ipc::dto::TimeChoice {
+                id: "free".into(),
+                label: "Free time".into(),
+            },
+            charter_ipc::dto::TimeChoice {
+                id: "learning".into(),
+                label: "Learning time".into(),
+            },
+        ],
+        ask_default: Some("learning".into()),
+        ..Default::default()
+    }));
+    let client = MockCharterdClient::new().with_time_left(t);
+    dispatch(
+        &client,
+        &MockPairingSink::new(true),
+        &MockExecProbe::new(),
+        &argv(&["ask-for-more", "30"]),
+    )
+    .await;
+    let subs = client.submitted();
+    assert!(subs[0].1.contains("\"time\":\"learning\""), "{}", subs[0].1);
 }

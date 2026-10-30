@@ -72,6 +72,8 @@ impl MockCharterdClient {
                     budget_week_seconds: -1,
 
                     ask_first: Vec::new(),
+
+                    time: None,
                 },
                 paired: true,
                 clock: 1_700_000_000,

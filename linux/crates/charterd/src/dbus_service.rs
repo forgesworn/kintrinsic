@@ -111,6 +111,8 @@ pub fn remaining_to_view(r: &Remaining, now: i64) -> TimeLeftView {
         budget_week_seconds: r.budget_week_secs,
         // Stamped by the loop from the child's `apps` clause, same as buckets.
         ask_first: Vec::new(),
+        // Stamped by the loop from the child's `times` clause (§Times).
+        time: None,
     }
 }
 

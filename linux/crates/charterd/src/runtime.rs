@@ -1205,10 +1205,18 @@ fn random_challenge() -> Option<String> {
 /// a guardian is paired (offers the panel's "Ask for more time"), and — when
 /// paired — the guardian↔machine conversation key the offline-unlock challenge
 /// is answered against.
+/// §Times: one locked child's ask choices — `(id, label)` pairs, Free time
+/// first — and the id offered first.
+type LockAsk = (Vec<(String, String)>, String);
+
 struct LockSpawnCtx<'a> {
     passwd: &'a str,
     lock_bin: &'a str,
     infos: &'a std::collections::BTreeMap<u32, crate::lock_info::LockInfo>,
+    /// §Times: per locked child, the kinds of time "Ask for more time" may
+    /// name as `(id, label)` (Free time first) and the default id. Absent for
+    /// a child with no named time — the ask stays untyped, as before.
+    asks: &'a std::collections::BTreeMap<u32, LockAsk>,
     paired: bool,
     /// `Some` (paired) → derive a per-lock challenge + expected code and hand
     /// both to `charter-lock`; `None` (device-only) → no offline unlock.
@@ -1357,6 +1365,24 @@ async fn apply_child_decisions(
                     if let Some(user) = user_for_uid(passwd, d.uid) {
                         cmd.env("CHARTER_LOCK_CAN_ASK", "1")
                             .env("CHARTER_LOCK_USER", user);
+                        // §Times: the panel offers a type when the child has
+                        // any named time. Ids are `[a-z0-9-]` and labels are
+                        // the guardian's text, so tab/newline-separated lines
+                        // with those characters stripped from the label.
+                        if let Some((choices, default)) = ctx.asks.get(&d.uid) {
+                            let lines: Vec<String> = choices
+                                .iter()
+                                .map(|(id, label)| {
+                                    let label: String = label
+                                        .chars()
+                                        .map(|c| if c == '\t' || c == '\n' { ' ' } else { c })
+                                        .collect();
+                                    format!("{id}\t{label}")
+                                })
+                                .collect();
+                            cmd.env("CHARTER_LOCK_ASK_TIMES", lines.join("\n"))
+                                .env("CHARTER_LOCK_ASK_DEFAULT", default);
+                        }
                     }
                 }
                 // Offline guardian unlock (paired only): a FRESH per-lock
@@ -2084,6 +2110,19 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
     // baseline every two seconds, and a line per tick would bury the one line
     // that says when it started.
     let mut display_unreadable = false;
+    // §Times: the times layer's own 10-/1-minute warning edges, per child
+    // (the core's count down to Free's WINDOW end, which inside a carved span
+    // is not when the ward's time ends — see `times_routing`).
+    let mut times_warn: std::collections::BTreeMap<u32, crate::times_routing::WarnTracker> =
+        std::collections::BTreeMap::new();
+    // §Times: the id of the everything-except time whose site departures the
+    // machine-wide web policy currently carries (`None` = Free time's own
+    // policy). A change re-renders it on the very next fast tick, rather than
+    // waiting up to a minute for the slow-tick reconcile.
+    let mut web_time_applied: Option<String> = None;
+    // §Times: the last time each child was seen in, so a TRANSITION is logged
+    // once rather than every tick.
+    let mut times_last: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
     // G1: the last probed session activity, so a lock/unlock (or idle/active)
     // transition is logged once in each direction rather than every tick —
     // same reasoning as `display_unreadable` above.
@@ -2416,6 +2455,30 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             }
         }
 
+        // 1a-bis-times) Every managed child's `times` clause (§Times, store key
+        //     17), read once and shared by everything below that needs to know
+        //     which time a child is in. Fail-safe in the restrictive direction:
+        //     absent/garbage/`v` too high ⇒ `None`, and every TAGGED window then
+        //     locks (`times_routing`). A child with no guardian binding has no
+        //     times clause.
+        let times_by_uid: std::collections::BTreeMap<u32, charter_spine::times::GrantTimes> =
+            configs
+                .iter()
+                .filter_map(|(user, cfg)| {
+                    let subject = cfg.subject.as_deref()?;
+                    let uid = uid_for_user(&passwd, user)?;
+                    if !roster.is_lockable(uid) {
+                        return None;
+                    }
+                    let json = sys
+                        .child_clauses()
+                        .get_child_clause(subject, ClauseKind::Times.store_key())
+                        .ok()
+                        .flatten();
+                    Some((uid, crate::times_routing::parse_times(json.as_deref())?))
+                })
+                .collect();
+
         // 1a-ter) Every managed child's `askFirst` apps ("ask before opening
         //     Minecraft"), resolved to labels via the installed-app inventory
         //     right here — so the tray/console can render "Ask to open" rows
@@ -2448,6 +2511,8 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         //     (USAGE_SYNC, B3) from the broker-verified store, so the budget
         //     dimension enforces the POOLED spend (union rule when both minute
         //     journals exist). Absent/stale views degrade to local-only.
+        let mut stand_downs: std::collections::BTreeMap<u32, i64> =
+            std::collections::BTreeMap::new();
         for (user, cfg) in &configs {
             let (Some(subject), Some(uid)) = (cfg.subject.as_deref(), uid_for_user(&passwd, user))
             else {
@@ -2457,16 +2522,18 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             // A guardian stand-down ("finish up now") for this child, refreshed
             // from the same verified store. Level-triggered like the pooled view:
             // None once it is lifted or lapses, so the ward comes straight back.
-            multi.set_stand_down(
-                uid,
-                charter_spine::standdown::stand_down_now(
-                    &charter_spine::standdown::ChildSlot {
-                        store: sys.child_clauses(),
-                        subject_hex: subject,
-                    },
-                    now.max(0) as u64,
-                ),
+            let stand_down = charter_spine::standdown::stand_down_now(
+                &charter_spine::standdown::ChildSlot {
+                    store: sys.child_clauses(),
+                    subject_hex: subject,
+                },
+                now.max(0) as u64,
             );
+            // §Times: the same countdown caps a running named time's figure.
+            if let Some(sd) = stand_down {
+                stand_downs.insert(uid, sd.secs_until_lock);
+            }
+            multi.set_stand_down(uid, stand_down);
         }
 
         // 1b) Apply any guardian-approved time.extend grants the broker enacted to
@@ -2484,16 +2551,36 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 std::mem::take(&mut *extension_inbox.lock().unwrap_or_else(|e| e.into_inner()));
             for p in pending {
                 // A per-group grant (`bucket_id` set) credits that bucket's
-                // own pool; the ordinary whole-device routing credits the
-                // schedule/budget pool the enactor decided on.
-                match (&p.bucket_id, p.dim) {
-                    (Some(bucket_id), _) => {
+                // own pool; a TYPED grant (§Times, `time_id` set) credits that
+                // named time's own pool — never Free's, which would unlock
+                // the device as Free time; the ordinary whole-device routing
+                // credits the schedule/budget pool the enactor decided on.
+                // Before times this match had no typed arm and a typed grant
+                // fell into `(None, None)`: approved, and silently dropped.
+                match crate::times_routing::pending_route(&p) {
+                    crate::times_routing::PendingRoute::Bucket(bucket_id) => {
                         multi.apply_bucket_extension(uid, p.at, &p.req_id, p.minutes, bucket_id);
                     }
-                    (None, Some(dim)) => {
+                    crate::times_routing::PendingRoute::Time(time_id) => {
+                        let newly =
+                            multi.apply_time_extension(uid, p.at, &p.req_id, p.minutes, time_id);
+                        // Banked, but enacted only once the device's `times`
+                        // clause defines the id (`times_routing::state_for`
+                        // offers known pools only): an unknown id gives NO
+                        // extra time rather than the wrong kind of it.
+                        if newly && !crate::times_routing::is_known(times_by_uid.get(&uid), time_id)
+                        {
+                            eprintln!(
+                                "charterd: a granted time.extend for uid {uid} names time \
+                                 {time_id:?}, which this device's times clause does not \
+                                 define — no extra time until it does"
+                            );
+                        }
+                    }
+                    crate::times_routing::PendingRoute::Dimension(dim) => {
                         multi.apply_extension(uid, p.at, &p.req_id, p.minutes, dim);
                     }
-                    (None, None) => {}
+                    crate::times_routing::PendingRoute::Nothing => {}
                 }
             }
         }
@@ -2535,6 +2622,21 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             match gift_route(&body, lock_reason, buckets_by_uid.get(&uid)) {
                 GiftRoute::Bucket(group_id) => {
                     multi.apply_bucket_extension(uid, now, &reqid, minutes, &group_id);
+                }
+                // §Times: minutes of a NAMED time land in that time's own pool
+                // and run as that time. An id the device's `times` clause does
+                // not define enacts no extra time (banked for a clause that
+                // lands later today, never run as Free) — logged once, on the
+                // application, not on every re-read of the clause.
+                GiftRoute::Time(time_id) => {
+                    let newly = multi.apply_time_extension(uid, now, &reqid, minutes, &time_id);
+                    if newly && !crate::times_routing::is_known(times_by_uid.get(&uid), &time_id) {
+                        eprintln!(
+                            "charterd: gift {} for uid {uid} names time {time_id:?}, which this \
+                             device's times clause does not define — no extra time until it does",
+                            body.id
+                        );
+                    }
                 }
                 GiftRoute::Dimension(dim) => {
                     if body.group_id.is_some() {
@@ -2755,7 +2857,28 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             .and_then(|uid| policies.iter().find(|(u, _)| *u == uid))
             .map(|(_, pol)| charter_schedule::TimeModel::of(pol.budget.as_ref()))
             .unwrap_or(charter_schedule::TimeModel::Session);
-        let decisions = match active_model {
+        // §Times: WHAT the active child's tick charges depends on which time
+        // they are in, read off the state BEFORE this tick (the same one-tick
+        // lag every other per-tick input lives with). A named time with
+        // `countsAgainstBudget: false` charges as Idle — the core's one lever
+        // for "nothing to the budget, nothing to any bucket" — and every other
+        // state charges exactly as before (`times_routing::charge_activity`).
+        let charge = active
+            .and_then(|uid| {
+                let pol = policies.iter().find(|(u, _)| *u == uid).map(|(_, p)| p)?;
+                crate::times_routing::state_for(
+                    &multi,
+                    pol.schedule.as_ref(),
+                    times_by_uid.get(&uid),
+                    inventory_known,
+                    stand_downs.get(&uid).copied(),
+                    uid,
+                    now,
+                )
+            })
+            .map(|st| crate::times_routing::charge_activity(activity, &st.verdict))
+            .unwrap_or(activity);
+        let mut decisions = match active_model {
             charter_schedule::TimeModel::Session => {
                 // Nobody is metering from the display this tick (this child is
                 // on the session model, or there is no active child at all), so
@@ -2765,7 +2888,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // which is the one line worth having.
                 display_unreadable = false;
                 multi.tick_attributed_with(
-                    activity,
+                    charge,
                     active,
                     now,
                     elapsed,
@@ -2819,7 +2942,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     }
                 }
                 multi.tick_open_with(
-                    activity,
+                    charge,
                     active,
                     now,
                     elapsed,
@@ -2829,6 +2952,67 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 )
             }
         };
+
+        // 2-times) Which TIME each child is in (§Times), folded into the core's
+        //     decisions. The core still runs a TAGGED window as Free time (it
+        //     is shared with Android and predates tags), so this is where an
+        //     unknown tag LOCKS, an only-these time locks on an unknown
+        //     inventory, a non-counting named window opens over a spent budget,
+        //     and a named pool runs once Free's own pools are dry — see
+        //     `times_routing` for each fail direction. The freeze and the lock
+        //     screen are level-triggered on `locked`, so the override is all it
+        //     takes; transitions between times happen here, on the tick.
+        let times_states: std::collections::BTreeMap<u32, crate::times_routing::TimesState> =
+            policies
+                .iter()
+                .filter_map(|(uid, pol)| {
+                    Some((
+                        *uid,
+                        crate::times_routing::state_for(
+                            &multi,
+                            pol.schedule.as_ref(),
+                            times_by_uid.get(uid),
+                            inventory_known,
+                            stand_downs.get(uid).copied(),
+                            *uid,
+                            now,
+                        )?,
+                    ))
+                })
+                .collect();
+        for d in decisions.iter_mut() {
+            if let Some(st) = times_states.get(&d.uid) {
+                crate::times_routing::apply_to_decision(d, st);
+            }
+        }
+        for (uid, st) in &times_states {
+            // A named pool running out of any window burns WALL CLOCK, for
+            // every child, active or not — exactly as Free's schedule pool
+            // does in the core ("+30 minutes of Learning time" is a span, not
+            // a usage meter). Only while it is the thing keeping them open.
+            if let Some(id) = crate::times_routing::burning_pool(&st.verdict) {
+                multi.burn_time_pool(*uid, now, id, elapsed);
+            }
+            let now_in = match &st.verdict {
+                crate::times_routing::Verdict::Named { id, from_pool, .. } => {
+                    format!("{id}{}", if *from_pool { " (given time)" } else { "" })
+                }
+                crate::times_routing::Verdict::Locked(why) => format!("locked ({why:?})"),
+                crate::times_routing::Verdict::Core { .. } if st.remaining.locked => {
+                    "locked".to_string()
+                }
+                crate::times_routing::Verdict::Core { .. } => "free".to_string(),
+            };
+            // Only for a child the times layer is actually steering, so a
+            // family with no named times gets no new journal lines.
+            if times_last.get(uid) != Some(&now_in) {
+                if st.in_play {
+                    eprintln!("charterd: uid {uid} is now in time: {now_in}");
+                }
+                times_last.insert(*uid, now_in);
+            }
+        }
+        times_last.retain(|uid, _| times_states.contains_key(uid));
 
         // 2b) Republish each child's time-left so `charter status` (served over
         //     D-Bus, keyed by the calling uid) reflects their REAL remaining time,
@@ -2844,7 +3028,13 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 .unwrap_or_else(|e| e.into_inner());
             snap.clear();
             for (uid, pol) in &policies {
-                if let Some(r) = multi.remaining(*uid, now) {
+                // §Times: the time-folded breakdown, so the ward's readout
+                // (and the D-Bus `TimeLeft`) sees a named pool or a times lock.
+                let rem = times_states
+                    .get(uid)
+                    .map(|st| st.remaining)
+                    .or_else(|| multi.remaining(*uid, now));
+                if let Some(r) = rem {
                     let mut view = remaining_to_view(&r, now);
                     if pol.learning.as_ref().is_some_and(|l| !l.is_paused()) {
                         view.learning_today_seconds = multi.learning_today(*uid, now);
@@ -2892,6 +3082,20 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     // without a policy read of their own.
                     if let Some(apps) = ask_first_by_uid.get(uid) {
                         view.ask_first = apps.clone();
+                    }
+                    // Which time, until when, what follows, what is allowed,
+                    // and which kinds of time an ask may name (§Times).
+                    // `None` for a child with no named times and no tags.
+                    if let Some(st) = times_states.get(uid) {
+                        view.time = crate::times_routing::times_view(
+                            st,
+                            pol.schedule.as_ref(),
+                            times_by_uid.get(uid),
+                            &inventory,
+                            enforcement_tz_of(pol.schedule.as_ref(), pol.budget.as_ref()),
+                            now,
+                        )
+                        .map(Box::new);
                     }
 
                     if let Some(user) = user_for_uid(&passwd, *uid) {
@@ -2972,11 +3176,21 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             if !roster.is_lockable(uid) {
                 continue;
             }
-            let sites: Vec<charter_proto::LearningApp> = multi
+            let mut sites: Vec<charter_proto::LearningApp> = multi
                 .learning_apps(uid)
                 .into_iter()
                 .filter(|a| a.kind == charter_proto::LearningAppKind::Site)
                 .collect();
+            // §Times: an *only these* time's sites are its implied web runtime
+            // — each a resolver-pinned window by this same machinery — and,
+            // exactly as when any site app is in force, unsanctioned Chromium
+            // is swept while the time runs. Sanctioned learning windows keep
+            // surviving on top (they stay in the list).
+            if let Some(t) = times_states.get(&uid).and_then(|st| {
+                crate::times_routing::active_time(&st.verdict, times_by_uid.get(&uid))
+            }) {
+                sites.extend(crate::times_routing::time_sites(t));
+            }
             if !sites.is_empty() {
                 site_apps_by_uid.insert(uid, sites);
             }
@@ -3015,11 +3229,30 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 .get_child_clause(subject, ClauseKind::Apps.store_key())
                 .ok()
                 .flatten();
-            blocked.extend(crate::apps_policy::blocked_pkgs_from_apps(
-                apps_json.as_deref(),
-                &inventory_pkgs,
-                now,
-            ));
+            // §Times: while a named time runs, Free time's resolved clause is
+            // COMPOSED with it (`compose_apps`, shared with Android) and swept
+            // by the same posture rules — an *only these* time is an
+            // inventory-scoped allowlist (it is LOCKED while the inventory is
+            // unknown, never run over "an empty inventory blocks nothing"), an
+            // *everything except* time bans more or un-bans. `appRules`,
+            // spent buckets and sanctioned learning windows apply on top,
+            // unchanged, below and in the sweep.
+            let named = times_states.get(&uid).and_then(|st| {
+                crate::times_routing::active_time(&st.verdict, times_by_uid.get(&uid))
+            });
+            blocked.extend(match named {
+                Some(t) => crate::apps_policy::blocked_pkgs_for_time(
+                    apps_json.as_deref(),
+                    t,
+                    &inventory_pkgs,
+                    now,
+                ),
+                None => crate::apps_policy::blocked_pkgs_from_apps(
+                    apps_json.as_deref(),
+                    &inventory_pkgs,
+                    now,
+                ),
+            });
 
             // …plus any app whose BUCKET allowance is spent for today ("Play"
             // is gone → the games in it stop). This closes the bucket, NOT the
@@ -3067,25 +3300,79 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
             }
         }
 
+        // §Times: the ACTIVE child's everything-except time, when it carries
+        // site departures — the one thing a time changes in the machine-wide
+        // web policy (`WebContentEnforcer::reconcile_with`). An only-these
+        // time never touches it (per-user site windows instead).
+        let web_time: Option<charter_spine::times::NamedTime> = active
+            .and_then(|uid| {
+                let st = times_states.get(&uid)?;
+                crate::times_routing::active_time(&st.verdict, times_by_uid.get(&uid))
+            })
+            .filter(|t| {
+                t.posture == charter_spine::times::TimePosture::EverythingExcept
+                    && (!t.deny_sites.is_empty() || !t.undeny_sites.is_empty())
+            })
+            .cloned();
+
         // 3) Per-child freeze + the active child's lock screen — gated by mode.
         //    observe: log only; freeze-only: freeze without lock; enforce: full.
         if mode.applies_effects() {
             // The panel's schedule/usage block for any locked child (built here
             // — only the loop holds the policy + ledgers).
             let mut lock_infos = std::collections::BTreeMap::new();
+            // §Times: per locked child, the kinds of time the panel's "Ask for
+            // more time" may name, and the one it offers first.
+            let mut lock_asks: std::collections::BTreeMap<u32, LockAsk> =
+                std::collections::BTreeMap::new();
             for d in decisions.iter().filter(|d| d.locked) {
                 if let Some(pol) = policies.iter().find(|(u, _)| *u == d.uid).map(|(_, p)| p) {
-                    let rem = multi.remaining(d.uid, now);
-                    lock_infos.insert(
-                        d.uid,
-                        crate::lock_info::lock_info(
-                            pol.schedule.as_ref(),
-                            pol.budget.as_ref(),
-                            rem.and_then(|r| r.next_open_secs),
-                            multi.used_today(d.uid, now).unwrap_or(0),
-                            now,
-                        ),
+                    let st = times_states.get(&d.uid);
+                    // The time-folded figure: "come back at …" names the next
+                    // window that can actually RUN, not an unknown-tag one.
+                    let rem = st
+                        .map(|s| s.remaining)
+                        .or_else(|| multi.remaining(d.uid, now));
+                    let mut info = crate::lock_info::lock_info(
+                        pol.schedule.as_ref(),
+                        pol.budget.as_ref(),
+                        rem.and_then(|r| r.next_open_secs),
+                        multi.used_today(d.uid, now).unwrap_or(0),
+                        now,
                     );
+                    if let Some(st) = st {
+                        let times = times_by_uid.get(&d.uid);
+                        // "Locked until Learning time at 09:00" / "Locked
+                        // today" / "Nothing is set up for this time yet" —
+                        // only for a child with named times or tags.
+                        if let Some((title, detail)) =
+                            crate::times_routing::lock_copy(st, pol.schedule.as_ref(), times, now)
+                        {
+                            info.title = Some(title);
+                            if detail.is_some() {
+                                info.detail = detail;
+                            }
+                        }
+                        if let Some(v) = crate::times_routing::times_view(
+                            st,
+                            pol.schedule.as_ref(),
+                            times,
+                            &[],
+                            enforcement_tz_of(pol.schedule.as_ref(), pol.budget.as_ref()),
+                            now,
+                        ) {
+                            if let (false, Some(default)) = (v.ask.is_empty(), v.ask_default) {
+                                lock_asks.insert(
+                                    d.uid,
+                                    (
+                                        v.ask.into_iter().map(|c| (c.id, c.label)).collect(),
+                                        default,
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    lock_infos.insert(d.uid, info);
                 }
             }
             apply_child_decisions(
@@ -3095,6 +3382,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     passwd: &passwd,
                     lock_bin: &lock_bin,
                     infos: &lock_infos,
+                    asks: &lock_asks,
                     paired: broker.is_some(),
                     unlock_conv_key: unlock_conv_key.as_deref(),
                 },
@@ -3103,6 +3391,73 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 mode.shows_lock(),
             )
             .await;
+
+            // §Times: the times layer's own 10-/1-minute warnings, naming the
+            // time and what follows ("then Free time" / "then locked"). They
+            // replace the core's for a child whose schedule carries a tag or
+            // who is in a named time (`apply_to_decision` dropped those):
+            // the core counts down to Free's WINDOW end, which inside a carved
+            // span is not when the ward's time ends. Sent to the active
+            // child's display only, like the lock.
+            for (uid, st) in &times_states {
+                let tracker = times_warn.entry(*uid).or_default();
+                if !st.in_play || st.remaining.locked {
+                    tracker.reset();
+                    continue;
+                }
+                let times = times_by_uid.get(uid);
+                let named = crate::times_routing::active_time(&st.verdict, times);
+                let key = named
+                    .map(|t| t.id.as_str())
+                    .unwrap_or(charter_ipc::dto::FREE_TIME_CHOICE);
+                let Some(level) = tracker.observe(key, st.remaining.effective_secs) else {
+                    continue;
+                };
+                if Some(*uid) != active {
+                    continue;
+                }
+                let schedule = policies
+                    .iter()
+                    .find(|(u, _)| u == uid)
+                    .and_then(|(_, p)| p.schedule.as_ref());
+                let label = named
+                    .map(|t| t.label.clone())
+                    .unwrap_or_else(|| crate::times_routing::FREE_TIME_LABEL.to_string());
+                let then = crate::times_routing::following_label(st, schedule, times);
+                let (summary, body) = crate::times_routing::warning_text(
+                    level,
+                    &label,
+                    then.as_deref(),
+                    st.remaining.effective_secs,
+                );
+                let (display, _) = tokio::task::spawn_blocking(active_session_x)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        (
+                            std::env::var("CHARTER_DISPLAY").unwrap_or_else(|_| ":0".into()),
+                            None,
+                        )
+                    });
+                notify_child(&passwd, *uid, &display, &summary, &body);
+            }
+            times_warn.retain(|uid, _| times_states.contains_key(uid));
+
+            // §Times: an everything-except time's site departures re-render
+            // the machine-wide web policy at the TRANSITION, on this fast
+            // tick, rather than up to a minute later on the slow one.
+            if matches!(mode, EnforceMode::Enforce)
+                && web_time.as_ref().map(|t| t.id.clone()) != web_time_applied
+            {
+                match web.reconcile_with(&sys, web_time.as_ref()).await {
+                    crate::web_content::WebReconcile::Failed => {
+                        let _ = web.force_lock(&sys).await;
+                    }
+                    crate::web_content::WebReconcile::Unavailable => {}
+                    _ => web_time_applied = web_time.as_ref().map(|t| t.id.clone()),
+                }
+            }
 
             // Per-app enforcement: SIGTERM any blocked app the child has open.
             // The /proc sweep + kill run on the blocking pool (like the other
@@ -3314,7 +3669,14 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                         None
                     }
                 });
-                let (Some(subject), Some(remaining)) = (subject, multi.remaining(*uid, now)) else {
+                // §Times: the time-folded breakdown — `windowLeftSecs` is the
+                // span of the time in force (or its pool), and a times lock
+                // reads `lockReason: 'schedule'`.
+                let remaining = times_states
+                    .get(uid)
+                    .map(|st| st.remaining)
+                    .or_else(|| multi.remaining(*uid, now));
+                let (Some(subject), Some(remaining)) = (subject, remaining) else {
                     continue;
                 };
                 let tz = enforcement_tz_of(pol.schedule.as_ref(), pol.budget.as_ref());
@@ -3429,6 +3791,12 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                 // A guardian-triggered update that has not landed, and why
                 // (machine-wide, so every ward's STATUS carries it).
                 status.update_health = updater.health();
+                // §Times: the named time in force; absent for Free time or
+                // locked, so a pre-times payload stays byte-identical.
+                status.active_time = times_states.get(uid).and_then(|st| match &st.verdict {
+                    crate::times_routing::Verdict::Named { id, .. } => Some(id.clone()),
+                    _ => None,
+                });
                 // The clock went backwards since the last emit: say from where,
                 // once, so the guardian takes this lower-`ts` status as current.
                 status.clock_stepped_back_from = crate::status_emit::clock_stepped_back_from(
@@ -3485,6 +3853,22 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                         union.push(app);
                     }
                 }
+                // §Times: every *only these* time's sites, DEFINED rather than
+                // only while running, so the window is already in the menu at
+                // the transition (this reconcile is slow-tick). A launcher
+                // outside its time is harmless: the sweep spares only the
+                // windows sanctioned for the time in force.
+                for t in times_by_uid
+                    .get(&uid)
+                    .map(|t| t.times.as_slice())
+                    .unwrap_or_default()
+                {
+                    for app in crate::times_routing::time_sites(t) {
+                        if seen.insert(app.id.clone()) {
+                            union.push(app);
+                        }
+                    }
+                }
             }
             for act in crate::enactors::learning_apps::reconcile(&union, &mut learn_fs) {
                 eprintln!("charterd: learning launcher {act:?}");
@@ -3492,13 +3876,16 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
         }
 
         // 7) Web content policy (machine-wide), fail-closed — full enforce only.
-        if matches!(mode, EnforceMode::Enforce)
-            && matches!(
-                web.reconcile(&sys).await,
-                crate::web_content::WebReconcile::Failed
-            )
-        {
-            let _ = web.force_lock(&sys).await;
+        //    The active child's everything-except time (§Times) is folded in
+        //    here too, so the slow tick never undoes the fast tick's override.
+        if matches!(mode, EnforceMode::Enforce) {
+            match web.reconcile_with(&sys, web_time.as_ref()).await {
+                crate::web_content::WebReconcile::Failed => {
+                    let _ = web.force_lock(&sys).await;
+                }
+                crate::web_content::WebReconcile::Unavailable => {}
+                _ => web_time_applied = web_time.as_ref().map(|t| t.id.clone()),
+            }
         }
 
         // 04-G5: the network section is done. Whatever it waited on, this loop
@@ -3640,6 +4027,10 @@ enum GiftRoute {
     /// A plain gift (every gift before named-times, and any gift still
     /// addressed to the whole device): the ordinary whole-device dimension.
     Dimension(charter_schedule::Dimension),
+    /// A typed gift (§Times, `time` set): tops up that named time's own pool.
+    /// Whether the device defines the id is decided where the pools are run
+    /// (`times_routing::state_for`): an unknown id enacts no extra time.
+    Time(String),
 }
 
 /// Decide a gift's route, pure so the routing rule is unit-tested without a
@@ -3655,6 +4046,12 @@ enum GiftRoute {
 /// before named-times — minutes on the budget pool, unless the child is
 /// currently locked BY THE SCHEDULE (a closed window), in which case only a
 /// schedule extension can actually unlock them.
+///
+/// §Times: a gift carrying `time` buys THAT time — its own pool, run as that
+/// time — and never Free's whole-device pool, which would unlock the device as
+/// Free time instead of the posture the guardian chose. A live bucket still
+/// wins (bucket routing beats `time`, as on a `time.extend`). An untyped gift
+/// routes exactly as before.
 fn gift_route(
     body: &charter_proto::GiftBody,
     lock_reason: Option<charter_schedule::LockReason>,
@@ -3666,15 +4063,14 @@ fn gift_route(
             _ => charter_schedule::Dimension::Budget,
         })
     };
-    match body.group_id.as_deref() {
-        Some(group_id) => {
-            let exists = buckets.is_some_and(|b| b.buckets.iter().any(|bk| bk.id == group_id));
-            if exists {
-                GiftRoute::Bucket(group_id.to_string())
-            } else {
-                dimension_fallback()
-            }
+    if let Some(group_id) = body.group_id.as_deref() {
+        let exists = buckets.is_some_and(|b| b.buckets.iter().any(|bk| bk.id == group_id));
+        if exists {
+            return GiftRoute::Bucket(group_id.to_string());
         }
+    }
+    match body.time.as_deref() {
+        Some(time_id) => GiftRoute::Time(time_id.to_string()),
         None => dimension_fallback(),
     }
 }
@@ -4111,6 +4507,97 @@ mod tests {
 
     // ---- gift routing (§2 of the named-times wiring) ----------------------
 
+    fn typed_gift(time: &str) -> charter_proto::GiftBody {
+        charter_proto::GiftBody {
+            time: Some(time.into()),
+            ..gift(None)
+        }
+    }
+
+    /// §Times: a typed gift buys its own time's pool — never Free's
+    /// whole-device pool, locked or not — and a live bucket still wins.
+    #[test]
+    fn a_typed_gift_routes_to_its_time_and_never_to_free_time() {
+        for lock in [
+            None,
+            Some(charter_schedule::LockReason::Schedule),
+            Some(charter_schedule::LockReason::Budget),
+        ] {
+            assert_eq!(
+                super::gift_route(&typed_gift("learning"), lock, None),
+                super::GiftRoute::Time("learning".into())
+            );
+        }
+        let live = buckets_with(vec![play_bucket(Some(60), None)]);
+        let both = charter_proto::GiftBody {
+            group_id: Some("play".into()),
+            ..typed_gift("learning")
+        };
+        assert_eq!(
+            super::gift_route(&both, None, Some(&live)),
+            super::GiftRoute::Bucket("play".into())
+        );
+    }
+
+    /// §Times: a gift naming a time the device does not define enacts NO extra
+    /// time — not Free time, not anything — however long it sits there.
+    #[test]
+    fn a_gift_for_an_unknown_time_gives_no_extra_time() {
+        use crate::child_policy::{EffectivePolicy, PolicySource};
+        use crate::multi_child::MultiChildEnforcer;
+        const UID: u32 = 1001;
+        // Mon 2026-06-29 20:00 UTC: outside the only window.
+        const NOW: i64 = 1_782_691_200 + 20 * 3600;
+        let schedule: charter_schedule::GrantSchedule = serde_json::from_str(
+            r#"{"v":1,"tz":"Etc/UTC","weekly":{"mon":[{"start":"16:00","end":"19:00"}]},"issuedAt":1}"#,
+        )
+        .unwrap();
+        let mut multi = MultiChildEnforcer::new();
+        multi.sync(
+            &[(
+                UID,
+                EffectivePolicy {
+                    schedule: Some(schedule.clone()),
+                    budget: None,
+                    learning: None,
+                    source: PolicySource::Guardian,
+                },
+            )],
+            NOW,
+            |_| (None, None),
+        );
+        multi.tick(Some(UID), NOW, 0);
+        let times = crate::times_routing::parse_times(Some(
+            r#"{"v":1,"issuedAt":1,"times":[{"id":"learning","label":"Learning time","posture":"everythingExcept"}]}"#,
+        ));
+        let g = typed_gift("chores");
+        let super::GiftRoute::Time(id) =
+            super::gift_route(&g, Some(charter_schedule::LockReason::Schedule), None)
+        else {
+            panic!("typed gift must route to its time");
+        };
+        assert!(multi.apply_time_extension(UID, NOW, &format!("gift:{}", g.id), 30, &id));
+        let st = crate::times_routing::state_for(
+            &multi,
+            Some(&schedule),
+            times.as_ref(),
+            true,
+            None,
+            UID,
+            NOW,
+        )
+        .unwrap();
+        assert!(
+            st.remaining.locked,
+            "an unknown time's gift unlocks nothing"
+        );
+        assert_eq!(
+            multi.remaining(UID, NOW).unwrap().extension_secs,
+            0,
+            "and Free gains nothing"
+        );
+    }
+
     fn gift(group_id: Option<&str>) -> charter_proto::GiftBody {
         charter_proto::GiftBody {
             v: 1,
@@ -4119,6 +4606,7 @@ mod tests {
             minutes: 15,
             expires_at: 9_999_999_999,
             group_id: group_id.map(String::from),
+            time: None,
         }
     }
 

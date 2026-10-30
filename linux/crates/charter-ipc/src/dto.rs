@@ -177,6 +177,73 @@ pub struct TimeLeftView {
     /// empty, never an error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ask_first: Vec<AskFirstAppView>,
+    /// Which TIME the ward is in (§Times) — Free time, Learning time or
+    /// another named time — and what is allowed in it, what follows, and
+    /// which kinds of time the ward may ask for. `None` for a child with no
+    /// named times at all, so every pre-times consumer reads exactly what it
+    /// always did; absent bytes from a pre-times daemon default to `None`.
+    ///
+    /// Boxed: it is the largest thing on the view and rides inside
+    /// [`DaemonEvent::TimeLeftChanged`], whose sibling variants are tiny.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<Box<TimesView>>,
+}
+
+/// One kind of time the ward may ask for more of. `id` is the named-time id,
+/// or [`FREE_TIME_CHOICE`] for Free time (an ask for Free time carries no
+/// `time` field on the wire — absent IS Free).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// The choice id that stands for Free time in [`TimesView::ask`]. The same
+/// string the contract reserves (`"free"` is never a named-time id), so it can
+/// never collide with a real time.
+pub const FREE_TIME_CHOICE: &str = "free";
+
+/// The ward-facing account of times (§Times): every string is already in the
+/// child's words and the child's tz, so a surface renders it verbatim and
+/// needs no policy read of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimesView {
+    /// The named-time id in force; `None` for Free time or while locked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// The label of the time in force ("Free time" for Free). Empty while
+    /// locked.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// "HH:MM" in the child's tz when the time in force ends, if it ends
+    /// before midnight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// What follows it: a time's label, or `None` for "then locked".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub then: Option<String>,
+    /// Under an *only these* time: the labels of everything allowed. Empty
+    /// otherwise (an *everything except* time is described by its label).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+    /// While locked: the headline ("Locked until Learning time at 09:00",
+    /// "Locked today"). `None` when the time layer has nothing better to say
+    /// than the ordinary lock copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_title: Option<String>,
+    /// While locked: the line under it ("Nothing is set up for this time
+    /// yet.").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_detail: Option<String>,
+    /// The kinds of time an "Ask for more time" may name — Free time first,
+    /// then each named time. Empty when the child has no named time, so the
+    /// ask stays untyped exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<TimeChoice>,
+    /// Which of `ask` to offer first (an `id` from it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_default: Option<String>,
 }
 
 /// The `-1` sentinel meaning "this cap is not set". A free function because
@@ -204,6 +271,19 @@ impl TimeLeftView {
         }
     }
 
+    /// The named time a whole-device "Ask for more time" should name
+    /// (§Times): the daemon's default for this ward right now, or `None` for
+    /// Free time — which is also the answer for a child with no named times,
+    /// so a pre-times ask is byte-identical. Shared by every asker (CLI, tray)
+    /// for the same reason [`limit_hit`](Self::limit_hit) is.
+    pub fn default_ask_time(&self) -> Option<&str> {
+        self.time
+            .as_ref()?
+            .ask_default
+            .as_deref()
+            .filter(|id| *id != FREE_TIME_CHOICE)
+    }
+
     /// An "unknown" snapshot — explicitly NOT "unlimited" (fail-safe).
     pub fn unknown() -> Self {
         TimeLeftView {
@@ -221,6 +301,7 @@ impl TimeLeftView {
             budget_day_seconds: -1,
             budget_week_seconds: -1,
             ask_first: Vec::new(),
+            time: None,
         }
     }
 }
@@ -343,6 +424,7 @@ mod tests {
                 budget_day_seconds: -1,
                 budget_week_seconds: -1,
                 ask_first: Vec::new(),
+                time: None,
             }
         }
         // The daemon's authoritative reason wins outright.
