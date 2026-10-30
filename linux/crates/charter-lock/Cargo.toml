@@ -19,7 +19,7 @@ path = "src/main.rs"
 # "randr" pulls in RandR screen-change events (04-B8): a hotplugged monitor or
 # a resolution change otherwise leaves the lock window its original size,
 # with the new screen area showing the live desktop with no panel at all.
-x11rb = { version = "0.13", default-features = false, features = ["composite", "randr"] }
+x11rb = { version = "0.14", default-features = false, features = ["composite", "randr"] }
 # Pure-Rust TTF rasterizer for the panel's text (X core fonts render as tiny
 # bitmap `fixed` on modern servers). The DejaVu faces are vendored in assets/
 # (Bitstream Vera license — embedding permitted; see assets/DEJAVU-LICENSE).
