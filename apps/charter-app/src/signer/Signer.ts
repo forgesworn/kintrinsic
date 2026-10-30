@@ -22,6 +22,9 @@ export interface DecisionWire {
    *  group the REQUEST named. Echoed verbatim into the GRANT, exactly like
    *  `limitHit` itself, on both allow and deny. */
   bucketId?: string;
+  /** The named time the REQUEST asked for more of (contract §Times). Echoed
+   *  verbatim into the GRANT on allow and deny; absent = Free time. */
+  time?: string;
 }
 
 /**
@@ -97,6 +100,21 @@ export interface DecisionContext {
   install?: InstallDecision;
   /** `app.open` wire correlation; absent = not an app.open ask. */
   appOpen?: AppOpenDecisionWire;
+}
+
+/**
+ * Where a gift goes and what it buys, beyond the minutes (contract §Times).
+ * Both fields default to today's behaviour, so a caller that passes neither is
+ * byte-identical to before: Free time, every paired device.
+ */
+export interface GiftOptions {
+  /** The named-time id the minutes buy. Absent (or `"free"`) = Free time. */
+  time?: string;
+  /** Used only to word the confirm sheet ("30 minutes of Learning time"). */
+  timeLabel?: string;
+  /** `Device.id`s to wrap the gift to. Absent = every paired device; an empty
+   *  list is refused (no recipient is a mistake, not "everyone"). */
+  deviceIds?: string[];
 }
 
 /**
@@ -180,6 +198,22 @@ export interface Signer {
     minutes: number,
     tz?: string,
     groupId?: string,
+    opts?: GiftOptions,
+  ): Promise<SignOutcome>;
+  /**
+   * Answer a `time.extend` ask with a DIFFERENT type of time than it asked
+   * for (contract §Times): a `minutesGranted: 0` grant that closes the ask,
+   * plus a gift carrying `timeId` (absent = Free time), both wrapped to the
+   * asking device only. `ctx.wire` is required — there is nothing to answer
+   * without a real ask. One confirm covers both.
+   */
+  answerAskWithOtherTime?(
+    requestId: string,
+    ctx: DecisionContext,
+    minutes: number,
+    timeId?: string,
+    /** Wording for the confirm sheet only; the raw id is shown if absent. */
+    timeLabel?: string,
   ): Promise<SignOutcome>;
   /**
    * Call a stand-down: "finish up now", then locked for the rest of the ward's

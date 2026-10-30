@@ -11,7 +11,7 @@
 // Source of truth: spec/contract.md §5.6.
 
 import { describe, expect, it } from "vitest";
-import { MAX_EXTEND_MINUTES } from "./grant";
+import { MAX_EXTEND_MINUTES, MAX_NAMED_TIMES, MAX_TIME_LABEL_LEN } from "./grant";
 import { MAX_REASON_LEN, MAX_WRAP_JITTER_SECS, CHARTER_DEVICE_REQUEST } from "./request";
 import { CHARTER_DEVICE_STATUS } from "./status";
 import { CHARTER_DEVICE_RELAYS } from "./relayConfig";
@@ -34,6 +34,11 @@ describe("§5.6 wire-contract constants (must match the Rust wardens)", () => {
   it("time.extend bounds", () => {
     expect(MAX_EXTEND_MINUTES).toBe(1440);
     expect(MAX_REASON_LEN).toBe(280);
+  });
+
+  it("times bounds (§Times — MAX_NAMED_TIMES / MAX_TIME_LABEL_LEN)", () => {
+    expect(MAX_NAMED_TIMES).toBe(16);
+    expect(MAX_TIME_LABEL_LEN).toBe(60);
   });
 
   it("event kinds — the real declared constants, not literals", () => {

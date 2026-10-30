@@ -9,8 +9,10 @@
 // supersedes any previously-cached one with the parent's true current intent.
 
 import { normalizeWebDomain } from "../domain/webDomain";
+import { findTaggedOverlaps } from "../domain/times";
+import { isValidTimeId, normaliseNamedTime, timesFault } from "./times";
 import { RELEASE_PUBKEY_HEX } from "../release/releaseTrust";
-import type { AlwaysAvailablePolicy, AppsPolicy, Budget, BucketsPolicy, LearningPolicy, Lifeline, ListeningPolicy, Policy, Schedule, ScheduleWindow, Tethering, WebPolicy } from "../domain/types";
+import type { AlwaysAvailablePolicy, AppsPolicy, Budget, BucketsPolicy, LearningPolicy, Lifeline, ListeningPolicy, NamedTime, Policy, Schedule, ScheduleWindow, Tethering, WebPolicy } from "../domain/types";
 import type {
   AppBucket,
   AppRule,
@@ -28,6 +30,7 @@ import type {
   GrantBuckets,
   GrantListening,
   GrantLifeline,
+  GrantTimes,
   GrantUpdate,
   UpdateManifest,
 } from "./types";
@@ -45,6 +48,13 @@ function assertWindows(windows: ScheduleWindow[]): void {
     if (w.start >= w.end) {
       throw new Error(`schedule window must satisfy start < end, got ${w.start}-${w.end}`);
     }
+    // A tag must be a usable named-time id. Whether the id is DEFINED is not
+    // checked here: a save signs one dimension at a time, and an unknown tag
+    // is safe on the device (that span locks) — a malformed one is not worth
+    // sending at all.
+    if (w.time !== undefined && !isValidTimeId(w.time)) {
+      throw new Error(`schedule window time must be a named-time id, got ${String(w.time)}`);
+    }
   }
 }
 
@@ -60,7 +70,11 @@ export function scheduleToGrant(schedule: Schedule, issuedAt: number): GrantSche
   for (const [day, windows] of Object.entries(schedule.weekly)) {
     if (!windows) continue;
     assertWindows(windows);
-    weekly[day as keyof GrantSchedule["weekly"]] = windows.map((w) => ({ start: w.start, end: w.end }));
+    // `time` rides ONLY when set, and is never written as `time: undefined`,
+    // so an untagged window is the same two-key object it always was.
+    weekly[day as keyof GrantSchedule["weekly"]] = windows.map((w) =>
+      w.time === undefined ? { start: w.start, end: w.end } : { start: w.start, end: w.end, time: w.time },
+    );
     totalWindows += windows.length;
   }
   if (schedule.overrides) {
@@ -68,6 +82,15 @@ export function scheduleToGrant(schedule: Schedule, issuedAt: number): GrantSche
       assertWindows(windows);
       totalWindows += windows.length;
     }
+  }
+  // Two tagged windows overlapping on one day is refused at the source: the
+  // device would resolve it deterministically (earlier start, then array
+  // order) but the guardian never meant a tie, so none is ever signed.
+  const overlap = findTaggedOverlaps(schedule)[0];
+  if (overlap) {
+    throw new Error(
+      `two named times overlap on ${overlap.day}: ${overlap.a.start}-${overlap.a.end} and ${overlap.b.start}-${overlap.b.end}`,
+    );
   }
   // A NON-paused schedule that allows zero time anywhere (every day blocked, no
   // override windows) is the parent's "block all screen time" intent. An all-
@@ -241,6 +264,25 @@ export function appsToGrant(apps: AppsPolicy, issuedAt: number): GrantApps {
   const holds = pruneHolds(apps.holds, issuedAt);
   if (holds.length) g.holds = holds;
   return g;
+}
+
+/**
+ * Map a child's named times to the wire `GrantTimes` (replace-the-set).
+ *
+ * THROWS on a set the device would refuse (bad or duplicate or reserved id,
+ * more than `MAX_NAMED_TIMES`, label out of bounds, a site that is not a
+ * pinnable site app). The device's answer to a bad body is to treat the whole
+ * clause as absent, which locks every tagged window — so unlike `buckets`
+ * (where dropping one bad entry is the lesser harm) there is no partial
+ * answer worth sending. An empty set is valid and is how the last time is
+ * deleted. An `onlyThese` time with nothing in it is valid on the wire (it
+ * runs nothing); it is the editor's job, not this mapper's, to refuse one.
+ */
+export function timesToGrant(times: NamedTime[], issuedAt: number): GrantTimes {
+  const cleaned = times.map((t) => ({ ...t, label: typeof t.label === "string" ? t.label.trim() : t.label }));
+  const fault = timesFault(cleaned);
+  if (fault) throw new Error(`times can't be sent: ${fault}`);
+  return { v: 1, times: cleaned.map(normaliseNamedTime), issuedAt };
 }
 
 /**
@@ -509,12 +551,20 @@ export function policyToClauses(
       | GrantLifeline
       | GrantBuckets
       | GrantListening
-      | GrantAlwaysAvailable,
+      | GrantAlwaysAvailable
+      | GrantTimes,
   ): ClausePayload => {
     const c: ClausePayload = { v: 1, kind, issuedAt, body };
     if (subject) c.subject = subject;
     return c;
   };
+  // The definitions go BEFORE the schedule whose tagged windows refer to them.
+  // Delivery order across wraps is not guaranteed either way, and the worst
+  // case (a window landing first) is a locked span until the definition
+  // arrives — never an open one. Only when the child has used times at all:
+  // `undefined` signs nothing, so a family that never touched them is
+  // byte-identical to before the clause existed; `[]` is a real clear.
+  if (policy.times) out.push(base("times", timesToGrant(policy.times, issuedAt)));
   if (policy.schedule) out.push(base("schedule", scheduleToGrant(policy.schedule, issuedAt)));
   if (policy.budget) out.push(base("budget", budgetToGrant(policy.budget, issuedAt)));
   if (policy.web) out.push(base("content", contentToGrant(policy.web, issuedAt)));

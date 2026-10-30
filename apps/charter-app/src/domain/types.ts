@@ -9,6 +9,10 @@ import type { PolicyOverride } from "./effectivePolicy";
 // Same precedent, same reason: named times' compile/decompose logic lives
 // next to the wire mapping it produces, not here.
 import type { FreeGroupRecord } from "./namedTimes";
+// And again for the times clause: the shape is the wire's, defined once there.
+import type { NamedTime } from "../wire/types";
+
+export type { NamedTime };
 
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
@@ -59,6 +63,13 @@ export interface AlwaysAvailablePolicy {
 export interface ScheduleWindow {
   start: string; // "HH:MM"
   end: string; // "HH:MM"
+  /**
+   * The id of the named time this window runs (see `Policy.times`). Absent =
+   * Free time. A tagged window may overlap an untagged one (it carves it); two
+   * tagged windows may not overlap on one day. Only ever set on a DEVICE
+   * schedule — a per-app allowed-hours schedule has no use for it.
+   */
+  time?: string;
 }
 
 /**
@@ -349,6 +360,20 @@ export interface Policy {
    * `domain/namedTimes.ts`.
    */
   freeGroups?: FreeGroupRecord[];
+  /**
+   * Device scope only: this child's named times (Learning time and friends) —
+   * the DEFINITIONS, per child. WHEN each runs is a tagged `ScheduleWindow` in
+   * each device's own `schedule`. Free time has no entry here.
+   *
+   * Deliberately NOT a `SPLITTABLE_CONTROLS` member: the `times` clause goes
+   * identically to every device, only the windows differ per device.
+   *
+   * OPTIONAL, with a meaning at each state: `undefined` = this child has never
+   * used times, no `times` clause is signed and the wire is byte-identical to
+   * before the feature; `[]` = the guardian deleted the last one, and a real
+   * empty clause is signed so every device drops its copy.
+   */
+  times?: NamedTime[];
 }
 
 /** Where a device is in the parent-governed pairing handshake. */
@@ -461,6 +486,9 @@ export interface ChildRequest {
   /** Present only when `limitHit === 'bucket'` — the specific named-times
    *  group asked about. Echoed verbatim into the grant. */
   bucketId?: string;
+  /** The named-time id the ward asked for more of (contract §Times). Absent =
+   *  Free time. Echoed verbatim into the grant. */
+  time?: string;
   /** Stage 1: the SPECIFIC artifact, e.g. "VLC media player". */
   appLabel?: string;
   /** Stage 1: optional artifact ref/hash, e.g. "flatpak:org.videolan.VLC". */

@@ -71,7 +71,49 @@ export type ClauseKind =
   | "gift"
   | "standdown"
   | "listening"
-  | "alwaysavailable";
+  | "alwaysavailable"
+  | "times";
+
+// --- times clause (Free time, Learning time and other named times) ----------
+
+/** How a named time is composed with Free time (contract §Times). */
+export type TimePosture = "everythingExcept" | "onlyThese";
+
+/**
+ * Contract `NamedTime` — a kind of screen time with its own posture. Free time
+ * has NO entry: it is the standing `apps`/`content`/`apprules`/`buckets`/
+ * `learning` clauses, and an untagged `ScheduleWindow` runs it.
+ *
+ * Fields for the other posture are ignored by the device, so `timesToGrant`
+ * (./clause.ts) emits only the ones that belong to `posture`.
+ */
+export interface NamedTime {
+  /** `[a-z0-9-]{1,32}`; unique within the clause; never `"free"` (reserved). */
+  id: string;
+  /** Display name, 1..`MAX_TIME_LABEL_LEN` chars. Renaming changes THIS, never `id`. */
+  label: string;
+  posture: TimePosture;
+  // everythingExcept — departures from Free time:
+  blockApps?: string[];
+  unblockApps?: string[];
+  denySites?: string[];
+  undenySites?: string[];
+  // onlyThese — the whole statement:
+  apps?: string[];
+  /** `LearningApp`s of kind `site` only — the learning clause's own shape, so
+   *  Linux can pin and launch each one and Android allowlists the union of
+   *  their `domains`. A bare domain could neither be launched nor pinned. */
+  sites?: LearningApp[];
+  /** Default false (absent): time here drains neither the budget nor a bucket. */
+  countsAgainstBudget?: boolean;
+}
+
+/** Contract `GrantTimes` — every named time for one child (replace-the-set). */
+export interface GrantTimes {
+  v: 1;
+  times: NamedTime[];
+  issuedAt: number;
+}
 
 /**
  * Contract `GrantListening` (spec 2026-07-29) — what happens to audio ALREADY
@@ -501,6 +543,13 @@ export interface GrantGift {
    * moment the ward updates.
    */
   groupId?: string;
+  /**
+   * The TIME these minutes buy (contract §Times): a named-time id. Absent =
+   * Free time, byte-identical to before. A pre-times ward ignores the field and
+   * lands the minutes as Free time (the same documented gap as `groupId`); a
+   * times-aware ward with an unknown id enacts NO extra time (fail-safe).
+   */
+  time?: string;
 }
 
 /** Contract `ClausePayload` — the inner content of a CHARTER_DEVICE_CLAUSE (31113). */
@@ -526,7 +575,8 @@ export interface ClausePayload {
     | GrantGift
     | GrantStandDown
     | GrantListening
-    | GrantAlwaysAvailable;
+    | GrantAlwaysAvailable
+    | GrantTimes;
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +621,9 @@ export interface TimeExtendRequestParams {
    *  about. Echoed VERBATIM into the grant, exactly like `limitHit` itself;
    *  absent bytes from a pre-buckets device or guardian still parse as unset. */
   bucketId?: string;
+  /** The named-time id the child is asking for more of (contract §Times).
+   *  Absent = Free time. Echoed verbatim into the GRANT. */
+  time?: string;
 }
 
 /** Contract `TimeExtendGrantParams` — what the guardian granted. May be LESS
@@ -583,6 +636,10 @@ export interface TimeExtendGrantParams {
    *  `bucket` extension lands in that bucket's own per-group extension pool,
    *  never the device's `schedule`/`budget` pools. */
   bucketId?: string;
+  /** Echoed verbatim from the REQUEST (contract §Times): the named time whose
+   *  pool these minutes land in. Absent = Free time. Echoed on allow AND deny,
+   *  exactly like `limitHit`, so the device's params-echo check stays exact. */
+  time?: string;
 }
 
 /**

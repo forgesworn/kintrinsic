@@ -59,7 +59,13 @@ export type WardenFeature =
   // build reads the `update` clause; charterd from 0.7.12 (712) — older
   // laptops store it and never read it, so the guardian points at the
   // download page instead.
-  | "selfUpdate";
+  | "selfUpdate"
+  // Times (Free time, Learning time and other named times): the `times`
+  // clause, tagged schedule windows and typed gifts/asks. Both platforms, new
+  // together. An older ward ignores the tag and runs the window as FREE time —
+  // a loosening — so the guardian app must not send one to a device that
+  // reports old (see `canUseTimes` in ./times.ts).
+  | "times";
 
 /**
  * A platform whose warden does not enforce this clause AT ALL — no version of
@@ -163,6 +169,8 @@ const MIN_VERSION: Record<WardenFeature, Partial<Record<Device["platform"], Thre
   // release key's announcement both name (contract § "On Linux (from
   // 0.7.12)"). Android has read the clause since self-update shipped.
   selfUpdate: { linux: 712 },
+  // Ward Kintrinsic 0.7.0 (versionCode 49); charterd 0.8.0 (800).
+  times: { android: 49, linux: 800 },
 };
 
 /** Every paired device a clause would actually be sealed to. */
