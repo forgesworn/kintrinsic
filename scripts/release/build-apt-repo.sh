@@ -104,15 +104,22 @@ cleanup() {
   rm -rf "$TMP"
   [ -z "$NEW_DISTS" ] || rm -rf "$NEW_DISTS"
   [ -z "$NEW_JSON" ] || rm -f "$NEW_JSON"
-  if [ "$DONE" = 0 ] && [ "$SWAPPED" = 1 ]; then
-    # The swap started but did not finish: put the previous dists/ back.
-    rm -rf "$OUT/dists"
-    if [ -e "$OLD_DISTS" ]; then mv "$OLD_DISTS" "$OUT/dists"; fi
+  if [ "$DONE" = 0 ]; then
+    # Anything short of a completed swap: put the previous dists/ back if it
+    # was moved aside (whatever step a signal or error interrupted).
+    if [ -n "$OLD_DISTS" ] && [ -e "$OLD_DISTS" ]; then
+      rm -rf "$OUT/dists"
+      mv "$OLD_DISTS" "$OUT/dists"
+    elif [ "$SWAPPED" = 1 ]; then
+      rm -rf "$OUT/dists"   # there was no previous dists/ to restore
+    fi
   elif [ -n "$OLD_DISTS" ]; then
     rm -rf "$OLD_DISTS"
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 TREE="$TMP/tree"
 mkdir -p "$TREE/pool/main/k/kintrinsic" "$TREE/dists/stable/main/binary-amd64"

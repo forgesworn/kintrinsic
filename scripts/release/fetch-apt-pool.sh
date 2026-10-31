@@ -7,7 +7,8 @@
 #   1. InRelease must verify (gpgv) against <apt-dir>/kintrinsic-archive-keyring.gpg;
 #   2. the sha256 of dists/stable/main/binary-amd64/Packages and Packages.gz
 #      must equal the SHA256 entries for them inside that signed InRelease
-#      (a file that is not listed there is a failure).
+#      (a file that is not listed there is a failure). Only the signed text
+#      that gpgv extracts is parsed, never unsigned lines around it.
 # Each pool entry is then downloaded from its GitHub release URL, hashed, and
 # kept only when its sha256 matches pool.json AND the SHA256 that the verified
 # Packages index records for that Filename. Any mismatch deletes the file and
@@ -33,7 +34,11 @@ KEYRING="$APT_DIR/kintrinsic-archive-keyring.gpg"
 INRELEASE="$APT_DIR/dists/stable/InRelease"
 [ -s "$KEYRING" ] || die "missing $KEYRING"
 [ -f "$INRELEASE" ] || die "missing $INRELEASE"
-gpgv --keyring "$KEYRING" "$INRELEASE" || die "InRelease does not verify against $KEYRING"
+# Parse only the text gpgv itself vouches for: a clearsigned file may carry
+# unsigned lines before or after the signed block.
+SIGNED="$(mktemp "${TMPDIR:-/tmp}/kintrinsic-inrelease.XXXXXX")"
+trap 'rm -f "$SIGNED"' EXIT
+gpgv --keyring "$KEYRING" --output "$SIGNED" "$INRELEASE" || die "InRelease does not verify against $KEYRING"
 for rel in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
   file="$APT_DIR/dists/stable/$rel"
   [ -f "$file" ] || die "missing $file"
@@ -41,7 +46,7 @@ for rel in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
     /^SHA256:[ \t]*$/ { in_sec = 1; next }
     /^[^ \t]/ { in_sec = 0 }
     in_sec && $3 == f { print $1 }
-  ' "$INRELEASE")"
+  ' "$SIGNED")"
   [ -n "$signed" ] || die "InRelease does not list $rel under SHA256"
   [ "$(printf '%s\n' "$signed" | wc -l)" = 1 ] || die "InRelease lists $rel more than once"
   got="$(sha256sum "$file" | cut -d' ' -f1)"
