@@ -51,7 +51,7 @@ fn dpkg_arch() -> String {
 }
 
 /// The Debian `control` file. Pure so it can be unit-tested without packaging.
-fn control_file(version: &str, arch: &str) -> String {
+fn control_file(version: &str, arch: &str, installed_size_kib: u64) -> String {
     format!(
         "Package: kintrinsic\n\
          Version: {version}\n\
@@ -59,6 +59,7 @@ fn control_file(version: &str, arch: &str) -> String {
          Maintainer: Forgesworn\n\
          Section: admin\n\
          Priority: optional\n\
+         Installed-Size: {installed_size_kib}\n\
          Conflicts: charter\n\
          Replaces: charter\n\
          Provides: charter\n\
@@ -77,6 +78,40 @@ fn control_file(version: &str, arch: &str) -> String {
          \x20'charter-setup <user>' to lock down an account. fapolicyd is\n\
          \x20installed but stays off until 'charter-applock arm' is run.\n"
     )
+}
+
+/// Files that dpkg must treat as conffiles, written to `DEBIAN/conffiles`
+/// (`dpkg-deb --build` infers none). Deliberately ONLY the apt source: the
+/// other `/etc` files (the tray autostart) are enforcement-relevant and must
+/// always be the package's own copy on upgrade.
+const CONFFILES: &[&str] = &["/etc/apt/sources.list.d/kintrinsic.sources"];
+
+/// The `conffiles` file body: one absolute path per line, trailing newline.
+fn conffiles_file() -> String {
+    CONFFILES.iter().map(|p| format!("{p}\n")).collect()
+}
+
+/// `Installed-Size` for a staged tree: the file bytes under `dir` (the
+/// `DEBIAN` control directory excluded), rounded up to KiB, never below 1.
+fn installed_size_kib(dir: &Path) -> Result<u64, String> {
+    fn walk(dir: &Path, top: bool) -> Result<u64, String> {
+        let mut bytes = 0u64;
+        for entry in fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+            if top && entry.file_name() == "DEBIAN" {
+                continue;
+            }
+            let meta = fs::symlink_metadata(entry.path())
+                .map_err(|e| format!("stat {}: {e}", entry.path().display()))?;
+            if meta.is_dir() {
+                bytes += walk(&entry.path(), false)?;
+            } else {
+                bytes += meta.len();
+            }
+        }
+        Ok(bytes)
+    }
+    Ok(walk(dir, true)?.div_ceil(1024).max(1))
 }
 
 /// Copy `src` -> `dst`, creating parent dirs. Optionally mark executable.
@@ -382,10 +417,36 @@ fn build_deb() -> Result<(), String> {
         stage(&pkg.join(src), &stage_dir.join(dst), false)?;
     }
 
+    // 4b. The signed apt repository: the archive keyring and the deb822
+    //     source that points at https://kintrinsic.app/apt, so installing
+    //     this .deb once makes `apt upgrade` (and Update Manager) track new
+    //     releases. The source is a conffile (see CONFFILES).
+    stage(
+        &pkg.join("apt/kintrinsic-archive-keyring.gpg"),
+        &stage_dir.join("usr/share/keyrings/kintrinsic-archive-keyring.gpg"),
+        false,
+    )?;
+    stage(
+        &pkg.join("apt/kintrinsic.sources"),
+        &stage_dir.join("etc/apt/sources.list.d/kintrinsic.sources"),
+        false,
+    )?;
+    for conf in CONFFILES {
+        let staged = stage_dir.join(conf.trim_start_matches('/'));
+        if !staged.is_file() {
+            return Err(format!("conffile {conf} is not staged"));
+        }
+    }
+
     // 5. DEBIAN control + maintainer scripts.
     write_mode(
+        &stage_dir.join("DEBIAN/conffiles"),
+        &conffiles_file(),
+        0o644,
+    )?;
+    write_mode(
         &stage_dir.join("DEBIAN/control"),
-        &control_file(VERSION, &arch),
+        &control_file(VERSION, &arch, installed_size_kib(&stage_dir)?),
         0o644,
     )?;
     for script in ["postinst", "prerm", "postrm"] {
@@ -420,7 +481,7 @@ mod tests {
 
     #[test]
     fn control_has_required_fields() {
-        let c = control_file("0.1.0", "amd64");
+        let c = control_file("0.1.0", "amd64", 1234);
         for field in [
             "Package: kintrinsic",
             "Version: 0.1.0",
@@ -455,6 +516,44 @@ mod tests {
         }
         // Trailing newline (dpkg-deb requires it).
         assert!(c.ends_with('\n'));
+        // apt reads these to place the package in the index.
+        for field in [
+            "Section: admin\n",
+            "Priority: optional\n",
+            "Installed-Size: 1234\n",
+        ] {
+            assert!(c.contains(field), "control missing `{field}`:\n{c}");
+        }
+    }
+
+    /// The apt source and keyring ship in the package, the source is a
+    /// conffile, and the source is exactly the deb822 the repo is served as.
+    #[test]
+    fn the_apt_source_and_keyring_are_packaged() {
+        let apt = workspace_root().join("packaging/apt");
+        let src = std::fs::read_to_string(apt.join("kintrinsic.sources")).unwrap();
+        assert_eq!(
+            src,
+            "Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\n\
+             Architectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n"
+        );
+        assert!(apt.join("kintrinsic-archive-keyring.gpg").is_file());
+        let conf = conffiles_file();
+        assert!(conf.contains("/etc/apt/sources.list.d/kintrinsic.sources\n"));
+        assert_eq!(conf, "/etc/apt/sources.list.d/kintrinsic.sources\n");
+    }
+
+    #[test]
+    fn installed_size_rounds_up_and_skips_debian() {
+        let dir = workspace_root().join(format!("target/xtask-size-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("DEBIAN")).unwrap();
+        fs::create_dir_all(dir.join("usr/bin")).unwrap();
+        fs::write(dir.join("DEBIAN/control"), vec![0u8; 100_000]).unwrap();
+        fs::write(dir.join("usr/bin/a"), vec![0u8; 1025]).unwrap();
+        fs::write(dir.join("b"), vec![0u8; 1]).unwrap();
+        assert_eq!(installed_size_kib(&dir).unwrap(), 2); // 1026 bytes -> 2 KiB
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// R2-4: ProtectSystem=full leaves /usr, /boot, /efi and /etc read-only
@@ -509,7 +608,7 @@ mod tests {
     /// util-linux supplies the setpriv/prlimit the arm self-test runs.
     #[test]
     fn fapolicyd_is_a_hard_dependency_and_never_armed_by_the_package() {
-        let c = control_file("0.1.0", "amd64");
+        let c = control_file("0.1.0", "amd64", 1234);
         let depends = c
             .lines()
             .find_map(|l| l.strip_prefix("Depends: "))

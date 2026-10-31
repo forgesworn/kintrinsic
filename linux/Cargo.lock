@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "charter-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "charter-ipc",
  "charter-primitives",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "charter-ipc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "charter-lock"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "ab_glyph",
  "x11rb",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "charter-tray"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "charter-ipc",
  "ksni",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "charterd"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "charter-content",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "yoke"
