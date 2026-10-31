@@ -80,15 +80,21 @@ fn control_file(version: &str, arch: &str, installed_size_kib: u64) -> String {
     )
 }
 
-/// Files that dpkg must treat as conffiles, written to `DEBIAN/conffiles`
-/// (`dpkg-deb --build` infers none). Deliberately ONLY the apt source: the
-/// other `/etc` files (the tray autostart) are enforcement-relevant and must
-/// always be the package's own copy on upgrade.
-const CONFFILES: &[&str] = &["/etc/apt/sources.list.d/kintrinsic.sources"];
-
-/// The `conffiles` file body: one absolute path per line, trailing newline.
-fn conffiles_file() -> String {
-    CONFFILES.iter().map(|p| format!("{p}\n")).collect()
+/// Make every directory under `dir` (and `dir` itself) mode 0755, whatever
+/// the build umask was: `create_dir_all` honours the umask, and a 002 umask
+/// would otherwise ship group-writable directories in the .deb.
+fn normalise_dir_modes(dir: &Path) -> Result<(), String> {
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+    for entry in fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let meta = fs::symlink_metadata(entry.path())
+            .map_err(|e| format!("stat {}: {e}", entry.path().display()))?;
+        if meta.is_dir() {
+            normalise_dir_modes(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// `Installed-Size` for a staged tree: the file bytes under `dir` (the
@@ -417,10 +423,12 @@ fn build_deb() -> Result<(), String> {
         stage(&pkg.join(src), &stage_dir.join(dst), false)?;
     }
 
-    // 4b. The signed apt repository: the archive keyring and the deb822
-    //     source that points at https://kintrinsic.app/apt, so installing
-    //     this .deb once makes `apt upgrade` (and Update Manager) track new
-    //     releases. The source is a conffile (see CONFFILES).
+    // 4b. The signed apt repository: the archive keyring, plus the deb822
+    //     source that points at https://kintrinsic.app/apt as a REFERENCE copy
+    //     under /usr/share/charter/apt. Nothing is shipped under /etc/apt and
+    //     there is no conffile: postinst installs the source only when absent
+    //     (never prompting over a hand-made one) and postrm removes it only
+    //     when byte-identical to what postinst installed.
     stage(
         &pkg.join("apt/kintrinsic-archive-keyring.gpg"),
         &stage_dir.join("usr/share/keyrings/kintrinsic-archive-keyring.gpg"),
@@ -428,22 +436,11 @@ fn build_deb() -> Result<(), String> {
     )?;
     stage(
         &pkg.join("apt/kintrinsic.sources"),
-        &stage_dir.join("etc/apt/sources.list.d/kintrinsic.sources"),
+        &stage_dir.join("usr/share/charter/apt/kintrinsic.sources"),
         false,
     )?;
-    for conf in CONFFILES {
-        let staged = stage_dir.join(conf.trim_start_matches('/'));
-        if !staged.is_file() {
-            return Err(format!("conffile {conf} is not staged"));
-        }
-    }
 
     // 5. DEBIAN control + maintainer scripts.
-    write_mode(
-        &stage_dir.join("DEBIAN/conffiles"),
-        &conffiles_file(),
-        0o644,
-    )?;
     write_mode(
         &stage_dir.join("DEBIAN/control"),
         &control_file(VERSION, &arch, installed_size_kib(&stage_dir)?),
@@ -456,6 +453,9 @@ fn build_deb() -> Result<(), String> {
             true,
         )?;
     }
+
+    // Directories 0755 regardless of the build umask.
+    normalise_dir_modes(&stage_dir)?;
 
     // 6. Build the .deb with deterministic root ownership (no fakeroot needed).
     let out = target.join(format!("deb/kintrinsic_{VERSION}_{arch}.deb"));
@@ -526,21 +526,70 @@ mod tests {
         }
     }
 
-    /// The apt source and keyring ship in the package, the source is a
-    /// conffile, and the source is exactly the deb822 the repo is served as.
+    const APT_SOURCE: &str =
+        "Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\n\
+         Architectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n";
+
+    /// The keyring and the reference apt source ship in the package; the
+    /// source is exactly the deb822 the repo is served as; xtask neither
+    /// ships anything under /etc/apt nor writes DEBIAN/conffiles.
     #[test]
     fn the_apt_source_and_keyring_are_packaged() {
         let apt = workspace_root().join("packaging/apt");
         let src = std::fs::read_to_string(apt.join("kintrinsic.sources")).unwrap();
-        assert_eq!(
-            src,
-            "Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\n\
-             Architectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n"
-        );
+        assert_eq!(src, APT_SOURCE);
         assert!(apt.join("kintrinsic-archive-keyring.gpg").is_file());
-        let conf = conffiles_file();
-        assert!(conf.contains("/etc/apt/sources.list.d/kintrinsic.sources\n"));
-        assert_eq!(conf, "/etc/apt/sources.list.d/kintrinsic.sources\n");
+        let code = include_str!("main.rs");
+        let prod = &code[..code.find("#[cfg(test)]").unwrap()];
+        assert!(
+            !prod.contains("etc/apt/"),
+            "nothing may ship under /etc/apt"
+        );
+        assert!(!prod.contains("DEBIAN/conffiles"), "no conffiles");
+    }
+
+    /// postinst installs the reference copy only when absent; postrm's
+    /// here-doc of the expected content must stay byte-identical to the
+    /// source file (it is the only way postrm can tell "ours" from "theirs").
+    #[test]
+    fn postrm_heredoc_matches_the_reference_source() {
+        let debian = workspace_root().join("packaging/debian");
+        let postrm = std::fs::read_to_string(debian.join("postrm")).unwrap();
+        let mut lines = postrm
+            .lines()
+            .skip_while(|l| !l.contains("<<'KINTRINSIC_SOURCES'"))
+            .skip(1);
+        let mut body = String::new();
+        loop {
+            let l = lines
+                .next()
+                .expect("here-doc terminator KINTRINSIC_SOURCES");
+            if l == "KINTRINSIC_SOURCES" {
+                break;
+            }
+            body.push_str(l);
+            body.push('\n');
+        }
+        assert_eq!(body, APT_SOURCE);
+        let postinst = std::fs::read_to_string(debian.join("postinst")).unwrap();
+        assert!(postinst.contains("/usr/share/charter/apt/kintrinsic.sources"));
+        assert!(postinst.contains("[ ! -e /etc/apt/sources.list.d/kintrinsic.sources ]"));
+    }
+
+    #[test]
+    fn staged_directories_are_0755_whatever_the_umask() {
+        let dir = workspace_root().join(format!("target/xtask-mode-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("usr/share/x")).unwrap();
+        for d in ["usr", "usr/share", "usr/share/x"] {
+            fs::set_permissions(dir.join(d), fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        normalise_dir_modes(&dir).unwrap();
+        for d in ["", "usr", "usr/share", "usr/share/x"] {
+            let mode = fs::metadata(dir.join(d)).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o755, "{d:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

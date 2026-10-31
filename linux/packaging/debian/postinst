@@ -15,6 +15,15 @@ case "$1" in
         if [ -d /etc/fapolicyd ] && [ ! -d /etc/fapolicyd/trust.d ]; then
             install -d -m 0755 /etc/fapolicyd/trust.d
         fi
+        # The signed apt source, so `apt upgrade` tracks new releases. Installed
+        # only when absent: a hand-made or edited file is left untouched
+        # whatever its content, and nothing here can prompt or fail the
+        # install (the file is deliberately not a conffile).
+        if [ ! -e /etc/apt/sources.list.d/kintrinsic.sources ]; then
+            install -m 0644 /usr/share/charter/apt/kintrinsic.sources \
+                /etc/apt/sources.list.d/kintrinsic.sources 2>/dev/null \
+                || echo "kintrinsic: warning: could not add the apt source; see https://kintrinsic.app/download" >&2
+        fi
         systemctl daemon-reload || true
         # Reload D-Bus so the system.d policy for org.forgesworn.charterd applies.
         systemctl reload dbus 2>/dev/null || systemctl reload dbus-broker 2>/dev/null || true

@@ -3,11 +3,35 @@
 # left in place on remove; purge clears it.
 set -e
 
+# The apt source postinst installed goes with the package, but ONLY if it is
+# still byte-identical to what postinst installed: a file the user edited or
+# wrote themselves is left alone. The reference copy under /usr/share is
+# already gone by now, so the expected content is embedded here. Keep this
+# here-doc byte-identical to packaging/apt/kintrinsic.sources (xtask tests it).
+remove_apt_source() {
+    f=/etc/apt/sources.list.d/kintrinsic.sources
+    [ -f "$f" ] || return 0
+    if cat <<'KINTRINSIC_SOURCES' | cmp -s - "$f"
+Types: deb
+URIs: https://kintrinsic.app/apt
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg
+KINTRINSIC_SOURCES
+    then
+        rm -f "$f" || true
+    fi
+    return 0
+}
+
 case "$1" in
     remove)
+        remove_apt_source
         systemctl daemon-reload || true
         ;;
     purge)
+        remove_apt_source
         rm -rf /var/lib/charter || true
         systemctl daemon-reload || true
         ;;
