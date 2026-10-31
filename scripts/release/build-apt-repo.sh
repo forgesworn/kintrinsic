@@ -99,12 +99,18 @@ log "package $PKG $VER ($ARCH), $SIZE bytes, sha256 $ACTUAL_SHA"
 
 # ---- scratch space ----------------------------------------------------------
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/kintrinsic-apt.XXXXXX")"
-NEW_DISTS="" ; OLD_DISTS="" ; NEW_JSON=""
+NEW_DISTS="" ; OLD_DISTS="" ; NEW_JSON="" ; SWAPPED=0 ; DONE=0
 cleanup() {
   rm -rf "$TMP"
   [ -z "$NEW_DISTS" ] || rm -rf "$NEW_DISTS"
-  [ -z "$OLD_DISTS" ] || rm -rf "$OLD_DISTS"
   [ -z "$NEW_JSON" ] || rm -f "$NEW_JSON"
+  if [ "$DONE" = 0 ] && [ "$SWAPPED" = 1 ]; then
+    # The swap started but did not finish: put the previous dists/ back.
+    rm -rf "$OUT/dists"
+    if [ -e "$OLD_DISTS" ]; then mv "$OLD_DISTS" "$OUT/dists"; fi
+  elif [ -n "$OLD_DISTS" ]; then
+    rm -rf "$OLD_DISTS"
+  fi
 }
 trap cleanup EXIT
 
@@ -141,7 +147,6 @@ REL
     -o APT::FTPArchive::Release::Architectures=amd64 \
     -o APT::FTPArchive::Release::Components=main \
     -o "APT::FTPArchive::Release::Description=Kintrinsic Linux warden (charterd) — official releases" \
-    -o APT::FTPArchive::Release::Acquire-By-Hash=no \
     -o APT::FTPArchive::MD5=true \
     -o APT::FTPArchive::SHA1=false \
     -o APT::FTPArchive::SHA256=true \
@@ -182,27 +187,16 @@ gpgv --keyring "$KEYRING" "$TREE/dists/stable/Release.gpg" "$TREE/dists/stable/R
 printf '{\n  "pool": [\n    {\n      "filename": "%s",\n      "url": "%s",\n      "sha256": "%s",\n      "sizeBytes": %s\n    }\n  ]\n}\n' \
   "$POOL_REL" "$URL" "$ACTUAL_SHA" "$SIZE" >"$TMP/pool.json"
 
-# ---- install atomically (same filesystem as <out>) ---------------------------
-NEW_DISTS="$OUT/.dists.new.$$"
-OLD_DISTS="$OUT/.dists.old.$$"
-NEW_JSON="$OUT/.pool.json.new.$$"
-cp -R "$TREE/dists" "$NEW_DISTS"
-cp "$TMP/pool.json" "$NEW_JSON"
-if [ -e "$OUT/dists" ]; then mv "$OUT/dists" "$OLD_DISTS"; fi
-mv "$NEW_DISTS" "$OUT/dists"; NEW_DISTS=""
-mv "$NEW_JSON" "$OUT/pool.json"; NEW_JSON=""
-log "wrote $OUT/dists and $OUT/pool.json"
-
-# ---- self-check -------------------------------------------------------------
+# ---- self-check (on the staged tree, BEFORE <out> is touched) ----------------
 if [ "$SELF_CHECK" = 1 ]; then
   echo "== self-check: gpgv =="
-  gpgv --keyring "$KEYRING" "$OUT/dists/stable/InRelease" || die "self-check: gpgv failed"
+  gpgv --keyring "$KEYRING" "$TREE/dists/stable/InRelease" || die "self-check: gpgv failed"
 
   echo "== self-check: apt-get update against a file: copy =="
   CHK="$TMP/check"
-  mkdir -p "$CHK/repo/pool/main/k/kintrinsic" "$CHK/state/lists/partial" "$CHK/cache/archives/partial"
-  cp -R "$OUT/dists" "$CHK/repo/dists"
-  cp "$DEB" "$CHK/repo/$POOL_REL"
+  mkdir -p "$CHK/state/lists/partial" "$CHK/cache/archives/partial"
+  # $TREE already holds dists/ and the pool file; apt only reads it.
+  cp -R "$TREE" "$CHK/repo"
   cp "$KEYRING" "$CHK/keyring.gpg"
   : >"$CHK/state/status"
   echo "deb [signed-by=$CHK/keyring.gpg arch=amd64] file:$CHK/repo stable main" >"$CHK/sources.list"
@@ -225,6 +219,17 @@ if [ "$SELF_CHECK" = 1 ]; then
   echo "== self-check passed =="
 fi
 
-# The swap is done and verified: drop the previous dists/.
-[ -z "$OLD_DISTS" ] || { rm -rf "$OLD_DISTS"; OLD_DISTS=""; }
+# ---- install atomically (same filesystem as <out>) ---------------------------
+NEW_DISTS="$OUT/.dists.new.$$"
+OLD_DISTS="$OUT/.dists.old.$$"
+NEW_JSON="$OUT/.pool.json.new.$$"
+cp -R "$TREE/dists" "$NEW_DISTS"
+cp "$TMP/pool.json" "$NEW_JSON"
+if [ -e "$OUT/dists" ]; then mv "$OUT/dists" "$OLD_DISTS"; fi
+SWAPPED=1
+mv "$NEW_DISTS" "$OUT/dists"; NEW_DISTS=""
+mv "$NEW_JSON" "$OUT/pool.json"; NEW_JSON=""
+DONE=1
+log "wrote $OUT/dists and $OUT/pool.json"
+
 log "done: kintrinsic $VER"
