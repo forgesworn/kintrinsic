@@ -52,9 +52,9 @@ run none of our own.
 On Linux Mint, Ubuntu or Debian (amd64), add the signed apt source once; updates then arrive through Update Manager or `apt upgrade`:
 
 ```sh
-sudo install -d -m 0755 /usr/share/keyrings
-curl -fsSL https://kintrinsic.app/apt/kintrinsic-archive-keyring.gpg | sudo tee /usr/share/keyrings/kintrinsic-archive-keyring.gpg >/dev/null
-printf 'Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/kintrinsic.sources >/dev/null
+sudo install -d -m 0755 /usr/share/keyrings &&
+curl -fsSL https://kintrinsic.app/apt/kintrinsic-archive-keyring.gpg | sudo tee /usr/share/keyrings/kintrinsic-archive-keyring.gpg >/dev/null &&
+printf 'Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/kintrinsic.sources >/dev/null &&
 sudo apt update && sudo apt install kintrinsic
 ```
 

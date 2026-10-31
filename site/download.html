@@ -78,13 +78,17 @@
           </p>
           <h3 class="t-eyebrow" style="margin-top: 1.4rem;">Install with apt (recommended)</h3>
           <p class="download__meta" style="margin-top: 0.5rem;">
-            Paste these four lines into a terminal, once. They add the Kintrinsic
-            package source and its signing key, then install.
+            Copy this into a terminal, once. It adds the Kintrinsic package
+            source and its signing key, then installs. It runs as one command,
+            so sudo asks for the password only once.
           </p>
-          <pre style="margin: 0.7rem 0 0; padding: 0.8rem 1rem; background: var(--code-bg); border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 0.82em; line-height: 1.5;"><code>sudo install -d -m 0755 /usr/share/keyrings
-curl -fsSL https://kintrinsic.app/apt/kintrinsic-archive-keyring.gpg | sudo tee /usr/share/keyrings/kintrinsic-archive-keyring.gpg &gt;/dev/null
-printf 'Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/kintrinsic.sources &gt;/dev/null
+          <div class="cmd">
+            <pre class="cmd__pre"><code id="apt-cmds">sudo install -d -m 0755 /usr/share/keyrings &amp;&amp;
+curl -fsSL https://kintrinsic.app/apt/kintrinsic-archive-keyring.gpg | sudo tee /usr/share/keyrings/kintrinsic-archive-keyring.gpg &gt;/dev/null &amp;&amp;
+printf 'Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/kintrinsic.sources &gt;/dev/null &amp;&amp;
 sudo apt update &amp;&amp; sudo apt install kintrinsic</code></pre>
+            <button type="button" class="btn btn-ghost cmd__copy" data-copy="apt-cmds" hidden>Copy</button>
+          </div>
           <p class="download__meta">
             Archive signing key fingerprint: <code data-apt-fpr>F38D 9963 0950 8C43 4BD4 A2F6 8535 F658 6E50 4E80</code>.
             After this, updates arrive through Update Manager or <code>sudo apt upgrade</code>.
@@ -385,6 +389,30 @@ sudo apt update &amp;&amp; sudo apt install kintrinsic</code></pre>
         if (d) el.hidden = !d.mirror;
       });
     }).catch(function () {});
+  </script>
+  <script>
+    // Copy button for the apt set-up. Copies the code block's exact text with
+    // plain \n line endings (no \r, no trailing newline, so nothing runs until
+    // the reader presses Enter). Hidden without JavaScript.
+    document.querySelectorAll('[data-copy]').forEach(function (btn) {
+      var src = document.getElementById(btn.getAttribute('data-copy'));
+      if (!src) return;
+      btn.hidden = false;
+      btn.addEventListener('click', function () {
+        var text = src.textContent.replace(/\r/g, '').replace(/\s+$/, '');
+        var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 2000); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { fallback(text); done(); });
+        } else { fallback(text); done(); }
+      });
+    });
+    function fallback(text) {
+      var t = document.createElement('textarea');
+      t.value = text; t.setAttribute('readonly', ''); t.style.position = 'fixed'; t.style.opacity = '0';
+      document.body.appendChild(t); t.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(t);
+    }
   </script>
 </body>
 </html>
