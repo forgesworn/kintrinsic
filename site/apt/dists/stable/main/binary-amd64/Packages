@@ -1,18 +1,19 @@
 Package: kintrinsic
-Version: 0.8.0
+Version: 0.8.1
 Architecture: amd64
 Maintainer: Forgesworn
+Installed-Size: 54748
 Depends: systemd, dbus, policykit-1, zenity, qrencode, libwebkit2gtk-4.1-0, x11-utils, fapolicyd, util-linux
 Recommends: flatpak
 Suggests: chromium | chromium-browser | google-chrome-stable
 Conflicts: charter
 Replaces: charter
 Provides: charter
-Filename: pool/main/k/kintrinsic/kintrinsic_0.8.0_amd64.deb
-Size: 13178522
-MD5sum: 941e3eb7f28413b86a0f6dbac4c879c3
-SHA1: ca749fca4ae814b031b3337087edff65d9c7805a
-SHA256: 9c81873210cdbc7757bd5d9a8efd9a0f799468e853ac212e3662e00cf92db382
+Filename: pool/main/k/kintrinsic/kintrinsic_0.8.1_amd64.deb
+Size: 13176468
+MD5sum: 5e1fe8426a10ef796917750a4fe26273
+SHA1: 55ced0762624fea4c318f8fc46961f932b75d36f
+SHA256: 8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c
 Section: admin
 Priority: optional
 Homepage: https://kintrinsic.app

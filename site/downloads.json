@@ -12,9 +12,9 @@
     "mirror": "https://nostr.download/2754a344624de1994b6221e7a23ef1c509d74bcade5385655b134ad0f029685d.apk"
   },
   "linux": {
-    "version": "0.8.0",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.0/kintrinsic_0.8.0_amd64.deb",
-    "sha256": "9c81873210cdbc7757bd5d9a8efd9a0f799468e853ac212e3662e00cf92db382",
-    "mirror": "https://nostr.download/9c81873210cdbc7757bd5d9a8efd9a0f799468e853ac212e3662e00cf92db382.deb"
+    "version": "0.8.1",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.1/kintrinsic_0.8.1_amd64.deb",
+    "sha256": "8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c",
+    "mirror": "https://nostr.download/8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c.deb"
   }
 }
