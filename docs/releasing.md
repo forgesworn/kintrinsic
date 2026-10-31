@@ -156,7 +156,7 @@ repository at `https://kintrinsic.app/apt/`. It is built only from a
 
 - `scripts/release/build-apt-repo.sh --deb <deb> --url <github-url> --sha256
   <hex> --self-check` checks the .deb's hash, writes `site/apt/dists/stable/`
-  (`Packages`, `Packages.gz`, `Release`, `InRelease`, `Release.gpg`) and
+  (`Packages`, `Release`, `InRelease`, `Release.gpg`; deliberately no `Packages.gz`, because the CDN caches `.gz` files for hours and a stale one fails apt against a fresh `InRelease`) and
   `site/apt/pool.json`, signs with the archive key, then proves the result:
   `gpgv` against the public keyring and a non-root `apt-get update` /
   `apt-cache policy kintrinsic` against a `file:` copy. It runs automatically

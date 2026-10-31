@@ -4,7 +4,7 @@
 #   build-apt-repo.sh --deb <path> --url <public-download-url> [--sha256 <64hex>]
 #                     [--out site/apt] [--self-check]
 #
-# Writes <out>/dists/ (Packages, Packages.gz, Release, InRelease, Release.gpg)
+# Writes <out>/dists/ (Packages, Release, InRelease, Release.gpg)
 # and <out>/pool.json. It never writes the .deb into the repo (the deploy
 # fetches it from the GitHub release and verifies the hash: see
 # fetch-apt-pool.sh), and never touches the public keyring files in <out>.
@@ -14,7 +14,7 @@
 #   CHARTER_APT_GNUPGHOME  default ~/.charter-release/gnupg
 #   CHARTER_APT_KEY_FPR    default F38D996309508C434BD4A2F68535F6586E504E80
 #
-# Needs: gpg, gpgv, dpkg-deb, dpkg-scanpackages, apt-ftparchive, gzip, sha256sum
+# Needs: gpg, gpgv, dpkg-deb, dpkg-scanpackages, apt-ftparchive, sha256sum
 # (and apt-get / apt-cache for --self-check).
 set -euo pipefail
 
@@ -59,7 +59,7 @@ if printf '%s' "$URL" | grep -q '[^A-Za-z0-9._~:/?#@!$&()*+,;=%-]'; then
   die "--url contains characters that are not safe to embed: $URL"
 fi
 
-for tool in gpg gpgv dpkg-deb dpkg-scanpackages apt-ftparchive gzip sha256sum; do
+for tool in gpg gpgv dpkg-deb dpkg-scanpackages apt-ftparchive sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
 if [ "$SELF_CHECK" = 1 ]; then
@@ -132,7 +132,10 @@ BIN="$TREE/dists/stable/main/binary-amd64"
 [ "$(grep -c '^Package: ' "$BIN/Packages")" = 1 ] || die "Packages must hold exactly one entry"
 grep -qx "Filename: $POOL_REL" "$BIN/Packages" || die "Packages Filename is not $POOL_REL"
 grep -qx "SHA256: $ACTUAL_SHA" "$BIN/Packages" || die "Packages SHA256 does not match the .deb"
-gzip -9n -c "$BIN/Packages" >"$BIN/Packages.gz"
+# No Packages.gz, deliberately: the site's CDN caches .gz files for hours but
+# serves extension-less files fresh, so a .gz index goes stale against a fresh
+# InRelease and apt rejects it ("File has unexpected size"). The uncompressed
+# index is a few hundred bytes.
 cat >"$BIN/Release" <<REL
 Archive: stable
 Origin: Kintrinsic
@@ -160,9 +163,10 @@ REL
     -o APT::FTPArchive::SHA512=true \
     release .
 ) >"$TMP/Release" 2>"$TMP/release.err" || { cat "$TMP/release.err" >&2; die "apt-ftparchive release failed"; }
-for f in Packages Packages.gz Release; do
+for f in Packages Release; do
   grep -q " main/binary-amd64/$f\$" "$TMP/Release" || die "Release does not list main/binary-amd64/$f"
 done
+if grep -q 'Packages\.gz$' "$TMP/Release"; then die "Release must not list Packages.gz (the CDN caches .gz)"; fi
 for sect in MD5Sum SHA256 SHA512; do
   grep -qx "$sect:" "$TMP/Release" || die "Release is missing its $sect section"
 done

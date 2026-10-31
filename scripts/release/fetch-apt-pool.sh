@@ -5,7 +5,7 @@
 #
 # Before anything is downloaded the repository index is verified end to end:
 #   1. InRelease must verify (gpgv) against <apt-dir>/kintrinsic-archive-keyring.gpg;
-#   2. the sha256 of dists/stable/main/binary-amd64/Packages and Packages.gz
+#   2. the sha256 of dists/stable/main/binary-amd64/Packages
 #      must equal the SHA256 entries for them inside that signed InRelease
 #      (a file that is not listed there is a failure). Only the signed text
 #      that gpgv extracts is parsed, never unsigned lines around it.
@@ -39,7 +39,7 @@ INRELEASE="$APT_DIR/dists/stable/InRelease"
 SIGNED="$(mktemp "${TMPDIR:-/tmp}/kintrinsic-inrelease.XXXXXX")"
 trap 'rm -f "$SIGNED"' EXIT
 gpgv --keyring "$KEYRING" --output "$SIGNED" "$INRELEASE" || die "InRelease does not verify against $KEYRING"
-for rel in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
+for rel in main/binary-amd64/Packages; do
   file="$APT_DIR/dists/stable/$rel"
   [ -f "$file" ] || die "missing $file"
   signed="$(awk -v f="$rel" '
@@ -52,7 +52,7 @@ for rel in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
   got="$(sha256sum "$file" | cut -d' ' -f1)"
   [ "$got" = "$signed" ] || die "$rel sha256 $got does not match the signed InRelease ($signed)"
 done
-echo "fetch-apt-pool: index verified (InRelease signature, Packages, Packages.gz)"
+echo "fetch-apt-pool: index verified (InRelease signature, Packages)"
 
 # filename<TAB>url<TAB>sha256 per entry.
 if command -v jq >/dev/null 2>&1; then
