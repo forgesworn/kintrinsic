@@ -1,0 +1,29 @@
+Package: kintrinsic
+Version: 0.8.0
+Architecture: amd64
+Maintainer: Forgesworn
+Depends: systemd, dbus, policykit-1, zenity, qrencode, libwebkit2gtk-4.1-0, x11-utils, fapolicyd, util-linux
+Recommends: flatpak
+Suggests: chromium | chromium-browser | google-chrome-stable
+Conflicts: charter
+Replaces: charter
+Provides: charter
+Filename: pool/main/k/kintrinsic/kintrinsic_0.8.0_amd64.deb
+Size: 13178522
+MD5sum: 941e3eb7f28413b86a0f6dbac4c879c3
+SHA1: ca749fca4ae814b031b3337087edff65d9c7805a
+SHA256: 9c81873210cdbc7757bd5d9a8efd9a0f799468e853ac212e3662e00cf92db382
+Section: admin
+Priority: optional
+Homepage: https://kintrinsic.app
+Description: Kintrinsic for Linux — guardian-chartered device warden
+ charterd is the privileged broker spine: it verifies guardian-signed
+ grants and enforces schedule/budget limits, app-install brokering, and
+ execution lockdown. Works standalone via device-only limits (set in
+ the Screen Time settings app, no phone needed). Ships the systemd
+ service, D-Bus policy, polkit rules, fapolicyd policy, noexec mount
+ units, the charter CLI, charter-lock, charter-xclients,
+ charter-settings, charter-setup and charter-applock. Run
+ 'charter-setup <user>' to lock down an account. fapolicyd is
+ installed but stays off until 'charter-applock arm' is run.
+

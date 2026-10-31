@@ -148,6 +148,41 @@ produce byte-identical output from the same source. `--from-draft` is
 additive: it exists so a build that already happened in CI, under the
 `release` Environment's reviewer gate, doesn't need repeating by hand.
 
+## The apt repository
+
+Linux machines can track the `kintrinsic` package through a signed apt
+repository at `https://kintrinsic.app/apt/`. It is built only from a
+**published** `linux-v*` GitHub release and holds no binaries in git.
+
+- `scripts/release/build-apt-repo.sh --deb <deb> --url <github-url> --sha256
+  <hex> --self-check` checks the .deb's hash, writes `site/apt/dists/stable/`
+  (`Packages`, `Packages.gz`, `Release`, `InRelease`, `Release.gpg`) and
+  `site/apt/pool.json`, signs with the archive key, then proves the result:
+  `gpgv` against the public keyring and a non-root `apt-get update` /
+  `apt-cache policy kintrinsic` against a `file:` copy. It runs automatically
+  in the deb channel of `publish-release.mjs --from-draft`, after the manifest
+  is written; commit `site/apt/` with the manifest and push to `main`. If it
+  fails the release is already public, so fix the cause and re-run the command
+  above by hand (the .deb is the release asset), then commit.
+- The `.deb` itself is **not** committed (`site/apt/pool/` is ignored). The
+  site deploy runs `scripts/release/fetch-apt-pool.sh site/apt`, which
+  downloads each file listed in `pool.json` from the GitHub release and checks
+  its sha256 against both `pool.json` and the signed `Packages` index. Any
+  mismatch fails the job before `rsync`, so the live site is left as it was
+  (fail closed; there is no unsigned or stale fallback).
+- Key: dedicated, sign-only RSA 4096, fingerprint
+  `F38D 9963 0950 8C43 4BD4 A2F6 8535 F658 6E50 4E80`. The secret key lives only
+  in `~/.charter-release/gnupg` (override with `CHARTER_APT_GNUPGHOME` and
+  `CHARTER_APT_KEY_FPR`). Back up `~/.charter-release/` as a whole.
+- This is a separate trust path from the ward's two-key self-update. apt is the
+  administrator's convenience path; `charterd`'s own update remains the
+  guardian-driven path, and neither depends on the other.
+- **Rotation.** The .deb installs `/usr/share/keyrings/kintrinsic-archive-keyring.gpg`.
+  To rotate, ship the new keyring inside a package release signed by the
+  *old* key, let machines upgrade, and only then switch the repository to the
+  new key. Switching first leaves every machine failing `apt update` until
+  the keyring is re-added by hand.
+
 ## The `release` Environment
 
 All three build jobs in `release-artifacts.yml` (ward APK, guardian APK,

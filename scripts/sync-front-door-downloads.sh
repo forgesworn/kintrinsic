@@ -102,5 +102,5 @@ node --input-type=module -e '
 ' "$PUB" "$CY"
 
 echo
-echo "downloads.json and download.html updated. Commit site/ and push."
+echo "downloads.json and download.html updated. Commit site/ (including site/apt/ after a Linux release) and push."
 echo "Verify the buttons resolve first: curl -sIL <url> | grep -i '^http'"

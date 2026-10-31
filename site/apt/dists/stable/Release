@@ -1,0 +1,20 @@
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Sat, 31 Oct 2026 07:27:09 +0000
+Description: Kintrinsic Linux warden (charterd) — official releases
+Label: Kintrinsic
+Origin: Kintrinsic
+Suite: stable
+MD5Sum:
+ 34121fa3ba25e6f6058bccb048461f90             1283 main/binary-amd64/Packages
+ bf75ebbe61c79d7377b9fdc17e79fac9              789 main/binary-amd64/Packages.gz
+ 8f32e7709347f529e458075eb07f0ce6               89 main/binary-amd64/Release
+SHA256:
+ a94fb00432d483af3c8e8b7cf0fc22140f20be8cdd7b831d7775b0d5b227dce0             1283 main/binary-amd64/Packages
+ c4b018a121fbe4cc4f937fb73f32858c33ad8c52f36aa49939dad90f3b4209c8              789 main/binary-amd64/Packages.gz
+ cdfdafd1b2049d40c735389f8ab6c7718c9ae2f7e3dc2f119e5192f6a2d1452e               89 main/binary-amd64/Release
+SHA512:
+ b52a643bc3be8526be765667060c12abde438b2f694df366ab115d7d88f05a927f8172203be8a2a0b62c9e4994d9dc9ca1254e1f20a575f774f4d4ed6dbf1b14             1283 main/binary-amd64/Packages
+ 1f14f058c57a6fc57d7f4992776b0b2e258ef20768af61a7745da5ce6e3963c9d81fd1701e26f04e9a4014fbc4797aff66313ae5d2968f012abc5a14734ba035              789 main/binary-amd64/Packages.gz
+ c5a890de50b9cfdfe420bf40742d514a654d250355a56cfbe77470352f3f2ebd0845f45bd88799c8cf8f07d3c278749bfcfeac3b328d7357cb13ccfdb4f9a89b               89 main/binary-amd64/Release

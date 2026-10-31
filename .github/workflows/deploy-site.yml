@@ -8,7 +8,7 @@ name: Deploy site
 on:
   push:
     branches: [main]
-    paths: ['site/**']
+    paths: ['site/**', 'scripts/release/fetch-apt-pool.sh']
   workflow_dispatch: {}
 
 # One deploy at a time; a push burst collapses to the newest queued run.
@@ -28,6 +28,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The apt pool (the .deb itself) is not in git: pull it from the public GitHub
+      # release and check its sha256 against site/apt/pool.json and the signed index.
+      # Any mismatch fails the job before rsync runs, so the live site is untouched.
+      - name: Fetch apt pool
+        run: bash scripts/release/fetch-apt-pool.sh site/apt
 
       - name: Deploy to Hetzner
         env:

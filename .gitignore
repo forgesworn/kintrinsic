@@ -53,3 +53,7 @@ internal/
 # Agent scaffolding: local only, never public
 CLAUDE.md
 CLAUDE.local.md
+
+# Local build output: the apt pool is materialised at deploy time from the
+# GitHub release (scripts/release/fetch-apt-pool.sh), never committed.
+site/apt/pool/

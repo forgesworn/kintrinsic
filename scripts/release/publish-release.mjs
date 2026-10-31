@@ -836,12 +836,41 @@ async function runFromDraft(args, sk) {
     writeFileSync(manifestPath, formatManifest(manifest));
     console.log(`wrote apps/charter-app/public/${manifestFile}`);
 
+    if (channel === "charter-deb") {
+      // The signed apt repository tracks the published .deb. The release is
+      // already public by now, so a failure here is re-runnable by hand.
+      const debUrl = urls[0];
+      if (typeof debUrl !== "string" || !debUrl.startsWith("https://github.com/")) {
+        throw new Error(`apt repo: expected the GitHub release URL first in urls, got ${debUrl}`);
+      }
+      const aptArgs = [
+        join(REPO_ROOT, "scripts", "release", "build-apt-repo.sh"),
+        "--deb", artifactPath,
+        "--url", debUrl,
+        "--sha256", sha256,
+        "--self-check",
+      ];
+      try {
+        execFileSync("bash", aptArgs, { cwd: REPO_ROOT, stdio: "inherit" });
+      } catch (err) {
+        throw new Error(
+          `apt repository build failed (${err.message}). The release ${tag} is already published; ` +
+            `fix the cause and re-run by hand: bash scripts/release/build-apt-repo.sh --deb <the ${gr.asset}> ` +
+            `--url ${debUrl} --sha256 ${sha256} --self-check`,
+        );
+      }
+    }
+
     execFileSync("bash", [join(REPO_ROOT, "scripts", "sync-front-door-downloads.sh")], {
       cwd: REPO_ROOT,
       stdio: "inherit",
     });
 
-    console.log(`next: commit apps/charter-app/public/${manifestFile} and site/, then push`);
+    console.log(
+      `next: commit apps/charter-app/public/${manifestFile} and site/` +
+        (channel === "charter-deb" ? " (including site/apt/)" : "") +
+        `, then push`,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

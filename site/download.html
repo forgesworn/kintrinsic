@@ -76,7 +76,21 @@
             all in one place. Installing changes nothing until you set them — no
             limits apply until you do. This alone is a complete, working setup.
           </p>
-          <p style="margin-top: 1.4rem;">
+          <h3 class="t-eyebrow" style="margin-top: 1.4rem;">Install with apt (recommended)</h3>
+          <p class="download__meta" style="margin-top: 0.5rem;">
+            Paste these four lines into a terminal, once. They add the Kintrinsic
+            package source and its signing key, then install.
+          </p>
+          <pre style="margin: 0.7rem 0 0; padding: 0.8rem 1rem; background: var(--code-bg); border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 0.82em; line-height: 1.5;"><code>sudo install -d -m 0755 /usr/share/keyrings
+curl -fsSL https://kintrinsic.app/apt/kintrinsic-archive-keyring.gpg | sudo tee /usr/share/keyrings/kintrinsic-archive-keyring.gpg &gt;/dev/null
+printf 'Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/kintrinsic.sources &gt;/dev/null
+sudo apt update &amp;&amp; sudo apt install kintrinsic</code></pre>
+          <p class="download__meta">
+            Archive signing key fingerprint: <code data-apt-fpr>F38D 9963 0950 8C43 4BD4 A2F6 8535 F658 6E50 4E80</code>.
+            After this, updates arrive through Update Manager or <code>sudo apt upgrade</code>.
+          </p>
+          <p class="download__meta" style="margin-top: 1.4rem;">Or download the installer directly:</p>
+          <p style="margin-top: 0.6rem;">
             <a class="btn btn-wax" href="https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.0/kintrinsic_0.8.0_amd64.deb" data-dl="linux" download>Download the installer (.deb)</a>
           </p>
           <p class="download__meta">

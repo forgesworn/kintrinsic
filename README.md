@@ -47,6 +47,19 @@ updates all travel over Nostr relays and Blossom blob servers. The only external
 services the running product needs are relays and Blossom; the long-term goal is to
 run none of our own.
 
+## Install on Linux
+
+On Linux Mint, Ubuntu or Debian (amd64), add the signed apt source once; updates then arrive through Update Manager or `apt upgrade`:
+
+```sh
+sudo install -d -m 0755 /usr/share/keyrings
+curl -fsSL https://kintrinsic.app/apt/kintrinsic-archive-keyring.gpg | sudo tee /usr/share/keyrings/kintrinsic-archive-keyring.gpg >/dev/null
+printf 'Types: deb\nURIs: https://kintrinsic.app/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/kintrinsic-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/kintrinsic.sources >/dev/null
+sudo apt update && sudo apt install kintrinsic
+```
+
+Prefer a single file? Download the `.deb` from the [download page](https://kintrinsic.app/download.html) and run `sudo apt install ./kintrinsic_*.deb`.
+
 ## The lexicon
 
 Kintrinsic is **wardship**, not "parental controls" — controls frame the
