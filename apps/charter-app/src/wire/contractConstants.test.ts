@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_EXTEND_MINUTES, MAX_NAMED_TIMES, MAX_TIME_LABEL_LEN } from "./grant";
 import { MAX_REASON_LEN, MAX_WRAP_JITTER_SECS, CHARTER_DEVICE_REQUEST } from "./request";
 import { CHARTER_DEVICE_STATUS } from "./status";
+import { CHARTER_DEVICE_AUDIT } from "./audit";
 import { CHARTER_DEVICE_RELAYS } from "./relayConfig";
 import {
   CHARTER_DEVICE_CLAUSE,
@@ -47,12 +48,14 @@ describe("§5.6 wire-contract constants (must match the Rust wardens)", () => {
     expect(CHARTER_DEVICE_REQUEST).toBe(31111);
     expect(CHARTER_DEVICE_GRANT).toBe(31112);
     expect(CHARTER_DEVICE_CLAUSE).toBe(31113);
+    expect(CHARTER_DEVICE_AUDIT).toBe(31000);
     expect(CHARTER_DEVICE_STATUS).toBe(31114);
     expect(CHARTER_DEVICE_USAGE_SYNC).toBe(31115);
     expect(CHARTER_DEVICE_RELEASE).toBe(31116);
     expect(CHARTER_DEVICE_RELAYS).toBe(31118);
-    // audit 31000 + curator web list 30100 are Rust-side-only on the wire the
-    // guardian emits/consumes today; pinned in the Rust mirror.
+    // The curator web list 30100 is Rust-side-only on the wire the guardian
+    // emits/consumes today; pinned in the Rust mirror. The audit (31000) is
+    // consumed here for the break-glass override.
   });
 
   it("marker tag", () => {

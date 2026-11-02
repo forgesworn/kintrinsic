@@ -1762,7 +1762,16 @@ appears. The outcome vocabulary is `enacted | denied | failed | locked | thawed
 When the ward activates the emergency override, the device emits the standard
 device audit with tags `["t","charter-device"]`, `["outcome","override"]`,
 `["op","unlock.breakglass"]`, `["scope","calls"|"full"]`,
-`["durationSecs","<n>"]` — content empty, no reason text, no PII. The
+`["durationSecs","<n>"]`, `["at","<unix secs>"]` — content empty, no reason
+text, no PII. `at` is an additive tag: the moment the ward pressed the
+override, stable across wrap rebuilds (the gift-wrap's own `created_at` is
+stamped when the wrap is built, which is the next poll after the press even if
+the phone is offline, so it can be well before the wrap reaches a relay; a wrap
+rebuilt after a day offline gets a new id and a new time). A consumer may
+decline an `at` later than the wrap's own `created_at`, or implausibly old
+(the guardian app uses 30 days), and date by `created_at` instead, while still
+keying on it. Consumers fold copies of one override by `(machine, at)`, and an
+older ward that omits `at` is dated by the rumor's `created_at` instead. The
 override itself **never waits on the wire**: offline, the event is journaled
 durably and emitted on reconnect. Guardian side: the carrier notifies
 immediately on any `outcome=override` audit; MyCharter renders it in Activity

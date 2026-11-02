@@ -9,6 +9,7 @@ import {
 import { CHARTER_DEVICE_REQUEST, type DeviceRequest } from "../wire/request";
 import type { LocalInboxEntry } from "../carrier/localLink";
 import { ingestWrap, type WrapIngestContext } from "./ingestWrap";
+import { overrideTags, overrideWrap } from "../test/overrideWrap";
 import { ConsumeQueue, drainLocalInbox } from "./localDrain";
 
 const MARKER: [string, string] = ["t", "charter-device"];
@@ -68,6 +69,8 @@ function giftWrapRequest(req: DeviceRequest, opts: { sealedBy?: Uint8Array } = {
 function makeStore(opts: { knownMachine?: boolean } = {}) {
   const known = opts.knownMachine ?? true;
   const memory: string[] = [];
+  const memoryAudits: string[] = [];
+  const persistedAudits: string[] = [];
   const persisted: string[] = [];
   const statuses: unknown[] = [];
   const ctx: WrapIngestContext = {
@@ -81,14 +84,24 @@ function makeStore(opts: { knownMachine?: boolean } = {}) {
       if (!memory.includes(r.reqId)) memory.push(r.reqId);
       return true;
     },
+    seenAudits: new Set(),
+    hasAudit: (key) => memoryAudits.includes(key),
+    ingestAudit: (a) => {
+      if (!known) return false;
+      if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
+      return true;
+    },
   };
   return {
     ctx,
     memory,
     persisted,
+    memoryAudits,
+    persistedAudits,
     statuses,
     persist: () => {
       persisted.splice(0, persisted.length, ...memory);
+      persistedAudits.splice(0, persistedAudits.length, ...memoryAudits);
     },
   };
 }
@@ -133,15 +146,15 @@ describe("home-network drain", () => {
     expect(store.memory).toEqual(["dd".repeat(32)]);
 
     // State not written yet: the carrier must keep the wrap.
-    queue.flush({ persistedOk: true, hasRequest: (id) => store.persisted.includes(id), consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: (id) => store.persisted.includes(id), consume });
     expect(consume).not.toHaveBeenCalled();
 
     // A failed write must not release it either.
     store.persist();
-    queue.flush({ persistedOk: false, hasRequest: (id) => store.persisted.includes(id), consume });
+    queue.flush({ persistedOk: false, hasAudit: () => false, hasRequest: (id) => store.persisted.includes(id), consume });
     expect(consume).not.toHaveBeenCalled();
 
-    queue.flush({ persistedOk: true, hasRequest: (id) => store.persisted.includes(id), consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: (id) => store.persisted.includes(id), consume });
     expect(consume).toHaveBeenCalledTimes(1);
     expect(consume).toHaveBeenCalledWith([w.id]);
     expect(queue.size).toBe(0);
@@ -158,7 +171,7 @@ describe("home-network drain", () => {
     expect(store.memory).toEqual(["ee".repeat(32)]);
     // It is consumed (so it doesn't come back every two seconds) without a second request.
     const consume = vi.fn();
-    queue.flush({ persistedOk: true, hasRequest: () => true, consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: () => true, consume });
     expect(consume).toHaveBeenCalledWith([w.id]);
   });
 
@@ -172,9 +185,9 @@ describe("home-network drain", () => {
     const queue = new ConsumeQueue();
     drainLocalInbox({ inbox: () => [entry(w)], ingest: (x) => ingestWrap(x, store.ctx), queue });
     const consume = vi.fn();
-    queue.flush({ persistedOk: true, hasRequest: () => false, consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: () => false, consume });
     expect(consume).not.toHaveBeenCalled();
-    queue.flush({ persistedOk: true, hasRequest: (r) => r === "ab".repeat(32), consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: (r) => r === "ab".repeat(32), consume });
     expect(consume).toHaveBeenCalledWith([w.id]);
   });
 
@@ -197,7 +210,7 @@ describe("home-network drain", () => {
       queue,
     });
     const consume = vi.fn();
-    queue.flush({ persistedOk: true, hasRequest: () => false, consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: () => false, consume });
     expect(consume).toHaveBeenCalledWith([forged.id, "bad"]);
     expect(store.memory).toEqual([]);
   });
@@ -215,10 +228,46 @@ describe("home-network drain", () => {
     queue.add("w1", "req1");
     queue.add("w1"); // the same wrap seen again, e.g. by the next drain
     const consume = vi.fn();
-    queue.flush({ persistedOk: true, hasRequest: () => false, consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: () => false, consume });
     expect(consume).not.toHaveBeenCalled();
-    queue.flush({ persistedOk: true, hasRequest: () => true, consume });
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: () => true, consume });
     expect(consume).toHaveBeenCalledWith(["w1"]);
+  });
+
+  it("holds an emergency unlock's wrap until the line is persisted, as it does an ask", () => {
+    const store = makeStore();
+    const at = Math.floor(Date.now() / 1000) - 60;
+    const w = overrideWrap({ guardianPk, machineSk, tags: overrideTags([["at", String(at)]]) });
+    const queue = new ConsumeQueue();
+    const result = ingestWrap(w, store.ctx);
+    expect(result.kind).toBe("audit");
+    drainLocalInbox({ inbox: () => [entry(w)], ingest: () => result, queue });
+    const consume = vi.fn();
+    const flush = (persistedOk = true) =>
+      queue.flush({
+        persistedOk,
+        hasRequest: () => false,
+        hasAudit: (k) => store.persistedAudits.includes(k),
+        consume,
+      });
+    flush();
+    expect(consume).not.toHaveBeenCalled();
+    store.persist();
+    flush(false);
+    expect(consume).not.toHaveBeenCalled();
+    flush();
+    expect(consume).toHaveBeenCalledWith([w.id]);
+  });
+
+  it("does not consume an emergency unlock from a phone it cannot place yet", () => {
+    const store = makeStore({ knownMachine: false });
+    const queue = new ConsumeQueue();
+    const current = overrideWrap({ guardianPk, machineSk, tags: overrideTags() });
+    const result = ingestWrap(current, store.ctx);
+    expect(result).toEqual({ kind: "unlanded" });
+    drainLocalInbox({ inbox: () => [entry(current)], ingest: () => result, queue });
+    expect(queue.size).toBe(0);
+    expect(store.ctx.handledWraps.has(current.id)).toBe(false);
   });
 
   it("does nothing when the bridge has no inbox", () => {

@@ -226,15 +226,24 @@ impl BreakGlass {
 }
 
 /// The contract's break-glass audit tags (`spec/contract.md` §Break-glass
-/// override event): outcome=override, op=unlock.breakglass, scope, duration.
-/// Content is always empty — numbers and enums only, never PII.
-pub fn audit_tags(scope: &str, duration_secs: u64) -> Vec<Vec<String>> {
+/// override event): outcome=override, op=unlock.breakglass, scope, duration,
+/// and `at`, the moment the ward pressed it. Content is always empty —
+/// numbers and enums only, never PII.
+///
+/// `at` is carried as a tag because the audit's gift-wrap is stamped when it
+/// is BUILT: at the next poll after the press, even if the phone is offline
+/// (the wrap then waits, with that old date, until a relay takes it), and again
+/// if it is rebuilt after a day. Neither is when the glass was broken. A tag is
+/// part of the journaled entry, so it is stable across every rebuild and the
+/// guardian can fold the copies into one line at the right time.
+pub fn audit_tags(scope: &str, duration_secs: u64, at: u64) -> Vec<Vec<String>> {
     // NB: the transport prepends the ["t","charter-device"] marker itself.
     vec![
         vec!["outcome".into(), "override".into()],
         vec!["op".into(), "unlock.breakglass".into()],
         vec!["scope".into(), scope.into()],
         vec!["durationSecs".into(), duration_secs.to_string()],
+        vec!["at".into(), at.to_string()],
     ]
 }
 
@@ -274,8 +283,8 @@ mod tests {
         let base = tmp("spool");
         let bg = BreakGlass::new(&base);
         assert!(bg.pending_audits().is_empty());
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
-        bg.queue_audit(audit_tags(SCOPE_CALLS, 300));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
+        bg.queue_audit(audit_tags(SCOPE_CALLS, 300, T0));
         let reopened = BreakGlass::new(&base);
         let pending = reopened.pending_audits();
         assert_eq!(pending.len(), 2, "offline audits survive a restart");
@@ -311,7 +320,7 @@ mod tests {
     fn each_audit_is_built_once_and_dropped_only_when_sent() {
         let base = tmp("once");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
         let mut builds = 0u8;
         let mut build = |_: &[Vec<String>]| {
             builds += 1;
@@ -327,7 +336,7 @@ mod tests {
         );
         assert_eq!(first.len(), 1);
         // A second audit gets its own wrap; the first keeps its own.
-        bg.queue_audit(audit_tags(SCOPE_CALLS, 300));
+        bg.queue_audit(audit_tags(SCOPE_CALLS, 300, T0));
         let both = bg.wraps_to_publish(T0 + 120, &mut build, |w| offered.push(w.id));
         assert_eq!(builds, 2);
         assert_eq!(
@@ -339,7 +348,7 @@ mod tests {
         assert_eq!(both.len(), 2);
         // Only what was sent leaves the spool.
         bg.mark_sent(&[both[0].id]);
-        assert_eq!(bg.pending_audits(), vec![audit_tags(SCOPE_CALLS, 300)]);
+        assert_eq!(bg.pending_audits(), vec![audit_tags(SCOPE_CALLS, 300, T0)]);
         bg.mark_sent(&[both[1].id]);
         assert!(bg.pending_audits().is_empty());
         let _ = std::fs::remove_dir_all(&base);
@@ -349,7 +358,15 @@ mod tests {
     fn a_spool_written_by_an_earlier_build_still_loads() {
         let base = tmp("legacy");
         let bg = BreakGlass::new(&base);
-        let legacy = vec![audit_tags(SCOPE_FULL, 600)];
+        // Hand-written as an earlier build stored it: the tags it knew then,
+        // with no `at`, so this proves old entries (not just current ones) load.
+        let legacy: Vec<Vec<Vec<String>>> = vec![vec![
+            vec!["outcome".into(), "override".into()],
+            vec!["op".into(), "unlock.breakglass".into()],
+            vec!["scope".into(), SCOPE_FULL.into()],
+            vec!["durationSecs".into(), "600".into()],
+        ]];
+        assert!(legacy[0].iter().all(|t| t[0] != "at"));
         std::fs::write(bg.spool_path(), serde_json::to_string(&legacy).unwrap()).unwrap();
         assert_eq!(bg.pending_audits(), legacy);
         let wraps = bg.wraps_to_publish(T0, |_| Some(fake_wrap(9)), |_| {});
@@ -366,7 +383,7 @@ mod tests {
     fn a_wrap_waiting_over_a_day_is_rebuilt_once_and_never_sent_stale() {
         let base = tmp("stale");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
         let mut n = 0u8;
         let mut offered = Vec::new();
         let mut round = |now: u64, offered: &mut Vec<NostrEvent>| {
@@ -417,7 +434,7 @@ mod tests {
     fn a_wrap_that_could_not_be_journaled_is_not_offered() {
         let base = tmp("nodisk");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
         // The temporary file's name is taken by a directory: the write fails.
         std::fs::create_dir_all(bg.dir.join("pending-audits.json.tmp")).unwrap();
         let mut offers = 0;
@@ -433,14 +450,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The press time rides in the tags, so every rebuilt wrap of the same
+    /// audit tells the guardian the same moment.
+    #[test]
+    fn audit_tags_carry_the_press_time() {
+        let tags = audit_tags(SCOPE_CALLS, 300, 1_782_752_461);
+        assert!(tags.contains(&vec!["at".into(), "1782752461".into()]));
+        assert_eq!(
+            tags.iter().filter(|t| t[0] == "at").count(),
+            1,
+            "exactly one at tag"
+        );
+    }
+
     #[test]
     fn audit_tags_carry_no_pii() {
-        let tags = audit_tags(SCOPE_FULL, 600);
+        let tags = audit_tags(SCOPE_FULL, 600, T0);
         let flat = format!("{tags:?}");
         // Only routing/classification vocabulary — no names, numbers, reasons.
-        for key in ["outcome", "op", "scope", "durationSecs"] {
+        for key in ["outcome", "op", "scope", "durationSecs", "at"] {
             assert!(flat.contains(key));
         }
-        assert_eq!(tags.len(), 4, "no extra fields creep in");
+        assert_eq!(tags.len(), 5, "no extra fields creep in");
     }
 }

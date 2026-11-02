@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   CURSOR_OVERLAP_SECS,
+  SWEEP_INTERVAL_SECS,
   WINDOW_FLOOR_SECS,
   nextCursor,
+  readWindow,
+  sweepDue,
   windowSince,
 } from "./relayWindow";
 
@@ -54,5 +57,41 @@ describe("nextCursor", () => {
     const askedAt = NOW - 30;
     const cursor = nextCursor(NOW - 600, NOW, true);
     expect(windowSince(cursor, NOW + 30)).toBeLessThanOrEqual(askedAt);
+  });
+});
+
+describe("sweepDue", () => {
+  it("sweeps when none has happened yet", () => {
+    expect(sweepDue(null, NOW)).toBe(true);
+  });
+
+  it("does not sweep again before the interval is up", () => {
+    expect(sweepDue(NOW - SWEEP_INTERVAL_SECS + 1, NOW)).toBe(false);
+  });
+
+  it("sweeps once the interval has passed, exactly at it too", () => {
+    expect(sweepDue(NOW - SWEEP_INTERVAL_SECS, NOW)).toBe(true);
+    expect(sweepDue(NOW - 2 * SWEEP_INTERVAL_SECS, NOW)).toBe(true);
+  });
+
+  it("sweeps when forced (foreground, pull-to-refresh) however recent the last one", () => {
+    expect(sweepDue(NOW - 5, NOW, true)).toBe(true);
+  });
+});
+
+describe("readWindow", () => {
+  it("a sweep reads from the floor and ignores the cursor", () => {
+    const cursor = NOW - 300;
+    expect(readWindow(cursor, null, NOW)).toEqual({ since: NOW - WINDOW_FLOOR_SECS, sweep: true });
+    expect(readWindow(cursor, NOW - 10, NOW, true)).toEqual({ since: NOW - WINDOW_FLOOR_SECS, sweep: true });
+  });
+
+  it("any other read follows the cursor", () => {
+    const cursor = NOW - 300;
+    expect(readWindow(cursor, NOW - 60, NOW)).toEqual({ since: cursor, sweep: false });
+  });
+
+  it("the floor is unchanged at a day", () => {
+    expect(WINDOW_FLOOR_SECS).toBe(24 * 60 * 60);
   });
 });

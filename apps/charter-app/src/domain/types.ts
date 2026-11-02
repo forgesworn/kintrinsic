@@ -558,6 +558,13 @@ export interface ActivityEvent {
    * can say "applied on {device}" once the ward's ACK arrives. Never wire data.
    */
   wraps?: string[];
+  /**
+   * Present only on an emergency-unlock line: the override's identity
+   * (`DeviceOverride.key`). The in-memory "handled" sets are lost on reload and
+   * the relay is re-read for a day, so this persisted key is what stops the same
+   * unlock being added twice. Distinct from `wraps`, which are clause deliveries.
+   */
+  auditKey?: string;
 }
 
 /** The signing helper the parent uses to authorize changes/decisions. */

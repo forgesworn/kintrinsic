@@ -73,6 +73,27 @@ function relativeTime(ts: number, now: number): string {
   });
 }
 
+/**
+ * The exact moment, for an emergency unlock: "18:42" today, "Sat 31 Oct, 18:42"
+ * on another day (with the year when it is not this one). A guardian reading
+ * "5m ago" for something the ward did in an emergency also wants to know WHEN,
+ * and a relative time drifts as the page ages. Uses the viewer's own locale so
+ * a UK phone reads 24-hour.
+ */
+export function exactWhen(ts: number, now: number): string {
+  const d = new Date(ts);
+  const n = new Date(now);
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === n.toDateString()) return time;
+  const day = d.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    ...(d.getFullYear() !== n.getFullYear() ? { year: "numeric" as const } : {}),
+  });
+  return `${day}, ${time}`;
+}
+
 /** A friendly day-bucket label: Today / Yesterday / a short date. */
 function dayLabel(ts: number, now: number): string {
   const startOf = (t: number) => {
@@ -186,7 +207,11 @@ export function ActivityEventRow({
         <br />
         <span className="row-sub">
           {who ? `${who} · ` : ""}
-          <time dateTime={new Date(ev.ts).toISOString()}>{relativeTime(ev.ts, now)}</time>
+          <time dateTime={new Date(ev.ts).toISOString()}>
+            {ev.outcome === "override"
+              ? `${exactWhen(ev.ts, now)} · ${relativeTime(ev.ts, now)}`
+              : relativeTime(ev.ts, now)}
+          </time>
         </span>
       </span>
     </li>

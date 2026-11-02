@@ -1684,8 +1684,10 @@ impl Warden {
         self.break_glass.open(&w);
         // Loud, but never blocking: spooled now, emitted on the next poll
         // (or immediately after, if the phone is online).
+        // `now` rides in the audit so the guardian sees when it was pressed,
+        // not when the wrap was eventually built and published.
         self.break_glass
-            .queue_audit(crate::breakglass::audit_tags(&scope, duration_secs));
+            .queue_audit(crate::breakglass::audit_tags(&scope, duration_secs, now));
         serde_json::json!({
             "allowed": true,
             "scope": scope,
@@ -5489,6 +5491,10 @@ mod tests {
         assert!(pending[0].contains(&vec!["outcome".into(), "override".into()]));
         assert!(pending[0].contains(&vec!["op".into(), "unlock.breakglass".into()]));
         assert!(pending[0].contains(&vec!["durationSecs".into(), "600".into()]));
+        assert!(
+            pending[0].contains(&vec!["at".into(), now.to_string()]),
+            "the audit carries the moment the glass was broken"
+        );
 
         // Durable: a restart mid-emergency must not slam the door.
         drop(w);
