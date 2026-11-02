@@ -244,11 +244,87 @@ describe("LeverSheet", () => {
       ctx.deviceStatus = {};
     });
 
+    it("says the real reach of Stop now before it is sent", () => {
+      mount(<LeverSheet mode="stop" child={CHILD} onClose={onClose} />);
+      const text = container.textContent ?? "";
+      expect(text).toContain("every one of their devices");
+      expect(text).toContain("Always-on apps stop too, though audio already playing may carry on");
+      expect(text).toContain("until midnight, or until you allow them back on");
+      expect(text).toContain("the emergency unlock unless you have turned it off");
+      // The button is not renamed.
+      expect(button("Warn, then finish")).toBeTruthy();
+    });
+
     it("Cancel closes without sending", async () => {
       mount(<LeverSheet mode="stop" child={CHILD} onClose={onClose} />);
       await click(button("Cancel"));
       expect(ctx.standDown).not.toHaveBeenCalled();
       expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+  describe("while the ward is stopped for today", () => {
+    const NOTICE = "Sam is stopped for today, so this won't take effect until you allow them back on.";
+    const stopped = () => {
+      ctx.deviceStatus = {
+        ["a".repeat(64)]: { ts: Math.floor(Date.now() / 1000), lockReason: "standdown" },
+      };
+    };
+    afterEach(() => {
+      ctx.deviceStatus = {};
+    });
+
+    it("the give sheet says so first, and still sends if the guardian insists", async () => {
+      stopped();
+      mount(<LeverSheet mode="give" child={CHILD} onClose={onClose} />);
+      expect(container.textContent).toContain(NOTICE);
+      await click(button("+15 min"));
+      expect(ctx.giveTime).toHaveBeenCalledTimes(1);
+    });
+
+    it("the give sheet offers the existing 'Allow back on' action", async () => {
+      stopped();
+      mount(<LeverSheet mode="give" child={CHILD} onClose={onClose} />);
+      await click(button("Allow back on"));
+      expect(ctx.giveTime).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Finished for today");
+      await click(button("Allow back on"));
+      expect(ctx.standDown).toHaveBeenCalledWith("c1", true);
+    });
+
+    it("the approve sheet says so before approving, and does not block it", async () => {
+      stopped();
+      mount(<LeverSheet mode="approve" child={CHILD} request={ASK} onClose={onClose} />);
+      expect(container.textContent).toContain(NOTICE);
+      await click(button("Approve 30 min"));
+      expect(ctx.approveRequest).toHaveBeenCalledWith("r1", 30);
+    });
+
+    it("the different-kind-of-time sheet says so too", () => {
+      stopped();
+      mount(<LeverSheet mode="retype" child={CHILD} request={ASK} onClose={onClose} />);
+      expect(container.textContent).toContain(NOTICE);
+    });
+
+    it("a lift that lands while the stop sheet is open settles it, never offering 'Warn, then finish'", async () => {
+      stopped();
+      mount(<LeverSheet mode="stop" child={CHILD} onClose={onClose} />);
+      expect(button("Allow back on")).toBeDefined();
+      ctx.deviceStatus = {};
+      mount(<LeverSheet mode="stop" child={CHILD} onClose={onClose} />);
+      expect(container.textContent).toContain("Sam is back on.");
+      expect([...container.querySelectorAll("button")].map((b) => b.textContent?.trim())).toEqual([
+        "Close",
+      ]);
+      await click(button("Close"));
+      expect(ctx.standDown).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("says nothing when the ward is not stopped", () => {
+      mount(<LeverSheet mode="give" child={CHILD} onClose={onClose} />);
+      expect(container.textContent).not.toContain("stopped for today");
+      mount(<LeverSheet mode="approve" child={CHILD} request={ASK} onClose={onClose} />);
+      expect(container.textContent).not.toContain("stopped for today");
     });
   });
 });

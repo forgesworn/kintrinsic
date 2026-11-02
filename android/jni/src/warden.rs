@@ -464,6 +464,14 @@ pub struct Warden {
 /// clause lifts its posture lists (see [`Warden::app_policy`]) but never
 /// `hidden`. Used to bound what an `onlyThese` time may IMPLY allowed: it
 /// must not grant a browser Free time itself denies.
+/// What is stored in the `apps` slot, as [`Warden::stored_apps_clause_state`]
+/// reads it.
+enum StoredApps {
+    Absent,
+    Usable(charter_proto::GrantApps),
+    Unusable,
+}
+
 fn free_time_would_run(free: Option<charter_proto::GrantApps>, pkg: &str) -> bool {
     let Some(g) = free else {
         return true;
@@ -1254,9 +1262,22 @@ impl Warden {
     /// ([`Warden::app_policy`]) needs the difference: there an unreadable
     /// clause read as "none" unsuspended and unhid every app for a tick (F1).
     fn stored_apps_clause_checked(&self) -> Result<Option<charter_proto::GrantApps>, String> {
+        Ok(match self.stored_apps_clause_state()? {
+            StoredApps::Usable(g) => Some(g),
+            StoredApps::Absent | StoredApps::Unusable => None,
+        })
+    }
+
+    /// [`Warden::stored_apps_clause_checked`], keeping "nothing stored" apart
+    /// from "stored but unusable" (unparseable, or a version this build does
+    /// not understand). Enforcement treats both as no lists, but anything that
+    /// LOOSENS on the strength of Free time's lists (an `onlyThese` time
+    /// implying a browser or an always-available app) must treat an unusable
+    /// clause as unknown, not as permissive.
+    fn stored_apps_clause_state(&self) -> Result<StoredApps, String> {
         self.require_readable_pairing()?;
         let Some(subject) = self.subject else {
-            return Ok(None);
+            return Ok(StoredApps::Absent);
         };
         let Some(stored) = self
             .child_clauses
@@ -1266,7 +1287,7 @@ impl Warden {
             )
             .map_err(|e| format!("apps clause unreadable: {e:?}"))?
         else {
-            return Ok(None);
+            return Ok(StoredApps::Absent);
         };
         Ok(
             match serde_json::from_str::<charter_proto::GrantApps>(&stored) {
@@ -1276,10 +1297,24 @@ impl Warden {
                 // (`apps_policy.rs`), so a version bump behaves identically on
                 // both platforms: the loosening direction (a blocked-list simply
                 // stops being enforced) rather than confiscating on a guess.
-                Ok(g) if g.v == charter_proto::APPS_VERSION => Some(g),
-                _ => None,
+                Ok(g) if g.v == charter_proto::APPS_VERSION => StoredApps::Usable(g),
+                _ => StoredApps::Unusable,
             },
         )
+    }
+
+    /// Whether Free time's own `apps` clause would let `pkg` run at `now`, for
+    /// the places a named time IMPLIES an app allowed. No clause restricts
+    /// nothing; a stored clause that cannot be used is unknown, so nothing is
+    /// implied (closed).
+    fn free_time_runs(&self, now: i64, pkg: &str) -> Result<bool, String> {
+        Ok(match self.stored_apps_clause_state()? {
+            StoredApps::Absent => true,
+            StoredApps::Usable(g) => {
+                free_time_would_run(Some(g.effective_at(now.max(0) as u64)), pkg)
+            }
+            StoredApps::Unusable => false,
+        })
     }
 
     /// The sole ward's stored `apps` clause, if there is a usable one.
@@ -1333,18 +1368,28 @@ impl Warden {
         // moment the ward set it as default. Free blocking it, not listing it
         // under an allowlist, or hiding it means no browser at all in this
         // time: the sites stay unreachable (fail closed).
-        if let Some(t) = named {
+        if let Some(t) = &named {
             if t.posture == charter_proto::TimePosture::OnlyThese && !t.sites.is_empty() {
                 if let Some(b) = &self.default_browser {
-                    let free = self.stored_apps_clause_checked()?;
-                    let free_runs_it = free_time_would_run(
-                        free.as_ref()
-                            .map(|g| g.effective_at(now_unix.max(0) as u64)),
-                        b,
-                    );
+                    let free_runs_it = self.free_time_runs(now_unix, b)?;
                     if free_runs_it && !eff.allowed.contains(b) {
                         eff.allowed.push(b.clone());
                     }
+                }
+            }
+        }
+        // Always-available apps run in every time. Inside a named time the
+        // device is unlocked, so the lock-only exemption is empty and the
+        // composed list would suspend them: keep each one Free time would run
+        // runnable, whatever the time's posture says.
+        if named.is_some() {
+            for pkg in self.always_available_in_time(now_unix) {
+                eff.blocked.retain(|b| b != &pkg);
+                eff.ask_first.retain(|b| b != &pkg);
+                if eff.posture == charter_proto::AppPosture::Allowlist
+                    && !eff.allowed.contains(&pkg)
+                {
+                    eff.allowed.push(pkg);
                 }
             }
         }
@@ -1593,12 +1638,45 @@ impl Warden {
                         view["timeLine"] =
                             serde_json::json!(format!("{} until {until}", named.label));
                     }
-                    let allowed = crate::times::allowed_labels(named, |pkg| {
+                    // Name only what will really run: the enforcer unions the
+                    // per-app rules and the spent buckets on top of the
+                    // composed list, so an app either has blocked is left off
+                    // (an unreadable answer leaves the line as it was).
+                    let not_running: std::collections::HashSet<String> = self
+                        .app_rule_suspensions(now)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .chain(self.bucket_suspensions(now).unwrap_or_default())
+                        .collect();
+                    let mut shown = named.clone();
+                    shown.apps.retain(|p| !not_running.contains(p));
+                    let mut allowed = crate::times::allowed_labels(&shown, |pkg| {
                         self.installed_apps
                             .iter()
                             .find(|a| a.pkg == pkg)
                             .map(|a| a.label.clone())
                     });
+                    if named.posture == charter_proto::TimePosture::OnlyThese {
+                        // Always-available apps run in every time; say so. An
+                        // app this phone does not have is not named: a package
+                        // id means nothing to the ward.
+                        for pkg in self.always_available_in_time(now) {
+                            if named.apps.contains(&pkg) || not_running.contains(&pkg) {
+                                continue;
+                            }
+                            let Some(label) = self
+                                .installed_apps
+                                .iter()
+                                .find(|a| a.pkg == pkg)
+                                .map(|a| a.label.clone())
+                            else {
+                                continue;
+                            };
+                            if !allowed.contains(&label) {
+                                allowed.push(label);
+                            }
+                        }
+                    }
                     if !allowed.is_empty() {
                         view["allowed"] = serde_json::json!(allowed);
                     }
@@ -3387,7 +3465,10 @@ impl Warden {
             // "never re-derived platform-side"). A stood-down ward once saw a
             // locked shade headlined "Unlocked" — this arm was missing.
             "standdown" => {
-                let (t, d) = charter_spine::enforcer_runtime::lock_message(LockReason::StandDown);
+                let (t, d) = charter_spine::enforcer_runtime::lock_message_for(
+                    LockReason::StandDown,
+                    dormant,
+                );
                 (t.to_string(), d.to_string())
             }
             "malformed" => (
@@ -3563,22 +3644,48 @@ impl Warden {
         if !locked {
             return EMPTY.to_string();
         }
-        let Some(subject) = self.subject else {
+        let Some(body) = self.always_available_body() else {
             return EMPTY.to_string();
         };
-        let body = self
-            .child_clauses
+        serde_json::json!({ "open": body.exempt_packages(lock_reason, now) }).to_string()
+    }
+
+    /// The stored `alwaysavailable` clause, or `None` when unpaired, absent,
+    /// unreadable or unparseable. Every reader of it fails closed: it only ever
+    /// loosens enforcement.
+    fn always_available_body(&self) -> Option<charter_proto::AlwaysAvailableBody> {
+        let subject = self.subject?;
+        self.child_clauses
             .get_child_clause(
                 &subject.to_hex(),
                 charter_proto::ClauseKind::AlwaysAvailable.store_key(),
             )
             .ok()
             .flatten()
-            .and_then(|b| serde_json::from_str::<charter_proto::AlwaysAvailableBody>(&b).ok());
-        let Some(body) = body else {
-            return EMPTY.to_string();
+            .and_then(|b| serde_json::from_str::<charter_proto::AlwaysAvailableBody>(&b).ok())
+    }
+
+    /// The always-available packages that stay runnable INSIDE a named time:
+    /// live in the clause and something Free time would itself run (not
+    /// blocked, not off Free's allowlist, not `hidden`). `alwaysavailable`
+    /// "applies in every time and a named time cannot override it"
+    /// (`docs/times-design.md` model item 4), but it never reaches past Free
+    /// time's own outright block (`spec/contract.md`, Always available).
+    ///
+    /// Only reached with a named time running, i.e. an unlocked device. A
+    /// stand-down locks the device and runs no time, so it removes these apps
+    /// by design. Empty on any doubt (fail closed).
+    fn always_available_in_time(&self, now: i64) -> Vec<String> {
+        let Some(body) = self.always_available_body() else {
+            return Vec::new();
         };
-        serde_json::json!({ "open": body.exempt_packages(lock_reason, now) }).to_string()
+        let live = body.live_packages(now.max(0) as u64);
+        if live.is_empty() {
+            return Vec::new();
+        }
+        live.into_iter()
+            .filter(|p| self.free_time_runs(now, p).unwrap_or(false))
+            .collect()
     }
 
     fn schedule_now(&self) -> Option<GrantSchedule> {
@@ -11358,6 +11465,931 @@ mod times_tests {
         assert!(
             warn.get("time").is_none() && warn.get("then").is_none(),
             "{warn}"
+        );
+    }
+}
+
+/// `alwaysavailable` applies in every time (docs/times-design.md model item 4
+/// and the fail-safe table): outside a window, inside an `onlyThese` or
+/// `everythingExcept` time and in a typed-gift run, a named app stays
+/// runnable, bounded by what Free time itself would run. Only a stand-down
+/// takes it away. The matrix test prints what each seam the lock screen and
+/// the reconcile read answers; the assertions pin the promise.
+#[cfg(test)]
+mod always_available_in_times {
+    use super::*;
+    use charter_proto::ClauseKind;
+    use serde_json::json;
+
+    // Mon 2026-06-29, Europe/London (BST): T0 is 18:00 local.
+    const T0: i64 = 1_782_752_400;
+    const POD: &str = "de.danoeh.antennapod";
+
+    fn put(w: &Warden, hex: &str, kind: ClauseKind, body: serde_json::Value) {
+        w.child_clauses
+            .put_child_clause(hex, kind.store_key(), 1, &body.to_string())
+            .expect("stored");
+    }
+
+    /// The renamed Learning template: `onlyThese`, id still `learning`.
+    fn project(apps: serde_json::Value) -> serde_json::Value {
+        json!({
+            "v": 1, "issuedAt": 1,
+            "times": [{ "id": "learning", "label": "Project", "posture": "onlyThese",
+                        "apps": apps }]
+        })
+    }
+
+    fn phone(
+        tag: &str,
+        windows: serde_json::Value,
+        times: Option<serde_json::Value>,
+        apps: Option<serde_json::Value>,
+    ) -> (Warden, String) {
+        let base =
+            std::env::temp_dir().join(format!("charter-aa-times-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 1).expect("warden");
+        let subject = charter_primitives::PubKey::from_bytes([0x44; 32]);
+        w.subject = Some(subject);
+        let hex = subject.to_hex();
+        put(
+            &w,
+            &hex,
+            ClauseKind::Schedule,
+            json!({ "v": 1, "tz": "Europe/London", "weekly": { "mon": windows }, "issuedAt": 1 }),
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::AlwaysAvailable,
+            json!({ "v": 1, "issuedAt": 1, "apps": [{ "pkg": POD }] }),
+        );
+        if let Some(t) = times {
+            put(&w, &hex, ClauseKind::Times, t);
+        }
+        if let Some(a) = apps {
+            put(&w, &hex, ClauseKind::Apps, a);
+        }
+        (w, hex)
+    }
+
+    /// What the ward's two consumers would do with `POD` at `now`, computed the
+    /// way `appSuspendSet` / `openRowEntries` compute it from the same answers.
+    struct Seen {
+        locked: bool,
+        tick_reason: String,
+        shade_reason: String,
+        active_time: Option<String>,
+        posture: String,
+        open: Vec<String>,
+        /// `appSuspendSet`: lock posture minus exemptions, plus standing.
+        suspended: bool,
+        /// `openRowEntries`: would the shade paint a button (when locked)?
+        open_row: bool,
+        /// In the policy's `hidden` list: gone from the launcher.
+        hidden: bool,
+        /// Suspended by a per-app rule or a spent bucket (unioned on top).
+        rule_or_bucket: bool,
+    }
+
+    impl Seen {
+        /// What the ward can actually open: not suspended, not hidden.
+        fn runnable(&self) -> bool {
+            !self.suspended && !self.hidden
+        }
+    }
+
+    fn see(w: &mut Warden, hex: &str, now: i64) -> Seen {
+        let d = w.tick(Some(hex), true, now, None);
+        let d = &d[0];
+        let view: serde_json::Value =
+            serde_json::from_str(&w.always_available_view(now as u64, d.locked, &d.reason))
+                .unwrap();
+        let open: Vec<String> = serde_json::from_value(view["open"].clone()).unwrap();
+        let raw = w.app_policy(now).expect("app policy reads");
+        let hidden = !raw.is_empty()
+            && serde_json::from_str::<serde_json::Value>(&raw).unwrap()["hidden"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|h| h == POD));
+        let rule_or_bucket = w
+            .app_rule_suspensions(now)
+            .unwrap()
+            .iter()
+            .chain(w.bucket_suspensions(now).unwrap().iter())
+            .any(|p| p == POD);
+        let (posture, allowed, blocked) = if raw.is_empty() {
+            (String::new(), Vec::new(), Vec::new())
+        } else {
+            let p: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let list = |k: &str| -> Vec<String> {
+                p[k].as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            (
+                p["posture"].as_str().unwrap_or("").to_string(),
+                list("allowed"),
+                list("blocked"),
+            )
+        };
+        let pod = POD.to_string();
+        let standing = if posture == "allowlist" {
+            !allowed.contains(&pod)
+        } else {
+            blocked.contains(&pod)
+        };
+        let exempt = open.contains(&pod);
+        let shade = w.lock_info(now);
+        let shade_view: serde_json::Value =
+            serde_json::from_str(&w.always_available_view(now as u64, true, &shade.reason))
+                .unwrap();
+        let shade_open: Vec<String> = serde_json::from_value(shade_view["open"].clone()).unwrap();
+        Seen {
+            locked: d.locked,
+            tick_reason: d.reason.clone(),
+            shade_reason: shade.reason,
+            active_time: d.active_time.clone(),
+            posture,
+            suspended: (d.locked && !exempt) || standing || rule_or_bucket,
+            hidden,
+            rule_or_bucket,
+            open_row: shade_open.contains(&pod) && !standing,
+            open,
+        }
+    }
+
+    fn line(name: &str, s: &Seen) -> String {
+        format!(
+            "{name:<44} locked={:<5} tick={:<8} shade={:<8} time={:<9} posture={:<9} open={:<5} suspended={:<5} openRow={}",
+            s.locked,
+            s.tick_reason,
+            s.shade_reason,
+            s.active_time.as_deref().unwrap_or("-"),
+            s.posture,
+            !s.open.is_empty(),
+            s.suspended,
+            s.open_row
+        )
+    }
+
+    /// Every candidate from the report, printed with `--nocapture`. The locked
+    /// rows are pinned: outside a window the exemption must survive.
+    #[test]
+    fn matrix_of_locked_states_keeps_the_exemption() {
+        let untagged = json!([{ "start": "16:00", "end": "17:00" }]);
+        let tagged = json!([
+            { "start": "16:00", "end": "17:00" },
+            { "start": "17:00", "end": "17:30", "time": "learning" }
+        ]);
+        let only_tagged = json!([{ "start": "16:00", "end": "17:00", "time": "learning" }]);
+        let unknown_now = json!([{ "start": "17:00", "end": "19:00", "time": "learning" }]);
+        let later = T0 + 30 * 60; // 18:30, outside every window above
+        let cases: Vec<(&str, serde_json::Value, Option<serde_json::Value>, i64)> = vec![
+            ("no times, closed", untagged.clone(), None, later),
+            (
+                "times clause, no tagged window on phone",
+                untagged.clone(),
+                Some(project(json!([]))),
+                later,
+            ),
+            (
+                "tagged window, outside it",
+                tagged.clone(),
+                Some(project(json!(["com.khan.app"]))),
+                later,
+            ),
+            (
+                "only a tagged window, outside it",
+                only_tagged,
+                Some(project(json!(["com.khan.app"]))),
+                later,
+            ),
+            (
+                "tagged window now, times clause absent",
+                unknown_now.clone(),
+                None,
+                T0,
+            ),
+            (
+                "tagged window now, times clause unparseable",
+                unknown_now,
+                Some(json!({ "v": 99, "times": [], "issuedAt": 1 })),
+                T0,
+            ),
+        ];
+        let mut out = Vec::new();
+        for (i, (name, windows, times, now)) in cases.into_iter().enumerate() {
+            let (mut w, hex) = phone(&format!("locked{i}"), windows, times, None);
+            let s = see(&mut w, &hex, now);
+            println!("{}", line(name, &s));
+            out.push((name, s));
+        }
+        for (name, s) in &out {
+            assert!(s.locked, "{name}: expected a lock");
+            assert_eq!(s.tick_reason, "schedule", "{name}");
+            assert_eq!(s.shade_reason, "schedule", "{name}");
+            assert!(!s.suspended, "{name}: reconcile suspends the exempt app");
+            assert!(s.open_row, "{name}: the shade paints no Open row");
+        }
+    }
+
+    /// A budget lock while a Project definition exists, and a dormant schedule.
+    #[test]
+    fn budget_and_dormant_locks_keep_the_exemption() {
+        // Dormant: `paused` locks as "schedule".
+        let (mut w, hex) = phone(
+            "dormant",
+            json!([{ "start": "16:00", "end": "17:00" }]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Schedule,
+            json!({ "v": 1, "tz": "Europe/London", "weekly": {}, "paused": true, "issuedAt": 2 }),
+        );
+        let s = see(&mut w, &hex, T0);
+        println!("{}", line("dormant + times clause", &s));
+        assert!(s.locked && s.open_row && !s.suspended);
+
+        // Budget: spent inside a Free window, with a Project definition present.
+        let (mut w, hex) = phone(
+            "budget",
+            json!([{ "start": "16:00", "end": "19:00" }]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Budget,
+            json!({
+                "v": 1, "tz": "Europe/London", "dailyMinutes": 5, "weekStart": "mon", "issuedAt": 1
+            }),
+        );
+        let t = T0 - 30 * 60;
+        w.tick(Some(&hex), true, t, None);
+        w.tick(Some(&hex), true, t + 290, None);
+        w.tick(Some(&hex), true, t + 590, None);
+        let s = see(&mut w, &hex, t + 600);
+        println!("{}", line("budget spent + times clause", &s));
+        assert_eq!(s.tick_reason, "budget");
+        assert!(s.locked && s.open_row && !s.suspended);
+    }
+
+    /// A stand-down as the guardian's "Stop now" signs it: to end of the ward's
+    /// day, a minute's grace. T0 is 18:00 BST, so midnight is T0 + 6 h.
+    fn stop_now(w: &Warden, hex: &str) {
+        w.child_clauses
+            .put_child_clause(
+                hex,
+                ClauseKind::StandDown.store_key(),
+                T0 as u64,
+                &json!({
+                    "v": 1, "issuedAt": T0, "id": "stop-1",
+                    "expiresAt": T0 + 6 * 3600, "graceSecs": 60
+                })
+                .to_string(),
+            )
+            .expect("stored");
+    }
+
+    /// The "Stop now" candidate on a phone that was ALREADY locked outside its
+    /// hours: the exemption goes when the grace ends, the shade reads
+    /// `standdown` (no Ask, no Open row) and it all comes back at the ward's
+    /// midnight with no message from anyone. Run with and without a `times`
+    /// clause: the outcome does not depend on times.
+    #[test]
+    fn stop_now_takes_the_exemption_until_midnight_with_or_without_times() {
+        for (tag, times) in [
+            ("sd-no-times", None),
+            ("sd-times", Some(project(json!(["com.khan.app"])))),
+        ] {
+            let (mut w, hex) = phone(
+                tag,
+                json!([{ "start": "16:00", "end": "17:00" }]),
+                times,
+                None,
+            );
+            let before = see(&mut w, &hex, T0);
+            println!("{}", line(&format!("{tag}: before Stop now"), &before));
+            assert!(before.open_row && !before.suspended);
+
+            stop_now(&w, &hex);
+            let grace = see(&mut w, &hex, T0 + 10);
+            println!("{}", line(&format!("{tag}: in the grace"), &grace));
+            assert_eq!(grace.tick_reason, "schedule");
+            assert!(grace.open_row && !grace.suspended);
+
+            let stopped = see(&mut w, &hex, T0 + 71);
+            println!("{}", line(&format!("{tag}: grace over"), &stopped));
+            assert_eq!(stopped.tick_reason, "standdown");
+            assert_eq!(stopped.shade_reason, "standdown");
+            assert!(stopped.suspended, "the stand-down must take the app");
+            assert!(!stopped.open_row, "the stand-down must take the row");
+            assert_eq!(w.lock_info(T0 + 71).title, "That's it for today");
+
+            let late = see(&mut w, &hex, T0 + 6 * 3600 - 1);
+            assert_eq!(late.tick_reason, "standdown", "23:59:59 still stands");
+
+            let midnight = see(&mut w, &hex, T0 + 6 * 3600);
+            println!("{}", line(&format!("{tag}: midnight"), &midnight));
+            assert_eq!(midnight.tick_reason, "schedule", "lapsed on the device");
+            assert!(midnight.open_row && !midnight.suspended);
+        }
+    }
+
+    /// "Stop now" pressed inside a Free window, the laptop-session case seen
+    /// from the phone: an unlocked phone locks and its exempt app goes too.
+    #[test]
+    fn stop_now_locks_a_phone_that_was_inside_its_hours() {
+        let (mut w, hex) = phone(
+            "sd-free",
+            json!([{ "start": "16:00", "end": "23:00" }]),
+            None,
+            None,
+        );
+        let open = see(&mut w, &hex, T0);
+        assert!(!open.locked, "inside the Free window");
+        stop_now(&w, &hex);
+        see(&mut w, &hex, T0 + 10);
+        let stopped = see(&mut w, &hex, T0 + 71);
+        println!("{}", line("Free window, Stop now, grace over", &stopped));
+        assert!(stopped.locked);
+        assert_eq!(stopped.tick_reason, "standdown");
+        assert!(stopped.suspended && !stopped.open_row);
+    }
+
+    /// Saving a time through the real signed ingest (times, then the schedule
+    /// at the same `issuedAt`, as the guardian sends them) leaves a clause
+    /// stored months earlier untouched.
+    #[test]
+    fn ingesting_a_time_does_not_disturb_the_stored_clause() {
+        use charter_verify::test_support::{ClauseBuilder, TestGuardian};
+        let base =
+            std::env::temp_dir().join(format!("charter-aa-times-{}-ingest", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x44);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 1).unwrap();
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+        let hex = ward.pubkey().to_hex();
+        let send = |w: &mut Warden, kind: ClauseKind, at: u64, body: serde_json::Value| {
+            let ev = ClauseBuilder {
+                kind,
+                issued_at: at,
+                body: json!({}),
+                created_at: at,
+                subject: None,
+            }
+            .subject(ward.pubkey())
+            .body(body)
+            .build(&guardian);
+            let res = w.ingest_clause(&serde_json::to_string(&ev).unwrap(), at);
+            assert!(res.accepted, "{kind:?} rejected: {}", res.reason);
+        };
+        send(
+            &mut w,
+            ClauseKind::AlwaysAvailable,
+            1,
+            json!({ "v": 1, "issuedAt": 1, "apps": [{ "pkg": POD }] }),
+        );
+        let mut body = project(json!(["com.khan.app"]));
+        body["issuedAt"] = json!(2);
+        send(&mut w, ClauseKind::Times, 2, body);
+        send(
+            &mut w,
+            ClauseKind::Schedule,
+            2,
+            json!({ "v": 1, "tz": "Europe/London", "issuedAt": 2, "weekly": { "mon": [
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "17:30", "time": "learning" }
+            ] } }),
+        );
+        let s = see(&mut w, &hex, T0 + 30 * 60);
+        println!("{}", line("real ingest, outside the window", &s));
+        assert!(
+            s.locked && s.open_row && !s.suspended,
+            "{}",
+            line("ingest", &s)
+        );
+    }
+
+    /// The design's promise: "`alwaysavailable` applies unchanged in every
+    /// time." A phone inside its `onlyThese` Project window is unlocked, so the
+    /// exemption answers empty, and the composed allowlist suspends the app.
+    #[test]
+    fn an_always_available_app_stays_runnable_inside_an_only_these_time() {
+        let (mut w, hex) = phone(
+            "inside",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        let s = see(&mut w, &hex, T0 - 30 * 60); // 17:30, inside Project
+        println!("{}", line("inside onlyThese Project window", &s));
+        assert!(!s.locked, "the phone is unlocked in its Project window");
+        assert_eq!(s.active_time.as_deref(), Some("learning"));
+        assert!(
+            !s.suspended,
+            "{POD} is suspended inside the time: posture={} open={:?}",
+            s.posture, s.open
+        );
+    }
+
+    /// The same promise for minutes a typed gift bought outside any window.
+    #[test]
+    fn an_always_available_app_stays_runnable_in_a_named_pool_run() {
+        let (mut w, hex) = phone(
+            "pool",
+            json!([{ "start": "16:00", "end": "17:00" }]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        let now = T0;
+        w.tick(Some(&hex), true, now, None);
+        w.extension
+            .as_mut()
+            .expect("ledger")
+            .apply_time(now, "g1", 30, "learning");
+        let s = see(&mut w, &hex, now + 1);
+        println!("{}", line("named pool run of Project", &s));
+        assert_eq!(s.active_time.as_deref(), Some("learning"));
+        assert!(
+            !s.suspended,
+            "{POD} is suspended in a pool-run time: posture={} open={:?}",
+            s.posture, s.open
+        );
+    }
+
+    /// A stand-down issued while the phone is inside its `onlyThese` window:
+    /// once the grace is over the phone locks and the app goes with it, by
+    /// design (`clause.rs`, `spec/contract.md`). The always-available keeping
+    /// is for times, not for a guardian saying stop.
+    #[test]
+    fn a_stand_down_still_suspends_it_inside_a_time() {
+        let (mut w, hex) = phone(
+            "sd-inside",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        let now = T0 - 30 * 60; // 17:30, inside Project
+        let before = see(&mut w, &hex, now);
+        assert!(!before.locked && !before.suspended, "runnable before");
+        w.child_clauses
+            .put_child_clause(
+                &hex,
+                ClauseKind::StandDown.store_key(),
+                now as u64,
+                &json!({
+                    "v": 1, "issuedAt": now, "id": "stop-2",
+                    "expiresAt": T0 + 6 * 3600, "graceSecs": 60
+                })
+                .to_string(),
+            )
+            .expect("stored");
+        let grace = see(&mut w, &hex, now + 10);
+        assert!(!grace.suspended, "the grace minute still runs it");
+        let stopped = see(&mut w, &hex, now + 71);
+        println!("{}", line("onlyThese Project, grace over", &stopped));
+        assert!(stopped.locked);
+        assert_eq!(stopped.tick_reason, "standdown");
+        assert!(stopped.suspended, "the stand-down must take the app");
+        assert!(!stopped.open_row, "and its Open row");
+        // Not through the lock term alone: the app is in none of the sets that
+        // would keep it runnable. No exemption at the lock, and the composed
+        // policy runs no named time to add it to.
+        assert!(
+            stopped.open.is_empty(),
+            "no lock exemption: {:?}",
+            stopped.open
+        );
+        assert!(
+            stopped.active_time.is_none(),
+            "a stand-down runs no named time"
+        );
+        assert!(!stopped.runnable());
+        let policy = w.app_policy(now + 71).unwrap();
+        assert!(
+            policy.is_empty()
+                || !serde_json::from_str::<serde_json::Value>(&policy).unwrap()["allowed"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|p| p == POD)),
+            "the composed policy must not name it: {policy}"
+        );
+        assert!(w
+            .always_available_view((now + 71) as u64, true, "standdown")
+            .contains(r#""open":[]"#));
+    }
+
+    /// `everythingExcept` whose own `blockApps` names the app: the time cannot
+    /// override the clause, so the app stays runnable.
+    #[test]
+    fn an_everything_except_time_cannot_block_it() {
+        let (mut w, hex) = phone(
+            "except",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "gaming" }
+            ]),
+            Some(json!({
+                "v": 1, "issuedAt": 1,
+                "times": [{ "id": "gaming", "label": "Gaming", "posture": "everythingExcept",
+                            "blockApps": [POD, "com.other.app"] }]
+            })),
+            None,
+        );
+        let s = see(&mut w, &hex, T0 - 30 * 60);
+        assert_eq!(s.active_time.as_deref(), Some("gaming"));
+        assert!(
+            !s.suspended,
+            "blocked by the time only: posture={}",
+            s.posture
+        );
+        let policy: serde_json::Value =
+            serde_json::from_str(&w.app_policy(T0 - 30 * 60).unwrap()).unwrap();
+        let blocked = policy["blocked"].as_array().unwrap();
+        assert!(blocked.iter().any(|b| b == "com.other.app"), "others stay");
+        assert!(!blocked.iter().any(|b| b == POD));
+    }
+
+    /// The keeping reaches no further than Free time itself: an app Free time
+    /// blocks outright (or leaves off its allowlist) stays suspended inside a
+    /// time.
+    #[test]
+    fn free_times_own_block_still_wins_inside_a_time() {
+        let windows = json!([
+            { "start": "16:00", "end": "17:00" },
+            { "start": "17:00", "end": "19:00", "time": "learning" }
+        ]);
+        let now = T0 - 30 * 60;
+        for (tag, apps) in [
+            (
+                "blocked",
+                json!({ "v": 1, "issuedAt": 1, "posture": "blocklist", "blocked": [POD] }),
+            ),
+            (
+                "unlisted",
+                json!({ "v": 1, "issuedAt": 1, "posture": "allowlist", "allowed": ["com.x"] }),
+            ),
+        ] {
+            let (mut w, hex) = phone(
+                &format!("free-{tag}"),
+                windows.clone(),
+                Some(project(json!(["com.khan.app"]))),
+                Some(apps),
+            );
+            let s = see(&mut w, &hex, now);
+            assert_eq!(s.active_time.as_deref(), Some("learning"), "{tag}");
+            assert!(s.suspended, "{tag}: Free time's own block must still win");
+        }
+    }
+
+    /// An expired entry is inert inside a time as it is at a lock.
+    #[test]
+    fn an_expired_entry_is_not_kept_inside_a_time() {
+        let (mut w, hex) = phone(
+            "expired",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        let now = T0 - 30 * 60;
+        w.child_clauses
+            .put_child_clause(
+                &hex,
+                ClauseKind::AlwaysAvailable.store_key(),
+                2,
+                &json!({ "v": 1, "issuedAt": 2,
+                         "apps": [{ "pkg": POD, "untilUnix": now - 1 }] })
+                .to_string(),
+            )
+            .expect("stored");
+        let s = see(&mut w, &hex, now);
+        assert!(s.suspended, "an expired entry must not keep the app");
+    }
+
+    /// The home line for an `onlyThese` time names the kept app.
+    #[test]
+    fn the_home_line_names_the_kept_app() {
+        let (mut w, hex) = phone(
+            "home",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        let now = T0 - 30 * 60;
+        w.set_installed_apps(
+            r#"[{"pkg":"com.khan.app","label":"Khan"},{"pkg":"de.danoeh.antennapod","label":"AntennaPod"}]"#,
+        );
+        w.tick(Some(&hex), true, now, None);
+        let home: serde_json::Value = serde_json::from_str(&w.schedule_view(now)).unwrap();
+        let allowed = home["allowed"].as_array().expect("allowed line");
+        assert!(allowed.iter().any(|a| a == "Khan"), "{home}");
+        assert!(allowed.iter().any(|a| a == "AntennaPod"), "{home}");
+    }
+
+    /// The line names only what will really run: no raw package id for an app
+    /// this phone does not have, nothing a per-app rule blocks, nothing whose
+    /// bucket is spent.
+    #[test]
+    fn the_home_line_names_only_what_will_run() {
+        let windows = json!([
+            { "start": "16:00", "end": "17:00" },
+            { "start": "17:00", "end": "19:00", "time": "learning" }
+        ]);
+        let now = T0 - 30 * 60;
+        let installed = r#"[{"pkg":"com.khan.app","label":"Khan"},{"pkg":"de.danoeh.antennapod","label":"AntennaPod"}]"#;
+        let line = |w: &Warden| -> Vec<String> {
+            let home: serde_json::Value = serde_json::from_str(&w.schedule_view(now)).unwrap();
+            home["allowed"]
+                .as_array()
+                .map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+                .unwrap_or_default()
+        };
+
+        // Not installed: left off rather than shown as a package id.
+        let (mut w, hex) = phone(
+            "home-uninstalled",
+            windows.clone(),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        w.set_installed_apps(r#"[{"pkg":"com.khan.app","label":"Khan"}]"#);
+        w.tick(Some(&hex), true, now, None);
+        assert_eq!(line(&w), vec!["Khan".to_string()]);
+
+        // Blocked by a per-app rule: left off, as is the time's own app.
+        let (mut w, hex) = phone(
+            "home-rule",
+            windows.clone(),
+            Some(project(json!(["com.khan.app"]))),
+            None,
+        );
+        w.set_installed_apps(installed);
+        put(
+            &w,
+            &hex,
+            ClauseKind::AppRules,
+            json!({ "v": 1, "issuedAt": 1, "rules": [
+                { "pkg": POD, "blocked": true },
+                { "pkg": "com.khan.app", "blocked": true }
+            ] }),
+        );
+        w.tick(Some(&hex), true, now, None);
+        assert!(line(&w).is_empty(), "{:?}", line(&w));
+    }
+
+    fn project_phone(tag: &str, apps: Option<serde_json::Value>) -> (Warden, String) {
+        phone(
+            tag,
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(project(json!(["com.khan.app"]))),
+            apps,
+        )
+    }
+
+    /// A Free `apps` clause that is stored but cannot be used says nothing
+    /// about what Free time blocks or hides, so nothing is implied runnable.
+    #[test]
+    fn an_unusable_free_clause_keeps_no_always_available_app_in_a_time() {
+        let now = T0 - 30 * 60;
+        for (tag, raw) in [
+            ("garbage", "{ this is not json".to_string()),
+            (
+                "future",
+                json!({ "v": 99, "issuedAt": 1, "posture": "blocklist", "blocked": [] })
+                    .to_string(),
+            ),
+        ] {
+            let (mut w, hex) = project_phone(&format!("unusable-{tag}"), None);
+            w.child_clauses
+                .put_child_clause(&hex, ClauseKind::Apps.store_key(), 1, &raw)
+                .expect("stored");
+            let s = see(&mut w, &hex, now);
+            assert_eq!(s.active_time.as_deref(), Some("learning"), "{tag}");
+            assert!(
+                !s.runnable(),
+                "{tag}: kept on the strength of an unknown clause"
+            );
+        }
+    }
+
+    /// The default browser an `onlyThese` time implies is bounded the same way.
+    #[test]
+    fn an_unusable_free_clause_implies_no_browser_either() {
+        let now = T0 - 30 * 60;
+        let (mut w, hex) = phone(
+            "unusable-browser",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(json!({
+                "v": 1, "issuedAt": 1,
+                "times": [{ "id": "learning", "label": "Project", "posture": "onlyThese",
+                            "apps": ["com.khan.app"],
+                            "sites": [{ "id": "khan-academy", "label": "Khan Academy", "kind": "site",
+                                        "url": "https://www.khanacademy.org/",
+                                        "domains": ["khanacademy.org"] }] }]
+            })),
+            None,
+        );
+        w.set_default_browser("org.mozilla.firefox");
+        w.child_clauses
+            .put_child_clause(&hex, ClauseKind::Apps.store_key(), 1, "{ nope")
+            .expect("stored");
+        let raw = w.app_policy(now).unwrap();
+        assert!(!raw.contains("org.mozilla.firefox"), "{raw}");
+        // With no clause stored at all, the browser is implied as before.
+        let (w2, _) = phone(
+            "absent-browser",
+            json!([
+                { "start": "16:00", "end": "17:00" },
+                { "start": "17:00", "end": "19:00", "time": "learning" }
+            ]),
+            Some(json!({
+                "v": 1, "issuedAt": 1,
+                "times": [{ "id": "learning", "label": "Project", "posture": "onlyThese",
+                            "apps": ["com.khan.app"],
+                            "sites": [{ "id": "khan-academy", "label": "Khan Academy", "kind": "site",
+                                        "url": "https://www.khanacademy.org/",
+                                        "domains": ["khanacademy.org"] }] }]
+            })),
+            None,
+        );
+        let mut w2 = w2;
+        w2.set_default_browser("org.mozilla.firefox");
+        assert!(w2.app_policy(now).unwrap().contains("org.mozilla.firefox"));
+    }
+
+    /// An app Free time hides stays gone inside a time, paused or not.
+    #[test]
+    fn a_hidden_app_is_not_kept_inside_a_time() {
+        let now = T0 - 30 * 60;
+        for (tag, apps) in [
+            (
+                "hidden",
+                json!({ "v": 1, "issuedAt": 1, "posture": "blocklist", "hidden": [POD] }),
+            ),
+            (
+                "paused-and-hidden",
+                json!({ "v": 1, "issuedAt": 1, "posture": "blocklist", "paused": true,
+                        "hidden": [POD] }),
+            ),
+        ] {
+            let (mut w, hex) = project_phone(&format!("hid-{tag}"), Some(apps));
+            let s = see(&mut w, &hex, now);
+            assert_eq!(s.active_time.as_deref(), Some("learning"), "{tag}");
+            assert!(s.hidden, "{tag}: still on the hidden list");
+            assert!(!s.runnable(), "{tag}");
+        }
+    }
+
+    /// `paused` lifts Free time's blocks, so a paused Free time restricts
+    /// nothing and the app is kept (the pause is the guardian's own).
+    #[test]
+    fn a_paused_free_clause_does_not_stop_the_keeping() {
+        let now = T0 - 30 * 60;
+        let (mut w, hex) = project_phone(
+            "paused",
+            Some(
+                json!({ "v": 1, "issuedAt": 1, "posture": "blocklist", "paused": true,
+                         "blocked": [POD] }),
+            ),
+        );
+        let s = see(&mut w, &hex, now);
+        assert_eq!(s.active_time.as_deref(), Some("learning"));
+        assert!(s.runnable());
+    }
+
+    /// A per-app rule that blocks it right now wins over the keeping.
+    #[test]
+    fn an_apprules_block_still_wins_inside_a_time() {
+        let now = T0 - 30 * 60;
+        let (mut w, hex) = project_phone("rule", None);
+        put(
+            &w,
+            &hex,
+            ClauseKind::AppRules,
+            json!({ "v": 1, "issuedAt": 1, "rules": [{ "pkg": POD, "blocked": true }] }),
+        );
+        let s = see(&mut w, &hex, now);
+        assert_eq!(s.active_time.as_deref(), Some("learning"));
+        assert!(s.rule_or_bucket && !s.runnable());
+    }
+
+    /// An app in a bucket at its cap is suspended on top of the keeping.
+    #[test]
+    fn a_spent_bucket_still_wins_inside_a_time() {
+        let now = T0 - 30 * 60;
+        let (mut w, hex) = project_phone("bucket", None);
+        put(
+            &w,
+            &hex,
+            ClauseKind::Buckets,
+            json!({ "v": 1, "tz": "Europe/London", "issuedAt": 1, "paused": false,
+                    "buckets": [{ "id": "pods", "label": "Pods", "apps": [POD],
+                                  "dailyMinutes": 1 }] }),
+        );
+        // Spent in the Free window before: a Project time charges no bucket.
+        let free = T0 - 90 * 60;
+        w.tick(Some(&hex), true, free, Some(POD));
+        w.tick(Some(&hex), true, free + 61, Some(POD));
+        let s = see(&mut w, &hex, now);
+        assert_eq!(s.active_time.as_deref(), Some("learning"));
+        assert!(s.rule_or_bucket, "the bucket is spent");
+        assert!(!s.runnable());
+    }
+
+    /// PINS CURRENT BEHAVIOUR, NOT A RULING: `listening` has no lock-reason
+    /// gate, so a `continue`-mode app that is playing audio is not suspended
+    /// under a stand-down while it plays. Whether a stand-down should cut it is
+    /// an open decision for the guardian; the Stop now confirmation words it as
+    /// "audio already playing may carry on". Change this test with that
+    /// decision, not before.
+    #[test]
+    fn open_question_listening_audio_carries_on_under_a_stand_down() {
+        let (mut w, hex) = phone(
+            "sd-listening",
+            json!([{ "start": "16:00", "end": "23:00" }]),
+            None,
+            None,
+        );
+        put(
+            &w,
+            &hex,
+            ClauseKind::Listening,
+            json!({ "v": 1, "issuedAt": 1, "mode": "continue", "apps": [POD] }),
+        );
+        stop_now(&w, &hex);
+        see(&mut w, &hex, T0 + 10);
+        let stopped = see(&mut w, &hex, T0 + 71);
+        assert_eq!(stopped.tick_reason, "standdown");
+        let view = w.listening_view((T0 + 71) as u64, true, true);
+        assert!(view.contains(POD), "{view}");
+    }
+
+    /// The stand-down card says it ends at midnight only where the device
+    /// really comes back then: a dormant device stays off until a guardian
+    /// opens it.
+    #[test]
+    fn the_stand_down_card_promises_midnight_only_when_true() {
+        let (mut w, hex) = phone(
+            "sd-card",
+            json!([{ "start": "16:00", "end": "23:00" }]),
+            None,
+            None,
+        );
+        stop_now(&w, &hex);
+        see(&mut w, &hex, T0 + 10);
+        see(&mut w, &hex, T0 + 71);
+        let info = w.lock_info(T0 + 71);
+        assert_eq!(info.title, "That's it for today");
+        assert!(info.come_back.contains("midnight"), "{}", info.come_back);
+
+        // Dormant: wire-paused schedule, as the guardian's "off unless opened".
+        w.child_clauses
+            .put_child_clause(
+                &hex,
+                ClauseKind::Schedule.store_key(),
+                5,
+                &json!({ "v": 1, "tz": "Europe/London", "weekly": {}, "paused": true,
+                         "issuedAt": 5 })
+                .to_string(),
+            )
+            .expect("stored");
+        see(&mut w, &hex, T0 + 72);
+        let info = w.lock_info(T0 + 72);
+        assert_eq!(info.title, "That's it for today");
+        assert!(!info.come_back.contains("midnight"), "{}", info.come_back);
+        assert!(
+            info.come_back.contains("Talk to them"),
+            "{}",
+            info.come_back
         );
     }
 }

@@ -239,7 +239,7 @@ export function ChildStatus({
       ? "They've used all of today's time."
       : s.reason === "standdown"
         ? // A stand-down waits for a person — the one reading this.
-          "You asked them to finish up — until you allow them back on."
+          "You asked them to finish up — until midnight, or until you allow them back on."
         : "Outside of allowed hours right now.";
 
   const close = (n?: string) => {

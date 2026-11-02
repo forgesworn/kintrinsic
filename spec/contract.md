@@ -1001,8 +1001,13 @@ time's resolved standing policy — `apps` after `effective_at(now)`, and
   otherwise beat the allow the time just stated).
 - In every time: `apprules`, `buckets`, `hidden` and `alwaysavailable` apply
   unchanged on top, and sanctioned learning windows survive (the existing
-  `sweep_decision` rule). A named time can never loosen those. Label length
-  is counted in Unicode code points on both stacks.
+  `sweep_decision` rule). A named time can never loosen those. For
+  `alwaysavailable` that means a named app stays runnable inside a time (an
+  `onlyThese` time does not suspend it, an `everythingExcept` time's
+  `blockApps` does not ban it), bounded by what Free time itself would run:
+  an app Free time blocks outright, leaves off its allowlist or hides stays
+  unrunnable. A stand-down still removes it (see "Always available"). Label
+  length is counted in Unicode code points on both stacks.
 - `countsAgainstBudget: false` (the default): usage charges neither the
   screen budget nor any bucket; budget exhaustion never locks this time. A
   bucket that is already spent stays blocked (caps apply in every time), but
@@ -1211,7 +1216,9 @@ A duration restarts every time the stored clause is re-read, and the grant
 would never end.
 
 **The exemption is narrow on purpose, and only in one direction.** A package
-in `apps` is exempt from a `schedule` or `budget` lock ONLY. What unites those
+in `apps` is exempt from a `schedule` or `budget` lock ONLY, and it stays
+runnable inside every named time (which never locks the device; see the
+Times section, "In every time"). Nothing else lifts a block from it. What unites those
 two, and separates them from the reasons below, is not "the device reached
 this on its own clock" — a device set to **dormant** (`schedule.paused`,
 "off unless a guardian opens it") reaches `schedule` too, with no clock
@@ -1228,10 +1235,21 @@ lifeline still reaches her either way, so nothing is lost by holding the line
 there). It is **never** exempt from a malformed charter, either: an
 untrustworthy charter is not a state Charter can distinguish from any other,
 so nothing it names can be trusted to be a safe app. And it never overrides a
-**standing block in the `apps` clause** — the guardian's outright "no" always
-wins over her own "except this one, sometimes". The device subtracts the
-always-available set from the LOCK-DRIVEN posture only, never from the
-ordinary allow/block list.
+**standing block in Free time's `apps` clause** — the guardian's outright "no"
+always wins over her own "except this one, sometimes". The device subtracts the
+always-available set from the LOCK-DRIVEN posture only, never from Free
+time's own allow/block list.
+
+**Inside a named time** the device is unlocked, so there is no lock to
+subtract from. The warden instead keeps each live named app runnable in the
+policy it hands the enforcer: added to the allowlist of an `onlyThese` time,
+taken off the blocklist of an `everythingExcept` time, in either case only if
+Free time's own `apps` clause would run it (not blocked, on its allowlist when
+it has one, not `hidden`; a stored Free `apps` clause the device cannot use, being
+unparseable or of an unknown version, implies nothing, so no app is kept on its
+strength). A time's own list can never ban or omit it. A
+stand-down locks the device and runs no named time, so it removes the app, as
+above.
 
 Founder's ruling (2026-08-04), verbatim in substance: *"if that tablet is off
 until a request has been accepted or approved, or I just say it's now on — if

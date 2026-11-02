@@ -998,6 +998,10 @@ async fn thaw_all(sys: &RealSystem, roster: &ManagedRoster, lock: &mut LockState
 struct LockState {
     /// The spawned `charter-lock`, keyed by the locked child's uid.
     proc: Option<(u32, std::process::Child)>,
+    /// Whether `proc` was spawned for a stand-down. A lock already up when the
+    /// reason changes (a closed window, then a guardian's stand-down) must be
+    /// replaced, or it keeps offering an ask that cannot help.
+    proc_stood_down: bool,
     /// Set when a running lock comes down (its session may have just died);
     /// cleared once the glass is confirmed on (or moved to) a live VT.
     vt_heal_pending: bool,
@@ -1163,15 +1167,77 @@ async fn heal_stranded_vt(sys: &RealSystem) -> VtHeal {
 /// the lock EDGE, and the panel usually spawns ticks later (when the child
 /// becomes foreground), so relying on the effect showed the generic fallback.
 fn lock_text(d: &ChildDecision) -> (&'static str, &'static str) {
+    match lock_reason_of(d) {
+        Some(reason) => lock_message(reason),
+        None => ("Time's up", "Access is paused."),
+    }
+}
+
+/// Why this child is locked: the level-state reason, else the lock edge's.
+fn lock_reason_of(d: &ChildDecision) -> Option<charter_schedule::LockReason> {
     if let Some(reason) = d.reason {
-        return lock_message(reason);
+        return Some(reason);
     }
-    for e in &d.effects {
-        if let EnforcerEffect::ShowLock(reason) = e {
-            return lock_message(*reason);
-        }
+    d.effects.iter().find_map(|e| match e {
+        EnforcerEffect::ShowLock(reason) => Some(*reason),
+        _ => None,
+    })
+}
+
+/// Whether the lock already running is the right one for this child now: the
+/// same child, and showing the same kind of wall. A stand-down card and an
+/// ordinary one differ (no ask, other words), so a flip either way replaces the
+/// running card; the freeze holds throughout.
+fn running_lock_is_current(
+    running_uid: u32,
+    running_stood_down: bool,
+    uid: u32,
+    stood_down: bool,
+) -> bool {
+    running_uid == uid && running_stood_down == stood_down
+}
+
+/// The environment that turns on the lock panel's "Ask for more time", as
+/// `(name, value)` pairs: empty unless a guardian is paired, the child has a
+/// login name, and the lock is NOT a stand-down (no grant can lift one, so the
+/// button would contradict "talk to them to come back on"). With named times,
+/// the panel also offers a type: ids are `[a-z0-9-]` and labels are the
+/// guardian's text, so tab/newline-separated lines with those characters
+/// stripped from the label.
+fn lock_ask_env(
+    paired: bool,
+    stood_down: bool,
+    user: Option<&str>,
+    ask: Option<&LockAsk>,
+) -> Vec<(&'static str, String)> {
+    let (true, false, Some(user)) = (paired, stood_down, user) else {
+        return Vec::new();
+    };
+    let mut env = vec![
+        ("CHARTER_LOCK_CAN_ASK", "1".to_string()),
+        ("CHARTER_LOCK_USER", user.to_string()),
+    ];
+    if let Some((choices, default)) = ask {
+        let lines: Vec<String> = choices
+            .iter()
+            .map(|(id, label)| {
+                let label: String = label
+                    .chars()
+                    .map(|c| if c == '\t' || c == '\n' { ' ' } else { c })
+                    .collect();
+                format!("{id}\t{label}")
+            })
+            .collect();
+        env.push(("CHARTER_LOCK_ASK_TIMES", lines.join("\n")));
+        env.push(("CHARTER_LOCK_ASK_DEFAULT", default.clone()));
     }
-    ("Time's up", "Access is paused.")
+    env
+}
+
+/// A guardian's stand-down is the one lock no ask can lift (the cap applies
+/// after every pool), so its card offers no "Ask for more time", in any time.
+fn is_stand_down(d: &ChildDecision) -> bool {
+    lock_reason_of(d) == Some(charter_schedule::LockReason::StandDown)
 }
 
 /// Unambiguous 32-char challenge alphabet (no `I`/`O`, no `0`/`1`) so a shown
@@ -1315,8 +1381,13 @@ async fn apply_child_decisions(
 
     match active_locked {
         Some(d) => {
+            let stood_down = is_stand_down(d);
             let already = match lock.proc.as_mut() {
-                Some((u, c)) if *u == d.uid => c.try_wait().map(|w| w.is_none()).unwrap_or(false),
+                Some((u, c))
+                    if running_lock_is_current(*u, lock.proc_stood_down, d.uid, stood_down) =>
+                {
+                    c.try_wait().map(|w| w.is_none()).unwrap_or(false)
+                }
                 _ => false,
             };
             if !already {
@@ -1361,29 +1432,16 @@ async fn apply_child_decisions(
                 // Paired only: the panel's "Ask for more time" (the request
                 // publishes via `charter ask-for-more` run AS the child, so
                 // the CLI's dimension routing reads the child's own time-left).
-                if ctx.paired {
-                    if let Some(user) = user_for_uid(passwd, d.uid) {
-                        cmd.env("CHARTER_LOCK_CAN_ASK", "1")
-                            .env("CHARTER_LOCK_USER", user);
-                        // §Times: the panel offers a type when the child has
-                        // any named time. Ids are `[a-z0-9-]` and labels are
-                        // the guardian's text, so tab/newline-separated lines
-                        // with those characters stripped from the label.
-                        if let Some((choices, default)) = ctx.asks.get(&d.uid) {
-                            let lines: Vec<String> = choices
-                                .iter()
-                                .map(|(id, label)| {
-                                    let label: String = label
-                                        .chars()
-                                        .map(|c| if c == '\t' || c == '\n' { ' ' } else { c })
-                                        .collect();
-                                    format!("{id}\t{label}")
-                                })
-                                .collect();
-                            cmd.env("CHARTER_LOCK_ASK_TIMES", lines.join("\n"))
-                                .env("CHARTER_LOCK_ASK_DEFAULT", default);
-                        }
-                    }
+                // Never on a stand-down: no grant can lift it, so the button
+                // would contradict "talk to them to come back on". The
+                // guardian-code unlock below is a separate path and stays.
+                for (key, value) in lock_ask_env(
+                    ctx.paired,
+                    stood_down,
+                    user_for_uid(passwd, d.uid).as_deref(),
+                    ctx.asks.get(&d.uid),
+                ) {
+                    cmd.env(key, value);
                 }
                 // Offline guardian unlock (paired only): a FRESH per-lock
                 // CHALLENGE the guardian answers in Kintrinsic. Derive the
@@ -1420,6 +1478,7 @@ async fn apply_child_decisions(
                 }
                 if let Ok(child) = cmd.spawn() {
                     lock.proc = Some((d.uid, child));
+                    lock.proc_stood_down = stood_down;
                 }
             }
             let _ = sys.vt().set_vt_switching(false).await;
@@ -3374,6 +3433,9 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                             }
                         }
                     }
+                    if is_stand_down(d) {
+                        crate::lock_info::apply_stand_down_copy(&mut info, pol.schedule.as_ref());
+                    }
                     lock_infos.insert(d.uid, info);
                 }
             }
@@ -4413,9 +4475,69 @@ mod tests {
             source: PolicySource::DeviceOnly,
         };
         assert_eq!(super::lock_text(&d).0, "Outside allowed hours");
+        // Only a stand-down is one no ask can lift, whether the reason comes
+        // from the level state or only from the lock edge.
+        assert!(!super::is_stand_down(&d));
+        let sd = ChildDecision {
+            reason: Some(charter_schedule::LockReason::StandDown),
+            ..d.clone()
+        };
+        assert!(super::is_stand_down(&sd));
+        let edge = ChildDecision {
+            reason: None,
+            effects: vec![super::EnforcerEffect::ShowLock(
+                charter_schedule::LockReason::StandDown,
+            )],
+            ..d.clone()
+        };
+        assert!(super::is_stand_down(&edge));
         // No reason anywhere -> the generic fallback.
-        let bare = ChildDecision { reason: None, ..d };
+        let bare = ChildDecision {
+            reason: None,
+            effects: vec![],
+            ..d
+        };
         assert_eq!(super::lock_text(&bare).0, "Time's up");
+    }
+
+    #[test]
+    fn a_stand_down_card_offers_no_ask_in_any_time() {
+        let times: super::LockAsk = (
+            vec![("learning".into(), "Project\ttime".into())],
+            "learning".into(),
+        );
+        let env = |paired, sd, user, ask| super::lock_ask_env(paired, sd, user, ask);
+        // An ordinary lock offers it, typed when the child has times.
+        let ordinary = env(true, false, Some("sam"), Some(&times));
+        let keys: Vec<&str> = ordinary.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            keys,
+            [
+                "CHARTER_LOCK_CAN_ASK",
+                "CHARTER_LOCK_USER",
+                "CHARTER_LOCK_ASK_TIMES",
+                "CHARTER_LOCK_ASK_DEFAULT"
+            ]
+        );
+        assert_eq!(ordinary[2].1, "learning\tProject time");
+        assert!(!env(true, false, Some("sam"), None).is_empty());
+        // A stand-down offers none, with or without times, paired or not.
+        assert!(env(true, true, Some("sam"), Some(&times)).is_empty());
+        assert!(env(true, true, Some("sam"), None).is_empty());
+        // The old gates still hold.
+        assert!(env(false, false, Some("sam"), Some(&times)).is_empty());
+        assert!(env(true, false, None, None).is_empty());
+    }
+
+    #[test]
+    fn a_running_lock_is_replaced_when_it_flips_to_or_from_a_stand_down() {
+        assert!(super::running_lock_is_current(1002, false, 1002, false));
+        assert!(super::running_lock_is_current(1002, true, 1002, true));
+        // Schedule card up, then the stand-down lands (and the reverse).
+        assert!(!super::running_lock_is_current(1002, false, 1002, true));
+        assert!(!super::running_lock_is_current(1002, true, 1002, false));
+        // Another child's lock is never this child's.
+        assert!(!super::running_lock_is_current(1003, false, 1002, false));
     }
 
     #[test]

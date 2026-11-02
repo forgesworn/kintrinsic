@@ -36,6 +36,7 @@ import { UNKNOWN_TIME_PHRASE, canUseTimes, timeLabelFor, timesGate } from "../do
 import { isAskExpired } from "../domain/askExpiry";
 import type { Child, ChildRequest } from "../domain/types";
 import { endAskDecision, tryBeginAskDecision } from "./askDecisionLock";
+import { StoppedNotice } from "./StoppedNotice";
 import {
   defaultGiftDeviceIds,
   defaultGiftTime,
@@ -157,10 +158,20 @@ function Stepper({
   );
 }
 
-function GiveBody({ child, onClose }: { child: Child; onClose: (note?: string) => void }) {
+function GiveBody({
+  child,
+  onClose,
+  onAllowBack,
+}: {
+  child: Child;
+  onClose: (note?: string) => void;
+  onAllowBack: () => void;
+}) {
   const { giveTime, deviceStatus } = useCharter();
   const childName = child.name;
   const support = useGiveSupport(child);
+  // A stood-down ward opens nothing with more minutes: say so before sending.
+  const stopped = useStopState(child);
 
   // What is actually true about this ward right now. Giving five minutes to a
   // ward an hour over, or with twenty minutes left in the week, is a different
@@ -285,6 +296,12 @@ function GiveBody({ child, onClose }: { child: Child; onClose: (note?: string) =
         </>
       ) : (
         <>
+          {stopped.standing && (
+            <StoppedNotice
+              name={childName}
+              onAllowBack={stopped.canSend ? onAllowBack : undefined}
+            />
+          )}
           {standing && (
             <p className="card-sub" style={{ margin: "0 0 10px", color: "var(--warn, #9a6516)" }}>
               {childName} is {standing}.
@@ -441,12 +458,15 @@ function ApproveBody({
   child,
   request,
   onClose,
+  onAllowBack,
 }: {
   child: Child;
   request: ChildRequest;
   onClose: (note?: string) => void;
+  onAllowBack: () => void;
 }) {
   const { approveRequest, denyRequest, setRequestChosenMinutes, deviceStatus } = useCharter();
+  const stopped = useStopState(child);
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -489,6 +509,12 @@ function ApproveBody({
 
   return (
     <SheetFrame label={`Give ${child.name} more time`} busy={busy !== null} onClose={() => onClose()}>
+      {stopped.standing && (
+        <StoppedNotice
+          name={child.name}
+          onAllowBack={stopped.canSend ? onAllowBack : undefined}
+        />
+      )}
       {standing && (
         <p className="card-sub" style={{ margin: "0 0 10px", color: "var(--warn, #9a6516)" }}>
           {child.name} is {standing}.
@@ -565,6 +591,7 @@ function RetypeBody({
   onClose: (note?: string) => void;
 }) {
   const { answerRequestWithOtherTime } = useCharter();
+  const stopped = useStopState(child);
   const times = child.policies.find((p) => p.scope.kind === "device")?.times;
   // Everything except what was asked for: approving as asked already covers it.
   const choices = useMemo(
@@ -599,6 +626,7 @@ function RetypeBody({
 
   return (
     <SheetFrame label="Give a different kind of time" busy={busy} onClose={() => onClose()}>
+      {stopped.standing && <StoppedNotice name={child.name} />}
       <label className="field-label" htmlFor={`retype-${request.id}`} style={{ display: "block", marginBottom: 4 }}>
         Give {child.name} instead
       </label>
@@ -653,7 +681,12 @@ function RetypeBody({
 
 function StopBody({ child, onClose }: { child: Child; onClose: (note?: string) => void }) {
   const { standDown } = useCharter();
-  const { canSend, tooOld, standing, quiet } = useStopState(child);
+  const { canSend, tooOld, standing: liveStanding, quiet } = useStopState(child);
+  // What this sheet was opened to do, fixed on open: lift a stand-down, or
+  // call one. The device's report can flip under it (the lift lands, or a
+  // call does); the primary button must never silently become the opposite
+  // action, so a flip settles the sheet instead (below).
+  const [standing] = useState(liveStanding);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -710,6 +743,24 @@ function StopBody({ child, onClose }: { child: Child; onClose: (note?: string) =
       </SheetFrame>
     );
   }
+  if (liveStanding !== standing && !busy) {
+    return (
+      <SheetFrame
+        label={standing ? `Allow ${child.name} back on` : `Finish ${child.name} for today`}
+        busy={false}
+        onClose={() => onClose()}
+      >
+        <p className="card-sub" style={{ marginBottom: 12 }} aria-live="polite">
+          {standing
+            ? `${child.name} is back on.`
+            : `Finished for today — ${child.name} is waiting on you.`}
+        </p>
+        <Button block className="lever-primary" onClick={() => onClose()}>
+          Close
+        </Button>
+      </SheetFrame>
+    );
+  }
   const laggards = tooOld.length > 0 ? tooOld.map((d) => d.label).join(" and ") : null;
 
   return (
@@ -726,8 +777,14 @@ function StopBody({ child, onClose }: { child: Child; onClose: (note?: string) =
       ) : (
         <>
           <p className="card-sub" style={{ marginBottom: 12 }}>
-            {child.name} gets a minute’s warning, then their devices finish for the day. You can
-            let them back on whenever you like.
+            {child.name} gets a minute’s warning, then every one of their devices finishes for
+            the day, whatever kind of time is running. Always-on apps stop too, though audio
+            already playing may carry on until it ends. It lasts until midnight, or until you
+            allow them back on, which you can do whenever you like.
+          </p>
+          <p className="card-sub" style={{ marginBottom: 12 }}>
+            On phones, the emergency calls you have set up stay available, and so does the
+            emergency unlock unless you have turned it off.
           </p>
           {laggards && (
             <p className="card-sub" style={{ ...WARN, marginBottom: 12 }}>
@@ -761,13 +818,25 @@ function StopBody({ child, onClose }: { child: Child; onClose: (note?: string) =
 }
 
 export function LeverSheet(props: LeverSheetProps) {
+  // "Allow back on" from the give and approve sheets swaps in the stop sheet
+  // (already showing its lift form), rather than lifting from a different place.
+  const [allowBack, setAllowBack] = useState(false);
+  if (allowBack) return <StopBody child={props.child} onClose={props.onClose} />;
+  const toAllowBack = () => setAllowBack(true);
   switch (props.mode) {
     case "give":
-      return <GiveBody child={props.child} onClose={props.onClose} />;
+      return <GiveBody child={props.child} onClose={props.onClose} onAllowBack={toAllowBack} />;
     case "stop":
       return <StopBody child={props.child} onClose={props.onClose} />;
     case "approve":
-      return <ApproveBody child={props.child} request={props.request} onClose={props.onClose} />;
+      return (
+        <ApproveBody
+          child={props.child}
+          request={props.request}
+          onClose={props.onClose}
+          onAllowBack={toAllowBack}
+        />
+      );
     case "retype":
       return <RetypeBody child={props.child} request={props.request} onClose={props.onClose} />;
   }

@@ -144,7 +144,9 @@ pub fn view_for(t: Option<&TimeLeftView>) -> TrayView {
         // staring at a locked screen needs "when", and the remaining-time
         // parts are all zero anyway.
         let tooltip_detail = match t.reason.as_deref() {
-            Some("standdown") => "Locked until your guardian lifts it.".into(),
+            Some("standdown") => {
+                "Locked until midnight, or sooner if your guardian lets you back on.".into()
+            }
             Some("budget") => "Your time starts again tomorrow.".into(),
             _ => "Click to see when you can come back.".into(),
         };
@@ -162,7 +164,9 @@ pub fn view_for(t: Option<&TimeLeftView>) -> TrayView {
             icon: IconState::Locked,
             title: "Kintrinsic — locked".into(),
             status_line,
-            asks_enabled: true,
+            // Not on a stand-down: no grant can lift one, so an ask has
+            // nowhere useful to go (the lock card offers none either).
+            asks_enabled: t.reason.as_deref() != Some("standdown"),
             tooltip_detail,
         };
     }
@@ -457,7 +461,10 @@ mod tests {
         let v = view_for(Some(&t(0, true, Some("budget"))));
         assert_eq!(v.tooltip_detail, "Your time starts again tomorrow.");
         let v = view_for(Some(&t(0, true, Some("standdown"))));
-        assert_eq!(v.tooltip_detail, "Locked until your guardian lifts it.");
+        assert_eq!(
+            v.tooltip_detail,
+            "Locked until midnight, or sooner if your guardian lets you back on."
+        );
     }
 
     /// The daemon's fail-safe "unknown" (an unmanaged account, or before the
@@ -517,8 +524,11 @@ mod tests {
 
         let schedule = view_for(Some(&t(0, true, Some("schedule"))));
         assert!(schedule.status_line.contains("allowed hours"));
-        // Locked is exactly when asking matters most.
-        assert!(sd.asks_enabled && budget.asks_enabled && schedule.asks_enabled);
+        // Locked is exactly when asking matters most, except a stand-down,
+        // which no grant can lift.
+        assert!(budget.asks_enabled && schedule.asks_enabled);
+        assert!(!sd.asks_enabled);
+        assert!(sd.tooltip_detail.contains("midnight"));
     }
 
     /// An unreachable daemon must read as "not tracked", never as "no limit" —
