@@ -17,6 +17,49 @@ export const WINDOW_FLOOR_SECS = 24 * 60 * 60;
  *  between the phone that published a wrap and the one reading it. */
 export const CURSOR_OVERLAP_SECS = 120;
 
+/** How often a read ignores the cursor and sweeps the whole floor window again.
+ *
+ *  A ward builds the gift-wrap for an emergency unlock at its first poll after
+ *  the press, even offline, so the wrap's `created_at` is when it was built.
+ *  If the phone was offline, the wrap reaches a relay long after that, and a
+ *  running app whose cursor has already moved past that `created_at` would never
+ *  ask for it again: only a cold start would find it. A periodic sweep closes
+ *  that gap. Wraps already handled cost no decryption, so a sweep costs only the
+ *  download. */
+export const SWEEP_INTERVAL_SECS = 15 * 60;
+
+/**
+ * Should this read be a sweep of the whole floor window rather than the narrow
+ * cursor window?
+ *
+ * Yes when none has happened yet this session, when the last one is at least
+ * [`SWEEP_INTERVAL_SECS`] old, or when `forced` (the app has just come back to
+ * the foreground, or the guardian pulled to refresh: someone is looking now).
+ * `lastSweepAt` is the start time of the last sweep that SUCCEEDED; a failed
+ * read covered nothing, so the caller does not record it.
+ */
+export function sweepDue(lastSweepAt: number | null, nowSecs: number, forced = false): boolean {
+  if (forced || lastSweepAt === null) return true;
+  return nowSecs - lastSweepAt >= SWEEP_INTERVAL_SECS;
+}
+
+/**
+ * The `since` for the next read, and whether it is a sweep. A sweep reads from
+ * the floor regardless of the cursor; any other read follows [`windowSince`].
+ */
+export function readWindow(
+  cursor: number | null,
+  lastSweepAt: number | null,
+  nowSecs: number,
+  forced = false,
+): { since: number; sweep: boolean } {
+  const sweep = sweepDue(lastSweepAt, nowSecs, forced);
+  return {
+    since: sweep ? nowSecs - WINDOW_FLOOR_SECS : windowSince(cursor, nowSecs),
+    sweep,
+  };
+}
+
 /**
  * The `since` for the next read: the cursor if we have one, but never reaching
  * further back than the floor.

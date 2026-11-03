@@ -88,6 +88,8 @@ import { mintPairToken } from "../signer/guardianPairing";
 import { parseDevicePairingCode } from "../wire/deviceCode";
 import type { AppOpenWindow } from "../wire/grant";
 import type { DeviceRequest } from "../wire/request";
+import type { DeviceOverride } from "../wire/audit";
+import { overrideSummary } from "../domain/overrideSummary";
 import type { DeviceStatus } from "../wire/status";
 import { ingestWrap } from "./ingestWrap";
 import { ConsumeQueue, drainLocalInbox } from "./localDrain";
@@ -117,7 +119,7 @@ import {
 } from "./updateCheck";
 import { makeEmpty, makeSeed } from "../data/seed";
 import { decisionPath } from "./decisionGate";
-import { nextCursor, windowSince } from "./relayWindow";
+import { nextCursor, readWindow } from "./relayWindow";
 import { statusFor, type StatusForResult } from "./statusFor";
 import {
   emptyUsageHistory,
@@ -165,10 +167,11 @@ const APP_OPEN_WINDOW_PHRASE: Record<AppOpenWindow, string> = {
   restOfDay: "until tonight",
 };
 
-/** Ceiling on the remembered-wrap set. Comfortably more than a busy day of
- *  heartbeats and asks, and bounded so a session left open for a week cannot
- *  grow it without limit. */
-const HANDLED_WRAPS_MAX = 4000;
+/** Ceiling on the remembered-wrap set. One device heartbeats about 1440 times a
+ *  day and each sweep re-reads the whole day, so this has to cover a family's
+ *  day or every sweep decrypts the excess again. Bounded so a session left open
+ *  for a week cannot grow it without limit. */
+const HANDLED_WRAPS_MAX = 10_000;
 
 /** Drop the oldest ids once the set is over its ceiling. Sets iterate in
  *  insertion order, so the front of it is the oldest thing we know about — and
@@ -776,6 +779,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       consumeQueue.flush({
         persistedOk: persistedOk.current,
         hasRequest: (reqId) => s.requests.some((r) => r.reqId === reqId),
+        hasAudit: (key) => s.activity.some((a) => a.auditKey === key),
         consume: (ids) => {
           localConsume(ids);
         },
@@ -1312,6 +1316,45 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     const request: ChildRequest =
       r.op === "time.extend" && r.params.time !== undefined ? { ...card, time: r.params.time } : card;
     dispatch({ type: "ADD_REQUEST", request });
+    return true;
+  }, []);
+
+  /**
+   * Take in a ward's emergency unlock as an Activity line. Returns whether it
+   * was recorded — false when no paired device claims the machine, so the caller
+   * leaves it unhandled and a later pass can land it (the same contract as
+   * `ingestDeviceRequest`). Dispatches ADD_ACTIVITY directly: `addActivity`
+   * stamps the time the guardian saw it, and the point of this line is the
+   * moment the ward pressed the button.
+   */
+  const ingestDeviceAudit = useCallback((a: DeviceOverride): boolean => {
+    const s = stateRef.current;
+    if (s.activity.some((e) => e.auditKey === a.key)) return true;
+    let childId: string | undefined;
+    let device: Device | undefined;
+    for (const c of s.children) {
+      const d = c.devices.find(
+        (dev) => dev.pairing === "paired" && dev.devicePubkey === a.machine,
+      );
+      if (d) {
+        childId = c.id;
+        device = d;
+        break;
+      }
+    }
+    if (!childId || !device) return false;
+    dispatch({
+      type: "ADD_ACTIVITY",
+      event: {
+        id: uid("act"),
+        childId,
+        // Never in the future: the ward's clock may run ahead of ours.
+        ts: Math.min(a.at * 1000, Date.now()),
+        outcome: "override",
+        summary: overrideSummary(device.label, a.scope, a.durationSecs),
+        auditKey: a.key,
+      },
+    });
     return true;
   }, []);
 
@@ -1876,6 +1919,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // query feeds both intakes — STATUS heartbeats and the children's asks.
   // Fast cadence while a pairing QR is on screen — the parent is watching.
   const seenReqIds = useRef<Set<string>>(new Set());
+  const seenAudits = useRef<Set<string>>(new Set());
   const phonePairingWaiting = !!(phonePairing && !phonePairing.foundMachine);
 
   /**
@@ -1894,8 +1938,19 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * guardian hasn't added) is left unhandled, holds the cursor where it is, and
    * is retried every tick until it lands or ages out. The first read of a
    * session has no cursor and sweeps the full day, so a reload always heals.
+   *
+   * The cursor has one blind spot, so it is not the only thing deciding: a
+   * wrap published LATE. A ward builds an emergency unlock's wrap at its first
+   * poll after the press, even offline, so when the phone finally reaches a
+   * relay the wrap's `created_at` is already behind the cursor and the narrow
+   * window would never ask for it. So a read is also a sweep of the whole floor
+   * window (cursor ignored) every SWEEP_INTERVAL_SECS, and whenever the app
+   * comes to the foreground or is pulled to refresh. Handled wraps cost no
+   * decryption, so a sweep costs the download only.
    */
   const pollCursor = useRef<number | null>(null);
+  /** Start time of the last sweep that completed; null = none this session. */
+  const lastSweepAt = useRef<number | null>(null);
   const handledWraps = useRef<Set<string>>(new Set());
 
   /** The intake's view of this provider — shared by the relay poll and the
@@ -1908,14 +1963,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       hasRequest: (reqId: string) => stateRef.current.requests.some((r) => r.reqId === reqId),
       ingestStatus: ingestDeviceStatus,
       ingestRequest: ingestDeviceRequest,
+      seenAudits: seenAudits.current,
+      hasAudit: (key: string) => stateRef.current.activity.some((a) => a.auditKey === key),
+      ingestAudit: ingestDeviceAudit,
     }),
-    [ingestDeviceStatus, ingestDeviceRequest],
+    [ingestDeviceStatus, ingestDeviceRequest, ingestDeviceAudit],
   );
 
   /** One relay read: STATUS heartbeats + the children's asks. Hoisted out of
    *  the interval so a focus event and a pull-to-refresh can run exactly the
-   *  same fetch the timer does. */
-  const pollRelayOnce = useCallback(async () => {
+   *  same fetch the timer does. `sweep` forces a full-floor read (see above):
+   *  the foreground and pull-to-refresh callers pass it. */
+  const pollRelayOnce = useCallback(async (opts: { sweep?: boolean } = {}) => {
     if (stateRef.current.signer.kind !== "local") return;
     let guardianSk: Uint8Array;
     try {
@@ -1931,7 +1990,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // Asks stay approvable for hours (the child may be waiting at the lock
     // screen while the parent's phone was in a pocket), so the day-wide floor
     // stands — the cursor only ever narrows the window WITHIN it.
-    const since = windowSince(pollCursor.current, startedAt);
+    const { since, sweep } = readWindow(
+      pollCursor.current,
+      lastSweepAt.current,
+      startedAt,
+      opts.sweep === true,
+    );
     // Set by anything this round could not finish with. It pins the cursor, so
     // the wide window keeps coming back until the wrap lands or ages out.
     let unfinished = false;
@@ -1958,6 +2022,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         if (ingestWrap(w, ctx).kind === "unlanded") unfinished = true;
       }
       pollCursor.current = nextCursor(pollCursor.current, startedAt, unfinished);
+      // Only a read that completed counts as a sweep: a failed one covered
+      // nothing (it threw before here), so the next tick sweeps again.
+      if (sweep) lastSweepAt.current = startedAt;
       trimHandled(handledWraps.current);
     } catch {
       // Offline / relay down — routine; the next tick retries. The cursor is
@@ -2079,7 +2146,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     setRefreshing(true);
     setRefreshNotice(null);
     const outcome = await raceRefresh(
-      Promise.all([pollRelayOnce(), refetchManifests()]),
+      Promise.all([pollRelayOnce({ sweep: true }), refetchManifests()]),
     );
     if (refreshSeq.current !== seq) return;
     setRefreshing(false);

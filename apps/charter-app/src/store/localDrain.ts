@@ -10,8 +10,9 @@
 //     held;
 //   - wraps that were rejected, unreadable or duplicates are consumed too, so
 //     they do not come back every two seconds forever;
-//   - an ask that could not land yet (unknown phone) is NOT consumed: the
-//     carrier keeps it and a later drain retries, as the relay window does.
+//   - an ask or emergency unlock that could not land yet (unknown phone) is
+//     NOT consumed: the carrier keeps it and a later drain retries, as the
+//     relay window does.
 
 import type { NostrEvent } from "nostr-tools";
 import type { LocalInboxEntry } from "../carrier/localLink";
@@ -20,6 +21,8 @@ import type { WrapIngestResult } from "./ingestWrap";
 interface Pending {
   /** Present when the result is a new ask: don't consume until it is persisted. */
   reqId?: string;
+  /** Present when the result is an emergency unlock: same rule, keyed by its identity. */
+  auditKey?: string;
 }
 
 /** Wrap ids waiting for the state that holds their result to reach storage. */
@@ -27,9 +30,12 @@ export class ConsumeQueue {
   private pending = new Map<string, Pending>();
 
   /** Queue an id. A pending ask requirement is never weakened by a later duplicate. */
-  add(id: string, reqId?: string): void {
+  add(id: string, reqId?: string, auditKey?: string): void {
     const cur = this.pending.get(id);
-    this.pending.set(id, { reqId: reqId ?? cur?.reqId });
+    this.pending.set(id, {
+      reqId: reqId ?? cur?.reqId,
+      auditKey: auditKey ?? cur?.auditKey,
+    });
   }
 
   get size(): number {
@@ -40,17 +46,21 @@ export class ConsumeQueue {
    * Consume every queued id whose result is now persisted.
    *
    * `persistedOk` is whether the most recent write of the state to storage
-   * succeeded; `hasRequest` asks that same state whether an ask is in it.
+   * succeeded; `hasRequest` and `hasAudit` ask that same state whether an ask
+   * or an emergency unlock is in it.
    */
   flush(opts: {
     persistedOk: boolean;
     hasRequest: (reqId: string) => boolean;
+    hasAudit: (auditKey: string) => boolean;
     consume: (ids: string[]) => void;
   }): void {
     if (!opts.persistedOk || this.pending.size === 0) return;
     const ready: string[] = [];
     for (const [id, p] of this.pending) {
-      if (p.reqId === undefined || opts.hasRequest(p.reqId)) ready.push(id);
+      if (p.reqId !== undefined && !opts.hasRequest(p.reqId)) continue;
+      if (p.auditKey !== undefined && !opts.hasAudit(p.auditKey)) continue;
+      ready.push(id);
     }
     if (ready.length === 0) return;
     for (const id of ready) this.pending.delete(id);
@@ -101,6 +111,7 @@ export function drainLocalInbox(deps: {
     deps.queue.add(
       entry.id,
       result.kind === "request" || result.kind === "duplicate" ? result.reqId : undefined,
+      result.kind === "audit" ? result.key : undefined,
     );
   }
   return entries.length;
