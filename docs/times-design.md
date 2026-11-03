@@ -46,7 +46,9 @@ exactly one time at any instant, or it is locked.
    are not consulted (listing something is the un-ban). Overarching rules —
    `apprules` (per-app blocks and hours), `buckets` caps, `hidden` apps, and
    `alwaysavailable` exemptions — apply in every time and cannot be overridden
-   by a named time.
+   by a named time. For `alwaysavailable` that means the named app stays
+   runnable inside a time too (kept in the composed list on Android, bounded by
+   what Free time would itself run); only a stand-down takes it away.
 5. **Overlap: a named window beats a Free window** where they overlap (a
    homework hour inside free time carves it). Two *named* windows overlapping
    on one device is refused by the editor; a device that nevertheless receives
@@ -185,7 +187,9 @@ Given Free time's resolved standing clauses (`apps` after
   content (block all web) carries. Over an allowlist Free posture, bans
   remove from `allowed` and un-bans add to it.
 - In all cases: `apprules`, `buckets`, `hidden`, `alwaysavailable` apply
-  unchanged on top; sanctioned learning windows survive (existing rule).
+  unchanged on top (a live always-available app is kept runnable in the
+  composed list when Free time would run it; the warden does this after
+  `compose_apps`, which does not touch the clause); sanctioned learning windows survive (existing rule).
   `time` on a bucket-hit grant is ignored. Labels: Unicode code points.
 - `countsAgainstBudget: false` → usage in this time charges neither the
   screen budget nor any bucket; budget exhaustion does not lock it.

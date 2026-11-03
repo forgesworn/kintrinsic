@@ -364,7 +364,23 @@ impl AlwaysAvailableBody {
     /// subtracts this set from the LOCK-DRIVEN posture only, so a guardian's
     /// outright block always wins. See `appSuspendSet` on the Kotlin side.
     pub fn exempt_packages(&self, lock_reason: &str, now: u64) -> Vec<String> {
-        if self.v != CLAUSE_VERSION || !EXEMPTING_LOCK_REASONS.contains(&lock_reason) {
+        if !EXEMPTING_LOCK_REASONS.contains(&lock_reason) {
+            return Vec::new();
+        }
+        self.live_packages(now)
+    }
+
+    /// The packages the clause names that are live at `now`, whatever the
+    /// device is doing: a wrong version yields none, and an expired entry
+    /// drops out while the rest of the list stands.
+    ///
+    /// This is the "applies in every time" half of the clause: inside a named
+    /// time (which never locks the device) the caller keeps these runnable
+    /// where Free time would itself run them. It is not a lock exemption and
+    /// says nothing about a stand-down, which is reached through
+    /// [`AlwaysAvailableBody::exempt_packages`] and exempts nothing.
+    pub fn live_packages(&self, now: u64) -> Vec<String> {
+        if self.v != CLAUSE_VERSION {
             return Vec::new();
         }
         self.apps

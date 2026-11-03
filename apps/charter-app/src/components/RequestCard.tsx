@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { Child, ChildRequest, Device, RequestKind } from "../domain/types";
 import { Avatar, Banner, Button, Card, Pill } from "./ui";
 import { LeverSheet } from "./LeverSheet";
+import { StoppedNotice } from "./StoppedNotice";
+import { useStopState } from "./leverState";
 import { useCharter } from "../store/store";
 import { standingFor, standingNote } from "../domain/standing";
 import { catalogLookup } from "../data/appCatalog";
@@ -176,7 +178,7 @@ export function RequestCard({
   // connected) — the request stays pending and the guardian sees why.
   const [decideError, setDecideError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [sheet, setSheet] = useState<"approve" | "give" | "retype" | null>(null);
+  const [sheet, setSheet] = useState<"approve" | "give" | "retype" | "stop" | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   // Busy while THIS card is sending or while any other ask is: only one
@@ -281,6 +283,12 @@ export function RequestCard({
   // is a different call — and the guardian shouldn't have to go and look it up.
   const standing = isExtend ? standingNote(standingFor(child, deviceStatus)) : null;
 
+  // A stood-down ward opens nothing with more minutes: an approval would be
+  // sent and silently do nothing, so say so first (never blocking it).
+  const stopState = useStopState(child);
+  const stopped = isExtend && stopState.standing;
+  const allowBack = stopState.canSend ? () => setSheet("stop") : undefined;
+
   const run = async (next: BusyState, fn: () => Promise<void>) => {
     const token = tryBeginAskDecision();
     if (!token) return;
@@ -361,6 +369,16 @@ export function RequestCard({
           }}
         />
       )}
+      {sheet === "stop" && (
+        <LeverSheet
+          mode="stop"
+          child={child}
+          onClose={(n) => {
+            setSheet(null);
+            if (n) setNote(n);
+          }}
+        />
+      )}
     </>
   );
 
@@ -393,6 +411,11 @@ export function RequestCard({
           <p className="card-sub" style={{ color: "var(--warn, #b45309)", margin: "8px 0 0" }} role="alert">
             {decideError}
           </p>
+        )}
+        {stopped && !expired && (
+          <div style={{ marginTop: 8 }}>
+            <StoppedNotice name={child.name} onAllowBack={allowBack} />
+          </div>
         )}
         <div className="request-actions">
           {expired ? (
@@ -504,6 +527,10 @@ export function RequestCard({
         <p className="card-sub" style={{ color: "var(--warn, #9a6516)" }}>
           {child.name} is {standing}.
         </p>
+      )}
+
+      {stopped && !expired && (
+        <StoppedNotice name={child.name} onAllowBack={allowBack} />
       )}
 
       {expired && (

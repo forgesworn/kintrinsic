@@ -310,9 +310,11 @@ pub fn lock_message(reason: LockReason) -> (&'static str, &'static str) {
         // Names the person, because a person is the way out. "Time's up" would
         // send her to wait for a tomorrow that isn't coming, and an unexplained
         // lock in the middle of her own evening reads as the phone breaking.
+        // Says when it ends: a stand-down lapses at the ward's midnight, so
+        // she is not left thinking it lasts until somebody remembers.
         LockReason::StandDown => (
             "That's it for today",
-            "Your guardian asked you to finish up. Talk to them to come back on.",
+            "Your guardian asked you to finish up for today. It ends at midnight, or sooner if they let you back on.",
         ),
     }
 }
@@ -336,6 +338,15 @@ pub fn schedule_is_dormant(schedule: Option<&charter_schedule::GrantSchedule>) -
 /// told it was sent, and watch the device stay shut. So the reason is shared
 /// and only the words differ.
 pub fn lock_message_for(reason: LockReason, dormant: bool) -> (&'static str, &'static str) {
+    // A stand-down lapses at the ward's midnight, but a dormant device does not
+    // come back with the day: it stays off until a guardian opens it, so the
+    // midnight promise would be false. Name the person, as the original copy did.
+    if dormant && matches!(reason, LockReason::StandDown) {
+        return (
+            "That's it for today",
+            "Your guardian asked you to finish up. Talk to them to come back on.",
+        );
+    }
     if dormant && matches!(reason, LockReason::Schedule) {
         // Not "outside allowed hours": there are no allowed hours, and telling a
         // child to wait for a window that will never open is a promise the
@@ -388,13 +399,15 @@ mod tests {
         );
         // And a dormant flag must never leak into another reason's copy: a spent
         // budget on a dormant device is still "time's up", not "device is off".
-        for reason in [
-            LockReason::Budget,
-            LockReason::Malformed,
-            LockReason::StandDown,
-        ] {
+        for reason in [LockReason::Budget, LockReason::Malformed] {
             assert_eq!(lock_message_for(reason, true), lock_message(reason));
         }
+        // A stand-down keeps its headline; only the midnight promise goes,
+        // because a dormant device does not come back with the day.
+        assert_eq!(
+            lock_message_for(LockReason::StandDown, true).0,
+            lock_message(LockReason::StandDown).0
+        );
     }
 
     /// A device-only charter with a budget and no schedule — "2 hours a day,
@@ -480,5 +493,17 @@ mod tests {
         let (title, detail) = lock_message(LockReason::Malformed);
         assert_eq!(title, "Locked");
         assert!(detail.contains("guardian"));
+        // A stand-down says it ends, and that the guardian can end it sooner.
+        let (title, detail) = lock_message(LockReason::StandDown);
+        assert_eq!(title, "That's it for today");
+        assert!(
+            detail.contains("midnight") && detail.contains("sooner"),
+            "{detail}"
+        );
+        // A dormant device stays off after midnight: no midnight promise.
+        let (dtitle, ddetail) = lock_message_for(LockReason::StandDown, true);
+        assert_eq!(dtitle, "That's it for today");
+        assert!(!ddetail.contains("midnight"), "{ddetail}");
+        assert!(ddetail.contains("Talk to them"), "{ddetail}");
     }
 }

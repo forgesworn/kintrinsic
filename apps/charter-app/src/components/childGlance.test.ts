@@ -174,7 +174,7 @@ describe("childGlance", () => {
       NOW,
     );
     expect(g).toMatchObject({ line: "Stopped", tone: "out", fraction: null });
-    expect(g.spoken).toBe("Sam, online, stopped until you allow them back on");
+    expect(g.spoken).toBe("Sam, online, stopped until midnight, or until you allow them back on");
   });
 
   it("says Locked, with the opening time when it is later today", () => {

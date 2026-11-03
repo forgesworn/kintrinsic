@@ -128,7 +128,7 @@ export function childGlance(
       tone: "out",
       fraction: null,
       online,
-      spoken: `${child.name}, ${where}, stopped until you allow them back on`,
+      spoken: `${child.name}, ${where}, stopped until midnight, or until you allow them back on`,
     };
   }
   const opens = shortOpening(s.nextWindowText);

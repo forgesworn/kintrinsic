@@ -268,6 +268,9 @@ fn dedup(items: impl IntoIterator<Item = String>) -> Vec<String> {
 ///
 /// `apprules`, `buckets`, `hidden` and `alwaysavailable` are not touched (and
 /// `hidden` rides through unchanged): a named time can never loosen them.
+/// `alwaysavailable` is a clause of its own, so this composition cannot honour
+/// it; the Android warden re-adds each live named app Free time would run after
+/// composing (`Warden::app_policy`), or `onlyThese` would suspend it.
 pub fn compose_apps(free_resolved: &GrantApps, t: &NamedTime) -> GrantApps {
     let mut out = free_resolved.clone();
     match t.posture {

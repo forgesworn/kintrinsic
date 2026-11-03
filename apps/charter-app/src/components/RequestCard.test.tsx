@@ -103,6 +103,24 @@ describe("RequestCard", () => {
     expect(ctx.approveRequest).toHaveBeenCalledWith("r1", 15);
   });
 
+  it("a stopped ward: the ask card says an approval won't take effect, and still lets it be sent", async () => {
+    ctx.deviceStatus = {
+      ["a".repeat(64)]: { ts: Math.floor(Date.now() / 1000), lockReason: "standdown" },
+    };
+    try {
+      mount(<RequestCard request={TIME_ASK} child={CHILD} compact />);
+      expect(container.textContent).toContain(
+        "Sam is stopped for today, so this won't take effect until you allow them back on.",
+      );
+      // The existing action is reachable from the card.
+      expect(button("Allow back on")).toBeDefined();
+      await click(button("Approve 15 min"));
+      expect(ctx.approveRequest).toHaveBeenCalledWith("r1", 15);
+    } finally {
+      ctx.deviceStatus = {};
+    }
+  });
+
   it("compact: 'Not now' denies in one tap", async () => {
     mount(<RequestCard request={TIME_ASK} child={CHILD} compact />);
     await click(button("Not now"));

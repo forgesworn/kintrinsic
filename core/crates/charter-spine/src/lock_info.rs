@@ -23,6 +23,18 @@ pub struct LockInfo {
     pub lines: Vec<String>,
 }
 
+/// A guardian's stand-down is the reason on the card, whatever the schedule
+/// says: its words replace the schedule's (a dormant device's "This device is
+/// off" would otherwise hide that a person stopped it), and they say when it
+/// ends only if it will (a dormant device stays off after midnight).
+pub fn apply_stand_down_copy(info: &mut LockInfo, schedule: Option<&GrantSchedule>) {
+    let dormant = crate::enforcer_runtime::schedule_is_dormant(schedule);
+    let (title, detail) =
+        crate::enforcer_runtime::lock_message_for(charter_schedule::LockReason::StandDown, dormant);
+    info.title = Some(title.to_string());
+    info.detail = Some(detail.to_string());
+}
+
 /// Compose the panel's schedule/usage block.
 pub fn lock_info(
     schedule: Option<&GrantSchedule>,
@@ -260,6 +272,31 @@ mod tests {
         let detail = info.detail.expect("dormant gets an honest reason");
         assert!(detail.contains("guardian"));
         assert!(!detail.contains("come back"));
+    }
+
+    /// A stand-down is the reason on the card, so its words win over a dormant
+    /// device's "This device is off". They promise midnight only where the
+    /// device really comes back at midnight.
+    #[test]
+    fn a_stand_down_names_the_person_and_promises_midnight_only_when_true() {
+        let open = schedule(WeeklySchedule {
+            mon: Some(vec![win("07:00", "20:00")]),
+            ..Default::default()
+        });
+        let mut info = lock_info(Some(&open), None, None, 0, 1783166400);
+        apply_stand_down_copy(&mut info, Some(&open));
+        assert_eq!(info.title.as_deref(), Some("That's it for today"));
+        assert!(info.detail.as_deref().unwrap().contains("midnight"));
+
+        let mut dormant = schedule(WeeklySchedule::default());
+        dormant.paused = Some(true);
+        let mut info = lock_info(Some(&dormant), None, None, 0, 1783166400);
+        assert_eq!(info.title.as_deref(), Some("This device is off"));
+        apply_stand_down_copy(&mut info, Some(&dormant));
+        assert_eq!(info.title.as_deref(), Some("That's it for today"));
+        let detail = info.detail.unwrap();
+        assert!(!detail.contains("midnight"), "{detail}");
+        assert!(detail.contains("guardian"), "{detail}");
     }
 
     #[test]
