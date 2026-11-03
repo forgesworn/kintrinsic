@@ -440,6 +440,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        org.forgesworn.charter.service.RelayPollPace.show(this)
         // Reflect the current pairing state every time the screen is shown —
         // e.g. after a guardian RELEASE unpaired the device while this screen
         // was open, it must flip back to "waiting to pair" on its own.
@@ -450,6 +451,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         mainHandler.removeCallbacks(ticker)
+        org.forgesworn.charter.service.RelayPollPace.hide(this)
         super.onPause()
     }
 

@@ -156,7 +156,7 @@ export interface SignOutcomeAt extends SignOutcome {
 
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
-  signRelayConfig?(machine: string, relays: string[], label: string): Promise<string>;
+  signRelayConfig?(machine: string, relays: string[], label: string, battery?: import("../domain/battery").BatterySettings): Promise<string>;
   /** Current connection + auto-sign state (synchronous snapshot). */
   status(): SignerState;
 

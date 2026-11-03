@@ -22,6 +22,24 @@ pub struct Pairing {
     /// Later values are the last applied guardian-signed relay change.
     #[serde(default)]
     pub relays_updated_at: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "stored_battery",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub battery: Option<crate::relay_config::BatterySettings>,
+}
+
+// Scheduling metadata must never make the identity/enforcement record unreadable.
+fn stored_battery<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::relay_config::BatterySettings>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(
+        serde_json::from_value::<crate::relay_config::BatterySettings>(value)
+            .ok()
+            .filter(|b| b.valid()),
+    )
 }
 
 /// Why a `bunker://` URI was rejected.
@@ -151,6 +169,7 @@ pub fn pin_from_connect(
         audit_transparency,
         paired_at: now,
         relays_updated_at: Some(0),
+        battery: None,
     })
 }
 

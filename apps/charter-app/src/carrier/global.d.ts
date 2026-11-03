@@ -12,6 +12,8 @@ declare global {
      *  older than the release that added them — calling them must degrade to
      *  a no-op or null, never throw. */
     CharterCarrier?: {
+      batterySettings?: () => string;
+      setBatterySettings?: (json: string) => void;
       provision: (json: string) => void;
       roster?: (json: string) => void;
       version?: () => string;

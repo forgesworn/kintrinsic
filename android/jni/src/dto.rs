@@ -38,6 +38,7 @@ pub struct PairingState {
     pub subject: Option<String>,
     /// The pinned wss relays (empty until a `bunker://` pairing lands).
     pub relays: Vec<String>,
+    pub battery: Option<charter_transport::relay_config::BatterySettings>,
 }
 
 /// Result of `charterIngestClause`.

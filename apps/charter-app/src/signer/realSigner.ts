@@ -148,11 +148,11 @@ function giftTime(time: string | undefined): string | undefined {
 }
 
 export class RealSigner implements Signer {
-  async signRelayConfig(machine: string, relays: string[], label: string): Promise<string> {
+  async signRelayConfig(machine: string, relays: string[], label: string, battery?: import("../domain/battery").BatterySettings): Promise<string> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
-    const template = relayConfigTemplate(machine, relays, this.deps.now());
-    await this.authorize("clause", `Change relays for ${label}`);
+    const template = relayConfigTemplate(machine, relays, this.deps.now(), battery);
+    await this.authorize("clause", `${battery ? "Change battery behaviour and confirm relays" : "Change relays"} for ${label}`);
     template.created_at = this.deps.now();
     return JSON.stringify(await guardian.signEvent(template));
   }

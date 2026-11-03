@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Avatar, Button, Card, SectionLabel } from "../components/ui";
 import { wardPath } from "../domain/wardRoute";
 import { useCharter } from "../store/store";
+import GuardianBattery from "./GuardianBattery";
 import AppVersion from "../carrier/AppVersion";
 import CarrierDownload from "../carrier/CarrierDownload";
 import { CHILD_COLORS } from "./childColors";
@@ -48,6 +49,7 @@ function SettingsPage({ openAddChild }: { openAddChild: boolean }) {
   return (
     <div className="settings-page">
       <KeyBackupNudge />
+      <GuardianBattery />
 
       {/* id + scroll-margin: the getting-started scrolls here (the sticky
           header is ~72px, so offset the anchor so the heading isn't hidden). */}

@@ -351,6 +351,12 @@ write("keys.json", {
     content: JSON.stringify({ machine: MACHINE_PK, relays }),
   }, "relay_config.sig");
   write("relay_config.json", { guardian: GUARDIAN_PK, machine: MACHINE_PK, relays, event });
+  const battery = { screenOffSecs: 300, ordinarySecs: 60, requestBoost: true, openingBoost: true, boostSecs: 120 };
+  const batteryEvent = signWith(GUARDIAN_SK, {
+    kind: 31118, created_at: TS, tags: [MARKER, ["p", MACHINE_PK]],
+    content: JSON.stringify({ machine: MACHINE_PK, relays, battery }),
+  }, "battery_config.sig");
+  write("battery_config.json", { guardian: GUARDIAN_PK, machine: MACHINE_PK, relays, battery, event: batteryEvent });
 }
 
 {

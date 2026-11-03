@@ -1,3 +1,4 @@
+import { validateBattery } from "../domain/battery";
 import type { EventTemplate } from "nostr-tools";
 
 export const CHARTER_DEVICE_RELAYS = 31118;
@@ -19,12 +20,12 @@ export function validateRelays(relays: string[]): string[] {
   return unique;
 }
 
-export function relayConfigTemplate(machine: string, relays: string[], now: number): EventTemplate {
+export function relayConfigTemplate(machine: string, relays: string[], now: number, battery?: import("../domain/battery").BatterySettings): EventTemplate {
   if (!/^[0-9a-f]{64}$/.test(machine)) throw new Error("This device has no valid device code.");
   return {
     kind: CHARTER_DEVICE_RELAYS,
     created_at: now,
     tags: [["t", "charter-device"], ["p", machine]],
-    content: JSON.stringify({ machine, relays: validateRelays(relays) }),
+    content: JSON.stringify({ machine, relays: validateRelays(relays), ...(battery ? { battery: validateBattery(battery) } : {}) }),
   };
 }

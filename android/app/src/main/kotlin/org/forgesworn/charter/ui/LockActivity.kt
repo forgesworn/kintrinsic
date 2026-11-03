@@ -171,6 +171,7 @@ class LockActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        org.forgesworn.charter.service.RelayPollPace.show(this)
         ui.removeCallbacks(clockTick)
         tick = 0
         ui.post(clockTick)
@@ -202,6 +203,7 @@ class LockActivity : Activity() {
         // Don't tick a clock nobody can see (and never hold the CPU awake for
         // it): the shade re-paints the moment it comes back.
         ui.removeCallbacks(clockTick)
+        org.forgesworn.charter.service.RelayPollPace.hide(this)
         super.onPause()
     }
 

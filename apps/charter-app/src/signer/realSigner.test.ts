@@ -75,6 +75,18 @@ describe("RealSigner.signRelayConfig", () => {
     expect(published).toEqual([]);
   });
 
+  it("authorises battery settings for exactly the requested device", async () => {
+    const { recommendedBattery } = await import("../domain/battery");
+    const gate = vi.fn(() => true);
+    const signer = makeSigner(undefined, [], { confirmGate: gate });
+    await signer.connect("signet");
+    const event = JSON.parse(await signer.signRelayConfig(DPK2, RELAYS, "Ward phone", recommendedBattery)) as NostrEvent;
+    expect(gate).toHaveBeenCalled();
+    expect(event.tags).toContainEqual(["p", DPK2]);
+    expect(event.tags).not.toContainEqual(["p", DPK1]);
+    expect(JSON.parse(event.content).battery).toEqual(recommendedBattery);
+  });
+
   it("honours a cancelled guardian authorisation", async () => {
     const signer = makeSigner(undefined, [], { confirmGate: () => false });
     await signer.connect("local");

@@ -76,13 +76,16 @@ class AboutActivity : Activity() {
         guardianCard.addView(guardianLine.apply { setPadding(0, CharterTheme.dp(this@AboutActivity, 4), 0, 0) })
         root.addView(guardianCard, CharterTheme.stackParams(this, 14))
 
+        val batteryLine = CharterTheme.text(this, org.forgesworn.charter.service.RelayPollPace.status(), CharterTheme.FS_BODY)
+        root.addView(batteryLine)
+
         val relayLine = CharterTheme.text(this, "…", CharterTheme.FS_SMALL).apply {
             setTextIsSelectable(true)
         }
         val relayCard = CharterTheme.card(this)
         relayCard.addView(CharterTheme.text(this, "Relays", CharterTheme.FS_SECTION, bold = true))
         relayCard.addView(relayLine)
-        val changeRelays = CharterTheme.primaryButton(this, "Change relays").apply { isEnabled = false }
+        val changeRelays = CharterTheme.primaryButton(this, "Change relays / battery").apply { isEnabled = false }
         relayCard.addView(changeRelays, CharterTheme.stackParams(this, 10))
         changeRelays.setOnClickListener {
             val input = EditText(this).apply {
@@ -91,8 +94,8 @@ class AboutActivity : Activity() {
                 maxLines = 6
             }
             val dialog = AlertDialog.Builder(this)
-                .setTitle("Change relays")
-                .setMessage("In your guardian's Kintrinsic app, open Family → this device → Relays. Create a code and paste it here within ten minutes. This works even when the old relays are down.")
+                .setTitle("Change relays / battery")
+                .setMessage("In your guardian's Kintrinsic app, open Family → this device → Relays or Battery & responsiveness. Create a code and paste it here within ten minutes. This works even when the old relays are down.")
                 .setView(input)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Apply", null)
@@ -111,6 +114,7 @@ class AboutActivity : Activity() {
                             val error = state.exceptionOrNull()?.message ?: state.getOrNull()?.error
                             if (state.isSuccess && error == null) {
                                 relayLine.text = state.getOrThrow().relays.joinToString("\n")
+                                batteryLine.text = org.forgesworn.charter.service.RelayPollPace.status()
                                 dialog.dismiss()
                             } else input.error = error ?: "Could not apply the relay code."
                         }
@@ -161,7 +165,9 @@ class AboutActivity : Activity() {
             val code = runCatching { CharterCore.deviceCode() }.getOrNull()
                 ?: init?.machinePubkey ?: "(unavailable)"
             val state = runCatching { CharterCore.pairingState() }.getOrNull()
+            state?.let { org.forgesworn.charter.service.RelayPollPace.configure(it.battery) }
             runOnUiThread {
+                batteryLine.text = org.forgesworn.charter.service.RelayPollPace.status()
                 codeFull.text = code
                 publicNpub.text = PairingSas.npub(code.filterNot { it.isWhitespace() }) ?: "Public key unavailable."
                 codeShort.text = if (code.length >= 16) "${code.take(8)} … ${code.takeLast(4)}" else code

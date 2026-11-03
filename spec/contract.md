@@ -2956,3 +2956,30 @@ the audit section above unchanged; `summary` MAY appear in audit content,
 - Signet — per-origin grants + sync
 - Signet — trusted-app pairings (`kind` field added in `19d538a`)
 - Signet — Charter clause #1 implementation tracker (this work)
+
+### Android battery scheduling in signed device configuration
+
+Kind 31118 may additionally carry `battery` in its content:
+
+```json
+{"machine":"<machine hex pubkey>","relays":["wss://one.example","wss://two.example"],"battery":{"screenOffSecs":300,"ordinarySecs":60,"requestBoost":true,"openingBoost":true,"boostSecs":120}}
+```
+
+The existing guardian signature, machine binding, ten-minute TTL, pairing epoch
+and persisted `relays_updated_at` replay floor cover the entire configuration.
+All validation precedes persistence. Allowed screen-off steps are 120/300/600
+seconds; ordinary-use steps 30/60/120; request windows 60/120/180. Both boost
+flags must be booleans. Invalid signed values are rejected atomically.
+Absent `battery` preserves a previously configured choice, defaulting to
+Balanced on an older pairing. Invalid local battery metadata defaults without
+making the pairing identity unreadable. The Android ward alone uses these
+values; Linux preserves the metadata but retains its existing cadence.
+
+This uses the existing offline signed-code transfer, including when relays
+are unavailable. The guardian console goes through its authorised signer
+(including NIP-46 when selected). It does not publish this code as a clause or
+claim remote receipt. The ward applies it in About this device; the guardian
+must confirm the current relay list before signing because this configuration
+also confirms that list. Older ward software rejects the additional field;
+upgrade the ward before using battery codes. No enforcement permissions or
+watchdog timings are changed. Golden vector: `nostr/battery_config.json`.

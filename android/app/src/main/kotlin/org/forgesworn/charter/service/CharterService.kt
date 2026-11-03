@@ -92,9 +92,13 @@ class CharterService : Service() {
         tickStartedAt = SystemClock.elapsedRealtime()
         try {
             controller.tickAndApply(screenWas = screenWas)
+            if (RelayPollPace.waiting()) {
+                RelayPollPace.reconcile(org.forgesworn.charter.native.CharterCore.listRequests(128).associate { it.reqId to it.state })
+            }
             // The D8 widget rides the tick (worker thread — JNI-safe);
             // level-triggered inside push(), so unchanged minutes are free.
-            if (screenWas == null) org.forgesworn.charter.ui.TimeLeftWidget.push(this)
+            // Avoid widget JNI and launcher IPC while the display is off.
+            if (screenWas == null && interactive) org.forgesworn.charter.ui.TimeLeftWidget.push(this)
         } catch (t: Throwable) {
             Log.e(TAG, "tick failed", t)
         } finally {
@@ -107,7 +111,9 @@ class CharterService : Service() {
     private fun runPoll() {
         pollStartedAt = SystemClock.elapsedRealtime()
         try {
+            RelayPollPace.configure(org.forgesworn.charter.native.CharterCore.pairingState().battery)
             val r = controller.pollOnce()
+            handler.post { if (running) runTick() }
             // Every round logged: this is the bring-up visibility for the
             // on-metal gates (offline reasons are routine, not silent).
             Log.i(TAG, "poll: $r")
@@ -232,28 +238,27 @@ class CharterService : Service() {
             runTick(screenWas = wasInteractive)
         }
         handler.post(tick)
-        slowHandler.removeCallbacks(slowTick)
-        if (nowInteractive) {
-            kickLink()
-            // Waking up is exactly when a guardian's answer, gift or lock is
-            // worth having: poll at once rather than up to two minutes late.
-            slowHandler.post(slowTick)
-        } else {
-            slowHandler.postDelayed(slowTick, DARK_SLOW_TICK_MS)
-        }
+        if (nowInteractive) kickLink()
+        refreshRelay(prompt = nowInteractive)
     }
 
     // The slow (network) tick on its OWN thread: charterPollOnce blocks for
     // seconds on relay IO, and the Rust side releases the warden lock around
     // the network phases — so a slow relay costs a poll, never an enforcement
     // tick (the two-thread rule, port-spec §3.2).
-    private val slowTick = object : Runnable {
-        override fun run() {
-            if (!running) return
-            runPoll()
-            slowHandler.postDelayed(this, if (interactive) SLOW_TICK_MS else DARK_SLOW_TICK_MS)
-        }
+    private fun pollInterval() = RelayPollPace.interval(interactive)
+
+    private val relayLoop by lazy {
+        RelayRoundLoop(
+            now = { SystemClock.elapsedRealtime() },
+            active = { running && armed }, interactive = { interactive },
+            interval = { pollInterval() },
+            post = { runnable, delay -> slowHandler.postDelayed(runnable, delay); Unit },
+            remove = { slowHandler.removeCallbacks(it) }, work = { runPoll() },
+        )
     }
+    private val slowTick get() = relayLoop.round
+    private fun refreshRelay(prompt: Boolean) = relayLoop.refresh(prompt)
 
     override fun onCreate() {
         super.onCreate()
@@ -262,6 +267,9 @@ class CharterService : Service() {
         handler = Handler(worker.looper)
         slowWorker = HandlerThread("charter-slow-worker").apply { start() }
         slowHandler = Handler(slowWorker.looper)
+        RelayPollPace.onChange = {
+            refreshRelay(prompt = true)
+        }
         linkWorker = HandlerThread("charter-link-worker").apply { start() }
         linkHandler = Handler(linkWorker.looper)
         linkDiscovery = LinkDiscovery(this, linkHandler) { kickLink() }
@@ -356,7 +364,7 @@ class CharterService : Service() {
             }
             if (!running || !armed) return
             val tickDue = LivenessPolicy.tickDue(now, lastTickAt, interactive, TICK_MS)
-            val pollDue = LivenessPolicy.pollDue(now, lastPollAt, interactive, SLOW_TICK_MS, DARK_SLOW_TICK_MS)
+            val pollDue = LivenessPolicy.pollDue(now, lastPollAt, interactive, pollInterval(), pollInterval())
             Log.i(TAG, "liveness kick: tick due=$tickDue poll due=$pollDue screen=${if (interactive) "on" else "off"}")
             kickLink(rediscover = false)
             if (tickDue) {
@@ -378,8 +386,8 @@ class CharterService : Service() {
                 val posted = slowHandler.post {
                     try {
                         val n = SystemClock.elapsedRealtime()
-                        if (LivenessPolicy.pollDue(n, lastPollAt, interactive, SLOW_TICK_MS, DARK_SLOW_TICK_MS)) {
-                            runPoll()
+                        if (LivenessPolicy.pollDue(n, lastPollAt, interactive, pollInterval(), pollInterval())) {
+                            relayLoop.overdueRound()
                         }
                     } finally {
                         runCatching { wl?.takeIf { it.isHeld }?.release() }
@@ -393,6 +401,7 @@ class CharterService : Service() {
     }
 
     override fun onDestroy() {
+        RelayPollPace.onChange = null
         running = false
         armed = false
         runCatching { unregisterReceiver(screenReceiver) }
@@ -456,7 +465,7 @@ class CharterService : Service() {
         )
 
         /** Relay poll cadence (D4: connection-per-poll; 2-day cursor self-heals). */
-        internal const val SLOW_TICK_MS = 15_000L
+        internal const val SLOW_TICK_MS = RelayPollPace.USING_MS
 
         /**
          * The relay pace while the screen is off. Each poll is a fresh
@@ -465,7 +474,7 @@ class CharterService : Service() {
          * nobody waiting on the answer: what matters is that the poll happens
          * the moment the screen lights, which [repace] guarantees.
          */
-        internal const val DARK_SLOW_TICK_MS = 120_000L
+        internal const val DARK_SLOW_TICK_MS = RelayPollPace.ASLEEP_MS
 
         /** How often the local link monitor reads the link's state: lit, a
          *  locally applied change is ticked within this; dark, it only keeps
