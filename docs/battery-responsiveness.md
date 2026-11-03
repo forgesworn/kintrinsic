@@ -127,3 +127,14 @@ There is no measured battery saving, representative radio/wake comparison,
 background notification hardware check or approval-latency result from this
 session. Those remain the physical acceptance measurements described above.
 No release was published and no family device received a deployment.
+
+## Published builds
+
+Ward 0.7.2 (version code 51) and guardian 0.2.2 (version code 25) were
+subsequently released from merged commit `a0242e66c6afe4e90dd0daccb851158d8d7daa62`.
+GitHub-hosted builds passed provenance, SHA-256, signing-certificate and rotation
+lineage verification before publication. Both artifacts have a verified direct
+Blossom mirror, and all three update relays accepted their signed announcements.
+The guardian web deployment and merged-commit Rust CI passed. The physical
+measurement and instrumentation limitations above still apply. Publication did
+not install either APK on family devices.
