@@ -120,7 +120,11 @@ class CarrierService : Service() {
             openedAt.remove(relay)
             backoffs.remove(relay)
         }
-        p.relays.forEach { relay -> if (relay !in sockets) connect(relay) }
+        // Repeated service starts must respect an outage's queued retry,
+        // rather than repeatedly waking the radio before its backoff expires.
+        p.relays.forEach { relay ->
+            if (ReconnectPolicy.shouldConnect(relay in sockets, relay in reconnecting)) connect(relay)
+        }
     }
 
     private fun connect(relay: String) {
@@ -218,8 +222,7 @@ class CarrierService : Service() {
             val lived = openedAt.remove(relay)
                 ?.let { SystemClock.elapsedRealtime() - it }
                 ?: 0L
-            val prev = if (lived >= STABLE_MS) 0L else (backoffs[relay] ?: 0L)
-            val next = (prev * 2).coerceIn(1L, MAX_BACKOFF_SECS)
+            val next = ReconnectPolicy.next(backoffs[relay] ?: 0L, lived, store.reconnectCap())
             backoffs[relay] = next
             handler.postDelayed({ connect(relay) }, next * 1000)
         }

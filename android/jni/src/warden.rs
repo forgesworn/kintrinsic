@@ -300,6 +300,7 @@ pub struct Warden {
     guardian: Option<PubKey>,
     subject: Option<PubKey>,
     relays: Vec<String>,
+    battery_settings: Option<charter_transport::relay_config::BatterySettings>,
     /// When the CURRENT pairing was established (unix secs; 0 = unknown/legacy).
     /// A RELEASE dated before this predates the current pairing epoch — even
     /// if signed by the same guardian, it is a stale replay of an EARLIER
@@ -515,6 +516,7 @@ impl Warden {
             Ok(p) => (p, None),
             Err(e) => ((None, None, Vec::new(), 0), Some(e)),
         };
+        let battery_settings = load_battery(&pairing);
         let pair_token = load_pair_token(&base);
         let boot_watch = load_boot_watch(&base).unwrap_or_default();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -538,6 +540,7 @@ impl Warden {
             guardian,
             subject,
             relays,
+            battery_settings,
             paired_at,
             machine_sk,
             key_error,
@@ -870,6 +873,7 @@ impl Warden {
         self.guardian = None;
         self.subject = None;
         self.relays.clear();
+        self.battery_settings = None;
         self.paired_at = 0;
         self.pair_token = None;
         self.relay = None;
@@ -2329,6 +2333,7 @@ impl Warden {
                 self.guardian = guardian;
                 self.subject = subject;
                 self.relays = relays;
+                self.battery_settings = load_battery(&self.pairing);
                 self.paired_at = paired_at;
                 self.pairing_error = None;
                 self.rebuild_relay();
@@ -2403,6 +2408,7 @@ impl Warden {
             guardian: self.guardian.map(|g| g.to_hex()),
             subject: self.subject.map(|s| s.to_hex()),
             relays: self.relays.clone(),
+            battery: self.battery_settings.clone(),
         }
     }
 
@@ -2421,6 +2427,7 @@ impl Warden {
         self.pairing
             .save(&json)
             .map_err(|e| format!("save relay change: {e:?}"))?;
+        self.battery_settings = pairing.battery;
         self.relays = pairing.relays;
         self.last_status = None;
         self.rebuild_relay();
@@ -2464,6 +2471,7 @@ impl Warden {
             .map_err(|e| format!("persist pairing: {e:?}"))?;
         self.guardian = Some(pairing.guardian_pubkey);
         self.subject = Some(pairing.subject_pubkey);
+        self.battery_settings = pairing.battery;
         self.relays = pairing.relays;
         self.paired_at = pairing.paired_at;
         // QR onboarding: a `token` param in the scanned URI is echoed on
@@ -2502,6 +2510,7 @@ impl Warden {
             audit_transparency: false,
             paired_at: 0,
             relays_updated_at: Some(0),
+            battery: None,
         };
         let json = serde_json::to_string_pretty(&pairing).map_err(|e| format!("serialize: {e}"))?;
         self.pairing
@@ -2510,6 +2519,7 @@ impl Warden {
         self.guardian = Some(guardian);
         self.subject = Some(subject);
         self.relays = Vec::new();
+        self.battery_settings = None;
         // Test/onboarding-only path (no `now` param) — matches the paired_at:
         // 0 already persisted above; 0 disables the release-staleness guard
         // for this pairing, which is fine off the production `pair()` route.
@@ -4367,6 +4377,17 @@ fn load_machine_key(
             Some(format!("machine key unavailable: {e:?}")),
         ),
     }
+}
+
+fn load_battery(
+    store: &RealPairingStore,
+) -> Option<charter_transport::relay_config::BatterySettings> {
+    store
+        .load()
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<Pairing>(&json).ok())
+        .and_then(|p| p.battery)
 }
 
 /// A pairing read from disk: `(guardian, subject, relays, paired_at)`.
@@ -6555,10 +6576,11 @@ mod tests {
         let signed = charter_transport::nip59::sign_event_raw(
             &guardian_sk(), charter_primitives::kinds::CHARTER_DEVICE_RELAYS, 200,
             vec![charter_primitives::kinds::marker_tag(), vec!["p".into(), machine.to_hex()]],
-            json!({"machine": machine, "relays": ["wss://family.example", "wss://relay.trotters.cc"]}).to_string(),
+            json!({"machine": machine, "relays": ["wss://family.example", "wss://relay.trotters.cc"], "battery": {"screenOffSecs":600,"ordinarySecs":120,"requestBoost":true,"openingBoost":false,"boostSecs":60}}).to_string(),
         ).unwrap();
         let code = serde_json::to_string(&signed).unwrap();
-        w.update_relays(&code, 200).unwrap();
+        let state = w.update_relays(&code, 200).unwrap();
+        assert_eq!(state.battery.as_ref().unwrap().screen_off_secs, 600);
         let saved = w.pairing.load().unwrap();
         assert!(w.update_relays(&code, 201).is_err());
         assert_eq!(w.pairing.load().unwrap(), saved);
@@ -6572,6 +6594,7 @@ mod tests {
         assert_eq!(w.guardian, Some(guardian.pubkey()));
         assert_eq!(w.subject, subject);
         assert_eq!(w.paired_at, 100);
+        assert_eq!(w.pairing_state().battery.unwrap().ordinary_secs, 120);
         let _ = std::fs::remove_dir_all(&base);
     }
 

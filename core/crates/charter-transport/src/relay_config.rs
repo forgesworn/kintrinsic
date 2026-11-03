@@ -77,11 +77,31 @@ pub fn migrate_legacy_relays(pairing: &mut Pairing) -> bool {
     true
 }
 
+/// Android network scheduling only; enforcement and LAN monitoring are independent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatterySettings {
+    pub screen_off_secs: u64,
+    pub ordinary_secs: u64,
+    pub request_boost: bool,
+    pub opening_boost: bool,
+    pub boost_secs: u64,
+}
+impl BatterySettings {
+    pub fn valid(&self) -> bool {
+        [120, 300, 600].contains(&self.screen_off_secs)
+            && [30, 60, 120].contains(&self.ordinary_secs)
+            && [60, 120, 180].contains(&self.boost_secs)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RelayConfig {
     machine: PubKey,
     relays: Vec<String>,
+    #[serde(default)]
+    battery: Option<BatterySettings>,
 }
 
 /// Validate before mutating; callers must persist successfully before swapping
@@ -114,6 +134,12 @@ pub fn apply_signed_config(pairing: &mut Pairing, json: &str, now: u64) -> Resul
         return Err("This relay code is for a different device.".into());
     }
     let relays = validate_relays(&config.relays)?;
+    if config.battery.as_ref().is_some_and(|b| !b.valid()) {
+        return Err("Invalid battery settings.".into());
+    }
+    if let Some(battery) = config.battery {
+        pairing.battery = Some(battery);
+    }
     pairing.relays = relays;
     pairing.relays_updated_at = Some(event.created_at);
     Ok(())
@@ -153,6 +179,68 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn invalid_stored_battery_metadata_does_not_corrupt_pairing() {
+        let mut value = serde_json::to_value(pairing()).unwrap();
+        for invalid in [
+            serde_json::json!("outdated"),
+            serde_json::json!({"ordinarySecs":-1}),
+        ] {
+            value["battery"] = invalid;
+            let restored: Pairing = serde_json::from_value(value.clone()).unwrap();
+            assert!(restored.battery.is_none());
+            assert_eq!(restored.guardian_pubkey, pairing().guardian_pubkey);
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../charter-testkit/vectors/nostr/battery_config.json"
+        ))
+        .unwrap();
+        let mut p = pairing();
+        p.guardian_pubkey = PubKey::from_hex(fixture["guardian"].as_str().unwrap()).unwrap();
+        p.machine = PubKey::from_hex(fixture["machine"].as_str().unwrap()).unwrap();
+        apply_signed_config(&mut p, &fixture["event"].to_string(), 1_700_000_000).unwrap();
+        assert_eq!(p.battery.unwrap().ordinary_secs, 60);
+    }
+
+    #[test]
+    fn battery_configuration_is_signed_device_scoped_persisted_and_replay_protected() {
+        let mut p = pairing();
+        let mut event: NostrEvent =
+            serde_json::from_str(&code(&p, [1; 32], 101, default_relays())).unwrap();
+        let battery = serde_json::json!({"screenOffSecs":600,"ordinarySecs":120,"requestBoost":true,"openingBoost":false,"boostSecs":60});
+        let mut content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        content["battery"] = battery;
+        event = sign_event_raw(
+            &[1; 32],
+            event.kind,
+            event.created_at,
+            event.tags.clone(),
+            content.to_string(),
+        )
+        .unwrap();
+        let signed = serde_json::to_string(&event).unwrap();
+        let mut wrong_device = p.clone();
+        wrong_device.machine = PubKey::from_bytes([9; 32]);
+        assert!(apply_signed_config(&mut wrong_device, &signed, 102).is_err());
+        apply_signed_config(&mut p, &signed, 102).unwrap();
+        let mut restored: Pairing =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(restored.battery.as_ref().unwrap().screen_off_secs, 600);
+        assert!(apply_signed_config(&mut restored, &signed, 102).is_err());
+        // An ordinary relay edit leaves the device's battery choice intact.
+        let next = code(&p, [1; 32], 103, default_relays());
+        apply_signed_config(&mut p, &next, 104).unwrap();
+        assert_eq!(p.battery, restored.battery);
+        content["battery"]["ordinarySecs"] = serde_json::json!(1);
+        let invalid =
+            sign_event_raw(&[1; 32], event.kind, 105, event.tags, content.to_string()).unwrap();
+        let before = p.clone();
+        assert!(
+            apply_signed_config(&mut p, &serde_json::to_string(&invalid).unwrap(), 106).is_err()
+        );
+        assert_eq!(p, before);
     }
 
     #[test]

@@ -71,6 +71,16 @@ class RequestAppsActivity : Activity() {
     private fun isInstalled(pkg: String): Boolean =
         runCatching { packageManager.getPackageInfo(pkg, 0); true }.getOrDefault(false)
 
+    override fun onResume() {
+        super.onResume()
+        org.forgesworn.charter.service.RelayPollPace.show(this)
+    }
+
+    override fun onPause() {
+        org.forgesworn.charter.service.RelayPollPace.hide(this)
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         workerThread = HandlerThread("charter-request").apply { start() }

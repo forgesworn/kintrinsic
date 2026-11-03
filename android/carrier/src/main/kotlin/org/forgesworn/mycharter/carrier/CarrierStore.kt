@@ -19,6 +19,13 @@ import java.security.SecureRandom
 class CarrierStore(context: Context) {
     private val prefs = context.getSharedPreferences("carrier", Context.MODE_PRIVATE)
 
+    fun reconnectCap(): Long = org.forgesworn.mycharter.service.ReconnectPolicy.cap(
+        runCatching { prefs.getLong("reconnect_cap_secs", 300) }.getOrDefault(300),
+    )
+    fun saveReconnectCap(seconds: Long) {
+        prefs.edit().putLong("reconnect_cap_secs", org.forgesworn.mycharter.service.ReconnectPolicy.cap(seconds)).apply()
+    }
+
     fun saveProvision(p: ProvisionPayload) {
         prefs.edit()
             .putString(K_SK, p.guardianSkHex)

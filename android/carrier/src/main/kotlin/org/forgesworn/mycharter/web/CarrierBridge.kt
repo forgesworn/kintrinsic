@@ -26,6 +26,16 @@ class CarrierBridge(
     private val onProvisioned: () -> Unit,
 ) {
     @JavascriptInterface
+    fun batterySettings(): String = """{"reconnectCapSecs":${store.reconnectCap()}}"""
+
+    @JavascriptInterface
+    fun setBatterySettings(json: String) {
+        val o = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return
+        store.saveReconnectCap(o.optLong("reconnectCapSecs", 300))
+        onProvisioned()
+    }
+
+    @JavascriptInterface
     fun isCarrier(): Boolean = true
 
     @JavascriptInterface

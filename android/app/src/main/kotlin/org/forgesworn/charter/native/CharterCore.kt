@@ -35,6 +35,7 @@ object CharterCore {
         val guardianShort: String?,
         val subject: String?,
         val relays: List<String> = emptyList(),
+        val battery: org.forgesworn.charter.service.BatterySettings = org.forgesworn.charter.service.BatterySettings(),
         /** Parent-facing rejection text when a `pair` call was refused. */
         val error: String? = null,
         /** The pairing record exists but would not READ (F2); retried each poll. */
@@ -261,7 +262,10 @@ object CharterCore {
     fun updateRelays(code: String, nowUnix: Long): PairingState {
         val o = JSONObject(jni().charterUpdateRelays(code, nowUnix))
         return if (o.has("error")) pairingState().copy(error = o.optString("error"))
-        else parsePairingState(o)
+        else parsePairingState(o).also {
+            org.forgesworn.charter.service.RelayPollPace.configure(it.battery)
+            org.forgesworn.charter.service.RelayPollPace.onChange?.invoke()
+        }
     }
 
     fun setPairing(guardianHex: String, subjectHex: String): PairingState =
@@ -301,6 +305,7 @@ object CharterCore {
             guardianShort = o.optStringOrNull("guardian_short"),
             subject = o.optStringOrNull("subject"),
             relays = (0 until relaysArr.length()).map { relaysArr.getString(it) },
+            battery = org.forgesworn.charter.service.BatterySettings.parse(o.optJSONObject("battery")),
             error = o.optStringOrNull("error"),
             pairingUnreadable = o.optBoolean("pairing_unreadable", false),
         )
@@ -878,8 +883,12 @@ object CharterCore {
     /** Ask the guardian ("time.extend"). Blocking network IO — worker only. */
     fun submitRequest(op: String, paramsJson: String): SubmitResult {
         val o = JSONObject(jni().charterSubmitRequest(op, paramsJson))
+        val reqId = o.optStringOrNull("reqId")
+        if (reqId != null && o.optStringOrNull("error") == null) {
+            org.forgesworn.charter.service.RelayPollPace.submitted(reqId)
+        }
         return SubmitResult(
-            reqId = o.optStringOrNull("reqId"),
+            reqId = reqId,
             error = o.optStringOrNull("error"),
             code = o.optStringOrNull("code"),
         )

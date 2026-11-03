@@ -641,7 +641,7 @@ export interface CharterContextValue {
   unpairDevice: (childId: string, deviceId: string) => void;
   /** Scan-to-pair: offer to be pinned by a freshly-scanned ward. */
   sendPairOffer: (machine: string, token: string) => Promise<void>;
-  createRelayCode: (childId: string, deviceId: string, relays: string[]) => Promise<string>;
+  createRelayCode: (childId: string, deviceId: string, relays: string[], battery?: import("../domain/battery").BatterySettings) => Promise<string>;
   recordDeviceRelays: (childId: string, deviceId: string, relays: string[], issuedAt: number) => void;
   removeDevice: (childId: string, deviceId: string) => void;
 
@@ -1186,11 +1186,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     await signer.current?.sendPairOffer(machine, token, DEFAULT_RELAYS);
   }, []);
 
-  const createRelayCode = useCallback(async (childId: string, deviceId: string, relays: string[]) => {
+  const createRelayCode = useCallback(async (childId: string, deviceId: string, relays: string[], battery?: import("../domain/battery").BatterySettings) => {
     const device = stateRef.current.children.find((c) => c.id === childId)?.devices.find((d) => d.id === deviceId);
     if (!device?.devicePubkey || device.pairing !== "paired") throw new Error("Pair this device first.");
     if (!signer.current?.signRelayConfig) throw new Error("Connect your guardian signer first.");
-    return signer.current.signRelayConfig(device.devicePubkey, relays, device.label);
+    return signer.current.signRelayConfig(device.devicePubkey, relays, device.label, battery);
   }, []);
 
   const recordDeviceRelays = useCallback((childId: string, deviceId: string, relays: string[], issuedAt: number) => {

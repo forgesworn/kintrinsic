@@ -21,6 +21,7 @@ import {
 import { isValidDevicePubkey } from "./offlineUnlock";
 import Home from "./Home";
 import UnlockDevice from "./UnlockDevice";
+import DeviceBattery from "./DeviceBattery";
 import DeviceRelays from "./DeviceRelays";
 import DeviceDebugging from "./DeviceDebugging";
 import SetupComputer from "./SetupComputer";
@@ -674,6 +675,9 @@ function DeviceDetail({ child, device, onDone }: { child: Child; device: Device;
         <div className="card device-section">
           <DeviceRelays child={child} device={device} />
         </div>
+      )}
+      {paired && device.platform === "android" && (
+        <DeviceBattery child={child} device={device} />
       )}
 
       {/* Disconnect publishes a signed RELEASE — the most destructive wire

@@ -1,0 +1,34 @@
+{
+  "guardian": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+  "machine": "1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11",
+  "relays": [
+    "wss://relay.snort.social",
+    "wss://nos.lol",
+    "wss://relay.primal.net"
+  ],
+  "battery": {
+    "screenOffSecs": 300,
+    "ordinarySecs": 60,
+    "requestBoost": true,
+    "openingBoost": true,
+    "boostSecs": 120
+  },
+  "event": {
+    "id": "170ebbd2cb0e27df36b33e352da86d291050890e798c70c5b5f560ed52aa18a5",
+    "pubkey": "defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+    "created_at": 1700000000,
+    "kind": 31118,
+    "tags": [
+      [
+        "t",
+        "charter-device"
+      ],
+      [
+        "p",
+        "1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11"
+      ]
+    ],
+    "content": "{\"machine\":\"1be68a5a028f2601d0e80d468c344ba331d611b96c358b6032e8b4da0547fc11\",\"relays\":[\"wss://relay.snort.social\",\"wss://nos.lol\",\"wss://relay.primal.net\"],\"battery\":{\"screenOffSecs\":300,\"ordinarySecs\":60,\"requestBoost\":true,\"openingBoost\":true,\"boostSecs\":120}}",
+    "sig": "bb45eb75c195d7f70dfe78b56264bc1d0640998db261c77a8fa28a7539abde97d8292a184994593be0d03200b85d51df755e22238cab0652b12b36ff5aa50286"
+  }
+}

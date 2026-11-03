@@ -43,3 +43,13 @@ describe("offline relay configuration", () => {
     expect(() => relayConfigTemplate("invalid", vector.relays, 100)).toThrow();
   });
 });
+
+describe("signed per-device battery configuration", () => {
+  it("matches the shared signed battery vector and binds settings to the device", async () => {
+    const { default: batteryVector } = await import("../../../../core/crates/charter-testkit/vectors/nostr/battery_config.json");
+    const event = relayConfigTemplate(batteryVector.machine, batteryVector.relays, batteryVector.event.created_at, batteryVector.battery);
+    expect(event.content).toBe(batteryVector.event.content);
+    expect(verifyEvent(batteryVector.event)).toBe(true);
+    expect(event.tags).toContainEqual(["p", batteryVector.machine]);
+  });
+});
