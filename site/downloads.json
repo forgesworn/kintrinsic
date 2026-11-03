@@ -1,20 +1,20 @@
 {
   "android": {
-    "version": "0.2.0",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.2.0/kintrinsic-0.2.0.apk",
-    "sha256": "6b48f0e2bc92b0dbebced9c462cbe81aa89013db9271886b2bb6ca7f019bb7a5",
-    "mirror": "https://nostr.download/6b48f0e2bc92b0dbebced9c462cbe81aa89013db9271886b2bb6ca7f019bb7a5.apk"
+    "version": "0.2.1",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.2.1/kintrinsic-0.2.1.apk",
+    "sha256": "9443f7de4e5a0d80e9636d6f48e19f7f9b9acca06e87c761eefb00ecaa117f77",
+    "mirror": "https://nostr.download/9443f7de4e5a0d80e9636d6f48e19f7f9b9acca06e87c761eefb00ecaa117f77.apk"
   },
   "ward": {
-    "version": "0.7.0",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.7.0/kintrinsic-ward-0.7.0.apk",
-    "sha256": "2754a344624de1994b6221e7a23ef1c509d74bcade5385655b134ad0f029685d",
-    "mirror": "https://nostr.download/2754a344624de1994b6221e7a23ef1c509d74bcade5385655b134ad0f029685d.apk"
+    "version": "0.7.1",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.7.1/kintrinsic-ward-0.7.1.apk",
+    "sha256": "0aac3072d503002db40640d928617f15ad7d3143f644597d7468d82fb895096b",
+    "mirror": "https://nostr.download/0aac3072d503002db40640d928617f15ad7d3143f644597d7468d82fb895096b.apk"
   },
   "linux": {
-    "version": "0.8.1",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.1/kintrinsic_0.8.1_amd64.deb",
-    "sha256": "8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c",
-    "mirror": "https://nostr.download/8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c.deb"
+    "version": "0.8.2",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.2/kintrinsic_0.8.2_amd64.deb",
+    "sha256": "48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb",
+    "mirror": "https://nostr.download/48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb.deb"
   }
 }

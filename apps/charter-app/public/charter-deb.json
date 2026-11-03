@@ -1,9 +1,9 @@
 {
-  "versionName": "0.8.1",
-  "versionCode": 801,
-  "url": "https://nostr.download/8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c.deb",
-  "urls": ["https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.1/kintrinsic_0.8.1_amd64.deb", "https://nostr.download/8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c.deb"],
-  "sha256": "8b411bc9936c8003fdbc4951af8c1547c97698d6cc5e3574baea0dc032607c5c",
-  "sizeBytes": 13176468,
-  "builtAt": "2026-10-31T08:26:40Z"
+  "versionName": "0.8.2",
+  "versionCode": 802,
+  "url": "https://nostr.download/48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb.deb",
+  "urls": ["https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.2/kintrinsic_0.8.2_amd64.deb", "https://nostr.download/48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb.deb"],
+  "sha256": "48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb",
+  "sizeBytes": 13205490,
+  "builtAt": "2026-11-03T09:40:15Z"
 }
