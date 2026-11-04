@@ -83,6 +83,9 @@ class WardenController(
     private val degradedAppGate = DegradedAppGate()
     /** Wards currently locked because their app gate is failing (for the log). */
     private val degradedWards = mutableSetOf<String>()
+    /** What the platform last refused of the while-locked restrictions. For the
+     *  log only: the state itself is always read back from the platform. */
+    private var lockedRestrictionsRefused: List<String> = emptyList()
     /** When the standing baseline was last re-read (05-G2), unix secs. */
     private var lastPostureAt = 0L
     /** When a pinned-but-dead DNS filter was last re-dispatched (05-B7). */
@@ -144,7 +147,7 @@ class WardenController(
             // so the in-call UI can surface over the pin. Without this a
             // lifeline call runs headless behind the lock: no hang-up, no
             // in-call controls (the 2026-07-24 on-device trap: a rejected
-            // call rolled to voicemail with no way out). The dialer being
+            // call rolled to voicemail with no way out). A system dialer being
             // reachable opens nothing else — every other app stays suspended;
             // a locked phone is still a phone, per the lifeline design.
             // Empty always-available set: no decision has run yet, so this is
@@ -479,6 +482,7 @@ class WardenController(
             val ward = d.subject ?: ""
             val applied = guard.run("decision", ward) { applyDecision(d, nowUnix) }
             if (!applied && d.locked && d.enforceMode == CharterCore.Mode.ENFORCE) {
+                guard.run("lockedRestrictions", ward) { syncLockedRestrictions(true) }
                 guard.run("lock", ward) { lock.show(d.reason) }
             }
         }
@@ -492,8 +496,11 @@ class WardenController(
      *
      * The phone stack is here so a lifeline call has a face — without it a call
      * runs headless behind the lock with no hang-up (the 2026-07-24 on-device
-     * trap). The always-available set is here so the shade's Open row can
-     * actually launch what it offers.
+     * trap). That face is the system dialer's, and a default dialer's only when
+     * it is a system app: a third-party one is the ward's own choice and is not
+     * let past the lock ([org.forgesworn.charter.enforce.lockTaskDialers]). The
+     * always-available set is here so the shade's Open row can actually launch
+     * what it offers.
      *
      * RE-DERIVED EVERY TICK, never once at init: entries expire on their own
      * clock and a guardian edits the clause while the phone is locked. This was
@@ -501,14 +508,16 @@ class WardenController(
      * set happened to be at boot.
      */
     private fun lockTaskPackages(alwaysAvailable: Set<String>): Array<String> {
-        val dialers = buildList {
-            runCatching {
-                val telecom = context.getSystemService(Context.TELECOM_SERVICE)
-                    as android.telecom.TelecomManager
-                telecom.defaultDialerPackage?.let { add(it) }
-                telecom.systemDialerPackage?.let { add(it) }
-            }
-        }
+        val telecom = runCatching {
+            context.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
+        }.getOrNull()
+        // Read apart, so a failure reading the ward's choice cannot cost the
+        // system dialer its place.
+        val dialers = org.forgesworn.charter.enforce.lockTaskDialers(
+            defaultDialer = runCatching { telecom?.defaultDialerPackage }.getOrNull(),
+            systemDialer = runCatching { telecom?.systemDialerPackage }.getOrNull(),
+            appFlags = org.forgesworn.charter.enforce.appFlagsOf(context),
+        )
         // The settings app behind the shade's Wi-Fi / Bluetooth buttons: a
         // locked ward can still get online for an open-at-any-hour app, or
         // connect their headphones. See [org.forgesworn.charter.ui.Connections].
@@ -838,6 +847,13 @@ class WardenController(
         } else if (!degraded && degradedWards.remove(ward)) {
             Log.i(TAG, "app gate recovered: lifting the degraded lock")
         }
+        // Before the lock surface, so the shade's Wi-Fi and Bluetooth row is never
+        // offered ahead of them. Follows the same condition as the surface below,
+        // so a stand-in lock is closed too, and runs in every mode: Observe never
+        // asks for them, and a move to it lifts whatever a locked Enforce left.
+        guard.run("lockedRestrictions", ward) {
+            syncLockedRestrictions(lockedRestrictionsWanted(d.enforceMode, d.locked, degraded))
+        }
         if (d.enforceMode == CharterCore.Mode.ENFORCE) {
             guard.run("lock", ward) {
                 when {
@@ -885,6 +901,24 @@ class WardenController(
         } else if (!apply && baselineApplied) {
             restrictions.clearBaseline()
             baselineApplied = false
+        }
+    }
+
+    /**
+     * The while-locked restrictions, level-triggered per tick against the
+     * platform's real state. Nothing is cached, so a key that was refused is
+     * tried again next tick. The shade reads the same real state for itself, so
+     * a refusal hides its Wi-Fi and Bluetooth row for as long as it lasts.
+     */
+    private fun syncLockedRestrictions(wanted: Boolean) {
+        if (!Provisioning.isDeviceOwner(context)) return
+        val refused = restrictions.applyLockedRestrictions(wanted).failed
+        // Logged when the answer changes, not on every retry.
+        if (refused != lockedRestrictionsRefused) {
+            if (refused.isNotEmpty()) {
+                Log.e(TAG, "while-locked restrictions: the platform refused $refused; retrying each tick")
+            }
+            lockedRestrictionsRefused = refused
         }
     }
 
@@ -1150,6 +1184,17 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
         @Volatile var lockAlive = false
     }
 }
+
+/**
+ * Whether the while-locked restrictions should hold: exactly when the lock
+ * surface is up, which is only ever in Enforce. [degraded] is the stand-in lock
+ * for a failing app gate; it puts up the same shade with the same row.
+ */
+internal fun lockedRestrictionsWanted(
+    mode: CharterCore.Mode,
+    locked: Boolean,
+    degraded: Boolean,
+): Boolean = mode == CharterCore.Mode.ENFORCE && (locked || degraded)
 
 /**
  * Whether [ActivityLockController.show] must (re)launch the shade: it was never

@@ -1,9 +1,14 @@
 package org.forgesworn.charter.ui
 
+import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.Settings
+import org.forgesworn.charter.admin.Provisioning
+import org.forgesworn.charter.enforce.appFlagsOf
+import org.forgesworn.charter.enforce.lockedRestrictionsInForce
+import org.forgesworn.charter.enforce.systemPackagesOnly
 
 /**
  * Wi-Fi and Bluetooth from the lock shade.
@@ -23,11 +28,16 @@ import android.provider.Settings
  *
  * What that costs, said plainly: LockTask allows by PACKAGE, so the settings
  * app joins the allowlist, and a ward who navigates away from the Wi-Fi page
- * can reach the rest of Settings while locked. That is the same Settings they
- * have during allowed hours (Kintrinsic never suspends it), the tamper-relevant
- * parts stay closed by the baseline restrictions (date/time, VPN, private DNS,
- * factory reset, users, install sources), and nothing launched FROM Settings
- * gets past the pin unless it is itself allowlisted. Back returns to the shade.
+ * can reach the rest of Settings while locked. The tamper-relevant parts stay
+ * closed by the baseline restrictions (date/time, VPN, private DNS, factory
+ * reset, users, install sources), and while locked also by
+ * [org.forgesworn.charter.enforce.LOCKED_RESTRICTIONS] (accounts, app controls,
+ * default apps). The row is only offered while those are really in force
+ * ([lockedSurfaceClosed]). Back returns to the shade.
+ *
+ * Only a system app can serve these pages. Any app can declare an intent filter
+ * for them, and whichever package resolves joins the allowlist, so a store app
+ * must not be able to put itself there by claiming to be the Wi-Fi page.
  *
  * What the ward may JOIN there is the guardian's `connections` clause, which
  * the warden applies device-wide as restrictions the Settings pages honour
@@ -45,20 +55,52 @@ object Connections {
      * The package(s) that actually serve those pages on THIS device — resolved
      * live rather than assuming `com.android.settings`, so an OEM that hosts
      * them elsewhere still gets a working button. Empty when nothing resolves
-     * (the shade then shows no row rather than a dead one).
+     * to a system app (the shade then shows no row rather than a dead one).
      */
-    fun settingsPackages(ctx: Context): List<String> {
-        val pm = ctx.packageManager
-        return listOf(wifiIntent(), bluetoothIntent())
-            .mapNotNull { intent ->
-                runCatching {
-                    pm.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
-                        ?.activityInfo?.packageName
-                }.getOrNull()
-            }
-            .filter { it.isNotEmpty() && it != "android" }
-            .distinct()
-    }
+    fun settingsPackages(ctx: Context): List<String> =
+        systemSettingsPackages(
+            listOf(resolvedPackage(ctx, wifiIntent()), resolvedPackage(ctx, bluetoothIntent())),
+            appFlagsOf(ctx),
+        )
+
+    /**
+     * [intent] pinned to the system app that serves it, or null when nothing
+     * does (no button for that page). Pinned so the tap opens the package that
+     * was checked, whatever has been installed since the row was painted.
+     */
+    fun systemPage(ctx: Context, intent: Intent): Intent? =
+        systemSettingsPackages(listOf(resolvedPackage(ctx, intent)), appFlagsOf(ctx))
+            .firstOrNull()
+            ?.let { intent.setPackage(it) }
+
+    /**
+     * The pure half of [settingsPackages]. A failed lookup (null) and the
+     * platform's own chooser (`android`, itself a system package, which appears
+     * when several apps answer) both count as no result.
+     */
+    internal fun systemSettingsPackages(
+        resolved: List<String?>,
+        appFlags: (String) -> Int?,
+    ): List<String> =
+        systemPackagesOnly(
+            resolved.filterNotNull().filter { it.isNotEmpty() && it != "android" }.distinct(),
+            appFlags,
+        )
+
+    private fun resolvedPackage(ctx: Context, intent: Intent): String? = runCatching {
+        ctx.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            ?.activityInfo?.packageName
+    }.getOrNull()
+
+    /**
+     * Whether the while-locked restrictions are really in force right now, read
+     * from the platform rather than from what the warden last asked for. The
+     * row is offered only while this holds.
+     */
+    fun lockedSurfaceClosed(ctx: Context): Boolean = runCatching {
+        val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        lockedRestrictionsInForce(dpm, Provisioning.adminComponent(ctx))
+    }.getOrDefault(false)
 
     /**
      * One plain line on what the guardian's `connections` clause allows, or
