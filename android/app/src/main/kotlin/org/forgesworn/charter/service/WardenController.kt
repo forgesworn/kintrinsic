@@ -486,7 +486,8 @@ class WardenController(
     }
 
     /**
-     * The LockTask allowlist: Kintrinsic itself, the phone stack, and whatever the
+     * The LockTask allowlist: Kintrinsic itself, the phone stack, the settings
+     * app (Wi-Fi and Bluetooth from the shade), and whatever the
      * `alwaysavailable` clause opens right now.
      *
      * The phone stack is here so a lifeline call has a face — without it a call
@@ -508,10 +509,19 @@ class WardenController(
                 telecom.systemDialerPackage?.let { add(it) }
             }
         }
+        // The settings app behind the shade's Wi-Fi / Bluetooth buttons: a
+        // locked ward can still get online for an open-at-any-hour app, or
+        // connect their headphones. See [org.forgesworn.charter.ui.Connections].
+        // Resolved once and kept (the settings app doesn't move); an empty
+        // answer is not kept, so a lookup that failed early is retried.
+        val connections = connectionPackages
+            ?: org.forgesworn.charter.ui.Connections.settingsPackages(context)
+                .also { if (it.isNotEmpty()) connectionPackages = it }
         return org.forgesworn.charter.enforce.lockTaskAllowlist(
             context.packageName,
             dialers,
             alwaysAvailable,
+            connections,
         ).toTypedArray()
     }
 
@@ -529,6 +539,9 @@ class WardenController(
      *  again until the always-available set happens to change for some
      *  unrelated reason (fix round 1, 2026-08-04). */
     @Volatile private var lastLockTaskPackages: List<String>? = null
+
+    /** The settings package(s) behind the shade's Wi-Fi / Bluetooth buttons. */
+    @Volatile private var connectionPackages: List<String>? = null
 
     private fun syncLockTaskPackages(alwaysAvailable: Set<String>) {
         val next = lockTaskPackages(alwaysAvailable).toList()

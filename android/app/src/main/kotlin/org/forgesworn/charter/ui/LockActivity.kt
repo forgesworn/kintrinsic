@@ -589,6 +589,62 @@ class LockActivity : Activity() {
         }
     }
 
+    /**
+     * One row, two buttons: Wi-Fi and Bluetooth, each opening the platform's
+     * own page (the settings app is on the LockTask allowlist for exactly
+     * this — WardenController.lockTaskPackages). A device without the radio,
+     * or one where no page resolves, simply shows no button for it.
+     */
+    private fun paintConnectionsRow(root: LinearLayout) {
+        val status = text("", CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 6)
+        fun open(intent: Intent, what: String) {
+            val ok = runCatching {
+                startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure { Log.w(TAG, "could not open $what settings", it) }.isSuccess
+            // Honest, never silent.
+            status.text = if (ok) "" else "Couldn’t open $what settings — tell your guardian."
+        }
+        val buttons = buildList {
+            if (Connections.hasWifi(this@LockActivity) &&
+                intentResolves(Connections.wifiIntent())
+            ) {
+                add(
+                    CharterTheme.secondaryButton(this@LockActivity, "Wi-Fi", onInk = true).apply {
+                        setOnClickListener { open(Connections.wifiIntent(), "Wi-Fi") }
+                    },
+                )
+            }
+            if (Connections.hasBluetooth(this@LockActivity) &&
+                intentResolves(Connections.bluetoothIntent())
+            ) {
+                add(
+                    CharterTheme.secondaryButton(this@LockActivity, "Bluetooth", onInk = true).apply {
+                        setOnClickListener { open(Connections.bluetoothIntent(), "Bluetooth") }
+                    },
+                )
+            }
+        }
+        if (buttons.isEmpty()) return
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        buttons.forEachIndexed { i, b ->
+            row.addView(
+                b,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (i > 0) marginStart = dp(8)
+                },
+            )
+        }
+        root.addView(row, CharterTheme.stackParams(this, 10))
+        root.addView(status)
+    }
+
+    private fun intentResolves(intent: Intent): Boolean = runCatching {
+        packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY) != null
+    }.getOrDefault(false)
+
     private fun renderViews(
         info: CharterCore.LockInfo?,
         paired: Boolean,
@@ -928,6 +984,14 @@ class LockActivity : Activity() {
         } else {
             torchButton = null
         }
+
+        // Wi-Fi and Bluetooth (see Connections). LockTask takes the status bar
+        // and Quick Settings with it, so without these a ward could open
+        // Duolingo from the Open row and find it offline, or start a story with
+        // their headphones unconnected and no way to fix either. Next to the
+        // torch, in thumb reach: plumbing, offered plainly, no guardian
+        // switch — connecting to a network grants no screen time.
+        paintConnectionsRow(root)
 
         // Break-glass (design memo 2026-07-24): the fire alarm. Nothing stops
         // the ward using it — no approval, no network needed — and using it is

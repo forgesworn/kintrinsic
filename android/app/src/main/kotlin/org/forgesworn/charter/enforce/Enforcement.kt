@@ -162,7 +162,8 @@ fun appHideSet(
 }
 
 /**
- * The LockTask allowlist as pure set logic: Kintrinsic, the phone stack, and the
+ * The LockTask allowlist as pure set logic: Kintrinsic, the phone stack, the
+ * settings app that serves the shade's Wi-Fi and Bluetooth buttons, and the
  * live always-available set, deduped and order-stable. The JVM-testable seam
  * behind [org.forgesworn.charter.service.WardenController.lockTaskPackages].
  */
@@ -170,7 +171,8 @@ fun lockTaskAllowlist(
     self: String,
     dialers: List<String>,
     alwaysAvailable: Set<String>,
-): List<String> = (listOf(self) + dialers + alwaysAvailable.sorted()).distinct()
+    connections: List<String> = emptyList(),
+): List<String> = (listOf(self) + dialers + connections + alwaysAvailable.sorted()).distinct()
 
 /**
  * The level-triggered compare-then-push idiom, as pure logic: skip [push]

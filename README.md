@@ -138,6 +138,14 @@ on-device parental-control system); some are gaps we intend to close.
   stock) and Linux.** There is no ward enforcer for iOS, ChromeOS, Windows or
   macOS, and none is currently planned; a family with wards on those
   platforms cannot use Kintrinsic to enforce clauses there.
+- **The Android lock screen opens the system Settings app.** Its Wi-Fi and
+  Bluetooth buttons hand off to the platform's own pages so a locked ward can
+  still get online for an "open at any hour" app or connect headphones.
+  LockTask allows by package, so a ward who navigates away from those pages
+  can reach the rest of Settings while locked. It is the same Settings they
+  have during allowed hours; the tamper-relevant parts (date and time, VPN,
+  private DNS, factory reset, users, install sources) stay closed by Device
+  Owner restrictions, and no other app can be launched from it past the lock.
 - **No independent third-party security audit has been done.** The project
   has had internal review, but nothing external and adversarial. Given that
   the guardian app holds a family signing key, treat key backup and device
