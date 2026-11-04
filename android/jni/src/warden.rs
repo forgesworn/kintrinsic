@@ -3924,7 +3924,11 @@ impl Warden {
 
     /// A tick that must not accrue or transition (store read / ledger failure):
     /// hold the current lock state, no edge effects, but PRESERVE the charter
-    /// signal so the install-lockdown is not torn down (I22).
+    /// signal so the install-lockdown is not torn down (I22). A lock in force
+    /// counts as that signal too: a stand-down alone does not latch
+    /// `ever_configured`, and clearing the baseline under a held lock would let
+    /// a store fault open the phone. Unlocked with no latch stays not configured
+    /// (I17).
     fn hold_decision(&self, subject_hex: &str) -> Vec<dto::ChildDecision> {
         vec![dto::ChildDecision {
             subject: Some(subject_hex.to_string()),
@@ -3936,7 +3940,7 @@ impl Warden {
             },
             effects: Vec::new(),
             remaining_secs: 0,
-            configured: self.ever_configured,
+            configured: self.ever_configured || self.enforcer.is_locked(),
             enforce_mode: self.mode.as_str().into(),
             active_time: None,
             active_label: None,
@@ -9581,6 +9585,57 @@ mod parity_port_tests {
             .join(format!("{}.json", kind.store_key()));
         let _ = std::fs::remove_file(&file);
         std::fs::create_dir_all(&file).unwrap();
+    }
+
+    /// A stand-down alone does not latch `ever_configured`, on purpose. So a
+    /// store that stopped reading under that lock reported locked but not
+    /// configured, and Kotlin cleared the baseline: a store fault opened the
+    /// install lock, and every other restriction, on a phone still locked.
+    #[test]
+    fn an_unreadable_store_under_a_stand_down_lock_stays_configured() {
+        let (mut w, subj, base, _) = paired("standdown-unreadable");
+        put(
+            &w,
+            &subj,
+            ClauseKind::StandDown,
+            json!({
+                "v": 1,
+                "issuedAt": NOW,
+                "id": "sd-unreadable",
+                "expiresAt": NOW + 4 * 3600,
+                "graceSecs": 60,
+            }),
+        );
+        let _ = w.tick(Some(&subj), true, NOW, None);
+        let d = w.tick(Some(&subj), true, NOW + 61, None);
+        assert!(d[0].locked, "the stand-down lock has landed");
+        assert!(
+            !w.ever_configured,
+            "a stand-down alone still does not latch"
+        );
+
+        make_unreadable(&base, &subj, ClauseKind::StandDown);
+        let d = w.tick(Some(&subj), true, NOW + 62, None);
+        assert!(d[0].locked, "the lock is held through the fault");
+        assert_eq!(d[0].reason, "hold");
+        assert!(
+            d[0].configured,
+            "a held lock must not clear the baseline underneath it"
+        );
+        assert!(!w.ever_configured, "and holding it latches nothing");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// I17 still stands: a store fault on a ward who was never configured and
+    /// is not locked must not start restricting the phone.
+    #[test]
+    fn an_unreadable_store_on_an_unlocked_unconfigured_ward_stays_unconfigured() {
+        let (mut w, subj, base, _) = paired("unconfigured-unreadable");
+        make_unreadable(&base, &subj, ClauseKind::StandDown);
+        let d = w.tick(Some(&subj), true, NOW, None);
+        assert!(!d[0].locked);
+        assert!(!d[0].configured, "nothing to enforce: I17");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// F1: each per-app enforcement input answers `Err` for an unreadable

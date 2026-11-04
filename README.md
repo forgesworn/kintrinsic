@@ -142,10 +142,17 @@ on-device parental-control system); some are gaps we intend to close.
   Bluetooth buttons hand off to the platform's own pages so a locked ward can
   still get online for an "open at any hour" app or connect headphones.
   LockTask allows by package, so a ward who navigates away from those pages
-  can reach the rest of Settings while locked. It is the same Settings they
-  have during allowed hours; the tamper-relevant parts (date and time, VPN,
-  private DNS, factory reset, users, install sources) stay closed by Device
-  Owner restrictions, and no other app can be launched from it past the lock.
+  can reach the rest of Settings while locked. Date and time, VPN, private DNS,
+  factory reset, users and install sources are closed by Device Owner
+  restrictions at all times. While locked, so are adding or removing accounts,
+  force-stopping, disabling or clearing apps, and changing default apps; if the
+  platform refuses any of these, the buttons are hidden. Only a system app can
+  serve those pages. The phone's default dialer stays allowed past the lock, so
+  calls keep working. Settings can still open other screens inside its own
+  task, such as the permissions page, and a ward can reach the data usage page
+  for an app. Suspension is what stops links out of Settings reaching an app, so
+  an app with no launcher icon, or one the platform will not suspend, is not
+  stopped that way.
   What the ward may join there (new Wi-Fi networks, open Wi-Fi, new Bluetooth
   devices) is the guardian's Wi-Fi & Bluetooth setting, enforced device-wide.
 - **No independent third-party security audit has been done.** The project

@@ -175,6 +175,88 @@ fun lockTaskAllowlist(
 ): List<String> = (listOf(self) + dialers + connections + alwaysAvailable.sorted()).distinct()
 
 /**
+ * Keeps only the packages that are part of the device's system image. Fail
+ * closed: a package whose flags cannot be read (null, or a throw) is dropped.
+ *
+ * Anything chosen by the ward, or that a store app can claim by declaring an
+ * intent filter, must pass this before it goes near the lock: LockTask allows
+ * by package, so whatever is on the allowlist can open freely over the lock.
+ */
+internal fun systemPackagesOnly(packages: List<String>, appFlags: (String) -> Int?): List<String> =
+    packages.filter { pkg ->
+        val flags = runCatching { appFlags(pkg) }.getOrNull()
+        flags != null && flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0
+    }
+
+/** [systemPackagesOnly]'s flag reader for this device. A package that cannot be
+ *  found throws, and the filter treats that as unreadable. */
+internal fun appFlagsOf(context: Context): (String) -> Int? {
+    val pm = context.packageManager
+    return { pkg -> pm.getApplicationInfo(pkg, 0).flags }
+}
+
+/**
+ * The restrictions that hold only while the ward is locked. Settings stays
+ * reachable from the shade's Wi-Fi and Bluetooth row, so these close the pages
+ * that would otherwise undo the lock: adding or removing accounts; force-stopping,
+ * disabling or clearing apps; changing default apps.
+ *
+ * Never in [BASELINE_RESTRICTIONS]: during allowed hours Settings behaves as it
+ * always has. `DISALLOW_CONFIG_DEFAULT_APPS` arrived in API 34, which is this
+ * app's minSdk, so it needs no version check.
+ *
+ * None of them gets in the way of this app. A Device Owner's
+ * `setPackagesSuspended` runs as the system and is not gated on
+ * `DISALLOW_APPS_CONTROL`, and setting that restriction only strips suspensions
+ * made by other apps, not the admin's. The app does not use `AccountManager`.
+ */
+internal val LOCKED_RESTRICTIONS = listOf(
+    UserManager.DISALLOW_MODIFY_ACCOUNTS,
+    UserManager.DISALLOW_APPS_CONTROL,
+    UserManager.DISALLOW_CONFIG_DEFAULT_APPS,
+)
+
+/** Every locked restriction at [locked]: on while locked, off otherwise. */
+internal fun lockedRestrictionTargets(locked: Boolean): List<Pair<String, Boolean>> =
+    LOCKED_RESTRICTIONS.map { it to locked }
+
+/**
+ * Whether the platform really has every locked restriction in force, which is
+ * what the shade's Wi-Fi and Bluetooth row is gated on. An unreadable state
+ * (null) is not in force.
+ */
+internal fun lockedRestrictionsInForce(isSet: ((String) -> Boolean)?): Boolean =
+    isSet != null && LOCKED_RESTRICTIONS.all(isSet)
+
+/** [lockedRestrictionsInForce], read from the platform. Fails closed when the
+ *  read fails, including on a device where this app is not Device Owner. */
+internal fun lockedRestrictionsInForce(dpm: DevicePolicyManager, admin: ComponentName): Boolean {
+    val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
+    return lockedRestrictionsInForce(current?.let { b -> { k: String -> b.getBoolean(k, false) } })
+}
+
+/**
+ * Brings the restrictions to [desired], writing only the difference, one key at
+ * a time: a key the platform refuses is reported and does not stop the rest.
+ * Nothing is remembered between passes. Each one compares against the real
+ * state, so a failed write is simply still different next tick and is retried.
+ */
+internal fun pushRestrictions(
+    desired: List<Pair<String, Boolean>>,
+    isSet: ((String) -> Boolean)?,
+    write: (String, Boolean) -> Unit,
+): PostureReport {
+    val done = mutableListOf<String>()
+    val failed = mutableListOf<String>()
+    for ((key, on) in restrictionWrites(desired, isSet)) {
+        runCatching { write(key, on) }
+            .onSuccess { done += key }
+            .onFailure { failed += key }
+    }
+    return PostureReport(done, failed)
+}
+
+/**
  * The level-triggered compare-then-push idiom, as pure logic: skip [push]
  * entirely when [next] equals [lastPushed] (the discipline
  * [DpmRestrictionOps.applyTetherMode] and
@@ -288,6 +370,12 @@ interface RestrictionOps {
      * what the ward may JOIN: see [connectionsTargets].
      */
     fun applyConnections(wifi: String, bluetooth: String)
+
+    /**
+     * Level-triggered [LOCKED_RESTRICTIONS]: on while the ward is locked in
+     * Enforce, off otherwise. The report names any key the platform refused.
+     */
+    fun applyLockedRestrictions(locked: Boolean): PostureReport
 }
 
 /**
@@ -711,6 +799,64 @@ class DpmAppGateOps(
     }
 }
 
+/**
+ * The load-bearing install-lockdown (I28) + the clock-tamper close
+ * (DISALLOW_CONFIG_DATE_TIME, I7) + casual-tamper guards.
+ */
+internal val BASELINE_RESTRICTIONS = listOf(
+    UserManager.DISALLOW_INSTALL_APPS,
+    UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
+    UserManager.DISALLOW_CONFIG_DATE_TIME,
+    UserManager.DISALLOW_FACTORY_RESET,
+    UserManager.DISALLOW_ADD_USER,
+    // The ward cannot swap in their own VPN or a private DoH resolver that
+    // would bypass the Kintrinsic DNS filter (web-content enforcement).
+    UserManager.DISALLOW_CONFIG_VPN,
+    UserManager.DISALLOW_CONFIG_PRIVATE_DNS,
+    // Tethering hands tethered clients RAW upstream internet (kernel-forwarded
+    // around the VPN + Private DNS) — default-closed; a guardian grant lifts it.
+    UserManager.DISALLOW_CONFIG_TETHERING,
+    // Safe mode disables EVERY third-party package, a Device Owner
+    // included: no CharterService, no VPN, no lock, no app suspension,
+    // and — because nothing is running — no report that any of it
+    // stopped. Long-press Power from the lock screen, "Reboot to safe
+    // mode", and the phone is unmanaged for as long as the ward stays
+    // there (S1, review 2026-08-07).
+    //
+    // These two were held back on purpose while there was no way out of a
+    // wedged warden: taking away the OS's own escape hatches before ours
+    // existed would have been a way to brick a child's phone (port-spec
+    // D9/I27). Ours has since shipped — break-glass (jni/breakglass.rs +
+    // LockActivity) gives a full offline unlock from the lock screen, so
+    // the deferral no longer has anything to wait for.
+    //
+    // The boot-count tamper signal is the belt to this brace: a ward who
+    // finds some other way to boot unwarded still shows up on the
+    // guardian's STATUS as an unexplained gap.
+    UserManager.DISALLOW_SAFE_BOOT,
+    // Developer Options survives the freeze deny-list (the ward keeps
+    // Settings), and USB debugging from there is adb: force-stop the
+    // warden, flip the usage-stats app-op, and the day's accrual stops
+    // without anything appearing to be off.
+    //
+    // Listed here only so [clearBaseline] removes it on un-chartering.
+    // It is NOT in the applied baseline or the posture keys: the `debugging` clause
+    // owns it through [applyDebugging] (see below).
+    UserManager.DISALLOW_DEBUGGING_FEATURES,
+)
+
+/**
+ * What un-chartering clears: the baseline, plus the restrictions owned by their
+ * own per-tick steps (only a filtered-tethering session sets the hotspot key;
+ * the `connections` posture; the locked set). It must leave NO Kintrinsic
+ * restriction behind.
+ */
+internal val RESTRICTIONS_CLEARED_ON_RELEASE = BASELINE_RESTRICTIONS + listOf(
+    UserManager.DISALLOW_WIFI_TETHERING,
+    UserManager.DISALLOW_ADD_WIFI_CONFIG,
+    UserManager.DISALLOW_CONFIG_BLUETOOTH,
+) + LOCKED_RESTRICTIONS
+
 class DpmRestrictionOps(
     private val dpm: DevicePolicyManager,
     private val admin: ComponentName,
@@ -724,52 +870,6 @@ class DpmRestrictionOps(
 ) : RestrictionOps {
 
     /**
-     * The load-bearing install-lockdown (I28) + the clock-tamper close
-     * (DISALLOW_CONFIG_DATE_TIME, I7) + casual-tamper guards.
-     */
-    private val fullBaseline = listOf(
-        UserManager.DISALLOW_INSTALL_APPS,
-        UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
-        UserManager.DISALLOW_CONFIG_DATE_TIME,
-        UserManager.DISALLOW_FACTORY_RESET,
-        UserManager.DISALLOW_ADD_USER,
-        // The ward cannot swap in their own VPN or a private DoH resolver that
-        // would bypass the Kintrinsic DNS filter (web-content enforcement).
-        UserManager.DISALLOW_CONFIG_VPN,
-        UserManager.DISALLOW_CONFIG_PRIVATE_DNS,
-        // Tethering hands tethered clients RAW upstream internet (kernel-forwarded
-        // around the VPN + Private DNS) — default-closed; a guardian grant lifts it.
-        UserManager.DISALLOW_CONFIG_TETHERING,
-        // Safe mode disables EVERY third-party package, a Device Owner
-        // included: no CharterService, no VPN, no lock, no app suspension,
-        // and — because nothing is running — no report that any of it
-        // stopped. Long-press Power from the lock screen, "Reboot to safe
-        // mode", and the phone is unmanaged for as long as the ward stays
-        // there (S1, review 2026-08-07).
-        //
-        // These two were held back on purpose while there was no way out of a
-        // wedged warden: taking away the OS's own escape hatches before ours
-        // existed would have been a way to brick a child's phone (port-spec
-        // D9/I27). Ours has since shipped — break-glass (jni/breakglass.rs +
-        // LockActivity) gives a full offline unlock from the lock screen, so
-        // the deferral no longer has anything to wait for.
-        //
-        // The boot-count tamper signal is the belt to this brace: a ward who
-        // finds some other way to boot unwarded still shows up on the
-        // guardian's STATUS as an unexplained gap.
-        UserManager.DISALLOW_SAFE_BOOT,
-        // Developer Options survives the freeze deny-list (the ward keeps
-        // Settings), and USB debugging from there is adb: force-stop the
-        // warden, flip the usage-stats app-op, and the day's accrual stops
-        // without anything appearing to be off.
-        //
-        // Listed here only so [clearBaseline] removes it on un-chartering.
-        // It is NOT in [baseline] or [postureKeys]: the `debugging` clause
-        // owns it through [applyDebugging] (see below).
-        UserManager.DISALLOW_DEBUGGING_FEATURES,
-    )
-
-    /**
      * What [applyBaseline] sets. `DISALLOW_DEBUGGING_FEATURES` is excluded,
      * always: applying that restriction makes the platform turn ADB_ENABLED
      * off, and clearing it does not turn it back on. A baseline (or the 30 s
@@ -778,7 +878,7 @@ class DpmRestrictionOps(
      * A newly charted device is therefore blocked from its first tick, not
      * its first instant.
      */
-    private val baseline = fullBaseline - UserManager.DISALLOW_DEBUGGING_FEATURES
+    private val baseline = BASELINE_RESTRICTIONS - UserManager.DISALLOW_DEBUGGING_FEATURES
 
     /**
      * Only ACTS on a difference. Blindly re-adding restrictions that are
@@ -866,13 +966,7 @@ class DpmRestrictionOps(
     }
 
     override fun clearBaseline() {
-        fullBaseline.forEach { dpm.clearUserRestriction(admin, it) }
-        // Not in the baseline list (only a filtered-tethering session sets it),
-        // but un-chartering must leave NO Kintrinsic restriction behind.
-        dpm.clearUserRestriction(admin, UserManager.DISALLOW_WIFI_TETHERING)
-        // The `connections` posture, likewise owned by its own per-tick step.
-        dpm.clearUserRestriction(admin, UserManager.DISALLOW_ADD_WIFI_CONFIG)
-        dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH)
+        RESTRICTIONS_CLEARED_ON_RELEASE.forEach { dpm.clearUserRestriction(admin, it) }
         runCatching {
             dpm.setMinimumRequiredWifiSecurityLevel(DevicePolicyManager.WIFI_SECURITY_OPEN)
         }
@@ -923,6 +1017,16 @@ class DpmRestrictionOps(
         val level = runCatching { dpm.minimumRequiredWifiSecurityLevel }.getOrNull()
         if (level != t.minWifiSecurity) {
             dpm.setMinimumRequiredWifiSecurityLevel(t.minWifiSecurity)
+        }
+    }
+
+    /** Level-triggered like [applyTetherMode], and every key on its own: see
+     *  [pushRestrictions]. */
+    override fun applyLockedRestrictions(locked: Boolean): PostureReport {
+        val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
+        val isSet: ((String) -> Boolean)? = current?.let { b -> { k: String -> b.getBoolean(k, false) } }
+        return pushRestrictions(lockedRestrictionTargets(locked), isSet) { key, on ->
+            if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
         }
     }
 

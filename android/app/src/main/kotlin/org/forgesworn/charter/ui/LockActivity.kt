@@ -79,6 +79,10 @@ class LockActivity : Activity() {
      *  shade, even if the in-call UI fails to surface over LockTask. */
     private var endCallButton: Button? = null
 
+    /** The Wi-Fi and Bluetooth row of the current render, kept so [callPoll] can
+     *  hide it the moment the while-locked restrictions stop being in force. */
+    private var connectionsRow: android.view.View? = null
+
     /**
      * The vital signs (2026-07-25). LockTask runs at LOCK_TASK_FEATURE_NONE,
      * so the system status bar — clock, battery, signal — is gone while the
@@ -115,8 +119,12 @@ class LockActivity : Activity() {
                 (getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager)
                     .isInCall
             }.getOrDefault(false)
+            // Level-triggered: on this worker because it is a binder read.
+            val closed = Connections.lockedSurfaceClosed(this@LockActivity)
             runOnUiThread {
                 endCallButton?.visibility = if (inCall) android.view.View.VISIBLE
+                else android.view.View.GONE
+                connectionsRow?.visibility = if (closed) android.view.View.VISIBLE
                 else android.view.View.GONE
             }
             askWorker.postDelayed(this, CALL_POLL_MS)
@@ -520,7 +528,8 @@ class LockActivity : Activity() {
             // shows the real answer instead of a remembered "Asked!".
             readAskOutcome()
             val connections = CharterCore.connections()
-            runOnUiThread { renderViews(info, paired, lifeline, emergency, connections) }
+            val closed = Connections.lockedSurfaceClosed(this)
+            runOnUiThread { renderViews(info, paired, lifeline, emergency, connections, closed) }
         }
     }
 
@@ -594,33 +603,50 @@ class LockActivity : Activity() {
      * One row, two buttons: Wi-Fi and Bluetooth, each opening the platform's
      * own page (the settings app is on the LockTask allowlist for exactly
      * this — WardenController.lockTaskPackages). A device without the radio,
-     * or one where no page resolves, simply shows no button for it.
+     * or one where no system app serves the page, simply shows no button for it.
+     *
+     * The whole row stays hidden until the while-locked restrictions are really
+     * in force, since those pages lead on to the rest of Settings. [callPoll]
+     * keeps that up to date, and a tap checks once more before it opens anything.
      */
-    private fun paintConnectionsRow(root: LinearLayout, posture: CharterCore.Connections?) {
+    private fun paintConnectionsRow(
+        root: LinearLayout,
+        posture: CharterCore.Connections?,
+        closed: Boolean,
+    ) {
+        connectionsRow = null
         val status = text("", CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 6)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (closed) android.view.View.VISIBLE else android.view.View.GONE
+        }
         fun open(intent: Intent, what: String) {
+            if (!Connections.lockedSurfaceClosed(this)) {
+                container.visibility = android.view.View.GONE
+                return
+            }
             val ok = runCatching {
                 startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }.onFailure { Log.w(TAG, "could not open $what settings", it) }.isSuccess
             // Honest, never silent.
             status.text = if (ok) "" else "Couldn’t open $what settings — tell your guardian."
         }
+        val wifi = Connections.systemPage(this, Connections.wifiIntent())
+            .takeIf { Connections.hasWifi(this) }
+        val bluetooth = Connections.systemPage(this, Connections.bluetoothIntent())
+            .takeIf { Connections.hasBluetooth(this) }
         val buttons = buildList {
-            if (Connections.hasWifi(this@LockActivity) &&
-                intentResolves(Connections.wifiIntent())
-            ) {
+            if (wifi != null) {
                 add(
                     CharterTheme.secondaryButton(this@LockActivity, "Wi-Fi", onInk = true).apply {
-                        setOnClickListener { open(Connections.wifiIntent(), "Wi-Fi") }
+                        setOnClickListener { open(Intent(wifi), "Wi-Fi") }
                     },
                 )
             }
-            if (Connections.hasBluetooth(this@LockActivity) &&
-                intentResolves(Connections.bluetoothIntent())
-            ) {
+            if (bluetooth != null) {
                 add(
                     CharterTheme.secondaryButton(this@LockActivity, "Bluetooth", onInk = true).apply {
-                        setOnClickListener { open(Connections.bluetoothIntent(), "Bluetooth") }
+                        setOnClickListener { open(Intent(bluetooth), "Bluetooth") }
                     },
                 )
             }
@@ -638,18 +664,16 @@ class LockActivity : Activity() {
                 },
             )
         }
-        root.addView(row, CharterTheme.stackParams(this, 10))
+        container.addView(row, CharterTheme.stackParams(this, 10))
         // Say what the guardian chose, so a network that won't join isn't a
         // mystery (the platform's own message is a terse "blocked by admin").
         Connections.limitNote(posture?.wifi, posture?.bluetooth)?.let {
-            root.addView(text(it, CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 6))
+            container.addView(text(it, CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 6))
         }
-        root.addView(status)
+        container.addView(status)
+        root.addView(container)
+        connectionsRow = container
     }
-
-    private fun intentResolves(intent: Intent): Boolean = runCatching {
-        packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY) != null
-    }.getOrDefault(false)
 
     private fun renderViews(
         info: CharterCore.LockInfo?,
@@ -657,6 +681,7 @@ class LockActivity : Activity() {
         lifelineView: CharterCore.LifelineView = CharterCore.LifelineView(),
         emergencyNumber: String? = null,
         connections: CharterCore.Connections? = null,
+        lockedSurfaceClosed: Boolean = false,
     ) {
         val lifeline = lifelineView.numbers
         // Three deliberate zones rather than one centred blob: the clock owns
@@ -998,7 +1023,7 @@ class LockActivity : Activity() {
         // their headphones unconnected and no way to fix either. Next to the
         // torch, in thumb reach: plumbing, offered plainly, no guardian
         // switch — connecting to a network grants no screen time.
-        paintConnectionsRow(root, connections)
+        paintConnectionsRow(root, connections, lockedSurfaceClosed)
 
         // Break-glass (design memo 2026-07-24): the fire alarm. Nothing stops
         // the ward using it — no approval, no network needed — and using it is
