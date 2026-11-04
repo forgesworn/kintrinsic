@@ -147,9 +147,8 @@ on-device parental-control system); some are gaps we intend to close.
   restrictions at all times. While locked, so are adding or removing accounts,
   force-stopping, disabling or clearing apps, and changing default apps; if the
   platform refuses any of these, the buttons are hidden. Only a system app can
-  serve those pages or join the lock as a dialer, so a third-party default
-  dialer's in-call screen does not appear over the lock: the call still
-  connects, and the lock screen's End call button ends it.
+  serve those pages. The phone's default dialer stays allowed past the lock, so
+  calls keep working.
   What the ward may join there (new Wi-Fi networks, open Wi-Fi, new Bluetooth
   devices) is the guardian's Wi-Fi & Bluetooth setting, enforced device-wide.
 - **No independent third-party security audit has been done.** The project

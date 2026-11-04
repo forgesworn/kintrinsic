@@ -432,7 +432,6 @@ class LockActivity : Activity() {
         number: String,
         holdMs: Long,
         status: TextView,
-        emergency: Boolean = false,
     ): Button = CharterTheme.secondaryButton(this, label, onInk = true).apply {
         var holdRunnable: Runnable? = null
         var countdown: Runnable? = null
@@ -449,7 +448,14 @@ class LockActivity : Activity() {
 
         fun place() {
             reset()
-            val placed = placeCall(number, emergency)
+            val placed = runCatching {
+                startActivity(
+                    android.content.Intent(
+                        android.content.Intent.ACTION_CALL,
+                        android.net.Uri.parse("tel:" + android.net.Uri.encode(number)),
+                    ),
+                )
+            }.isSuccess
             if (!placed) status.text = "Couldn't start the call — tell your guardian."
         }
 
@@ -502,24 +508,6 @@ class LockActivity : Activity() {
                 else -> false
             }
         }
-    }
-
-    /** Tries each [LockCall] route in turn. False only when none could start. */
-    private fun placeCall(number: String, emergency: Boolean): Boolean {
-        val uri = android.net.Uri.parse("tel:" + android.net.Uri.encode(number))
-        val telecom = getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
-        val systemDialer = runCatching { telecom.systemDialerPackage }.getOrNull()
-        val used = LockCall.placeFirst(LockCall.routes(emergency, systemDialer)) { route ->
-            when (route) {
-                LockCall.Route.TELECOM -> telecom.placeCall(uri, null)
-                LockCall.Route.SYSTEM_DIAL_PAD -> startActivity(
-                    Intent(Intent.ACTION_DIAL, uri).setPackage(systemDialer),
-                )
-                LockCall.Route.ANY_CALL_HANDLER -> startActivity(Intent(Intent.ACTION_CALL, uri))
-            }
-        }
-        if (used == null) Log.e(TAG, "no route could start the call")
-        return used != null
     }
 
     private fun render() {
@@ -881,10 +869,9 @@ class LockActivity : Activity() {
         // A live call can ALWAYS be ended from the shade. Found on-device
         // 2026-07-24: with the dialer outside the LockTask allowlist, a
         // lifeline call ran headless — a rejected call rolled to voicemail
-        // with no hang-up. A system dialer is allowlisted now (init), but this
-        // bar stays: a third-party default dialer's in-call screen is not let
-        // past the lock, so for that ward this is the control. Whatever happens
-        // to the in-call UI, the shade itself can end the call.
+        // with no hang-up. The dialer is allowlisted now (init), but this
+        // bar stays as the belt-and-braces: whatever happens to the in-call
+        // UI, the shade itself can end the call.
         endCallButton = CharterTheme.button(
             this, "End call", CharterTheme.BRAND, "#FFFFFF", CharterTheme.BRAND_PRESS,
         ).apply {
@@ -903,11 +890,10 @@ class LockActivity : Activity() {
         root.addView(endCallButton, CharterTheme.stackParams(this, 12))
 
         // The communication lifeline (spec D9): a locked phone is still a
-        // phone. One button per guardian number; Telecom places the call
-        // directly (CALL_PHONE is DO-self-granted, see LockCall). A system
-        // dialer's in-call UI is on the LockTask allowlist (init) so the call
-        // has a face; every other app stays suspended. Failure is honest,
-        // never silent.
+        // phone. One button per guardian number; ACTION_CALL places the call
+        // directly (CALL_PHONE is DO-self-granted). The dialer/in-call UI is
+        // on the LockTask allowlist (init) so the call has a face; every
+        // other app stays suspended. Failure is honest, never silent.
         // A Wi-Fi-only device (a tablet) has no radio: ACTION_CALL goes nowhere.
         // Offer nothing rather than a button that takes the child's two-second
         // hold and then fails — see LifelineOffer.
@@ -940,7 +926,6 @@ class LockActivity : Activity() {
                         number = emergencyNumber,
                         holdMs = EMERGENCY_HOLD_MS,
                         status = callStatus,
-                        emergency = true,
                     ),
                 )
             }

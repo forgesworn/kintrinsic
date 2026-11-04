@@ -196,44 +196,6 @@ internal fun appFlagsOf(context: Context): (String) -> Int? {
 }
 
 /**
- * The dialers on the LockTask allowlist.
- *
- * The default dialer is the ward's choice, so a third-party one could be any
- * app that claims the role: it joins only if it is a system app. The system
- * dialer always joins, because it is what Telecom opens for an emergency number
- * (see [org.forgesworn.charter.ui.LockCall]).
- *
- * The cost of leaving a third-party default dialer off, said plainly: its
- * in-call screen cannot surface over the lock. The call itself still connects,
- * and the shade's End-call bar is the control for it.
- */
-internal fun lockTaskDialers(
-    defaultDialer: String?,
-    systemDialer: String?,
-    appFlags: (String) -> Int?,
-): List<String> =
-    (systemPackagesOnly(listOfNotNull(defaultDialer), appFlags) + listOfNotNull(systemDialer)).distinct()
-
-/**
- * The dialers Kintrinsic exempts from suspension, kept in step with
- * [lockTaskDialers] so that what the lock allows it can also open.
- *
- * The system dialer is here because many phones ship one that is not called
- * `com.android.dialer`. While it is also the default the platform refuses to
- * suspend it anyway, which hid the gap; once a ward picks a third-party default,
- * it would be suspended at every lock and Telecom's emergency dial pad would
- * have nowhere to open.
- *
- * The literal AOSP name counts only when it really is a system app: on a phone
- * without that package, anything installed under the name would otherwise be
- * exempt. The default dialer gets no exemption here. The platform refuses to
- * suspend whichever package holds that role, third-party or not, so such a
- * dialer stays unsuspended but cannot be opened past the lock.
- */
-internal fun suspensionExemptDialers(systemDialer: String?, appFlags: (String) -> Int?): Set<String> =
-    systemPackagesOnly(listOf("com.android.dialer"), appFlags).toSet() + listOfNotNull(systemDialer)
-
-/**
  * The restrictions that hold only while the ward is locked. Settings stays
  * reachable from the shade's Wi-Fi and Bluetooth row, so these close the pages
  * that would otherwise undo the lock: adding or removing accounts; force-stopping,
@@ -479,14 +441,10 @@ fun denyListPackages(context: Context): Set<String> {
         "com.android.settings",
         "com.android.systemui",
         "com.android.phone",
+        "com.android.dialer",
         "com.android.emergency",
         "com.android.inputmethod.latin",
     )
-    val systemDialer = runCatching {
-        (context.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager)
-            .systemDialerPackage
-    }.getOrNull()
-    deny += suspensionExemptDialers(systemDialer, appFlagsOf(context))
     // The current default launcher + IME are load-bearing; add them dynamically.
     resolveDefaultLauncher(pm)?.let { deny.add(it) }
     return deny

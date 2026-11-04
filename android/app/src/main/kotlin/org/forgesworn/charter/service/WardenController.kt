@@ -147,7 +147,7 @@ class WardenController(
             // so the in-call UI can surface over the pin. Without this a
             // lifeline call runs headless behind the lock: no hang-up, no
             // in-call controls (the 2026-07-24 on-device trap: a rejected
-            // call rolled to voicemail with no way out). A system dialer being
+            // call rolled to voicemail with no way out). The dialer being
             // reachable opens nothing else — every other app stays suspended;
             // a locked phone is still a phone, per the lifeline design.
             // Empty always-available set: no decision has run yet, so this is
@@ -496,11 +496,8 @@ class WardenController(
      *
      * The phone stack is here so a lifeline call has a face — without it a call
      * runs headless behind the lock with no hang-up (the 2026-07-24 on-device
-     * trap). That face is the system dialer's, and a default dialer's only when
-     * it is a system app: a third-party one is the ward's own choice and is not
-     * let past the lock ([org.forgesworn.charter.enforce.lockTaskDialers]). The
-     * always-available set is here so the shade's Open row can actually launch
-     * what it offers.
+     * trap). The always-available set is here so the shade's Open row can
+     * actually launch what it offers.
      *
      * RE-DERIVED EVERY TICK, never once at init: entries expire on their own
      * clock and a guardian edits the clause while the phone is locked. This was
@@ -508,16 +505,14 @@ class WardenController(
      * set happened to be at boot.
      */
     private fun lockTaskPackages(alwaysAvailable: Set<String>): Array<String> {
-        val telecom = runCatching {
-            context.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
-        }.getOrNull()
-        // Read apart, so a failure reading the ward's choice cannot cost the
-        // system dialer its place.
-        val dialers = org.forgesworn.charter.enforce.lockTaskDialers(
-            defaultDialer = runCatching { telecom?.defaultDialerPackage }.getOrNull(),
-            systemDialer = runCatching { telecom?.systemDialerPackage }.getOrNull(),
-            appFlags = org.forgesworn.charter.enforce.appFlagsOf(context),
-        )
+        val dialers = buildList {
+            runCatching {
+                val telecom = context.getSystemService(Context.TELECOM_SERVICE)
+                    as android.telecom.TelecomManager
+                telecom.defaultDialerPackage?.let { add(it) }
+                telecom.systemDialerPackage?.let { add(it) }
+            }
+        }
         // The settings app behind the shade's Wi-Fi / Bluetooth buttons: a
         // locked ward can still get online for an open-at-any-hour app, or
         // connect their headphones. See [org.forgesworn.charter.ui.Connections].

@@ -3,24 +3,21 @@ package org.forgesworn.charter.enforce
 import android.content.pm.ApplicationInfo
 import org.forgesworn.charter.ui.Connections
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Only system apps may join the lock by virtue of a role or an intent filter:
- * both are things a ward, or an app the ward installed, can claim.
+ * Only system apps may join the lock by virtue of an intent filter, which an
+ * app the ward installed can claim.
  */
 class SystemPackagesTest {
 
     private val settings = "com.android.settings"
-    private val systemDialer = "com.oem.dialer"
     private val thirdParty = "com.example.shell"
     private val unreadable = "com.example.gone"
 
     private val flags: (String) -> Int? = { pkg ->
         when (pkg) {
-            settings, systemDialer, "android" -> ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_INSTALLED
+            settings, "android" -> ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_INSTALLED
             thirdParty -> ApplicationInfo.FLAG_INSTALLED
             unreadable -> throw IllegalStateException("not found")
             else -> null
@@ -73,65 +70,5 @@ class SystemPackagesTest {
     @Test
     fun `one app serving both pages is listed once`() {
         assertEquals(listOf(settings), Connections.systemSettingsPackages(listOf(settings, settings), flags))
-    }
-
-    // ---- the dialers on the allowlist --------------------------------------
-
-    @Test
-    fun `a third-party default dialer is not allowlisted, the system dialer is`() {
-        assertEquals(listOf(systemDialer), lockTaskDialers(thirdParty, systemDialer, flags))
-    }
-
-    @Test
-    fun `a default dialer that cannot be read is not allowlisted`() {
-        assertEquals(listOf(systemDialer), lockTaskDialers(unreadable, systemDialer, flags))
-    }
-
-    @Test
-    fun `a system default dialer stays, listed once when it is also the system dialer`() {
-        assertEquals(listOf(systemDialer), lockTaskDialers(systemDialer, systemDialer, flags))
-        assertEquals(listOf(settings, systemDialer), lockTaskDialers(settings, systemDialer, flags))
-    }
-
-    @Test
-    fun `the system dialer stays whatever the default is`() {
-        assertEquals(listOf(systemDialer), lockTaskDialers(null, systemDialer, flags))
-    }
-
-    @Test
-    fun `a third-party default with no system dialer leaves no dialer on the allowlist`() {
-        assertEquals(emptyList<String>(), lockTaskDialers(thirdParty, null, flags))
-    }
-
-    // ---- the dialers exempt from suspension --------------------------------
-
-    /** Telecom opens the system dialer for an emergency number. Suspending it
-     *  would break 999 on any phone whose dialer has an OEM package name. */
-    @Test
-    fun `the system dialer is exempt from suspension under any package name`() {
-        assertTrue(systemDialer in suspensionExemptDialers(systemDialer, flags))
-    }
-
-    @Test
-    fun `a third-party default dialer gets no exemption`() {
-        assertFalse(thirdParty in suspensionExemptDialers(systemDialer, flags))
-    }
-
-    @Test
-    fun `the AOSP dialer name is exempt only when it really is a system app`() {
-        val aosp = "com.android.dialer"
-        val squatted: (String) -> Int? = { ApplicationInfo.FLAG_INSTALLED }
-        val genuine: (String) -> Int? = { ApplicationInfo.FLAG_SYSTEM }
-        assertFalse(aosp in suspensionExemptDialers(systemDialer, squatted))
-        assertTrue(aosp in suspensionExemptDialers(null, genuine))
-    }
-
-    /** What the lock lets in, it can also open. */
-    @Test
-    fun `what is allowlisted as a dialer is never suspended`() {
-        for (default in listOf(systemDialer, thirdParty, unreadable, null)) {
-            val allowlisted = lockTaskDialers(default, systemDialer, flags)
-            assertTrue(suspensionExemptDialers(systemDialer, flags).containsAll(allowlisted))
-        }
     }
 }
