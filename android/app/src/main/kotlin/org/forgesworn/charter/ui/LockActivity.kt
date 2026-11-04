@@ -519,7 +519,8 @@ class LockActivity : Activity() {
             // Re-read this spell's ask from the core, so a rebuilt view tree
             // shows the real answer instead of a remembered "Asked!".
             readAskOutcome()
-            runOnUiThread { renderViews(info, paired, lifeline, emergency) }
+            val connections = CharterCore.connections()
+            runOnUiThread { renderViews(info, paired, lifeline, emergency, connections) }
         }
     }
 
@@ -595,7 +596,7 @@ class LockActivity : Activity() {
      * this — WardenController.lockTaskPackages). A device without the radio,
      * or one where no page resolves, simply shows no button for it.
      */
-    private fun paintConnectionsRow(root: LinearLayout) {
+    private fun paintConnectionsRow(root: LinearLayout, posture: CharterCore.Connections?) {
         val status = text("", CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 6)
         fun open(intent: Intent, what: String) {
             val ok = runCatching {
@@ -638,6 +639,11 @@ class LockActivity : Activity() {
             )
         }
         root.addView(row, CharterTheme.stackParams(this, 10))
+        // Say what the guardian chose, so a network that won't join isn't a
+        // mystery (the platform's own message is a terse "blocked by admin").
+        Connections.limitNote(posture?.wifi, posture?.bluetooth)?.let {
+            root.addView(text(it, CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 6))
+        }
         root.addView(status)
     }
 
@@ -650,6 +656,7 @@ class LockActivity : Activity() {
         paired: Boolean,
         lifelineView: CharterCore.LifelineView = CharterCore.LifelineView(),
         emergencyNumber: String? = null,
+        connections: CharterCore.Connections? = null,
     ) {
         val lifeline = lifelineView.numbers
         // Three deliberate zones rather than one centred blob: the clock owns
@@ -991,7 +998,7 @@ class LockActivity : Activity() {
         // their headphones unconnected and no way to fix either. Next to the
         // torch, in thumb reach: plumbing, offered plainly, no guardian
         // switch — connecting to a network grants no screen time.
-        paintConnectionsRow(root)
+        paintConnectionsRow(root, connections)
 
         // Break-glass (design memo 2026-07-24): the fire alarm. Nothing stops
         // the ward using it — no approval, no network needed — and using it is

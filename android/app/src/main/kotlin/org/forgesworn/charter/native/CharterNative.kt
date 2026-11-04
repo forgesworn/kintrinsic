@@ -101,6 +101,13 @@ object CharterNative {
     external fun charterTetheringMode(nowUnix: Long): String
 
     /**
+     * The ward's Wi-Fi / Bluetooth posture (the `connections` clause):
+     * `{"wifi":"saved|secured|any","bluetooth":"paired|any"}`, or
+     * `{"error":…}` when the clause store will not read. Worker thread only.
+     */
+    external fun charterConnections(): String
+
+    /**
      * The ward's debugging posture at [nowUnix] (the `debugging` clause): 0
      * allowed with no end, >0 allowed until that unix second, -1 blocked, -2
      * hold (the clause store would not read; write nothing). The values are

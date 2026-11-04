@@ -244,7 +244,7 @@ store. The full `ClauseKind` set (wire tag → store key) is `schedule` (1),
 `budget` (2), `content` (3), `apps` (4), `learning` (5), `apprules` (6),
 `tethering` (7), `update` (8), `lifeline` (9), `buckets` (10),
 `maintenance` (11), `gift` (12), `standdown` (13), `listening` (14),
-`alwaysavailable` (15), `debugging` (16), `times` (17). Three device-local, non-clause slots share the same
+`alwaysavailable` (15), `debugging` (16), `times` (17), `connections` (18). Three device-local, non-clause slots share the same
 rollback-protected store and never cross the wire: `100` (cached USAGE_SYNC),
 `101` (the stand-down grace pin) and `102` (the install-window span). It is
 parsed and evaluated by the
@@ -1080,6 +1080,50 @@ A grant with `until` ends AT that instant — the next tick re-applies the block
 (auto-killing any live session). `until` recomputed each tick, like `appRules`;
 no alarms.
 
+### Connections — Wi-Fi and Bluetooth (v1 — device-enforced, Android)
+
+The `connections` clause (wire tag `"connections"`, store key `18`) sets how
+much of Wi-Fi and Bluetooth the ward may change on their own. Switching either
+radio **on and off is never governed**: a phone that cannot reach the home
+Wi-Fi or the ward's own headphones stops being useful for the things the family
+agreed are fine, and a switch grants no screen time. The tiers govern joining
+**new** things. Replace-the-state, per-(subject, kind) monotonic `issuedAt`.
+
+```ts
+interface GrantConnections {
+  v: 1;
+  issuedAt: number;
+  /** saved   = only networks already saved on the device;
+   *  secured = new networks, but only ones with a password (no open Wi-Fi);
+   *  any     = no limit. */
+  wifi: "saved" | "secured" | "any";
+  /** paired = only devices already paired; any = may pair new devices. */
+  bluetooth: "paired" | "any";
+}
+```
+
+**Enforcement (level-triggered per tick, while a charter exists):**
+- Wi-Fi `saved` ⇒ `DISALLOW_ADD_WIFI_CONFIG`. `secured` ⇒ that restriction
+  cleared and the minimum Wi-Fi security level raised to
+  `WIFI_SECURITY_PERSONAL`, so open networks are refused (including an open
+  network already saved). `any` ⇒ both cleared. `saved` leaves the security
+  level open on purpose: raising it would drop the ward off an open network
+  they already use.
+- Bluetooth `paired` ⇒ `DISALLOW_CONFIG_BLUETOOTH`. `any` ⇒ cleared.
+- **No clause = `any` / `any`**, what every ward had before the kind existed,
+  so an update changes nothing until a guardian chooses. A clause that is
+  stored but **malformed**, carries an unknown tier, or has a body `v` other
+  than 1 is the careful tier, `saved` / `paired`: it still leaves known
+  networks and paired headphones working and disconnects nothing. A clause
+  store that will not read changes nothing that tick.
+- Un-chartering clears all three, like the rest of the baseline.
+- The lock shade's Wi-Fi and Bluetooth buttons open the platform's own pages,
+  where the same restrictions hold, and the shade says in plain words which
+  tiers are in force.
+
+A ward that predates this kind does not know the tag and refuses the clause,
+so the guardian surface version-gates it (`wardenSupport`).
+
 ### Debugging (v1 — device-enforced, Android)
 
 The `debugging` clause (wire tag `"debugging"`, store key `16`) lets the
@@ -1478,6 +1522,7 @@ against this table rather than assume parity (MyCharter: `wardenSupport`).
 | `alwaysavailable` (15) | **stored, inert** | enforced (≥ versionCode 39) | a Linux lock freezes the whole user slice, so an exempted app is frozen with everything else regardless of what the clause says |
 | `debugging` (16) | n/a (no adb to govern) | enforced (≥ versionCode 47) | addressed to one device, not to every device of the child |
 | `times` (17) | enforced (≥ 0.8.0 / 800) | enforced (≥ versionCode 49) | tagged schedule windows and typed gifts on an older warden run as Free time — version-gated guardian-side |
+| `connections` (18) | n/a (network settings are not governed) | enforced (≥ versionCode 52) | |
 
 "**stored, inert**" means the clause is authenticated against the pinned
 guardian and cached exactly as any other — rollback protection and all — and
@@ -2783,7 +2828,8 @@ you change it in both, or a red test tells you which stack drifted.
   would keep its `raw` arm, i.e. unfiltered upstream internet. The required
   behaviour is therefore each kind's own fail-safe: `schedule` locks
   (malformed), `budget` reads as `paused` (quota 0 on both axes), `tethering`
-  is `blocked`, `debugging` is `blocked`, `content` fails closed, and a
+  is `blocked`, `debugging` is `blocked`, `connections` is `saved` / `paired`,
+  `content` fails closed, and a
   capping kind such as `buckets` caps nothing.
 - The contract version (this document) is `v0.1` — pre-stable.
 - The NIP-46 method namespace is `charter_*`; we do not draft an upstream NIP until the namespace stabilises (matches the `heartwood_*` discipline).

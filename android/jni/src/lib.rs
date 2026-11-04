@@ -30,7 +30,8 @@ use warden::{Warden, WARDEN};
 /// 5: times (§Times) — `charterDnsPlan` takes the clock (the web policy is
 ///    composed over the time running at that instant) and
 ///    `charterSetDefaultBrowser` is new.
-pub const ABI_VERSION: jint = 5;
+/// 6: the `connections` clause — `charterConnections`.
+pub const ABI_VERSION: jint = 6;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -442,6 +443,26 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterT
     now_unix: jlong,
 ) -> jstring {
     with_warden(&env, |w| w.tethering_mode(now_unix).to_string())
+}
+
+/// The sole ward's Wi-Fi / Bluetooth posture (the `connections` clause):
+/// `{"wifi":"saved|secured|any","bluetooth":"paired|any"}`, or `{"error":…}`
+/// when the clause store will not read, in which case Kotlin keeps what it
+/// last applied. Kotlin applies it level-triggered to DISALLOW_ADD_WIFI_CONFIG,
+/// the minimum Wi-Fi security level and DISALLOW_CONFIG_BLUETOOTH.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterConnections(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    with_warden(&env, |w| match w.connections_posture() {
+        Ok(p) => serde_json::json!({
+            "wifi": p.wifi.as_str(),
+            "bluetooth": p.bluetooth.as_str(),
+        })
+        .to_string(),
+        Err(e) => err_json(&e),
+    })
 }
 
 /// The sole ward's debugging posture at `now_unix` (the `debugging` clause).

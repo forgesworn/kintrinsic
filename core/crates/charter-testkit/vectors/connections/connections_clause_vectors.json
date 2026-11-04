@@ -1,0 +1,31 @@
+{
+  "note": "Canonical connections clause vectors — pins the guardian producer (TS: connectionsToGrant) ↔ warden (Rust: GrantConnections parse + evaluate_connections). `wifi` is saved | secured | any (saved = only networks already on the phone; secured = new networks only with a password; any = no limit). `bluetooth` is paired | any (paired = only devices already paired). Turning either radio on and off is never governed. No clause = any/any. `expect` is the posture the warden enforces. A payload in `invalid` must fail to parse; the warden then enforces saved/paired. A body `v` other than 1 also evaluates to saved/paired. issuedAt fixed for determinism.",
+  "vectors": [
+    {
+      "name": "saved_paired",
+      "payload": { "v": 1, "issuedAt": 1782734400, "wifi": "saved", "bluetooth": "paired" },
+      "expect": { "wifi": "saved", "bluetooth": "paired" }
+    },
+    {
+      "name": "secured_any",
+      "payload": { "v": 1, "issuedAt": 1782734400, "wifi": "secured", "bluetooth": "any" },
+      "expect": { "wifi": "secured", "bluetooth": "any" }
+    },
+    {
+      "name": "any_any",
+      "payload": { "v": 1, "issuedAt": 1782734400, "wifi": "any", "bluetooth": "any" },
+      "expect": { "wifi": "any", "bluetooth": "any" }
+    },
+    {
+      "name": "future_version_careful",
+      "payload": { "v": 2, "issuedAt": 1782734400, "wifi": "any", "bluetooth": "any" },
+      "expect": { "wifi": "saved", "bluetooth": "paired" }
+    }
+  ],
+  "invalid": [
+    { "name": "missing_bluetooth", "payload": { "v": 1, "issuedAt": 1, "wifi": "any" } },
+    { "name": "unknown_wifi_tier", "payload": { "v": 1, "issuedAt": 1, "wifi": "open", "bluetooth": "any" } },
+    { "name": "unknown_bluetooth_tier", "payload": { "v": 1, "issuedAt": 1, "wifi": "any", "bluetooth": "all" } },
+    { "name": "wrong_version_type", "payload": { "v": "1", "issuedAt": 1, "wifi": "any", "bluetooth": "any" } }
+  ]
+}

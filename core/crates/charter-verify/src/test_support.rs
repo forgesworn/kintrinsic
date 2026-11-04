@@ -318,6 +318,7 @@ impl ClauseBuilder {
             ClauseKind::AlwaysAvailable => "alwaysavailable",
             ClauseKind::Debugging => "debugging",
             ClauseKind::Times => "times",
+            ClauseKind::Connections => "connections",
         };
         let mut v = json!({"v": 1, "kind": kind, "issuedAt": self.issued_at, "body": self.body});
         if let Some(subject) = &self.subject {
@@ -345,6 +346,7 @@ impl ClauseBuilder {
             ClauseKind::AlwaysAvailable => "alwaysavailable",
             ClauseKind::Debugging => "debugging",
             ClauseKind::Times => "times",
+            ClauseKind::Connections => "connections",
         };
         vec![kinds::marker_tag(), vec!["d".into(), d.into()]]
     }

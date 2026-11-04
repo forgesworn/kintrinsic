@@ -17,7 +17,7 @@ import { ruleSummaries } from "./ruleSummaries";
 const GROUPS: { title: string; sections: SectionId[] }[] = [
   { title: "Time", sections: ["schedule", "budget", "listening"] },
   { title: "Apps & web", sections: ["always-available", "web", "apps", "named-times"] },
-  { title: "Safety", sections: ["lifeline", "tethering"] },
+  { title: "Safety", sections: ["lifeline", "tethering", "connections"] },
 ];
 
 /** Whether any of the child's devices is paired and can actually be reached. */

@@ -285,6 +285,14 @@ export interface Tethering {
   until?: number;
 }
 
+/** How much of Wi-Fi and Bluetooth the ward may change. Turning either on and
+ *  off is never limited; the tiers govern joining NEW networks and pairing NEW
+ *  devices. */
+export interface Connections {
+  wifi: "saved" | "secured" | "any";
+  bluetooth: "paired" | "any";
+}
+
 /** One lifeline entry: a label the ward recognises ("Mum") + the number the
  *  lock screen dials. */
 export interface LifelineNumberEntry {
@@ -326,6 +334,9 @@ export interface Policy {
   learning?: LearningPolicy;
   /** Device scope only: the ward's hotspot posture (default blocked). */
   tethering?: Tethering;
+  /** Device scope only: what the ward may join on Wi-Fi / Bluetooth
+   *  (absent = no limit). */
+  connections?: Connections;
   /** Device scope only: guardian numbers callable from the lock screen (D9). */
   lifeline?: Lifeline;
   /** Device scope only: named app buckets with their own daily allowance. */

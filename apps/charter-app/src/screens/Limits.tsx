@@ -79,6 +79,7 @@ import {
   type ListeningPolicy,
   type Lifeline,
   type Tethering,
+  type Connections,
   type BucketsPolicy,
   type AlwaysAvailablePolicy,
   type TimeModel,
@@ -323,6 +324,23 @@ export function tetheringSummary(t: Tethering): string {
   }
 }
 
+/** Normalize a saved Wi-Fi / Bluetooth posture. No clause means no limit:
+ *  what every ward had before this setting existed. */
+export function buildConnections(src?: Connections): Connections {
+  return { wifi: src?.wifi ?? "any", bluetooth: src?.bluetooth ?? "any" };
+}
+
+export function connectionsSummary(c: Connections): string {
+  const wifi =
+    c.wifi === "saved"
+      ? "Saved Wi-Fi only"
+      : c.wifi === "secured"
+        ? "Password Wi-Fi only"
+        : "Any Wi-Fi";
+  const bt = c.bluetooth === "paired" ? "paired Bluetooth only" : "any Bluetooth";
+  return `${wifi}, ${bt}`;
+}
+
 /** Normalize a saved listening agreement. Defaults to `stop` — the behaviour
  *  before this setting existed, and what the device does with no clause. */
 export function buildListening(src?: ListeningPolicy): ListeningPolicy {
@@ -467,7 +485,8 @@ export type SectionId =
   | "apps"
   | "always-available"
   | "lifeline"
-  | "tethering";
+  | "tethering"
+  | "connections";
 
 export const SECTION_TITLE: Record<SectionId, string> = {
   schedule: "Daily schedule",
@@ -482,6 +501,7 @@ export const SECTION_TITLE: Record<SectionId, string> = {
   "always-available": "Always available",
   lifeline: "Lifeline",
   tethering: "Hotspot",
+  connections: "Wi-Fi & Bluetooth",
 };
 
 // ---------------------------------------------------------------------------
@@ -2222,6 +2242,62 @@ function TetheringEditor({
 }
 
 /**
+ * Wi-Fi and Bluetooth: how much the ward may change on their own. Switching
+ * either on and off is never limited (a phone that can't reach the home Wi-Fi
+ * or their headphones stops being useful for the things you agreed are fine);
+ * these tiers decide whether they can JOIN something new.
+ */
+function ConnectionsEditor({
+  connections,
+  onChange,
+}: {
+  connections: Connections;
+  onChange: (c: Connections) => void;
+}) {
+  return (
+    <div className="stack">
+      <span className="row-sub">
+        They can always switch Wi-Fi and Bluetooth on and off, from the lock
+        screen too. This decides what they can join.
+      </span>
+
+      <SectionLabel>New Wi-Fi networks</SectionLabel>
+      <Segmented<Connections["wifi"]>
+        value={connections.wifi}
+        options={[
+          { value: "saved", label: "Saved only" },
+          { value: "secured", label: "With a password" },
+          { value: "any", label: "Any" },
+        ]}
+        onChange={(v) => onChange({ ...connections, wifi: v })}
+      />
+      <Banner tone={connections.wifi === "any" ? "warn" : "info"}>
+        {connections.wifi === "saved"
+          ? "Only networks already saved on their device. To add a new one (a friend’s house, a holiday), set this to “With a password” for a moment, or join it on their device yourself."
+          : connections.wifi === "secured"
+            ? "They can join a new network that needs a password, like a friend’s home Wi-Fi. Open “free Wi-Fi” (airports, cafés, trains) is refused, and an open network already saved stops connecting."
+            : "They can join any network, including open “free Wi-Fi” at an airport or café, where anyone nearby can see what isn’t encrypted. The web filter still applies on every network."}
+      </Banner>
+
+      <SectionLabel>New Bluetooth devices</SectionLabel>
+      <Segmented<Connections["bluetooth"]>
+        value={connections.bluetooth}
+        options={[
+          { value: "paired", label: "Paired only" },
+          { value: "any", label: "Can pair new" },
+        ]}
+        onChange={(v) => onChange({ ...connections, bluetooth: v })}
+      />
+      <span className="row-sub">
+        {connections.bluetooth === "paired"
+          ? "Headphones and speakers they’ve already paired still connect. Pairing something new needs you."
+          : "They can pair new headphones, speakers and other devices."}
+      </span>
+    </div>
+  );
+}
+
+/**
  * Add an educational site the curated catalogue doesn't carry.
  *
  * The catalogue's closures are measured against the live site; one typed here
@@ -2944,6 +3020,9 @@ export function DeviceLimits({
   const [draftTethering, setDraftTethering] = useState<Tethering>(() =>
     buildTethering(policy.tethering),
   );
+  const [draftConnections, setDraftConnections] = useState<Connections>(() =>
+    buildConnections(policy.connections),
+  );
   const [draftLifeline, setDraftLifeline] = useState<Lifeline>(() =>
     buildLifeline(policy.lifeline),
   );
@@ -3055,6 +3134,10 @@ export function DeviceLimits({
     () => buildTethering(policy.tethering),
     [policy.tethering],
   );
+  const savedConnections = useMemo(
+    () => buildConnections(policy.connections),
+    [policy.connections],
+  );
   const savedLifeline = useMemo(
     () => buildLifeline(policy.lifeline),
     [policy.lifeline],
@@ -3078,6 +3161,8 @@ export function DeviceLimits({
   const webDirty = JSON.stringify(draftWeb) !== JSON.stringify(savedWeb);
   const tetheringDirty =
     JSON.stringify(draftTethering) !== JSON.stringify(savedTethering);
+  const connectionsDirty =
+    JSON.stringify(draftConnections) !== JSON.stringify(savedConnections);
   const lifelineDirty =
     JSON.stringify(draftLifeline) !== JSON.stringify(savedLifeline);
   // Splitting a control, or editing one device's copy of it, is a real change
@@ -3231,7 +3316,7 @@ export function DeviceLimits({
 
   const dirty =
     scheduleDirty || budgetDirty || webDirty || appsDirty ||
-    tetheringDirty || lifelineDirty || overridesDirty || namedTimesDirty || listeningDirty ||
+    tetheringDirty || connectionsDirty || lifelineDirty || overridesDirty || namedTimesDirty || listeningDirty ||
     alwaysAvailableDirty;
   const lifelineError = lifelineDirty ? lifelineNumberError(draftLifeline) : null;
   // Block a save that would throw at sign time (or, unsigned, be stored as a
@@ -3419,6 +3504,7 @@ export function DeviceLimits({
         // on-request pkgs the base does, not just whatever it had before.
         deviceOverrides: effectiveOverrides,
         tethering: tetheringDirty ? draftTethering : undefined,
+        connections: connectionsDirty ? draftConnections : undefined,
         lifeline: lifelineDirty
           ? {
               // Carry the WHOLE draft. Listing only `numbers` here silently
@@ -3798,6 +3884,21 @@ export function DeviceLimits({
         <>
           <TetheringEditor tethering={draftTethering} onChange={setDraftTethering} />
           <ParityNote note={parityNote("tethering", "A hotspot rule", "A computer has no hotspot to govern.")} />
+        </>
+      ),
+    },
+    {
+      id: "connections",
+      body: (
+        <>
+          <ConnectionsEditor connections={draftConnections} onChange={setDraftConnections} />
+          <ParityNote
+            note={parityNote(
+              "connections",
+              "A Wi-Fi and Bluetooth rule",
+              "A computer's network settings aren't governed.",
+            )}
+          />
         </>
       ),
     },

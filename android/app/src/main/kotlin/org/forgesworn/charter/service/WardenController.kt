@@ -760,6 +760,18 @@ class WardenController(
             // before pushing it and never try again).
             guard.run("tether", ward) { restrictions.applyTetherMode(tetherMode) }
         }
+        // Wi-Fi / Bluetooth posture (the `connections` clause): what the ward
+        // may join, never the on/off switches. Same gate as tethering: only
+        // while a charter exists, and the baseline's clear owns the rest. An
+        // answer that could not be had changes nothing this tick.
+        if (applyRestrictions && Provisioning.isDeviceOwner(context)) {
+            val c = CharterCore.connections()
+            if (c != null) {
+                guard.run("connections", ward) {
+                    restrictions.applyConnections(c.wifi, c.bluetooth)
+                }
+            }
+        }
         // Debugging (adb) is not here: it runs once per tick, after every
         // decision, whether or not any charter is configured (see
         // [syncDebugging]).

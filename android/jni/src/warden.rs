@@ -1492,6 +1492,29 @@ impl Warden {
         }
     }
 
+    /// The sole ward's Wi-Fi / Bluetooth posture (the `connections` clause,
+    /// store_key 18) as `{"wifi": saved|secured|any, "bluetooth": paired|any}`.
+    ///
+    /// No ward or no clause is `any` / `any`: what every ward had before the
+    /// clause existed. A clause that is stored but malformed is the careful
+    /// tier, `saved` / `paired`, never open. A store that will not READ is an
+    /// `Err`: the caller keeps whatever it last applied rather than flapping a
+    /// restriction on one transient I/O error.
+    pub fn connections_posture(&self) -> Result<charter_schedule::ConnectionsPosture, String> {
+        use charter_schedule::{evaluate_connections_json, ConnectionsPosture};
+        let Some(subject) = self.subject else {
+            return Ok(ConnectionsPosture::OPEN);
+        };
+        match self.child_clauses.get_child_clause(
+            &subject.to_hex(),
+            charter_proto::ClauseKind::Connections.store_key(),
+        ) {
+            Ok(body) => Ok(evaluate_connections_json(body.as_deref())),
+            Err(e) if clause_error_is_malformed(&e) => Ok(ConnectionsPosture::CAREFUL),
+            Err(e) => Err(format!("connections clause unreadable: {e:?}")),
+        }
+    }
+
     /// The sole ward's debugging posture at `now_unix` (the `debugging` clause,
     /// store_key 16), as the values defined once in `lib.rs` (above
     /// `DEBUGGING_BLOCKED`): `0` allowed with no end, `>0` allowed until that
@@ -5749,6 +5772,69 @@ mod tests {
                 .accepted
         );
         assert_eq!(w.tethering_mode(5_000), "blocked");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The connections clause (store_key 18): absent is open; each tier the
+    /// guardian signs reaches Kotlin as-is; a superseding clause replaces it.
+    #[test]
+    fn connections_clause_drives_the_posture() {
+        use charter_schedule::{BluetoothAccess, ConnectionsPosture, WifiAccess};
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x46);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+
+        // No ward yet, then no clause: open, as before the clause existed.
+        assert_eq!(w.connections_posture(), Ok(ConnectionsPosture::OPEN));
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+        assert_eq!(w.connections_posture(), Ok(ConnectionsPosture::OPEN));
+
+        let send = |w: &mut Warden, issued_at: u64, body: serde_json::Value| {
+            let ev = ClauseBuilder {
+                kind: charter_proto::ClauseKind::Connections,
+                issued_at,
+                body: json!({}),
+                created_at: issued_at,
+                subject: None,
+            }
+            .subject(ward.pubkey())
+            .body(body)
+            .build(&guardian);
+            w.ingest_clause(&serde_json::to_string(&ev).unwrap(), 1_000)
+        };
+
+        let res = send(
+            &mut w,
+            1,
+            json!({"v": 1, "issuedAt": 1, "wifi": "secured", "bluetooth": "paired"}),
+        );
+        assert!(res.accepted, "connections clause rejected: {}", res.reason);
+        assert_eq!(
+            w.connections_posture(),
+            Ok(ConnectionsPosture {
+                wifi: WifiAccess::Secured,
+                bluetooth: BluetoothAccess::Paired,
+            })
+        );
+
+        assert!(
+            send(
+                &mut w,
+                2,
+                json!({"v": 1, "issuedAt": 2, "wifi": "saved", "bluetooth": "any"}),
+            )
+            .accepted
+        );
+        assert_eq!(
+            w.connections_posture(),
+            Ok(ConnectionsPosture {
+                wifi: WifiAccess::Saved,
+                bluetooth: BluetoothAccess::Any,
+            })
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

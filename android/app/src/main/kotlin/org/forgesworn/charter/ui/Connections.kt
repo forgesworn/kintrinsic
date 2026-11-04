@@ -28,6 +28,10 @@ import android.provider.Settings
  * parts stay closed by the baseline restrictions (date/time, VPN, private DNS,
  * factory reset, users, install sources), and nothing launched FROM Settings
  * gets past the pin unless it is itself allowlisted. Back returns to the shade.
+ *
+ * What the ward may JOIN there is the guardian's `connections` clause, which
+ * the warden applies device-wide as restrictions the Settings pages honour
+ * (WardenController, `connectionsTargets`); [limitNote] says it on the shade.
  */
 object Connections {
 
@@ -54,6 +58,23 @@ object Connections {
             }
             .filter { it.isNotEmpty() && it != "android" }
             .distinct()
+    }
+
+    /**
+     * One plain line on what the guardian's `connections` clause allows, or
+     * null when nothing is limited (or the posture is unknown). Switching
+     * either radio on and off is always allowed, so the line is only about
+     * joining new things.
+     */
+    fun limitNote(wifi: String?, bluetooth: String?): String? {
+        val parts = buildList {
+            when (wifi) {
+                "saved" -> add("Wi-Fi: networks already saved on this phone")
+                "secured" -> add("Wi-Fi: only networks with a password")
+            }
+            if (bluetooth == "paired") add("Bluetooth: devices already paired")
+        }
+        return if (parts.isEmpty()) null else parts.joinToString("\n")
     }
 
     /** Whether the device has the radio at all — no Bluetooth button on a

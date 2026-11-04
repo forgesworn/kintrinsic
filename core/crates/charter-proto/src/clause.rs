@@ -89,12 +89,17 @@ pub enum ClauseKind {
     /// background and has no entry; a `schedule` window tagged with a time's id
     /// runs it. Replace-the-set, per child, like `apprules`.
     Times,
+    /// How much of Wi-Fi and Bluetooth the ward may change on their own:
+    /// joining new networks (`saved` / `secured` / `any`) and pairing new
+    /// devices (`paired` / `any`). Switching either radio on and off is never
+    /// taken away. Absent = `any` / `any`. Replace-the-state, like `tethering`.
+    Connections,
 }
 
 /// Store key for the latest verified USAGE_SYNC view in the per-(subject, key)
 /// rollback-protected store. Not a clause — but the store's monotonic floor is
 /// exactly the `ts`-replay protection the contract requires, and `clear_for`
-/// on release wipes it with the clauses. Clause kinds own 1..=17; keep this
+/// on release wipes it with the clauses. Clause kinds own 1..=18; keep this
 /// well clear of them.
 pub const USAGE_SYNC_STORE_KEY: u16 = 100;
 
@@ -147,6 +152,7 @@ impl ClauseKind {
             ClauseKind::AlwaysAvailable => 15,
             ClauseKind::Debugging => 16,
             ClauseKind::Times => 17,
+            ClauseKind::Connections => 18,
         }
     }
 }
@@ -963,6 +969,26 @@ mod tests {
         ] {
             assert_ne!(k.store_key(), other.store_key());
         }
+    }
+
+    #[test]
+    fn connections_kind_serializes_lowercase_with_distinct_store_key() {
+        let k = ClauseKind::Connections;
+        assert_eq!(serde_json::to_string(&k).unwrap(), "\"connections\"");
+        let back: ClauseKind = serde_json::from_str("\"connections\"").unwrap();
+        assert_eq!(back, ClauseKind::Connections);
+        assert_eq!(k.store_key(), 18);
+        for other in [
+            ClauseKind::Tethering,
+            ClauseKind::Debugging,
+            ClauseKind::Times,
+            ClauseKind::AlwaysAvailable,
+        ] {
+            assert_ne!(k.store_key(), other.store_key());
+        }
+        let json = r#"{"v":1,"kind":"connections","issuedAt":1700000000,"body":{"v":1,"issuedAt":1700000000,"wifi":"secured","bluetooth":"any"}}"#;
+        let c = ClausePayload::from_json(json).unwrap();
+        assert_eq!(c.kind, ClauseKind::Connections);
     }
 
     #[test]

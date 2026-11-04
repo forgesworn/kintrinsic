@@ -4,9 +4,11 @@ import {
   alwaysAvailableSummary,
   appsSummary,
   budgetSummary,
+  connectionsSummary,
   buildAlwaysAvailable,
   buildApps,
   buildBudget,
+  buildConnections,
   buildLifeline,
   buildListening,
   buildSchedule,
@@ -42,5 +44,6 @@ export function ruleSummaries(policy: Policy, nowUnix: number): Record<SectionId
     apps: appsSummary(buildApps(policy.apps), nowUnix),
     lifeline: lifelineSummary(buildLifeline(policy.lifeline)),
     tethering: tetheringSummary(buildTethering(policy.tethering)),
+    connections: connectionsSummary(buildConnections(policy.connections)),
   };
 }

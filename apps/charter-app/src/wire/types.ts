@@ -72,7 +72,8 @@ export type ClauseKind =
   | "standdown"
   | "listening"
   | "alwaysavailable"
-  | "times";
+  | "times"
+  | "connections";
 
 // --- times clause (Free time, Learning time and other named times) ----------
 
@@ -330,6 +331,30 @@ export interface GrantTethering {
   until?: number;
 }
 
+// --- connections clause (Wi-Fi / Bluetooth posture) -------------------------
+
+/** What the ward may join on Wi-Fi: `saved` = only networks already on the
+ *  phone; `secured` = new networks, but only ones with a password (no open
+ *  "free Wi-Fi"); `any` = no limit. Turning Wi-Fi on and off is never limited. */
+export type WifiAccess = "saved" | "secured" | "any";
+
+/** What the ward may pair over Bluetooth: `paired` = only devices already
+ *  paired; `any` = may pair new ones. Turning Bluetooth on and off is never
+ *  limited. */
+export type BluetoothAccess = "paired" | "any";
+
+/**
+ * Contract `GrantConnections` (mirrors the Rust
+ * `charter_schedule::GrantConnections`, camelCase). Replace-the-state. No
+ * clause = `any` / `any`.
+ */
+export interface GrantConnections {
+  v: 1;
+  issuedAt: number;
+  wifi: WifiAccess;
+  bluetooth: BluetoothAccess;
+}
+
 // --- debugging clause (USB / wireless debugging, per device) ----------------
 
 /**
@@ -576,7 +601,8 @@ export interface ClausePayload {
     | GrantStandDown
     | GrantListening
     | GrantAlwaysAvailable
-    | GrantTimes;
+    | GrantTimes
+    | GrantConnections;
 }
 
 // ---------------------------------------------------------------------------

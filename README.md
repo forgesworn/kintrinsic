@@ -146,6 +146,8 @@ on-device parental-control system); some are gaps we intend to close.
   have during allowed hours; the tamper-relevant parts (date and time, VPN,
   private DNS, factory reset, users, install sources) stay closed by Device
   Owner restrictions, and no other app can be launched from it past the lock.
+  What the ward may join there (new Wi-Fi networks, open Wi-Fi, new Bluetooth
+  devices) is the guardian's Wi-Fi & Bluetooth setting, enforced device-wide.
 - **No independent third-party security audit has been done.** The project
   has had internal review, but nothing external and adversarial. Given that
   the guardian app holds a family signing key, treat key backup and device

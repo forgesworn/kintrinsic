@@ -133,7 +133,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 5
+    const val EXPECTED_ABI_VERSION = 6
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -495,6 +495,18 @@ object CharterCore {
             "raw", "filtered" -> m
             else -> "blocked"
         }
+
+    /** The `connections` posture: what the ward may join on Wi-Fi and Bluetooth. */
+    data class Connections(val wifi: String, val bluetooth: String)
+
+    /**
+     * The ward's Wi-Fi / Bluetooth posture right now, or `null` when it could
+     * not be had (an unreadable store, a stale `.so`): the caller then keeps
+     * what it last applied rather than flapping a restriction.
+     */
+    fun connections(): Connections? = runCatching {
+        parseConnections(jni().charterConnections())
+    }.getOrNull()
 
     /** [debuggingUntil]: blocked. Mirrors `DEBUGGING_BLOCKED` in
      *  `android/jni/src/lib.rs`, which defines every value once. */
@@ -1042,3 +1054,19 @@ object CharterCore {
  *  all (the native call threw): no result is a fault, so [fallback]. */
 fun CharterCore.SubmitResult?.wardMessageOr(fallback: String): String =
     this?.wardMessage(fallback) ?: fallback
+
+/**
+ * Parse the core's `connections` answer. `null` for an error reply or anything
+ * that is not one of the known tiers: the caller keeps what it last applied.
+ * The core already turns a malformed CLAUSE into the careful tier, so an
+ * unknown value here means a mismatched `.so`, not a guardian's choice.
+ */
+internal fun parseConnections(json: String): CharterCore.Connections? {
+    val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+    if (o.has("error")) return null
+    val wifi = o.optString("wifi")
+    val bluetooth = o.optString("bluetooth")
+    if (wifi !in setOf("saved", "secured", "any")) return null
+    if (bluetooth !in setOf("paired", "any")) return null
+    return CharterCore.Connections(wifi, bluetooth)
+}

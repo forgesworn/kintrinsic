@@ -19,8 +19,8 @@ class AbiCheckTest {
      *  `charterSetDefaultBrowser` is new. Moves together with `ABI_VERSION`
      *  in android/jni/src/lib.rs. */
     @Test
-    fun thisBuildExpectsAbiFive() {
-        assertEquals(5, CharterCore.EXPECTED_ABI_VERSION)
+    fun thisBuildExpectsAbiSix() {
+        assertEquals(6, CharterCore.EXPECTED_ABI_VERSION)
     }
 
     @Test

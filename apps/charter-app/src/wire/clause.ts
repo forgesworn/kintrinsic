@@ -12,7 +12,7 @@ import { normalizeWebDomain } from "../domain/webDomain";
 import { findTaggedOverlaps } from "../domain/times";
 import { isValidTimeId, normaliseNamedTime, timesFault } from "./times";
 import { RELEASE_PUBKEY_HEX } from "../release/releaseTrust";
-import type { AlwaysAvailablePolicy, AppsPolicy, Budget, BucketsPolicy, LearningPolicy, Lifeline, ListeningPolicy, NamedTime, Policy, Schedule, ScheduleWindow, Tethering, WebPolicy } from "../domain/types";
+import type { AlwaysAvailablePolicy, AppsPolicy, Budget, BucketsPolicy, Connections, LearningPolicy, Lifeline, ListeningPolicy, NamedTime, Policy, Schedule, ScheduleWindow, Tethering, WebPolicy } from "../domain/types";
 import type {
   AppBucket,
   AppRule,
@@ -26,6 +26,7 @@ import type {
   GrantContent,
   GrantSchedule,
   GrantTethering,
+  GrantConnections,
   GrantDebugging,
   GrantBuckets,
   GrantListening,
@@ -378,6 +379,10 @@ export function lifelineToGrant(lifeline: Lifeline, issuedAt: number): GrantLife
   return g;
 }
 
+export function connectionsToGrant(c: Connections, issuedAt: number): GrantConnections {
+  return { v: 1, issuedAt, wifi: c.wifi, bluetooth: c.bluetooth };
+}
+
 export function tetheringToGrant(tethering: Tethering, issuedAt: number): GrantTethering {
   const g: GrantTethering = { v: 1, allow: tethering.allow, issuedAt };
   // Only carry an expiry for an active allowance — a blocked posture is
@@ -589,6 +594,7 @@ export function policyToClauses(
       | GrantApps
       | GrantLearning
       | GrantTethering
+      | GrantConnections
       | GrantLifeline
       | GrantBuckets
       | GrantListening
@@ -614,6 +620,8 @@ export function policyToClauses(
     out.push(base("learning", learningToGrant(policy.learning, issuedAt)));
   if (policy.tethering)
     out.push(base("tethering", tetheringToGrant(policy.tethering, issuedAt)));
+  if (policy.connections)
+    out.push(base("connections", connectionsToGrant(policy.connections, issuedAt)));
   if (policy.lifeline && policy.lifeline.numbers.length > 0)
     out.push(base("lifeline", lifelineToGrant(policy.lifeline, issuedAt)));
   if (policy.buckets) out.push(base("buckets", bucketsToGrant(policy.buckets, issuedAt)));

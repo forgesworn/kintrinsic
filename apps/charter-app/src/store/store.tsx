@@ -31,6 +31,7 @@ import type {
   Lifeline,
   NamedTime,
   Tethering,
+  Connections,
   AlwaysAvailablePolicy,
 } from "../domain/types";
 import {
@@ -675,6 +676,7 @@ export interface CharterContextValue {
       apps?: AppsPolicy;
       learning?: LearningPolicy;
       tethering?: Tethering;
+      connections?: Connections;
       lifeline?: Lifeline;
       buckets?: BucketsPolicy;
       listening?: ListeningPolicy;
@@ -2315,6 +2317,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         apps?: AppsPolicy;
         learning?: LearningPolicy;
         tethering?: Tethering;
+        connections?: Connections;
         lifeline?: Lifeline;
         buckets?: BucketsPolicy;
         listening?: ListeningPolicy;
@@ -2337,6 +2340,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         apps: next.apps,
         learning: next.learning,
         tethering: next.tethering,
+        connections: next.connections,
         lifeline: next.lifeline,
         buckets: next.buckets,
         listening: next.listening,
@@ -2381,6 +2385,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         apps: next.apps ?? existing?.apps,
         learning: next.learning ?? existing?.learning,
         tethering: next.tethering ?? existing?.tethering,
+        connections: next.connections ?? existing?.connections,
         lifeline: next.lifeline ?? existing?.lifeline,
         buckets: next.buckets ?? existing?.buckets,
         listening: next.listening ?? existing?.listening,

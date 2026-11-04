@@ -1066,6 +1066,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 | ClauseKind::Tethering
                 | ClauseKind::Debugging
                 | ClauseKind::Times
+                | ClauseKind::Connections
                 | ClauseKind::Update
                 | ClauseKind::Lifeline
                 | ClauseKind::Buckets

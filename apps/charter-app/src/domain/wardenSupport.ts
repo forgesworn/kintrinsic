@@ -39,6 +39,7 @@ export type WardenFeature =
   | "lifeline"
   | "tethering"
   | "debugging"
+  | "connections"
   | "alwaysAvailable"
   // Honest attribution (2026-08-03): the `cmdline:` identity form and the
   // unrecognised-time counter are both Linux-only concepts by construction —
@@ -138,6 +139,11 @@ const MIN_VERSION: Record<WardenFeature, Partial<Record<Device["platform"], Thre
   // versionCode 47 is the first build that parses it; an older ward refuses
   // the unknown tag, so the toggle is only offered from there up.
   debugging: { android: 47, linux: NEVER },
+  // Wi-Fi / Bluetooth tiers are Device Owner restrictions: Android only.
+  // Ward Kintrinsic 0.7.3 (versionCode 52) is the first build that reads the
+  // clause; an older ward refuses the unknown tag, so the tiers do nothing
+  // there until it updates.
+  connections: { android: 52, linux: NEVER },
   // Ward Kintrinsic 0.6.5 (36); charterd 0.7.1 (701) — before 0.7.1 charterd never
   // read the `apps` clause at all (only `appRules`), so on a laptop this
   // threshold gates the standing toggles AND holds alike: an older charterd

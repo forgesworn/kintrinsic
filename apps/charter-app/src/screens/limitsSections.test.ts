@@ -4,6 +4,8 @@ import {
   appsSummary,
   buildAlwaysAvailable,
   buildApps,
+  buildConnections,
+  connectionsSummary,
   lifelineSummary,
   namedTimesSummary,
   SECTION_TITLE,
@@ -21,12 +23,13 @@ import {
 describe("every control still has somewhere to live", () => {
   const ALL = Object.keys(SECTION_TITLE) as SectionId[];
 
-  it("covers all nine controls", () => {
+  it("covers all ten controls", () => {
     expect(ALL.sort()).toEqual(
       [
         "always-available",
         "apps",
         "budget",
+        "connections",
         "lifeline",
         "listening",
         "named-times",
@@ -321,5 +324,21 @@ describe("buildAlwaysAvailable", () => {
   it("is idempotent, so a saved draft compares byte-identical", () => {
     const once = buildAlwaysAvailable({ apps: [{ pkg: "com.book" }] });
     expect(buildAlwaysAvailable(once)).toEqual(once);
+  });
+});
+
+describe("Wi-Fi & Bluetooth", () => {
+  it("no clause is no limit, as before the setting existed", () => {
+    expect(buildConnections(undefined)).toEqual({ wifi: "any", bluetooth: "any" });
+    expect(connectionsSummary(buildConnections(undefined))).toBe("Any Wi-Fi, any Bluetooth");
+  });
+
+  it("says each tier plainly", () => {
+    expect(connectionsSummary({ wifi: "saved", bluetooth: "paired" })).toBe(
+      "Saved Wi-Fi only, paired Bluetooth only",
+    );
+    expect(connectionsSummary({ wifi: "secured", bluetooth: "any" })).toBe(
+      "Password Wi-Fi only, any Bluetooth",
+    );
   });
 });

@@ -195,6 +195,42 @@ fun lockTaskAllowlist(
 fun <T> syncOnChange(next: T, lastPushed: T?, push: (T) -> Boolean): T? =
     if (next == lastPushed) lastPushed else if (push(next)) next else lastPushed
 
+/**
+ * The `connections` posture as restriction targets plus the minimum Wi-Fi
+ * security level (a DPM policy, not a user restriction).
+ *
+ * - Wi-Fi `saved`: `DISALLOW_ADD_WIFI_CONFIG` — the toggle and every network
+ *   already saved keep working; no new network can be added.
+ * - Wi-Fi `secured`: new networks allowed, but the minimum security level is
+ *   `WIFI_SECURITY_PERSONAL`, so open ("free") networks are refused.
+ * - Bluetooth `paired`: `DISALLOW_CONFIG_BLUETOOTH` — no pairing new devices;
+ *   paired headphones still reconnect.
+ * - `any` clears the lot.
+ *
+ * Anything unrecognised is the careful tier (`saved` / `paired`), matching the
+ * core. The `saved` tier deliberately leaves the security level OPEN: raising
+ * it would drop the ward off an open network they already rely on at home.
+ */
+internal data class ConnectionsTargets(
+    val restrictions: List<Pair<String, Boolean>>,
+    val minWifiSecurity: Int,
+)
+
+internal fun connectionsTargets(wifi: String, bluetooth: String): ConnectionsTargets {
+    val tier = if (wifi == "secured" || wifi == "any") wifi else "saved"
+    return ConnectionsTargets(
+        restrictions = listOf(
+            UserManager.DISALLOW_ADD_WIFI_CONFIG to (tier == "saved"),
+            UserManager.DISALLOW_CONFIG_BLUETOOTH to (bluetooth != "any"),
+        ),
+        minWifiSecurity = if (tier == "secured") {
+            android.app.admin.DevicePolicyManager.WIFI_SECURITY_PERSONAL
+        } else {
+            android.app.admin.DevicePolicyManager.WIFI_SECURITY_OPEN
+        },
+    )
+}
+
 /** Own the install-lockdown + anti-tamper restrictions (port-spec §3.4). */
 interface RestrictionOps {
     /**
@@ -245,6 +281,13 @@ interface RestrictionOps {
      * on (the ward device's user does that in Developer options).
      */
     fun applyDebugging(allowed: Boolean)
+
+    /**
+     * Level-triggered Wi-Fi / Bluetooth posture (the `connections` clause),
+     * re-asserted each tick. Never touches the radios' on/off switches — only
+     * what the ward may JOIN: see [connectionsTargets].
+     */
+    fun applyConnections(wifi: String, bluetooth: String)
 }
 
 /**
@@ -827,6 +870,12 @@ class DpmRestrictionOps(
         // Not in the baseline list (only a filtered-tethering session sets it),
         // but un-chartering must leave NO Kintrinsic restriction behind.
         dpm.clearUserRestriction(admin, UserManager.DISALLOW_WIFI_TETHERING)
+        // The `connections` posture, likewise owned by its own per-tick step.
+        dpm.clearUserRestriction(admin, UserManager.DISALLOW_ADD_WIFI_CONFIG)
+        dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_BLUETOOTH)
+        runCatching {
+            dpm.setMinimumRequiredWifiSecurityLevel(DevicePolicyManager.WIFI_SECURITY_OPEN)
+        }
         dpm.setAutoTimeRequired(admin, false)
     }
 
@@ -860,6 +909,20 @@ class DpmRestrictionOps(
         val target = listOf(UserManager.DISALLOW_DEBUGGING_FEATURES to blocked)
         for ((key, on) in restrictionWrites(target, isSet)) {
             if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
+        }
+    }
+
+    /** Level-triggered like [applyTetherMode]: read, write the difference. */
+    override fun applyConnections(wifi: String, bluetooth: String) {
+        val t = connectionsTargets(wifi, bluetooth)
+        val current = runCatching { dpm.getUserRestrictions(admin) }.getOrNull()
+        val isSet: ((String) -> Boolean)? = current?.let { b -> { k: String -> b.getBoolean(k, false) } }
+        for ((key, on) in restrictionWrites(t.restrictions, isSet)) {
+            if (on) dpm.addUserRestriction(admin, key) else dpm.clearUserRestriction(admin, key)
+        }
+        val level = runCatching { dpm.minimumRequiredWifiSecurityLevel }.getOrNull()
+        if (level != t.minWifiSecurity) {
+            dpm.setMinimumRequiredWifiSecurityLevel(t.minWifiSecurity)
         }
     }
 
