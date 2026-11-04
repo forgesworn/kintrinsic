@@ -148,7 +148,11 @@ on-device parental-control system); some are gaps we intend to close.
   force-stopping, disabling or clearing apps, and changing default apps; if the
   platform refuses any of these, the buttons are hidden. Only a system app can
   serve those pages. The phone's default dialer stays allowed past the lock, so
-  calls keep working.
+  calls keep working. Settings can still open other screens inside its own
+  task, such as the permissions page, and a ward can reach the data usage page
+  for an app. Suspension is what stops links out of Settings reaching an app, so
+  an app with no launcher icon, or one the platform will not suspend, is not
+  stopped that way.
   What the ward may join there (new Wi-Fi networks, open Wi-Fi, new Bluetooth
   devices) is the guardian's Wi-Fi & Bluetooth setting, enforced device-wide.
 - **No independent third-party security audit has been done.** The project
