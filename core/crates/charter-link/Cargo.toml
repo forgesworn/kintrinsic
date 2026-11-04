@@ -23,7 +23,7 @@ zeroize = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["net", "io-util", "time", "sync", "rt"] }
 # Session challenges: 32 bytes from the OS (the same crate the Android
 # native libraries already use for wrap keys).
-getrandom = { version = "0.2", optional = true }
+getrandom = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
