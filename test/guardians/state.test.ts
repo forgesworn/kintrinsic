@@ -378,9 +378,15 @@ describe('rule 7: root removal', () => {
     dropped(inb(s, R1, objection(R1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
     dropped(inb(s, W1, objection(W1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
     dropped(inb(s, X, objection(X, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'signer_not_pinned')
-    // An objection naming another remover does not touch this removal; it is held.
-    s = ok(inb(s, R2, objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120), 'objection_held')
+    // An objection naming a remover that isn't a pinned root other than the
+    // objector can never meet a removal: it is dropped, not held, so it
+    // can't fill the objecting root's quota.
+    dropped(inb(s, R2, objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
+    dropped(inb(s, R2, objection(R2, dU(R2), R2, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
     expect(s.pending).toHaveLength(1)
+    for (let i = 0; i < 70; i++) {
+      dropped(inb(s, W2, objection(W2, dU(R2), key(i, 9), { issuedAt: T0 + 102 + i }), T0 + 120), 'objection_mismatch')
+    }
     // Exception 2: a W bound to R2 may seal R2's objection.
     s = ok(inb(s, W2, ob, T0 + 120), 'objection_applied')
     expect(s.pending).toEqual([])

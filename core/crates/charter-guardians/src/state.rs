@@ -104,6 +104,11 @@ pub struct StoredStatement {
     pub received_at: i64,
     /// A cancel or objection that had nothing to act on when it arrived.
     pub held: bool,
+    /// The seal's author: a held statement goes when its signer or its
+    /// sealer departs. Empty in a state saved before this rule: read as the
+    /// signer.
+    #[serde(default)]
+    pub seal: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,7 +596,7 @@ fn forget_floors(s: &mut GuardianState, keys: &[String]) {
     s.statement_floors.retain(|f| !gone.contains(&f.signer));
 }
 
-fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
+fn put_statement(s: &mut GuardianState, st: &Statement, seal: &str, now: i64, held: bool) {
     if st.kind == StatementType::Withdrawal {
         return;
     }
@@ -618,6 +623,7 @@ fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
         expires_at: st.expires_at,
         received_at: now,
         held,
+        seal: seal.to_owned(),
     });
 }
 
@@ -694,6 +700,27 @@ fn clamp_clauses(s: &mut GuardianState, keys: &[String], at: i64) {
     }
 }
 
+/// Rule 4 for statements: when `keys` depart, every held statement one of
+/// them signed or sealed goes (it stops counting against any quota), and so
+/// does every objection one of them signed, held or applied, with the block
+/// on later removals it recorded (rule 7).
+fn drop_departed_statements(s: &mut GuardianState, keys: &[String]) {
+    s.statements.retain(|st| {
+        let signed = keys.contains(&st.signer);
+        let sealed = !st.seal.is_empty() && keys.contains(&st.seal);
+        !((st.held && (signed || sealed)) || (st.kind == StatementType::Objection && signed))
+    });
+}
+
+/// Everything a departure at `at` does to what the departing keys left:
+/// their held clauses' bars, their floors, their held statements and their
+/// objections.
+fn depart(s: &mut GuardianState, keys: &[String], at: i64) {
+    clamp_clauses(s, keys, at);
+    forget_floors(s, keys);
+    drop_departed_statements(s, keys);
+}
+
 /// The parts of a withdrawal recorded in its tombstone.
 struct WithdrawalRef {
     d: String,
@@ -719,8 +746,7 @@ fn withdraw(s: &mut GuardianState, idx: usize, w: &WithdrawalRef, at: i64) {
         issued_at: w.issued_at,
     });
     s.held_withdrawals.retain(|h| h.key != key);
-    clamp_clauses(s, std::slice::from_ref(&key), at);
-    forget_floors(s, &[key]);
+    depart(s, &[key], at);
 }
 
 /// The parts of a removal needed to apply it.
@@ -773,8 +799,7 @@ fn apply_removal(s: &mut GuardianState, r: &RemovalRef, at: i64) -> bool {
             gone.push(k.key.clone());
         }
     }
-    clamp_clauses(s, &gone, at);
-    forget_floors(s, &gone);
+    depart(s, &gone, at);
     // "Once a removal applies, every pending statement signed by R2 is dropped."
     drop_pending(s, |p| p.signer == r2 || p.key == r2);
     s.held_withdrawals.retain(|h| h.signer != r2);
@@ -797,7 +822,8 @@ fn bind_key(s: &mut GuardianState, approval: &Statement, now: i64) -> usize {
         rebind_root: None,
     });
     s.held_withdrawals.retain(|h| h.key != w);
-    put_statement(s, approval, now, false);
+    // An approval is sealed by the W it names (exception 1).
+    put_statement(s, approval, &approval.key, now, false);
     s.keys.len() - 1
 }
 
@@ -958,7 +984,7 @@ fn seal_allowed(s: &GuardianState, st: &Statement, seal_author: &str) -> bool {
     active_key(s, seal_author).is_some_and(|w| w.root == *speaks_for)
 }
 
-fn process_approval(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
+fn process_approval(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) -> Judged {
     // OQ: expiresAt on non-pending statements.
     if st.expires_at.is_some() {
         return drop(Reason::ExpiresAtNotAllowed);
@@ -1017,7 +1043,7 @@ fn process_approval(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
             rec.label = st.label.clone();
             rec.approval_id = st.id.clone();
             rec.approval_issued_at = st.issued_at;
-            put_statement(s, st, now, false);
+            put_statement(s, st, seal, now, false);
             return accept(Reason::ApprovalUpdated);
         }
     }
@@ -1105,6 +1131,7 @@ fn add_pending(
     st: &Statement,
     kind: PendingType,
     expires_at: i64,
+    seal: &str,
     now: i64,
 ) {
     drop_pending_d(s, &st.d);
@@ -1120,7 +1147,7 @@ fn add_pending(
         confirmed_at: None,
         takes_effect_at: None,
     });
-    put_statement(s, st, now, false);
+    put_statement(s, st, seal, now, false);
 }
 
 /// Rule 7: re-pinning a departed root needs a statement whose effective
@@ -1134,7 +1161,12 @@ fn departed_at_or_after(s: &GuardianState, key: &str, effective: i64) -> bool {
         .is_some_and(|d| effective <= d.issued_at)
 }
 
-fn process_coguardian_or_move(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
+fn process_coguardian_or_move(
+    s: &mut GuardianState,
+    st: &Statement,
+    seal: &str,
+    now: i64,
+) -> Judged {
     let r2 = st.key.as_str();
     let effective = effective_time(st.issued_at, now);
     if is_pinned(s, r2) {
@@ -1165,7 +1197,7 @@ fn process_coguardian_or_move(s: &mut GuardianState, st: &Statement, now: i64) -
     } else {
         PendingType::Move
     };
-    add_pending(s, st, pt, expires_at, now);
+    add_pending(s, st, pt, expires_at, seal, now);
     accept(if is_cog {
         Reason::CoguardianPending
     } else {
@@ -1173,7 +1205,7 @@ fn process_coguardian_or_move(s: &mut GuardianState, st: &Statement, now: i64) -
     })
 }
 
-fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
+fn process_removal(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) -> Judged {
     let r2 = st.key.as_str();
     let effective = effective_time(st.issued_at, now);
     if !is_pinned(s, r2) {
@@ -1186,7 +1218,7 @@ fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
         if !s.roots.iter().any(|x| x.root != r2) {
             return drop(Reason::LastRoot);
         }
-        put_statement(s, st, now, false);
+        put_statement(s, st, seal, now, false);
         let r = RemovalRef {
             d: st.d.clone(),
             id: st.id.clone(),
@@ -1208,11 +1240,17 @@ fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
     if cancelled_by(s, &st.d, &st.signer, effective) {
         return drop(Reason::Cancelled);
     }
-    add_pending(s, st, PendingType::Removal, expires_at, now);
+    add_pending(s, st, PendingType::Removal, expires_at, seal, now);
     accept(Reason::RemovalPending)
 }
 
-fn hold_or_drop(s: &mut GuardianState, st: &Statement, now: i64, reason: Reason) -> Judged {
+fn hold_or_drop(
+    s: &mut GuardianState,
+    st: &Statement,
+    seal: &str,
+    now: i64,
+    reason: Reason,
+) -> Judged {
     let owner = held_owner(st.kind, &st.d, &st.signer).to_owned();
     let reclaim = stored_for(s, &slot_of(st))
         .is_some_and(|prev| prev.held && held_owner(prev.kind, &prev.d, &prev.signer) == owner)
@@ -1220,11 +1258,11 @@ fn hold_or_drop(s: &mut GuardianState, st: &Statement, now: i64, reason: Reason)
     if held_count(s, &owner) - reclaim >= MAX_HELD_PER_ROOT {
         return drop(Reason::HeldQuota);
     }
-    put_statement(s, st, now, true);
+    put_statement(s, st, seal, now, true);
     accept(reason)
 }
 
-fn process_cancel(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
+fn process_cancel(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) -> Judged {
     if let Some(reason) = order_against(s, st, now) {
         return drop(reason);
     }
@@ -1237,16 +1275,22 @@ fn process_cancel(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
         // OQ: Same-second ties across different d.
         if effective_time(pend.issued_at, pend.received_at) <= effective_time(st.issued_at, now) {
             drop_pending_d(s, target);
-            put_statement(s, st, now, false);
+            put_statement(s, st, seal, now, false);
             return accept(Reason::CancelApplied);
         }
     }
-    hold_or_drop(s, st, now, Reason::CancelHeld)
+    hold_or_drop(s, st, seal, now, Reason::CancelHeld)
 }
 
-fn process_objection(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
-    // Rule 7: the removed root, or an active W bound to it, may object.
-    if root_of(s, &st.signer).as_deref() != Some(st.key.as_str()) {
+fn process_objection(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) -> Judged {
+    // Rule 7: the removed root, or an active W bound to it, may object, and
+    // only against a removal by another pinned root: a removal's signer is
+    // always pinned, so an objection naming any other `p` could only be
+    // held, filling its root's quota.
+    if root_of(s, &st.signer).as_deref() != Some(st.key.as_str())
+        || !is_pinned(s, &st.p)
+        || st.p == st.key
+    {
         return drop(Reason::ObjectionMismatch);
     }
     if let Some(reason) = order_against(s, st, now) {
@@ -1257,20 +1301,22 @@ fn process_objection(s: &mut GuardianState, st: &Statement, now: i64) -> Judged 
     // the two issuedAt values.
     if s.pending.iter().any(|p| p.d == target && p.signer == st.p) {
         drop_pending_d(s, target);
-        put_statement(s, st, now, false);
+        put_statement(s, st, seal, now, false);
         return accept(Reason::ObjectionApplied);
     }
-    hold_or_drop(s, st, now, Reason::ObjectionHeld)
+    hold_or_drop(s, st, seal, now, Reason::ObjectionHeld)
 }
 
-fn process_statement(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
+fn process_statement(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) -> Judged {
     match st.kind {
-        StatementType::Approval => process_approval(s, st, now),
+        StatementType::Approval => process_approval(s, st, seal, now),
         StatementType::Withdrawal => process_withdrawal(s, st, now),
-        StatementType::Coguardian | StatementType::Move => process_coguardian_or_move(s, st, now),
-        StatementType::Removal => process_removal(s, st, now),
-        StatementType::Cancel => process_cancel(s, st, now),
-        StatementType::Objection => process_objection(s, st, now),
+        StatementType::Coguardian | StatementType::Move => {
+            process_coguardian_or_move(s, st, seal, now)
+        }
+        StatementType::Removal => process_removal(s, st, seal, now),
+        StatementType::Cancel => process_cancel(s, st, seal, now),
+        StatementType::Objection => process_objection(s, st, seal, now),
     }
 }
 
@@ -1303,7 +1349,7 @@ pub fn apply_inbound(state: &GuardianState, seal_author: &str, inner: &Value, no
         if !may_sign {
             return drop(Reason::SignerNotPinned);
         }
-        let judged = process_statement(s, &st, now);
+        let judged = process_statement(s, &st, seal_author, now);
         if judged.0 == Verdict::Accepted && st.issued_at > now {
             s.clamped += 1;
         }
@@ -1533,8 +1579,7 @@ pub fn apply_presence_confirm(
                 gone.push(k.key.clone());
             }
         }
-        clamp_clauses(s, &gone, now);
-        forget_floors(s, &gone);
+        depart(s, &gone, now);
         bind_key(s, &ap, now);
         drop_pending(s, |p| p.signer == r || p.key == r);
         s.held_withdrawals.retain(|h| h.signer != r);

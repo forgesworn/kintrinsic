@@ -663,18 +663,38 @@ scenario("rule7_objection", ["7", "seal exceptions"], "The root being removed, o
   c.inbound(R1, st.objection(R1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
   c.inbound(W1, st.objection(W1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
   c.inbound(X, st.objection(X, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("signer_not_pinned"));
-  c.inbound(R2, st.objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120, A("objection_held"));
+  c.inbound(R2, st.objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
+  c.inbound(R2, st.objection(R2, dU(R2), R2, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
   c.inbound(W2, ob, T0 + 120, A("objection_applied"));
   c.inbound(R2, ob, T0 + 121, D("duplicate"));
   c.tick(T0 + 100 + H72 + 1);
 });
 
-scenario("rule7_objection_by_working_key", ["7"], "A working key of the root being removed signs the objection itself (its app objects automatically); it drops the removal and blocks a re-issue for 7 days, as the root's own would.", (c) => {
+scenario("held_statements_cleared_on_departure", ["7", "4", "pending", "10"], "When a key departs, every held statement it signed or sealed goes and stops counting against its root's quota, and so do its objections, held or applied, with their block on later removals. A removed root's own objections go with it, so re-pinning it is not refused for its old held statements.", (c) => {
+  twoRoots(c);
+  c.inbound(W3, st.approval(R2, W3, { issuedAt: T0 + 40 }), T0 + 40, A("approval_applied"));
+  c.inbound(W3, st.objection(W3, dU(R2), R1, { issuedAt: T0 + 50 }), T0 + 50, A("objection_held"));
+  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 55 }), T0 + 55, A("approval_applied"));
+  c.inbound(W1b, st.cancel(R1, dG(R3), { issuedAt: T0 + 60 }), T0 + 60, A("cancel_held"));
+  c.inbound(W2, st.withdrawal(R2, W3, { issuedAt: T0 + 70 }), T0 + 70, A("withdrawal_applied"));
+  c.inbound(W1, st.withdrawal(R1, W1b, { issuedAt: T0 + 80 }), T0 + 80, A("withdrawal_applied"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 90 }), T0 + 90, A("removal_pending"));
+  c.inbound(W2, st.objection(W2, dU(R2), R1, { issuedAt: T0 + 100 }), T0 + 100, A("objection_applied"));
+  c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 105 }), T0 + 105, A("objection_held"));
+  c.inbound(W2, st.removal(R2, R2, { issuedAt: T0 + 110 }), T0 + 110, A("removal_applied"));
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 120 });
+  c.inbound(W1, cg, T0 + 120, A("coguardian_pending"));
+  c.token(tokenHex("held-cleared"), dG(R2), T0 + 130);
+  c.confirm(W4, confirmEv(W4, cg.id, tokenHex("held-cleared"), T0 + 140, st.approval(R2, W4, { issuedAt: T0 + 135 })), T0 + 140, A("coguardian_applied"));
+});
+
+scenario("rule7_objection_by_working_key", ["7"], "A working key of the root being removed signs the objection itself (its app objects automatically); it drops the removal and blocks a re-issue for 7 days, as the root's own would, until that key departs: a withdrawn key's objections go with it.", (c) => {
   twoRoots(c);
   c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 110, A("removal_pending"));
   c.inbound(W2, st.objection(W2, dU(R2), R1, { issuedAt: T0 + 111 }), T0 + 120, A("objection_applied"));
   c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 200 }), T0 + 200, D("objected"));
   c.inbound(W2, st.withdrawal(R2, W2, { issuedAt: T0 + 300 }), T0 + 300, A("withdrawal_applied"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 310 }), T0 + 310, A("removal_pending"));
   c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 120 + 7 * DAY }), T0 + 120 + 7 * DAY, A("removal_pending"));
   c.inbound(W2, st.objection(W2, dU(R2), R1, { issuedAt: T0 + 121 + 7 * DAY }), T0 + 121 + 7 * DAY, D("signer_not_pinned"));
 });

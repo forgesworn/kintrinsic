@@ -2764,6 +2764,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      and its working keys, or a moved root's keys that R2 hasn't re-approved.
    - From the moment a ward applies a departure, it accepts nothing new from
      the departed keys.
+   - Their held statements and their objections are dropped (*Pending
+     statements*).
    - Clauses they signed **stay enforced** until a clause of the same
      `(subject, kind)` from a current signer replaces them.
    - The replacement must be newer than the held clause's effective time,
@@ -2810,6 +2812,10 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
        the removal. R2 itself, or any active W bound to R2, may sign it, so a
        root held on a Heartwood or in My Signet that is out of reach for the
        72 hours is not removed against its parent's will.
+     - An objection is accepted, or held until its removal arrives, only if
+       its `p` is a currently pinned root other than R2. Any other is
+       ignored: a removal's signer is always pinned, so it could never meet
+       a removal, and held it would count against R2's quota (rule 10).
      - **A guardian install objects automatically** when a STATUS shows a
        pending removal of its own root (`pending[]` names the remover as
        `signer`). It tells the parent, and offers leaving instead.
@@ -2818,7 +2824,9 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
        a parent with no live install: a lost phone, or a parent who has gone.
        A parent who wants to go leaves by self-removal, which applies at once.
        A stolen phone whose W is still active could object for its root; it
-       is answered by withdrawing that W, not by removing the parent.
+       is answered by withdrawing that W, not by removing the parent. The
+       withdrawal takes that W's objections with it, held or applied, and the
+       block they set (below).
      - An objection also blocks a removal re-issued after it: every removal
        of R2 signed by R1 that reaches the ward within **7 days** of the
        objection reaching it is dropped, on arrival, at confirmation and when
@@ -2892,6 +2900,11 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
   effective time. Without one, it expires 7 days after its effective time.
 - A cancel drops pending statements with its `d` whose effective time is at or
   below the cancel's. A later statement with that `d` is unaffected.
+- When a key departs (rule 4), every held cancel or objection it signed or
+  sealed is dropped and stops counting against any quota (rule 10), and so
+  is every objection it signed, applied or held, with the block on later
+  removals it set (rule 7). A removed root that is pinned again later
+  therefore never meets its own old held statements.
 - If a cancel arrives before the statement it cancels and the statement's
   effective time then exceeds the cancel's (a guardian clock ahead of the
   ward's), the statement pends; a guardian install that sees in STATUS a

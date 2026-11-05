@@ -289,6 +289,12 @@ once: `approval_preempted`).
 
 **A withdrawal** floors the withdrawn key's held clauses at `now`.
 
+**Every departure** (a withdrawal, an applied removal, a confirmed move), for
+the keys that depart: drop every held statement one of them signed or
+sealed, and every stored objection one of them signed, held or applied (so
+its block on later removals goes too); and drop their replay floors if they
+can never sign again (above). Scenario `held_statements_cleared_on_departure`.
+
 **Stored statements.** Approvals, co-guardians, removals, moves, cancels and
 objections are stored, when accepted (never when dropped), newest per
 **slot**. The slot is the `d`, except a cancel (`d` + its signer) and an
@@ -357,7 +363,8 @@ Every step returns the first failing check's reason, in the order given.
      pending statement's effective time ≤ the cancel's) → `held_quota` →
      `cancel_held`;
    - **objection:** `objection_mismatch` (the signer is neither the root named
-     in `d` nor an active W bound to it) → slot order → `objection_applied` (a pending removal with the
+     in `d` nor an active W bound to it, or `p` is not a pinned root other
+     than the root named in `d`) → slot order → `objection_applied` (a pending removal with the
      target `d` is signed by `p`: dropped whatever the two `issuedAt`) →
      `held_quota` → `objection_held`.
 

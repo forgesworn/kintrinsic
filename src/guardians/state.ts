@@ -92,6 +92,8 @@ export interface StoredStatement {
   receivedAt: number
   /** A cancel or objection that had nothing to act on when it arrived. */
   held: boolean
+  /** The seal's author: a held statement goes when its signer or its sealer departs. */
+  seal: string
 }
 
 export interface PendingRecord {
@@ -450,7 +452,7 @@ function forgetFloors(s: GuardianState, keys: string[]): void {
   s.statementFloors = s.statementFloors.filter((f) => !gone.has(f.signer))
 }
 
-function putStatement(s: GuardianState, st: Statement, now: number, held = false): void {
+function putStatement(s: GuardianState, st: Statement, seal: string, now: number, held = false): void {
   if (st.type === 'withdrawal') return
   const slot = statementSlot(st)
   // The statement it replaces keeps its signer's floor (it may have been
@@ -471,6 +473,7 @@ function putStatement(s: GuardianState, st: Statement, now: number, held = false
     expiresAt: st.expiresAt,
     receivedAt: now,
     held,
+    seal,
   })
 }
 
@@ -522,6 +525,30 @@ function clampClauses(s: GuardianState, keys: string[], at: number): void {
   }
 }
 
+/**
+ * Rule 4 for statements: when `keys` depart, every held statement one of them
+ * signed or sealed goes (it stops counting against any quota), and so does
+ * every objection one of them signed, held or applied, with the block on
+ * later removals it recorded (rule 7).
+ */
+function dropDepartedStatements(s: GuardianState, keys: string[]): void {
+  s.statements = s.statements.filter((st) => {
+    const signed = keys.includes(st.signer)
+    const sealed = keys.includes(st.seal)
+    return !((st.held && (signed || sealed)) || (st.type === 'objection' && signed))
+  })
+}
+
+/**
+ * Everything a departure at `at` does to what the departing keys left: their
+ * held clauses' bars, their floors, their held statements and their objections.
+ */
+function depart(s: GuardianState, keys: string[], at: number): void {
+  clampClauses(s, keys, at)
+  forgetFloors(s, keys)
+  dropDepartedStatements(s, keys)
+}
+
 function withdraw(
   s: GuardianState,
   rec: WorkingKeyRecord,
@@ -533,8 +560,7 @@ function withdraw(
   rec.rebindRoot = null
   s.tombstones.push({ type: 'withdrawal', d: w.d, id: w.id, key: rec.key, signer: w.signer, issuedAt: w.issuedAt })
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.key !== rec.key)
-  clampClauses(s, [rec.key], at)
-  forgetFloors(s, [rec.key])
+  depart(s, [rec.key], at)
 }
 
 /**
@@ -562,8 +588,7 @@ function applyRemoval(
       gone.push(k.key)
     }
   }
-  clampClauses(s, gone, at)
-  forgetFloors(s, gone)
+  depart(s, gone, at)
   // "Once a removal applies, every pending statement signed by R2 is dropped."
   dropPending(s, (p) => p.signer === R2 || p.key === R2)
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.signer !== R2)
@@ -585,7 +610,8 @@ function bindKey(s: GuardianState, approval: Statement, now: number): WorkingKey
   s.keys = s.keys.filter((k) => k.key !== approval.key)
   s.keys.push(rec)
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.key !== approval.key)
-  putStatement(s, approval, now)
+  // An approval is sealed by the W it names (exception 1).
+  putStatement(s, approval, approval.key, now)
   return rec
 }
 
@@ -703,7 +729,7 @@ function sealAllowed(s: GuardianState, st: Statement, sealAuthor: string): boole
   return w !== undefined && w.root === (st.type === 'objection' ? st.key : st.signer)
 }
 
-function processApproval(s: GuardianState, st: Statement, now: number) {
+function processApproval(s: GuardianState, st: Statement, seal: string, now: number) {
   // OQ: expiresAt on non-pending statements — an approval carrying one is refused.
   if (st.expiresAt !== null) return drop('expires_at_not_allowed')
   const W = st.key
@@ -736,7 +762,7 @@ function processApproval(s: GuardianState, st: Statement, now: number) {
     rec.label = st.label
     rec.approvalId = st.id
     rec.approvalIssuedAt = st.issuedAt
-    putStatement(s, st, now)
+    putStatement(s, st, seal, now)
     return accept('approval_updated')
   }
   const held = s.heldWithdrawals.find((h) => h.key === W && h.signer === R)
@@ -777,7 +803,7 @@ function processWithdrawal(s: GuardianState, st: Statement, now: number) {
   return accept('withdrawal_held')
 }
 
-function addPending(s: GuardianState, st: Statement, type: PendingType, expiresAt: number, now: number): void {
+function addPending(s: GuardianState, st: Statement, type: PendingType, expiresAt: number, seal: string, now: number): void {
   dropPending(s, (p) => p.d === st.d)
   s.pending.push({
     d: st.d,
@@ -791,7 +817,7 @@ function addPending(s: GuardianState, st: Statement, type: PendingType, expiresA
     confirmedAt: null,
     takesEffectAt: null,
   })
-  putStatement(s, st, now)
+  putStatement(s, st, seal, now)
 }
 
 /**
@@ -805,7 +831,7 @@ function departedAtOrAfter(s: GuardianState, key: string, effective: number): bo
   return !!dep && effective <= dep.issuedAt
 }
 
-function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
+function processCoGuardianOrMove(s: GuardianState, st: Statement, seal: string, now: number) {
   const R2 = st.key
   const effective = effectiveTime(st.issuedAt, now)
   if (isPinned(s, R2)) return drop('already_pinned')
@@ -817,11 +843,11 @@ function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
   if (now >= expiresAt) return drop('expired')
   if (cancelledBy(s, st.d, st.signer, effective)) return drop('cancelled')
   if (st.type === 'coguardian' && s.roots.length >= MAX_ROOTS) return drop('root_quota')
-  addPending(s, st, st.type as PendingType, expiresAt, now)
+  addPending(s, st, st.type as PendingType, expiresAt, seal, now)
   return accept(st.type === 'coguardian' ? 'coguardian_pending' : 'move_pending')
 }
 
-function processRemoval(s: GuardianState, st: Statement, now: number) {
+function processRemoval(s: GuardianState, st: Statement, seal: string, now: number) {
   const R2 = st.key
   const effective = effectiveTime(st.issuedAt, now)
   if (!isPinned(s, R2)) return drop('target_not_pinned')
@@ -829,7 +855,7 @@ function processRemoval(s: GuardianState, st: Statement, now: number) {
   if (order) return drop(order)
   if (st.signer === R2) {
     if (s.roots.filter((x) => x.root !== R2).length < 1) return drop('last_root')
-    putStatement(s, st, now)
+    putStatement(s, st, seal, now)
     applyRemoval(s, st, effective, now)
     return accept('removal_applied')
   }
@@ -837,20 +863,20 @@ function processRemoval(s: GuardianState, st: Statement, now: number) {
   if (now >= expiresAt) return drop('expired')
   if (objectedBy(s, st.d, st.signer, effective, now)) return drop('objected')
   if (cancelledBy(s, st.d, st.signer, effective)) return drop('cancelled')
-  addPending(s, st, 'removal', expiresAt, now)
+  addPending(s, st, 'removal', expiresAt, seal, now)
   return accept('removal_pending')
 }
 
-function holdOrDrop(s: GuardianState, st: Statement, now: number, reason: 'cancel_held' | 'objection_held') {
+function holdOrDrop(s: GuardianState, st: Statement, seal: string, now: number, reason: 'cancel_held' | 'objection_held') {
   const owner = heldOwner(st)
   const prev = storedFor(s, statementSlot(st))
   const reclaim = prev && prev.held && heldOwner(prev) === owner ? 1 : 0
   if (heldCount(s, owner) - reclaim >= MAX_HELD_PER_ROOT) return drop('held_quota')
-  putStatement(s, st, now, true)
+  putStatement(s, st, seal, now, true)
   return accept(reason)
 }
 
-function processCancel(s: GuardianState, st: Statement, now: number) {
+function processCancel(s: GuardianState, st: Statement, seal: string, now: number) {
   const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   const target = st.target as string
@@ -860,15 +886,18 @@ function processCancel(s: GuardianState, st: Statement, now: number) {
   // ties across different d.
   if (pend && effectiveTime(pend.issuedAt, pend.receivedAt) <= effectiveTime(st.issuedAt, now)) {
     dropPending(s, (p) => p.d === target)
-    putStatement(s, st, now)
+    putStatement(s, st, seal, now)
     return accept('cancel_applied')
   }
-  return holdOrDrop(s, st, now, 'cancel_held')
+  return holdOrDrop(s, st, seal, now, 'cancel_held')
 }
 
-function processObjection(s: GuardianState, st: Statement, now: number) {
-  // Rule 7: the removed root, or an active W bound to it, may object.
-  if (rootOf(s, st.signer) !== st.key) return drop('objection_mismatch')
+function processObjection(s: GuardianState, st: Statement, seal: string, now: number) {
+  // Rule 7: the removed root, or an active W bound to it, may object, and
+  // only against a removal by another pinned root: a removal's signer is
+  // always pinned, so an objection naming any other `p` could only be held,
+  // filling its root's quota.
+  if (rootOf(s, st.signer) !== st.key || !isPinned(s, st.p) || st.p === st.key) return drop('objection_mismatch')
   const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   const target = st.target as string
@@ -877,27 +906,27 @@ function processObjection(s: GuardianState, st: Statement, now: number) {
   // two issuedAt values.
   if (pend && pend.signer === st.p) {
     dropPending(s, (p) => p.d === target)
-    putStatement(s, st, now)
+    putStatement(s, st, seal, now)
     return accept('objection_applied')
   }
-  return holdOrDrop(s, st, now, 'objection_held')
+  return holdOrDrop(s, st, seal, now, 'objection_held')
 }
 
-function processStatement(s: GuardianState, st: Statement, now: number) {
+function processStatement(s: GuardianState, st: Statement, seal: string, now: number) {
   switch (st.type) {
     case 'approval':
-      return processApproval(s, st, now)
+      return processApproval(s, st, seal, now)
     case 'withdrawal':
       return processWithdrawal(s, st, now)
     case 'coguardian':
     case 'move':
-      return processCoGuardianOrMove(s, st, now)
+      return processCoGuardianOrMove(s, st, seal, now)
     case 'removal':
-      return processRemoval(s, st, now)
+      return processRemoval(s, st, seal, now)
     case 'cancel':
-      return processCancel(s, st, now)
+      return processCancel(s, st, seal, now)
     case 'objection':
-      return processObjection(s, st, now)
+      return processObjection(s, st, seal, now)
   }
 }
 
@@ -922,7 +951,7 @@ export function applyInbound(state: GuardianState, inbound: Inbound, now: number
     // Every statement is a root's, except an objection, which an active W
     // may sign for its root (rule 7).
     if (st.type === 'objection' ? !isSigner(s, st.signer) : !isPinned(s, st.signer)) return drop('signer_not_pinned')
-    const r = processStatement(s, st, now)
+    const r = processStatement(s, st, inbound.sealAuthor, now)
     if (r.result === 'accepted' && st.issuedAt > now) s.clamped += 1
     return r
   })
@@ -1065,8 +1094,7 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
         gone.push(k.key)
       }
     }
-    clampClauses(s, gone, now)
-    forgetFloors(s, gone)
+    depart(s, gone, now)
     bindKey(s, ap, now)
     dropPending(s, (p) => p.signer === R || p.key === R)
     s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.signer !== R)
