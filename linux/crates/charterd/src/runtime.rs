@@ -1348,6 +1348,9 @@ struct LockSpawnCtx<'a> {
     /// [`zeroize::Zeroizing`] in [`run`]. Each conversation key is derived per
     /// lock and wiped as soon as its code is (`guardians::unlock_codes`).
     unlock: Option<(&'a [u8; 32], &'a GuardianKeys)>,
+    /// The guardian-keys state (paired only). When it cannot be read, the
+    /// lock says rules can't be changed on this computer (rule 10).
+    guardians: Option<&'a GuardianKeys>,
 }
 
 /// Apply each child's freeze/thaw to **their** app.slice, and show/kill the
@@ -1464,6 +1467,7 @@ async fn apply_child_decisions(
                     .unwrap_or(detail)
                     .to_string();
                 let lines = info.map(|i| i.lines.join("\n")).unwrap_or_default();
+                let lines = crate::guardians::lock_lines(&lines, ctx.guardians);
                 // Resolve the locked child's REAL display + X credentials from
                 // their live session (DM-agnostic). Fall back to CHARTER_DISPLAY /
                 // ~/.Xauthority only if the session env is unreadable.
@@ -3586,6 +3590,7 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     asks: &lock_asks,
                     paired: broker.is_some(),
                     unlock: unlock_secret.as_deref().zip(guardian_keys.as_ref()),
+                    guardians: guardian_keys.as_ref(),
                 },
                 &roster,
                 &mut lock,

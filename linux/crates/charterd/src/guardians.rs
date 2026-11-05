@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use charter_ipc::dto::{GuardiansView, RuleSetterView, WorkingKeyView};
+use charter_ipc::dto::{GuardiansView, RuleSetterView, WorkingKeyView, RULES_STUCK_NOTICE};
 use charter_primitives::PubKey;
 use charter_spine::{GuardianKeys, GuardianStatements, MintedToken, PresenceError};
 use charter_sys::guardian_store::{
@@ -417,6 +417,18 @@ pub fn confirmable(keys: &GuardianKeys, now: u64) -> Option<Vec<ConfirmablePendi
             })
             .collect(),
     )
+}
+
+/// The lines the on-display lock shows under its reason, with the stuck
+/// notice first when the guardian-keys state is unavailable (rule 10). First,
+/// because the lock shows at most seven lines.
+pub fn lock_lines(lines: &str, keys: Option<&GuardianKeys>) -> String {
+    let stuck = keys.is_some_and(|k| !k.is_available());
+    match (stuck, lines.is_empty()) {
+        (false, _) => lines.to_owned(),
+        (true, true) => RULES_STUCK_NOTICE.to_owned(),
+        (true, false) => format!("{RULES_STUCK_NOTICE}\n{lines}"),
+    }
 }
 
 /// The STATUS wire name of a pending statement's kind.

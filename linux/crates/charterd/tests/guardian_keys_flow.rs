@@ -543,6 +543,48 @@ async fn the_daemon_reads_the_second_copy_and_fails_closed_without_either() {
     assert!(!w.keys().is_available());
 }
 
+/// Rule 10: with neither copy readable, every ward surface says rules can't
+/// be changed here: the published view (the CLI, the tray), the lock's lines
+/// and the privileged flow, which has nothing to list.
+#[test]
+fn a_stuck_ward_says_rules_cant_be_changed_everywhere() {
+    let w = Ward::new("stuck");
+    let state = w.dir.join(charter_sys::guardian_store::GUARDIAN_STATE_FILE);
+    std::fs::write(&state, b"{ not json").unwrap();
+    let keys = w.keys();
+    assert!(!keys.is_available());
+    let notice = "Rules can't be changed on this computer. Ask a parent.";
+
+    let view = guardians::build_view(&keys, NOW);
+    assert!(view.unavailable);
+    assert_eq!(view.notice(), Some(notice));
+    assert!(view.roots.is_empty() && view.keys.is_empty() && view.rules.is_empty());
+    let published = w.dir.join("guardians.json");
+    guardians::publish_view(&published, &view).unwrap();
+    let back: charter_ipc::GuardiansView =
+        serde_json::from_str(&std::fs::read_to_string(&published).unwrap()).unwrap();
+    assert_eq!(back.notice(), Some(notice));
+
+    // The lock: the notice first (the lock shows at most seven lines).
+    assert_eq!(
+        guardians::lock_lines("Mon 09:00–17:00", Some(&keys)),
+        format!("{notice}\nMon 09:00–17:00")
+    );
+    assert_eq!(guardians::lock_lines("", Some(&keys)), notice);
+    // A readable state, or an unpaired ward, leaves the lock as it was.
+    let fine = Ward::new("unstuck").keys();
+    assert!(fine.is_available());
+    assert_eq!(
+        guardians::lock_lines("Mon 09:00–17:00", Some(&fine)),
+        "Mon 09:00–17:00"
+    );
+    assert_eq!(guardians::lock_lines("", None), "");
+
+    assert!(guardians::confirmable(&keys, NOW).is_none());
+    // The state on disk is left as it was, for an administrator to look at.
+    assert_eq!(std::fs::read(&state).unwrap(), b"{ not json");
+}
+
 // ---------------------------------------------------------------------------
 // Scan-to-pair (review 2a, L4)
 // ---------------------------------------------------------------------------

@@ -9,12 +9,12 @@
 
 #[cfg(feature = "real")]
 mod real_main {
-    use charter_ipc::client::CharterdClient as _;
-    use charter_ipc::dto::TimeLeftView;
-    use charter_ipc::real::RealCharterdClient;
+    use charter_ipc::client::{CharterdClient as _, PairingSink as _};
+    use charter_ipc::dto::{GuardiansView, TimeLeftView};
+    use charter_ipc::real::{RealCharterdClient, RealPairingSink};
     use charter_tray::{
-        asked_notice_for, menu_rows, notice_for, submit_for, view_for, IconState, MenuRow, TrayAsk,
-        TrayView,
+        asked_notice_for, menu_rows, notice_for, submit_for, view_for, with_rules_notice,
+        IconState, MenuRow, TrayAsk, TrayView,
     };
     use ksni::TrayMethods as _;
     use std::sync::mpsc::Sender;
@@ -203,6 +203,12 @@ mod real_main {
         client.time_left().await.ok()
     }
 
+    /// The warden's published guardians view (world-readable; never a
+    /// pending statement), for the stuck notice (contract rule 10).
+    async fn current_guardians(sink: &RealPairingSink) -> Option<GuardiansView> {
+        sink.pairing_state().await.ok().and_then(|p| p.guardians)
+    }
+
     pub async fn run() {
         let client = RealCharterdClient::connect()
             .await
@@ -210,6 +216,8 @@ mod real_main {
 
         let (ask_tx, ask_rx) = std::sync::mpsc::channel::<TrayAsk>();
         let mut latest = current_time_left(&client).await;
+        let guardians_sink = RealPairingSink::default();
+        let mut guardians = current_guardians(&guardians_sink).await;
         // `assume_sni_available` is what lets the tray outlive a desktop that
         // isn't ready yet. We autostart from /etc/xdg/autostart, and on Mint the
         // SNI watcher (xapp-sn-watcher) autostarts from there too — while
@@ -222,7 +230,7 @@ mod real_main {
         // watcher takes the name.
         let tray = CharterTray {
             view: view_for(latest.as_ref()),
-            rows: menu_rows(latest.as_ref()),
+            rows: with_rules_notice(menu_rows(latest.as_ref()), guardians.as_ref()),
             asks: ask_tx,
         };
         let handle = match tray.assume_sni_available(true).spawn().await {
@@ -243,6 +251,7 @@ mod real_main {
             tokio::select! {
                 _ = tick.tick() => {
                     latest = current_time_left(&client).await;
+                    guardians = current_guardians(&guardians_sink).await;
                 }
                 ev = events.recv() => {
                     // A lagged/closed stream falls back to the poll cadence.
@@ -272,7 +281,7 @@ mod real_main {
                 }
             }
             let view = view_for(latest.as_ref());
-            let rows = menu_rows(latest.as_ref());
+            let rows = with_rules_notice(menu_rows(latest.as_ref()), guardians.as_ref());
             if let Some(handle) = &handle {
                 let _ = handle
                     .update(move |t: &mut CharterTray| {
