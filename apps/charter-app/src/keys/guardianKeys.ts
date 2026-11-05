@@ -1024,6 +1024,35 @@ export class GuardianKeys {
   }
 
   // ---------------------------------------------------------------------
+  // After a restore from backup
+  // ---------------------------------------------------------------------
+
+  /**
+   * What is left to do after this household was restored from a backup
+   * (decision D5): the working keys the backup listed that the devices still
+   * list under this identity and that aren't this phone's, i.e. the lost
+   * phone's, to offer for withdrawal. Null when nothing was restored.
+   */
+  restoreFollowUp(): { at: number; lost: { pubkey: string; label?: string }[] } | null {
+    const restored = this.deps.read().keys.restoredFrom;
+    if (!restored) return null;
+    const me = this.rootPubkey();
+    const w = this.workingPubkey();
+    const listed = new Set(this.reportedRoots().find((r) => r.root === me)?.keys ?? []);
+    return { at: restored.at, lost: restored.workingKeys.filter((k) => k.pubkey !== w && listed.has(k.pubkey)) };
+  }
+
+  /** The guardian is done with the restore notice. */
+  forgetRestore(): void {
+    if (!this.deps.read().keys.restoredFrom) return;
+    this.deps.write((k) => {
+      const { restoredFrom: _r, ...rest } = k;
+      void _r;
+      return rest;
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Presence confirmation
   // ---------------------------------------------------------------------
 

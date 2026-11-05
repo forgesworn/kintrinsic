@@ -7,7 +7,15 @@ import { isKeyBackedUp } from "../signer/backupStatus";
 const PK = "e".repeat(64);
 const restoreGuardianKey = vi.hoisted(() => vi.fn());
 vi.mock("../store/store", () => ({
-  useCharter: () => ({ restoreGuardianKey }),
+  useCharter: () => ({
+    restoreGuardianKey,
+    guardianKeys: {
+      state: { v: 1, pins: {} },
+      workingPubkey: PK,
+      rootPubkey: () => PK,
+      reportedRoots: () => [],
+    },
+  }),
   exportPersistedState: () => "{}",
   importPersistedState: () => {},
 }));

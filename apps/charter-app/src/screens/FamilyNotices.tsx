@@ -4,6 +4,7 @@ import KeyBackupNudge from "./KeyBackupNudge";
 import AnsweredDelivery from "./AnsweredDelivery";
 import RemovalNotice from "./RemovalNotice";
 import ClockNotice from "./ClockNotice";
+import RestoreNotice from "./RestoreNotice";
 
 /**
  * The family-wide notices, at the top of each child's page (there is no Home to
@@ -16,6 +17,7 @@ export default function FamilyNotices({ childId }: { childId: string }) {
       <Onboarding />
       <KeyBackupNudge />
       <UnclaimedPhones />
+      <RestoreNotice />
       <RemovalNotice />
       <ClockNotice childId={childId} />
       <AnsweredDelivery childId={childId} />

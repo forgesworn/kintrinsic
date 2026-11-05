@@ -1257,3 +1257,29 @@ describe("STATUS follow-ups: the remover's key and the clock counter", () => {
     expect(h.keys().clamped[PHONE]).toEqual({ count: 4, roseAt: T + 50 });
   });
 });
+
+describe("after a restore from backup (decision D5)", () => {
+  it("offers the lost phone's key while the devices list it, and a phone-held identity withdraws it itself", async () => {
+    const LOST = getPublicKey(generateSecretKey());
+    const ward = device(PHONE, "android", {
+      statusSeen: true,
+      appVersionCode: 55,
+      guardians: { roots: [{ root: W, keys: [LOST] }], pending: [], tombstones: 0, relays: [] },
+    });
+    // The restored phone: its key is the identity (W here is the local key), no W minted yet.
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }], opsOf(wSk));
+    expect(h.gk.restoreFollowUp()).toBeNull();
+    h.gk["deps"].write((k) => ({ ...k, restoredFrom: { at: T, workingKeys: [{ pubkey: LOST, label: "Old phone" }, { pubkey: W }] } }));
+    expect(h.gk.restoreFollowUp()).toEqual({ at: T, lost: [{ pubkey: LOST, label: "Old phone" }] });
+    const r = await h.gk.withdrawInstall(LOST);
+    const { sealAuthor, inner } = open(h.published[0].wrap, phoneSk);
+    expect(inner.id).toBe(r.event.id);
+    expect(inner.pubkey).toBe(W);
+    expect(sealAuthor).toBe(W);
+    // Once the devices drop it, there is nothing left to offer.
+    ward.guardians = { roots: [{ root: W, keys: [] }], pending: [], tombstones: 1, relays: [] };
+    expect(h.gk.restoreFollowUp()!.lost).toEqual([]);
+    h.gk.forgetRestore();
+    expect(h.gk.restoreFollowUp()).toBeNull();
+  });
+});

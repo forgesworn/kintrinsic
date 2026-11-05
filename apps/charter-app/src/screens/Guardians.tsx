@@ -9,6 +9,7 @@ import GuardianLostPhone from "./GuardianLostPhone";
 import PresenceScanner from "./PresenceScanner";
 import GuardianCode from "./GuardianCode";
 import RemovalNotice from "./RemovalNotice";
+import RestoreNotice from "./RestoreNotice";
 import { AnchorScanFields } from "./AnchorScan";
 import { familyGateReason } from "../keys/guardianKeys";
 import { phoneHeldRoot } from "../keys/state";
@@ -237,6 +238,7 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
         </div>
       ))}
 
+      <RestoreNotice />
       <RemovalNotice />
 
       {report && (

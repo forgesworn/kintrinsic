@@ -231,6 +231,7 @@ export default function SignerCard() {
               {approvalNote}
             </p>
           )}
+          <KeyBackupSection busy={busy} />
         </div>
       )}
       {runErrorLine}

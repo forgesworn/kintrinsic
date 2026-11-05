@@ -172,10 +172,29 @@ export interface GuardianKeysState {
    * reports its guardians.
    */
   forgottenRoot?: string;
+  /**
+   * Set when this household was restored from a backup (decision D5): when,
+   * and the working keys (public keys and labels) this identity had then. The
+   * lost phone's key is offered for withdrawal while the devices still list
+   * it; cleared when the guardian is done.
+   */
+  restoredFrom?: { at: number; workingKeys: { pubkey: string; label?: string }[] };
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
   return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+}
+
+function reviveRestored(x: unknown): GuardianKeysState["restoredFrom"] {
+  if (typeof x !== "object" || x === null) return undefined;
+  const o = x as { at?: unknown; workingKeys?: unknown };
+  if (typeof o.at !== "number" || !Array.isArray(o.workingKeys)) return undefined;
+  const workingKeys = o.workingKeys.flatMap((k) => {
+    const e = k as { pubkey?: unknown; label?: unknown } | null;
+    if (!e || typeof e.pubkey !== "string" || !/^[0-9a-f]{64}$/.test(e.pubkey)) return [];
+    return [{ pubkey: e.pubkey, ...(typeof e.label === "string" ? { label: e.label } : {}) }];
+  });
+  return { at: o.at, workingKeys };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -228,6 +247,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     ),
     presenceConfirmed: rec(o.presenceConfirmed) as Record<string, number>,
     heldRosters: rec(o.heldRosters) as Record<string, HeldRoster>,
+    restoredFrom: reviveRestored(o.restoredFrom),
   };
 }
 

@@ -86,6 +86,12 @@ export interface GuardianKeysApi {
   waitingPresenceWards(): ReturnType<GuardianKeys["waitingPresenceWards"]>;
   /** Other parents whose family list stopped because they changed identity (scan their new code). */
   movedAwayRoots(): string[];
+  /** After a restore from backup: the lost phone's working keys the devices still list. Null when nothing was restored. */
+  restoreFollowUp(): ReturnType<GuardianKeys["restoreFollowUp"]>;
+  /** Done with the restore notice. */
+  forgetRestore(): void;
+  /** The roots (and their working keys) the family's devices report, merged. */
+  reportedRoots(): { root: string; keys: string[] }[];
 }
 
 export interface UseGuardianKeysDeps {
@@ -318,6 +324,9 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       trustedRoots: () => keys.trustedRoots(),
       waitingPresenceWards: () => keys.waitingPresenceWards(),
       movedAwayRoots: () => keys.movedAwayRoots(),
+      restoreFollowUp: () => keys.restoreFollowUp(),
+      forgetRestore: () => keys.forgetRestore(),
+      reportedRoots: () => keys.reportedRoots(),
     }),
     [keys, keysState, workingPubkey, approveInstall, moveRoot, finishMove],
   );
