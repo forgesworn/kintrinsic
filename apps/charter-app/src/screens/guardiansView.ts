@@ -249,6 +249,23 @@ export function parentName(root: string, keys: GuardianKeysState): string {
   return keys.anchoredRoots?.[root]?.label ?? shortNpub(root);
 }
 
+/**
+ * Who set a rule, from its signer (a root or a working key the family's
+ * devices report): "your other phone" for this identity, else the other
+ * parent's name or short npub.
+ */
+export function ruleSetterName(author: string, keys: GuardianKeysState, children: readonly Child[], me: string): string {
+  for (const c of children) {
+    for (const d of c.devices) {
+      for (const r of d.guardians?.roots ?? []) {
+        if (r.root !== author && !r.keys.includes(author)) continue;
+        return r.root === me ? "your other phone" : parentName(r.root, keys);
+      }
+    }
+  }
+  return author === me ? "your other phone" : parentName(author, keys);
+}
+
 /** "Robin", "Robin and Sam", "Robin, Sam and Alex". */
 export function namesList(names: readonly string[]): string {
   if (names.length <= 1) return names[0] ?? "";

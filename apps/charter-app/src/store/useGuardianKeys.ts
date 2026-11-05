@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "
 import { getPublicKey, SimplePool, type NostrEvent } from "nostr-tools";
 import type { Child, SignerState } from "../domain/types";
 import { GuardianKeys, type SendReport } from "../keys/guardianKeys";
+import { inForceToResend } from "../domain/receivedRules";
 import type { SignedEvent } from "../keys/sdk";
 import { reviveGuardianKeys, type GuardianKeysState, type InstallRoot, type RootVia } from "../keys/state";
 import type { ChildReadiness } from "../keys/versionGate";
@@ -202,8 +203,15 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
           keys.recordRules(
             child.rosterId,
             signed.map(({ inner, machine }) => (machine ? { event: inner as SignedEvent, machine } : { event: inner as SignedEvent })),
+            { local: true },
           );
         }
+      },
+      inForce: (childId, kind, machine) => {
+        const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
+        if (!child?.rosterId) return undefined;
+        const subject = child.rosterId;
+        return inForceToResend(child, kind, machine, (k, m) => keys.ruleInForce(subject, k, m)) as NostrEvent | undefined;
       },
     }),
     [keys],

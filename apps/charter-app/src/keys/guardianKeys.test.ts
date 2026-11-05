@@ -1501,6 +1501,31 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(fitted.child.rules!.length).toBeGreaterThan(0);
   });
 
+  it("seeds each received rule once: a tie keeps this install's own, a later local edit wins", async () => {
+    const subject = "aa".repeat(32);
+    const h = harness([]);
+    const other = generateSecretKey();
+    const mine = clause(wSk, "schedule", T, { mine: 1 });
+    expect(h.gk.recordRules(subject, [{ event: mine }], { local: true })).toEqual(["schedule"]);
+    // A received rule of the same second doesn't replace this install's own, whatever its id.
+    expect(h.gk.recordRules(subject, [{ event: clause(other, "schedule", T, { theirs: 1 }) }])).toEqual([]);
+    expect(h.gk.ruleInForce(subject, "schedule")).toMatchObject({ local: true, event: { id: mine.id } });
+    expect(h.gk.rulesToApply(subject)).toEqual({});
+
+    // A newer received one wins, and is to be put on the screens once.
+    const theirs = clause(other, "schedule", T + 5);
+    expect(h.gk.recordRules(subject, [{ event: theirs }])).toEqual(["schedule"]);
+    expect(Object.keys(h.gk.rulesToApply(subject))).toEqual(["schedule"]);
+    h.gk.markRulesApplied(subject, { schedule: theirs.id });
+    expect(h.gk.rulesToApply(subject)).toEqual({});
+    expect(h.gk.ruleInForce(subject, "schedule", PHONE)).toMatchObject({ key: "schedule", local: false });
+
+    // A local edit made after it wins.
+    const later = clause(wSk, "schedule", T + 6);
+    expect(h.gk.recordRules(subject, [{ event: later }], { local: true })).toEqual(["schedule"]);
+    expect(h.gk.ruleInForce(subject, "schedule")).toMatchObject({ local: true });
+  });
+
   it("holds no rules for a child it was never told about", async () => {
     const h = harness([]);
     expect(h.gk.rulesFor("aa".repeat(32))).toEqual([]);

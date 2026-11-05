@@ -1109,3 +1109,41 @@ describe("RealSigner keeps a rule change's signed clauses for the family roster 
     expect(kept.map((r) => r.machine).sort()).toEqual([DPK1, DPK2].sort());
   });
 });
+
+describe("RealSigner re-sends a rule set on another phone as it is (decision 3)", () => {
+  it("sends the stored payload for a re-send only, and doesn't keep it as this install's own", async () => {
+    const other = finalizeEvent(
+      {
+        kind: 31113,
+        created_at: 1_699_000_000,
+        tags: [["t", "charter-device"]],
+        content: JSON.stringify({ v: 1, kind: "budget", subject: SUBJECT, issuedAt: 1_699_000_000, body: { v: 1, tz: "UTC", revoked: true, issuedAt: 1_699_000_000 } }),
+      },
+      generateSecretKey(),
+    );
+    const published: NostrEvent[] = [];
+    const kept: SignedRule[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }], relays: RELAYS };
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async (_r, wrap) => {
+        published.push(wrap);
+      },
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (_c, signed) => kept.push(...signed),
+      inForce: (_c, kind) => (kind === "budget" ? other : undefined),
+    });
+    await signer.connect("local");
+    await signer.signClause("child_sam", devicePolicy, { resend: true });
+    const budget = published.map((w) => unwrapClause(w, DEV1, GUARDIAN).payload).find((p) => p.kind === "budget")!;
+    expect(budget).toEqual(JSON.parse(other.content));
+    expect(kept.map((r) => JSON.parse(r.inner.content).kind)).toEqual(["schedule"]);
+
+    // A fresh decision sends this phone's own.
+    published.length = 0;
+    await signer.signClause("child_sam", devicePolicy);
+    const fresh = published.map((w) => unwrapClause(w, DEV1, GUARDIAN).payload).find((p) => p.kind === "budget")!;
+    expect(fresh.issuedAt).toBe(1_700_000_000 + 1);
+  });
+});

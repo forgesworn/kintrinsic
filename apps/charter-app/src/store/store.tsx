@@ -34,6 +34,7 @@ import type {
   Connections,
   AlwaysAvailablePolicy,
 } from "../domain/types";
+import { seedChild } from "../domain/receivedRules";
 import {
   SPLITTABLE_CONTROLS,
   pickOverrides,
@@ -59,7 +60,7 @@ import {
   type ReleaseManifest,
 } from "../release/releaseEvent";
 import { SignerCancelled, type ConfirmGate } from "../signer/mockSigner";
-import type { DecisionContext, GiftOptions, InstallDecision, Signer } from "../signer/Signer";
+import type { DecisionContext, GiftOptions, InstallDecision, SignClauseOptions, Signer } from "../signer/Signer";
 import { catalogLookup } from "../data/appCatalog";
 import {
   guardianPubkeyHex,
@@ -310,6 +311,8 @@ type Action =
   | { type: "SET_DEVICE_LAST_SEEN"; machine: string; lastSeenAt: number }
   | { type: "SET_DEVICE_DEBUGGING"; childId: string; deviceId: string; debugging: DeviceDebugging }
   | { type: "SET_POLICY"; childId: string; policy: Policy }
+  /** Rules another guardian's phone set, put on this phone's screens (decision 3). */
+  | { type: "SEED_RULES"; childId: string; policies: Policy[]; debugging: { deviceId: string; debugging: DeviceDebugging }[] }
   | { type: "ADD_POLICY"; childId: string; policy: Policy }
   | { type: "REMOVE_POLICY"; childId: string; policyId: string }
   | { type: "ADD_REQUEST"; request: ChildRequest }
@@ -421,6 +424,20 @@ export function reducer(state: CharterState, action: Action): CharterState {
             })
             : c,
         ),
+      };
+    case "SEED_RULES":
+      return {
+        ...state,
+        children: state.children.map((c) => {
+          if (c.id !== action.childId) return c;
+          let next: Child = { ...c, policies: action.policies };
+          for (const { deviceId, debugging } of action.debugging) {
+            next = mapDevice(next, deviceId, (d) =>
+              debugging.issuedAt >= (d.debugging?.issuedAt ?? 0) ? { ...d, debugging } : d,
+            );
+          }
+          return next;
+        }),
       };
     case "SET_DEVICE_DEBUGGING":
       // Monotonic like the ward's own rule: an older send never replaces a newer record.
@@ -2125,6 +2142,24 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [keysCore, guardianKeysRef],
   );
 
+  // Rules another guardian's phone set (carried by the roster) reach this
+  // phone's screens once each (decision 3, seeding). Runs after the roster's
+  // children are adopted, so a new child is there to take them. Nothing is
+  // sent to a ward: only what this phone shows, and would send next, changes.
+  useEffect(() => {
+    for (const child of state.children) {
+      if (!child.rosterId) continue;
+      const toApply = keysCore.rulesToApply(child.rosterId);
+      if (Object.keys(toApply).length === 0) continue;
+      const held = guardianKeysRef.current.rules?.[child.rosterId] ?? {};
+      const seeded = seedChild(child, toApply, held, () => uid("pol"));
+      if (seeded.policies !== child.policies || seeded.debugging.length > 0) {
+        dispatch({ type: "SEED_RULES", childId: child.id, policies: seeded.policies, debugging: seeded.debugging });
+      }
+      keysCore.markRulesApplied(child.rosterId, seeded.applied);
+    }
+  }, [state.children, state.guardianKeys, keysCore, guardianKeysRef]);
+
   // A roster held because no ward this phone vouches for had reported yet:
   // re-checked when one reports (its view lands in the children, or in a
   // presence ward), never by polling.
@@ -2402,14 +2437,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * clause that has nowhere to go.
    */
   const signClauseIfConnected = useCallback(
-    async (childId: string, policy: Policy): Promise<ClauseDelivery> => {
+    async (childId: string, policy: Policy, opts?: SignClauseOptions): Promise<ClauseDelivery> => {
       const blocked = clauseDeliveryPrecheck(
         signer.current!.status().connected,
         resolveChild(childId)?.devices.length ?? 0,
       );
       if (blocked) return blocked;
       try {
-        const signed = await signer.current!.signClause(childId, policy);
+        const signed = await signer.current!.signClause(childId, policy, opts);
         return signed.wraps && signed.wraps.length > 0 ? { outcome: "sent", wraps: signed.wraps } : { outcome: "sent" };
       } catch (err) {
         if (err instanceof SignerCancelled) return { outcome: "cancelled" };
@@ -2439,7 +2474,9 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         let allSent = true;
         for (const policy of policies) {
           try {
-            const d = await signClauseIfConnected(p.childId, policy);
+            // The standing rules, re-sent: one set on another phone that
+            // this phone can't show goes as that phone set it (decision 3).
+            const d = await signClauseIfConnected(p.childId, policy, { resend: true });
             if (d.outcome !== "sent") allSent = false;
           } catch {
             allSent = false;

@@ -149,6 +149,14 @@ export interface GuardianKeysState {
    * roster so both phones hold the same.
    */
   rules: Record<string, Record<string, SignedEvent>>;
+  /** Per child and rule key: the event id of the rule this install signed itself, while it is the one held. */
+  localRules: Record<string, Record<string, string>>;
+  /**
+   * Per child and rule key: the event id of the received rule last put on
+   * this install's rule screens (or left as set elsewhere when the screen
+   * can't hold it), so each received rule seeds the screens once.
+   */
+  appliedRules: Record<string, Record<string, string>>;
   /** Statements this install sent, by `d`. */
   sent: Record<string, SentStatement>;
   /** Wards confirmed in person here that no child of this install has yet, by machine. */
@@ -191,7 +199,17 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, rules: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, rules: {}, localRules: {}, appliedRules: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+}
+
+/** Per child (64 hex) and rule key: an event id. */
+function reviveIdMaps(x: unknown): Record<string, Record<string, string>> {
+  if (typeof x !== "object" || x === null) return {};
+  return Object.fromEntries(
+    Object.entries(x as Record<string, unknown>)
+      .filter(([k, v]) => /^[0-9a-f]{64}$/.test(k) && typeof v === "object" && v !== null)
+      .map(([k, v]) => [k, Object.fromEntries(Object.entries(v as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string"))]),
+  );
 }
 
 function reviveRestored(x: unknown): GuardianKeysState["restoredFrom"] {
@@ -254,6 +272,8 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
           ),
         ]),
     ),
+    localRules: reviveIdMaps(o.localRules),
+    appliedRules: reviveIdMaps(o.appliedRules),
     roster:
       typeof o.roster === "object" && o.roster !== null && Array.isArray(o.roster.children)
         ? o.roster

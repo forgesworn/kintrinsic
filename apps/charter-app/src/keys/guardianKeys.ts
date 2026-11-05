@@ -1451,37 +1451,94 @@ export class GuardianKeys {
    * Keep signed inner CLAUSE events as the rules in force for the child with
    * roster subject `subject`, keyed by `(kind, device)`: a family-wide rule
    * (no `machine`) went the same to every device, a device rule to that
-   * device only. Per key the newest `issuedAt` wins (a tie keeps the lower
-   * event id, as wards do). A ward holds one rule per kind, so a newer
+   * device only. Per key the newest `issuedAt` wins. On a tie this install's
+   * own rule stays (decision 3); between two received ones the lower event
+   * id wins, as on the wards. A ward holds one rule per kind, so a newer
    * family-wide rule replaces that kind's older device rules, and a device
-   * rule no newer than the family-wide one is already replaced. A malformed
-   * event is ignored. Returns the keys that changed (`ruleKey`).
+   * rule no newer than the family-wide one is already replaced. `local`
+   * marks rules this install signed itself. A malformed event is ignored.
+   * Returns the keys that changed (`ruleKey`).
    */
-  recordRules(subject: string, entries: readonly RuleEntry[]): string[] {
+  recordRules(subject: string, entries: readonly RuleEntry[], opts: { local?: boolean } = {}): string[] {
     if (!HEX64.test(subject)) return [];
-    const held = { ...(this.deps.read().keys.rules?.[subject] ?? {}) };
+    const state = this.deps.read().keys;
+    const held = { ...(state.rules?.[subject] ?? {}) };
+    const local = { ...(state.localRules?.[subject] ?? {}) };
     const changed = new Set<string>();
     const issuedAtOf = (key: string) => (held[key] ? (clauseOf(held[key])?.issuedAt ?? -1) : -1);
+    const isLocal = (key: string) => !!held[key] && local[key] === held[key].id;
     for (const { event: e, machine } of entries) {
       const c = clauseOf(e);
       if (!c || (machine !== undefined && !HEX64.test(machine))) continue;
       const key = ruleKey(c.kind, machine);
       const cur = held[key] ? clauseOf(held[key]) : null;
-      if (cur && (cur.issuedAt > c.issuedAt || (cur.issuedAt === c.issuedAt && held[key].id <= e.id))) continue;
+      if (cur) {
+        if (cur.issuedAt > c.issuedAt) continue;
+        if (cur.issuedAt === c.issuedAt) {
+          const mine = isLocal(key);
+          if (mine && !opts.local) continue;
+          if (mine === !!opts.local && held[key].id <= e.id) continue;
+        }
+      }
       if (machine !== undefined && issuedAtOf(c.kind) >= c.issuedAt) continue;
       held[key] = plain(e);
+      if (opts.local) local[key] = e.id;
+      else delete local[key];
       changed.add(key);
       if (machine === undefined) {
         for (const k of Object.keys(held)) {
           if (k.startsWith(`${c.kind}@`) && issuedAtOf(k) < c.issuedAt) {
             delete held[k];
+            delete local[k];
             changed.add(k);
           }
         }
       }
     }
-    if (changed.size > 0) this.deps.write((k) => ({ ...k, rules: { ...(k.rules ?? {}), [subject]: held } }));
+    if (changed.size > 0) {
+      this.deps.write((k) => ({
+        ...k,
+        rules: { ...(k.rules ?? {}), [subject]: held },
+        localRules: { ...(k.localRules ?? {}), [subject]: local },
+      }));
+    }
     return [...changed].sort();
+  }
+
+  /**
+   * The rule in force for one child, kind and device: the device's own rule
+   * when it has one, else the family-wide one; whether this install signed
+   * it, and its key. Undefined when none is held.
+   */
+  ruleInForce(subject: string, kind: string, machine?: string): { key: string; event: SignedEvent; local: boolean } | undefined {
+    return ruleInForceIn(this.deps.read().keys, subject, kind, machine);
+  }
+
+  /**
+   * Received rules this install has not put on its own screens yet (decision
+   * 3, seeding): held, not signed here, and not marked by `markRulesApplied`
+   * since they arrived. By key.
+   */
+  rulesToApply(subject: string): Record<string, SignedEvent> {
+    const { rules, localRules, appliedRules } = this.deps.read().keys;
+    const held = rules?.[subject] ?? {};
+    const out: Record<string, SignedEvent> = {};
+    for (const [key, event] of Object.entries(held)) {
+      if (localRules?.[subject]?.[key] === event.id || appliedRules?.[subject]?.[key] === event.id) continue;
+      out[key] = event;
+    }
+    return out;
+  }
+
+  /** Mark received rules as put on this install's screens (or left as set elsewhere), by key and event id. */
+  markRulesApplied(subject: string, applied: Record<string, string>): void {
+    if (Object.keys(applied).length === 0) return;
+    this.deps.write((k) => {
+      const held = k.rules?.[subject] ?? {};
+      // Only keys still held: a superseded rule needs no mark.
+      const prev = Object.fromEntries(Object.entries(k.appliedRules?.[subject] ?? {}).filter(([key]) => held[key]));
+      return { ...k, appliedRules: { ...(k.appliedRules ?? {}), [subject]: { ...prev, ...applied } } };
+    });
   }
 
   /** The rules in force this install holds for one child, by key (`ruleKey` order). */
@@ -1831,6 +1888,24 @@ const MAX_ROSTER_RULES = 64;
 /** A held rule's key: the clause kind, and `@machine` for a device rule. */
 export function ruleKey(kind: string, machine?: string): string {
   return machine ? `${kind}@${machine}` : kind;
+}
+
+/**
+ * The rule in force held for one child, kind and device: the device's own
+ * rule when it has one, else the family-wide one; whether this install
+ * signed it, and its key. Undefined when none is held.
+ */
+export function ruleInForceIn(
+  keys: Pick<GuardianKeysState, "rules" | "localRules">,
+  subject: string,
+  kind: string,
+  machine?: string,
+): { key: string; event: SignedEvent; local: boolean } | undefined {
+  const held = keys.rules?.[subject] ?? {};
+  const key = machine && held[ruleKey(kind, machine)] ? ruleKey(kind, machine) : kind;
+  const event = held[key];
+  if (!event) return undefined;
+  return { key, event, local: keys.localRules?.[subject]?.[key] === event.id };
 }
 
 /** The machine of a device rule's key; undefined for a family-wide one. */

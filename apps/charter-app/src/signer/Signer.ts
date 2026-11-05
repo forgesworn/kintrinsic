@@ -154,6 +154,17 @@ export interface SignOutcomeAt extends SignOutcome {
   issuedAt: number;
 }
 
+/** How `signClause` treats the policy it is given. */
+export interface SignClauseOptions {
+  /**
+   * The child's standing rules going out again (a newly set-up phone), not
+   * a fresh decision: a kind whose rule in force was set on another phone,
+   * and that this phone's screen can't hold, is sent as that phone set it
+   * (decision 3).
+   */
+  resend?: boolean;
+}
+
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
   signRelayConfig?(machine: string, relays: string[], label: string, battery?: import("../domain/battery").BatterySettings): Promise<string>;
@@ -170,7 +181,7 @@ export interface Signer {
   setAutoSign(on: boolean): Promise<void>;
 
   /** Sign a rule change (a new/updated policy) for a child. */
-  signClause(childId: string, policy: Policy): Promise<SignOutcome>;
+  signClause(childId: string, policy: Policy, opts?: SignClauseOptions): Promise<SignOutcome>;
 
   /**
    * Publish each device its consolidated cross-device usage view

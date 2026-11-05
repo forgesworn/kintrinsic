@@ -31,7 +31,7 @@ import {
   endOfDayUnix,
   DEFAULT_STANDDOWN_GRACE_SECS,
 } from "../wire/grant";
-import type { DecisionContext, GiftOptions, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
+import type { DecisionContext, GiftOptions, SignClauseOptions, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
 import { FREE_TIME_ID, isValidTimeId } from "../wire/times";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
@@ -131,6 +131,13 @@ export interface RealSignerDeps {
    * Absent = not kept.
    */
   onRulesSigned?: (childId: string, signed: SignedRule[]) => void;
+  /**
+   * For a re-send (`signClause` with `resend`): the signed clause another
+   * guardian's phone set for this child, kind and device, when this phone's
+   * screen can't hold it (decision 3, lossy seeding). Its payload goes out as
+   * it is instead of this phone's own copy. Undefined = send this phone's own.
+   */
+  inForce?: (childId: string, kind: string, machine: string) => NostrEvent | undefined;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -469,7 +476,7 @@ export class RealSigner implements Signer {
     return giftWrapSigned(inner, device, ops, issuedAt);
   }
 
-  async signClause(childId: string, policy: Policy): Promise<SignOutcome> {
+  async signClause(childId: string, policy: Policy, opts: SignClauseOptions = {}): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
@@ -481,7 +488,20 @@ export class RealSigner implements Signer {
     const issuedAt = this.nextIssuedAt();
     // Every device's signed inner, per kind, for the family roster.
     const signed = new RulesSigned();
-    const wrapOne = (clause: ClausePayload, device: string) => this.wrapRule(clause, device, guardian, issuedAt, signed);
+    const wrapOne = async (clause: ClausePayload, device: string) => {
+      // A re-send keeps a rule set on another phone that this phone can't
+      // show as it was: its payload unchanged (same body, same issuedAt),
+      // signed by this install because a ward takes a clause only from its
+      // sealer. Not kept for the roster: the held rule stays the other
+      // phone's own.
+      const kept = opts.resend ? this.deps.inForce?.(childId, clause.kind, device) : undefined;
+      if (kept) {
+        const ops = this.sealerFor(device, guardian);
+        const inner = await signClauseInner(JSON.parse(kept.content) as ClausePayload, ops, kept.created_at);
+        return giftWrapSigned(inner, device, ops, kept.created_at);
+      }
+      return this.wrapRule(clause, device, guardian, issuedAt, signed);
+    };
     if (policy.scope.kind === "app") {
       // App-scope rebuilds the child's ONE aggregate `appRules` clause, which
       // is the same set for every device — per-app rules are not splittable.
