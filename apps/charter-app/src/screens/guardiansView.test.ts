@@ -3,11 +3,13 @@ import { emptyGuardianKeys } from "../keys/state";
 import { parsePresenceCode } from "../keys/presenceCode";
 import {
   androidWardsSettingPin,
+  androidWardsPinUnconfirmed,
   androidWardsWithoutPin,
   clockBehindLine,
   clockBehindWards,
   CLOCK_NOTICE_SECONDS,
   pinStateOf,
+  pinUnconfirmedLine,
   durationWords,
   familyWards,
   guardiansSubroute,
@@ -178,6 +180,13 @@ describe("guardians view", () => {
     expect(pinStateOf(wardsWith(true)[1], sending)).toBe("set");
     const set = { ...none, pins: { [PHONE]: { state: "set" as const, sentAt: 1 } } };
     expect(androidWardsWithoutPin(wardsWith(false), set).map((w) => w.device.label)).toEqual(["Phone"]);
+    // Resent as often as it will be and never confirmed: asked again, and said.
+    const gaveUp = { ...none, pins: { [PHONE]: { state: "unconfirmed" as const, sentAt: 1 } } };
+    expect(pinStateOf(wardsWith(false)[1], gaveUp)).toBe("unconfirmed");
+    expect(androidWardsWithoutPin(wardsWith(false), gaveUp).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(androidWardsPinUnconfirmed(wardsWith(false), gaveUp).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(androidWardsPinUnconfirmed(wardsWith(false), sending)).toEqual([]);
+    expect(pinUnconfirmedLine("Sam's phone")).toBe("Couldn't confirm the guardian PIN on Sam's phone. Open the PIN screen to try again.");
   });
 
   it("checks a guardian PIN draft", () => {

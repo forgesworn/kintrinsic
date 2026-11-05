@@ -93,10 +93,12 @@ export interface HeldRoster {
 /**
  * The guardian PIN on one Android ward, as this install sent it (decision D4):
  * "sending" from the send until a STATUS from that ward shows `pinSet`, then
- * "set". The PIN itself is never kept.
+ * "set". "unconfirmed" once `PIN_RESEND_LIMIT` STATUS reports in a row came
+ * without `pinSet`: nothing more is sent until the guardian sets the PIN
+ * again. The PIN itself is never kept.
  */
 export interface PinDelivery {
-  state: "sending" | "set";
+  state: "sending" | "set" | "unconfirmed";
   /**
    * While "sending": the record (salt and scrypt hash) that was sent, resent
    * unchanged on each STATUS that doesn't yet show `pinSet`. Dropped once set.
@@ -106,7 +108,12 @@ export interface PinDelivery {
   sentAt: number;
   /** `ts` of the last STATUS from the ward acted on, so one STATUS triggers one resend at most. */
   statusTs?: number;
+  /** While "sending": how many STATUS reports without `pinSet` were answered with a resend (absent = none). */
+  resends?: number;
 }
+
+/** How many times a PIN is resent to one ward before this install stops and asks the guardian. */
+export const PIN_RESEND_LIMIT = 20;
 
 export interface GuardianKeysState {
   v: 1;
@@ -239,7 +246,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     approvalSentAt: rec(o.approvalSentAt) as Record<string, number>,
     pins: Object.fromEntries(
       Object.entries(rec(o.pins) as Record<string, PinDelivery>).filter(
-        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set") && typeof v.sentAt === "number",
+        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set" || v.state === "unconfirmed") && typeof v.sentAt === "number",
       ),
     ),
     objected: Object.fromEntries(

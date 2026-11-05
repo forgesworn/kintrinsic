@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19, nip44, verifyEvent, type NostrEvent } from "nostr-tools";
 import { fitRoster, GuardianKeys, MAX_ROSTER_BYTES, unwrapToWorkingKey, type KeysChild, type KeysDevice } from "./guardianKeys";
-import { emptyGuardianKeys, type GuardianKeysState } from "./state";
+import { emptyGuardianKeys, PIN_RESEND_LIMIT, type GuardianKeysState } from "./state";
 import { guardianPinHash } from "./pin";
 import { familyRosterTemplate, parseStatement, CHARTER_PRESENCE_CONFIRM, CHARTER_FAMILY_ROSTER, type SignedEvent } from "./sdk";
 import type { GuardianOps } from "../wire/giftwrap";
@@ -858,6 +858,49 @@ describe("guardian PIN", () => {
     expect(h.keys().pins[PHONE]).toEqual({ state: "set", sentAt: T + 2, statusTs: T + 30 });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 40, guardians: g(false) });
     expect(h.published).toHaveLength(2);
+  }, 30_000);
+
+  it("stops resending after PIN_RESEND_LIMIT reports without pinSet, until the guardian tries again", async () => {
+    const ward = readyWard(PHONE, "android");
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    await h.gk.setGuardianPin("123456");
+    h.published.length = 0;
+    const g = { ...ward.guardians!, pinSet: false };
+    for (let i = 1; i <= PIN_RESEND_LIMIT; i++) await h.gk.noteWardStatus({ machine: PHONE, ts: T + i * 10, guardians: g });
+    expect(PIN_RESEND_LIMIT).toBe(20);
+    expect(h.published).toHaveLength(20);
+    expect(h.keys().pins[PHONE].state).toBe("sending");
+    // The 21st: nothing sent, and the guardian is told.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 1000, guardians: g });
+    expect(h.published).toHaveLength(20);
+    expect(h.keys().pins[PHONE]).toEqual({ state: "unconfirmed", sentAt: T + 20, statusTs: T + 1000 });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 2000, guardians: g });
+    expect(h.published).toHaveLength(20);
+    // Trying again starts over.
+    await h.gk.setGuardianPin("123456");
+    expect(h.published).toHaveLength(21);
+    expect(h.keys().pins[PHONE].state).toBe("sending");
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 3000, guardians: g });
+    expect(h.published).toHaveLength(22);
+    expect(h.keys().pins[PHONE].resends).toBe(1);
+  }, 60_000);
+
+  it("never sends a PIN to a ward below the versioning gate, one that never reports pinSet", async () => {
+    const old = device(PHONE, "android", {
+      statusSeen: true,
+      appVersionCode: 54,
+      guardians: { roots: [{ root: R, keys: [W] }], pending: [], tombstones: 0, relays: [] },
+    });
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [old] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    const report = await h.gk.setGuardianPin("123456");
+    expect(report.sent).toEqual([]);
+    expect(report.failed.map((f) => f.to)).toEqual([PHONE]);
+    for (let i = 1; i <= 3; i++) await h.gk.noteWardStatus({ machine: PHONE, ts: T + i * 10, guardians: old.guardians });
+    expect(h.published).toHaveLength(0);
+    expect(h.keys().pins[PHONE]).toBeUndefined();
   }, 30_000);
 
   it("doesn't resend unattended where the root would have to sign (an approval prompt)", async () => {

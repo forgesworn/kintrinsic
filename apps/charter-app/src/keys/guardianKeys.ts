@@ -74,7 +74,7 @@ import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } f
 import { keyStanding, type StatusGuardians } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
 import { makeGuardianPinRecord, pinOnlyRelaysTemplate } from "./pin";
-import { phoneHeldRoot, type AnchoredRoot, type GuardianKeysState, type HeldRoster, type InstallRoot, type NextRoot, type PresenceWard, type RootVia } from "./state";
+import { phoneHeldRoot, PIN_RESEND_LIMIT, type AnchoredRoot, type GuardianKeysState, type HeldRoster, type InstallRoot, type NextRoot, type PresenceWard, type RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
 export interface KeysDevice {
@@ -1344,8 +1344,10 @@ export class GuardianKeys {
    *
    * The guardian PIN: a ward this install is sending a PIN to becomes "set"
    * once its STATUS shows `pinSet`; until then each newer STATUS resends the
-   * same record, once. Only where no approval prompt is needed (W, or a
-   * local-only family's own key): a resend runs unattended.
+   * same record, once, up to `PIN_RESEND_LIMIT` times, after which it is
+   * "unconfirmed" and nothing more is sent until the guardian tries again.
+   * Only where no approval prompt is needed (W, or a local-only family's own
+   * key): a resend runs unattended.
    */
   async noteWardStatus(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
     const m = status.machine;
@@ -1459,10 +1461,20 @@ export class GuardianKeys {
       this.deps.write((k) => ({ ...k, pins: { ...k.pins, [m]: { state: "set", sentAt: cur.sentAt, statusTs: status.ts } } }));
       return;
     }
+    // Enough resends: stop, and leave it to the guardian to try again.
+    const resends = cur.resends ?? 0;
+    if (resends >= PIN_RESEND_LIMIT) {
+      this.deps.write((k) => ({ ...k, pins: { ...k.pins, [m]: { state: "unconfirmed", sentAt: cur.sentAt, statusTs: status.ts } } }));
+      return;
+    }
     // Claim this STATUS before anything async, so a second delivery of it can't resend too.
-    this.deps.write((k) => (k.pins[m] ? { ...k, pins: { ...k.pins, [m]: { ...k.pins[m], statusTs: status.ts } } } : k));
+    this.deps.write((k) =>
+      k.pins[m] ? { ...k, pins: { ...k.pins, [m]: { ...k.pins[m], statusTs: status.ts, resends: resends + 1 } } } : k,
+    );
     const d = this.findDevice(m);
     if (!cur.record || !d || d.platform !== "android") return;
+    // Never to a ward below the versioning gate: it refuses the field outright.
+    if (!wardReadiness(d.platform, d.appVersionCode, d.statusSeen).ready) return;
     // A My Signet root would prompt; a phone-held root signs unattended.
     if (!phoneHeldRoot(this.deps.read().keys) && this.keyFor(m) !== "working") return;
     // Strictly after the last one, so the ward's RELAYS replay floor takes it.
