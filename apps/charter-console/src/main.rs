@@ -991,6 +991,10 @@ fn read_children() -> Vec<Value> {
             "bedtime": bedtime,
             "daily": daily,
             "paired": subject.is_some(),
+            // The child's 64-hex subject, public like the rest of this file:
+            // the page matches it against `rules[].subject` in the guardians
+            // view to say who set each of this child's rules.
+            "subject": subject,
             "learningKhan": learning_khan,
             // The rule above is what was AGREED; this is what is actually
             // happening right now. Showing only the first is how the console

@@ -708,6 +708,7 @@ function vTime(){
       </div>
       ${c.learningKhan?`<div class="banner ok" style="margin-top:18px"><span>Khan Academy is <b>time-free</b> — time you spend in it doesn't use up your screen time.</span></div>`:""}
     </div>
+    ${rulesSetBy(c)}
     <div class="card" style="margin-top:16px">
       <p class="muted">Think something here is wrong? Say so — Kintrinsic works best when it matches what you actually agreed.</p>
     </div>
@@ -749,6 +750,35 @@ function vTime(){
       </label>
       <p class="muted" style="font-size:.8rem">More learning apps, their own projects, and a daily learning cap are on the phone app (Connect a phone).</p>
       <button class="btn btn-soft btn-block" id="do-learning">${busySpin("Save learning time")}</button>
+    </div>
+    ${rulesSetBy(c)}`;
+}
+
+// Who set each rule this child holds, from the guardians view (contract
+// rule 5). A label is text a guardian chose, so it is never shown alone: it
+// always sits beside the short npub of its signer's ROOT. With no label, the
+// signing key's own short npub stands beside its root (or alone, when it is
+// the root). The machine-wide rule (subject "") is this computer's rule.
+const RULE_KINDS = {schedule:"Allowed hours", budget:"Time each day", content:"Websites",
+  apps:"Apps", apprules:"App rules", learning:"Learning time", buckets:"App groups",
+  times:"Times", connections:"Connections", tethering:"Tethering", update:"Updates",
+  lifeline:"Lifeline", maintenance:"Maintenance", gift:"Gifted time", listening:"Listening",
+  alwaysavailable:"Always available", debugging:"Debugging", standdown:"Stand down"};
+function ruleSetter(r){
+  const root = r.root || "";
+  if(r.label) return r.label+" ("+root+")";
+  if(r.signer && r.signer!==root) return r.signer+" ("+root+")";
+  return root;
+}
+function rulesSetBy(c){
+  const all = (S.guardians && Array.isArray(S.guardians.rules)) ? S.guardians.rules : [];
+  const mine = String((c && c.subject) || "").toLowerCase();
+  const rules = all.filter(r=>r && (r.subject==="" || (mine && String(r.subject||"").toLowerCase()===mine)));
+  if(!rules.length) return "";
+  const rows = rules.map(r=>`<div class="fact"><div class="k">${esc(RULE_KINDS[String(r.kind||"").toLowerCase()]||cap(r.kind))}${r.subject===""?" · this computer's rule":""}</div><div class="v" style="font-weight:500;font-size:.92rem;overflow-wrap:anywhere">${esc(ruleSetter(r))}</div></div>`).join("");
+  return `<div class="card pad-lg" style="margin-top:16px">
+      <div class="card-title">Who set these rules</div>
+      <div class="facts">${rows}</div>
     </div>`;
 }
 
