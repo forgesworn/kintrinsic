@@ -33,6 +33,7 @@ import {
   MAX_ACTIVE_KEYS_PER_ROOT,
   MAX_HELD_PER_ROOT,
   MAX_REMEMBERED_PER_SLOT,
+  MAX_REMEMBERED_PER_STATEMENT_SLOT,
   MAX_ROOTS,
   MAX_TOMBSTONES_PER_ROOT,
   OBJECTION_BLOCK_SECONDS,
@@ -93,6 +94,13 @@ export interface StoredStatement {
   receivedAt: number
   /** A cancel or objection that had nothing to act on when it arrived. */
   held: boolean
+  /**
+   * Ids of clamped statements (dated ahead of the ward clock when accepted)
+   * for this slot, kept while their `issuedAt` is above the slot's newest
+   * effective time, so a relay can't replay a superseded one. Sorted by `id`.
+   * The stored statement's own id is among them if it was clamped.
+   */
+  remembered: RememberedStatement[]
 }
 
 export interface PendingRecord {
@@ -146,6 +154,9 @@ export interface RememberedClause {
   id: string
   issuedAt: number
 }
+
+/** A clamped statement's id, remembered for its slot: the same shape. */
+export type RememberedStatement = RememberedClause
 
 /** A held clause: the minimal model of rules 4 and 5. */
 export interface HeldClause {
@@ -384,9 +395,20 @@ function storedFor(s: GuardianState, slot: string): StoredStatement | undefined 
   return s.statements.find((st) => st.slot === slot)
 }
 
+/**
+ * The slot's remembered ids that outlive `effective` as the slot's newest
+ * effective time: those whose `issuedAt` is still above it.
+ */
+function keptRemembered(stored: StoredStatement | undefined, effective: number): RememberedStatement[] {
+  return (stored?.remembered ?? []).filter((r) => r.issuedAt > effective).map((r) => ({ ...r }))
+}
+
 function putStatement(s: GuardianState, st: Statement, now: number, held = false): void {
   if (st.type === 'withdrawal') return
   const slot = statementSlot(st)
+  const remembered = keptRemembered(storedFor(s, slot), effectiveTime(st.issuedAt, now))
+  if (st.issuedAt > now) remembered.push({ id: st.id, issuedAt: st.issuedAt })
+  remembered.sort((a, b) => cmp(a.id, b.id))
   s.statements = s.statements.filter((x) => x.slot !== slot)
   s.statements.push({
     slot,
@@ -400,27 +422,28 @@ function putStatement(s: GuardianState, st: Statement, now: number, held = false
     expiresAt: st.expiresAt,
     receivedAt: now,
     held,
+    remembered,
   })
 }
 
 /**
- * Rule 2 within one slot: the newest `issuedAt` wins. Re-delivery of the
- * held event is `duplicate`; an older one is `stale`. At the same `issuedAt`
- * the lower event id wins, so every ward converges whatever the arrival
- * order; the loser is `tie_not_newer`.
+ * Rule 2 within one slot: the newest effective time wins. Re-delivery of the
+ * stored event, or of a clamped one the slot remembers, is `duplicate`; an
+ * older one is `stale`. At the same effective time the lower event id wins,
+ * so every ward converges whatever the arrival order; the loser is
+ * `tie_not_newer`. A clamped newcomer that would be the slot's 65th
+ * remembered id is `clamp_quota`. Run before any change to the state, so a
+ * statement that fails here leaves no trace.
  * OQ: Same d, same issuedAt, different content.
  */
-function orderAgainst(
-  stored: { id: string; issuedAt: number; receivedAt: number } | undefined,
-  st: Statement,
-  now: number,
-): ReasonCode | null {
+function orderAgainst(stored: StoredStatement | undefined, st: Statement, now: number): ReasonCode | null {
   if (!stored) return null
-  if (stored.id === st.id) return 'duplicate'
+  if (stored.id === st.id || (stored.remembered ?? []).some((r) => r.id === st.id)) return 'duplicate'
   const mine = effectiveTime(st.issuedAt, now)
   const theirs = effectiveTime(stored.issuedAt, stored.receivedAt)
   if (mine < theirs) return 'stale'
   if (mine === theirs && cmp(st.id, stored.id) > 0) return 'tie_not_newer'
+  if (st.issuedAt > now && keptRemembered(stored, mine).length >= MAX_REMEMBERED_PER_STATEMENT_SLOT) return 'clamp_quota'
   return null
 }
 

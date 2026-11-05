@@ -291,7 +291,16 @@ time min(`issuedAt`, `now`) with the stored one's: the same event id is
 `duplicate`; a lower effective time is `stale`; the same effective time with
 a higher event id (compared as lowercase hex) is `tie_not_newer`, and with a
 lower event id it wins and replaces the stored one. Each stored statement keeps the ward time it
-was accepted. A cancel or objection stored without acting is "held" and counts
+was accepted. Each slot also remembers the ids of clamped statements
+(`issuedAt` > `now` when accepted), each with its `issuedAt`, while that
+`issuedAt` is above the slot's newest effective time: an accepted statement
+keeps the previous entries whose `issuedAt` > its own effective time, plus
+`{ id, issuedAt }` when its `issuedAt` > `now`. So **slot order** is: the
+stored event id, or a remembered one, is `duplicate` → `stale` →
+`tie_not_newer` → `clamp_quota` (`issuedAt` > `now`, and the slot already
+remembers 64 ids with `issuedAt` > min(`issuedAt`, `now`)). This memory is
+not in the projected state; the 64 cap is not exercised here, and the
+references test it directly. A cancel or objection stored without acting is "held" and counts
 toward a root's 64: a cancel toward its signer, an objection toward the
 objecting root (the root its removal `d` names), whichever key signed it.
 

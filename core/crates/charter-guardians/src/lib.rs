@@ -34,8 +34,8 @@ pub use state::{
     mark_status_sent_to, pair_from_offer, pair_from_seal, pending_expiry, project_state,
     recipients, register_presence_token, root_of, signer_set, status_guardians, status_recipients,
     status_relays, tick, ClauseInput, GuardianState, HeldClause, Outcome, PairToken, Paired,
-    ProjectedState, RelaysChannel, RelaysInput, RememberedClause, StatusGuardians, Step, TickEntry,
-    Verdict,
+    ProjectedState, RelaysChannel, RelaysInput, RememberedClause, RememberedStatement,
+    StatusGuardians, Step, TickEntry, Verdict,
 };
 pub use statement::{parse_statement, split_pending_d, PendingType, Statement, StatementType};
 
@@ -61,6 +61,11 @@ pub const MAX_HELD_PER_ROOT: usize = 64;
 /// clause dated ahead of the ward clock). A further clamped clause is
 /// refused (`clamp_quota`) until the slot's bar passes some of them.
 pub const MAX_REMEMBERED_PER_SLOT: usize = 256;
+/// Per statement slot (rule 2), the most clamped statement ids a ward
+/// remembers (a statement dated ahead of the ward clock). A further clamped
+/// statement is ignored (`clamp_quota`) until the slot's newest effective
+/// time passes some of them.
+pub const MAX_REMEMBERED_PER_STATEMENT_SLOT: usize = 64;
 /// Pending statements expire at most this long after `issuedAt`.
 pub const PENDING_MAX_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// Notice period for a root removal signed by another root (rule 7).

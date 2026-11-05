@@ -104,6 +104,13 @@ pub struct StoredStatement {
     pub received_at: i64,
     /// A cancel or objection that had nothing to act on when it arrived.
     pub held: bool,
+    /// Ids of clamped statements (dated ahead of the ward clock when
+    /// accepted) for this slot, kept while their `issuedAt` is above the
+    /// slot's newest effective time, so a relay can't replay a superseded
+    /// one. Sorted by `id`. The stored statement's own id is among them if it
+    /// was clamped. Absent in a state persisted before this rule: empty.
+    #[serde(default)]
+    pub remembered: Vec<RememberedStatement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +186,9 @@ pub struct RememberedClause {
     pub id: String,
     pub issued_at: i64,
 }
+
+/// A clamped statement's id, remembered for its slot: the same shape.
+pub type RememberedStatement = RememberedClause;
 
 /// A held clause: the minimal model of rules 4 and 5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,11 +503,31 @@ fn stored_for<'a>(s: &'a GuardianState, slot: &str) -> Option<&'a StoredStatemen
     s.statements.iter().find(|st| st.slot == slot)
 }
 
+/// The slot's remembered ids that outlive `effective` as the slot's newest
+/// effective time: those whose `issuedAt` is still above it.
+fn kept_remembered(stored: Option<&StoredStatement>, effective: i64) -> Vec<RememberedStatement> {
+    stored.map_or_else(Vec::new, |st| {
+        st.remembered
+            .iter()
+            .filter(|r| r.issued_at > effective)
+            .cloned()
+            .collect()
+    })
+}
+
 fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
     if st.kind == StatementType::Withdrawal {
         return;
     }
     let slot = slot_of(st);
+    let mut remembered = kept_remembered(stored_for(s, &slot), effective_time(st.issued_at, now));
+    if st.issued_at > now {
+        remembered.push(RememberedStatement {
+            id: st.id.clone(),
+            issued_at: st.issued_at,
+        });
+    }
+    remembered.sort_by(|a, b| cmp_str(&a.id, &b.id));
     s.statements.retain(|x| x.slot != slot);
     s.statements.push(StoredStatement {
         slot,
@@ -511,16 +541,20 @@ fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
         expires_at: st.expires_at,
         received_at: now,
         held,
+        remembered,
     });
 }
 
-/// Rule 2 within one slot: re-delivery is `duplicate`, an older one `stale`,
-/// and at the same `issuedAt` the lower event id wins (`tie_not_newer`).
+/// Rule 2 within one slot: the newest effective time wins. Re-delivery of
+/// the stored event, or of a clamped one the slot remembers, is `duplicate`;
+/// an older one `stale`; at the same effective time the lower event id wins
+/// (`tie_not_newer`). A clamped newcomer that would be the slot's 65th
+/// remembered id is `clamp_quota`. Run before any change to the state, so a
+/// statement that fails here leaves no trace.
 /// OQ: Same d, same issuedAt, different content.
-/// Both sides compare by effective time.
 fn order_against(stored: Option<&StoredStatement>, st: &Statement, now: i64) -> Option<Reason> {
     let stored = stored?;
-    if stored.id == st.id {
+    if stored.id == st.id || stored.remembered.iter().any(|r| r.id == st.id) {
         return Some(Reason::Duplicate);
     }
     let mine = effective_time(st.issued_at, now);
@@ -530,6 +564,11 @@ fn order_against(stored: Option<&StoredStatement>, st: &Statement, now: i64) -> 
     }
     if mine == theirs && cmp_str(&st.id, &stored.id) == Ordering::Greater {
         return Some(Reason::TieNotNewer);
+    }
+    if st.issued_at > now
+        && kept_remembered(Some(stored), mine).len() >= MAX_REMEMBERED_PER_STATEMENT_SLOT
+    {
+        return Some(Reason::ClampQuota);
     }
     None
 }

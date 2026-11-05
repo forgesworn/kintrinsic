@@ -479,7 +479,28 @@ scenario("statement_clamp", ["who may sign what", "pending", "7"], "A statement 
   c.confirm(W3, confirmEv(W3, cg.id, tokenHex("clamp"), T0 + 190, st.approval(R2, W3, { issuedAt: T0 + 3 * DAY })), T0 + 190, A("coguardian_applied"));
 });
 
-scenario("pair_approval_clamped", ["scan-to-pair", "who may sign what"], "A pair offer's approval dated ahead of the ward clock still pairs; it counts as clamped.", (c) => {
+scenario("statement_replay_after_supersede", ["who may sign what", "2", "pending"], "A clamped statement's id is remembered for its slot until the slot's newest effective time reaches its issuedAt: a relay can't replay a superseded far-future co-guardian over the newer one. Once the slot passes its issuedAt, the replay is merely stale.", (c) => {
+  twoRoots(c);
+  const far = st.coguardian(R1, R3, { issuedAt: T0 + DAY });
+  c.inbound(W1, far, T0 + 100, A("coguardian_pending"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 200 }), T0 + 200, A("coguardian_pending"));
+  c.inbound(W1, far, T0 + 300, D("duplicate"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY + 1 }), T0 + DAY + 10, A("coguardian_pending"));
+  c.inbound(W1, far, T0 + DAY + 20, D("stale"));
+});
+
+scenario("statement_replay_after_cancel", ["who may sign what", "2", "pending"], "A cancelled far-future move keeps its slot, so its replay is a duplicate; once a newer move with the same d displaces it and is cancelled in turn, the remembered id still stops the replay from pending again.", (c) => {
+  twoRoots(c);
+  const far = st.move(R1, R3, { issuedAt: T0 + DAY });
+  c.inbound(W1, far, T0 + 100, A("move_pending"));
+  c.inbound(W1, st.cancel(R1, dM(R3), { issuedAt: T0 + 110 }), T0 + 110, A("cancel_applied"));
+  c.inbound(W1, far, T0 + 120, D("duplicate"));
+  c.inbound(W1, st.move(R1, R3, { issuedAt: T0 + 130 }), T0 + 130, A("move_pending"));
+  c.inbound(W1, st.cancel(R1, dM(R3), { issuedAt: T0 + 140 }), T0 + 140, A("cancel_applied"));
+  c.inbound(W1, far, T0 + 150, D("duplicate"));
+});
+
+scenario("pair_approval_clamped",["scan-to-pair", "who may sign what"], "A pair offer's approval dated ahead of the ward clock still pairs; it counts as clamped.", (c) => {
   c.pair(W1, T0, { approval: st.approval(R1, W1, { issuedAt: T0 + DAY }) });
 });
 

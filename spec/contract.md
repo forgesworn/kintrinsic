@@ -2648,8 +2648,15 @@ A root is never asked to decrypt ward traffic.
     `issuedAt` beats the clamped bar. A ward remembers at most **256** ids per
     `(subject, kind)`; past that, a CLAUSE that would need remembering is
     refused until the ward's clock catches up with some of them.
-  - A statement's slot (rule 2) holds one statement and its `id`; a statement
-    with the stored `id` is ignored.
+  - Statements get the same memory. A statement whose `issuedAt` was clamped
+    has its event `id` remembered for its slot (its `d`, as rule 2 defines
+    the slot) until the slot's newest effective time reaches its `issuedAt`.
+    A statement with a remembered `id`, or the `id` the slot holds, is
+    ignored as a duplicate. Without this, a relay could re-deliver a
+    superseded far-future co-guardian, removal or move and make it pending
+    again. A ward remembers at most **64** ids per slot; past that, a
+    statement that would need remembering is ignored until the ward's clock
+    catches up with some of them.
   - STATUS `guardians.clamped` counts the accepted events whose time was
     clamped, so a parent can see that a clock is adrift.
   - Why: a far-future rule from one signer must not pin a slot against the

@@ -42,6 +42,13 @@ export const FUTURE_SKEW_SECONDS = 300
  * (`clamp_quota`) until the slot's bar passes some of them.
  */
 export const MAX_REMEMBERED_PER_SLOT = 256
+/**
+ * Per statement slot (rule 2), the most clamped statement ids a ward
+ * remembers (a statement dated ahead of the ward clock). A further clamped
+ * statement is ignored (`clamp_quota`) until the slot's newest effective time
+ * passes some of them.
+ */
+export const MAX_REMEMBERED_PER_STATEMENT_SLOT = 64
 /** Pending statements expire at most this long after `issuedAt`. */
 export const PENDING_MAX_SECONDS = 7 * 24 * 60 * 60
 /** Notice period for a root removal signed by another root (rule 7). */

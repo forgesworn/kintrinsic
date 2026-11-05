@@ -15,6 +15,7 @@ import {
   MAX_JSON_DEPTH,
   PREVIOUS_RELAYS_MAX,
   MAX_REMEMBERED_PER_SLOT,
+  MAX_REMEMBERED_PER_STATEMENT_SLOT,
   type GuardianState,
   type StepResult,
 } from '../../src/guardians/index.js'
@@ -127,5 +128,47 @@ describe('D1: the clamped-clause id quota', () => {
     const settled = acceptClause(later.state, cl(T0 + DAY + 2000), T0 + DAY + 3000)
     expect(heldClause(settled.state, 'kid', 'apps')?.remembered).toEqual([])
     expect(acceptClause(settled.state, cl(T0 + DAY + 1000), T0 + DAY + 3001).outcome.reason).toBe('not_newer')
+  })
+})
+
+describe('Clamped statement ids are remembered per slot', () => {
+  const d = `kintrinsic/guardian/${R2.pk}`
+  const cg = (issuedAt: number) => coGuardian(R1, R2, { issuedAt })
+  const send = (s: GuardianState, ev: ReturnType<typeof cg>, now: number) => applyInbound(s, { sealAuthor: W1.pk, inner: ev }, now)
+  const slot = (s: GuardianState) => s.statements.find((x) => x.slot === d)
+
+  test('a superseded far-future statement is not pending again when replayed', () => {
+    let s = pairedR1W1()
+    const far = cg(T0 + DAY)
+    s = send(s, far, T0 + 100).state
+    s = send(s, cg(T0 + 200), T0 + 200).state
+    expect(slot(s)?.remembered.map((r) => r.id)).toEqual([far.id])
+    const replay = send(s, far, T0 + 300)
+    expect(replay.outcome).toMatchObject({ result: 'dropped', reason: 'duplicate' })
+    expect(replay.state.pending.map((p) => p.issuedAt)).toEqual([T0 + 200])
+  })
+
+  test('64 clamped ids per slot; the 65th is clamp_quota until the slot passes some', () => {
+    expect(MAX_REMEMBERED_PER_STATEMENT_SLOT).toBe(64)
+    let s = pairedR1W1()
+    // Each arrives a second later than the last, so each effective time is
+    // newer and each statement supersedes the one before.
+    for (let i = 1; i <= 64; i++) {
+      const r = send(s, cg(T0 + DAY + i), T0 + 100 + i)
+      expect(r.outcome.reason).toBe('coguardian_pending')
+      s = r.state
+    }
+    expect(slot(s)?.remembered).toHaveLength(64)
+    expect(send(s, cg(T0 + DAY + 65), T0 + 165).outcome).toMatchObject({ result: 'dropped', reason: 'clamp_quota' })
+    // A remembered id is a duplicate whatever the clock.
+    expect(send(s, cg(T0 + DAY + 10), T0 + 170).outcome.reason).toBe('duplicate')
+    // Once the slot's newest effective time reaches some of them, they go.
+    const later = send(s, cg(T0 + DAY + 1000), T0 + DAY + 32)
+    expect(later.outcome.reason).toBe('coguardian_pending')
+    expect(slot(later.state)?.remembered).toHaveLength(33)
+    // A statement that needs no memory prunes every id it reaches.
+    const settled = send(later.state, cg(T0 + DAY + 2000), T0 + DAY + 3000)
+    expect(slot(settled.state)?.remembered).toEqual([])
+    expect(send(settled.state, cg(T0 + DAY + 1000), T0 + DAY + 3001).outcome.reason).toBe('stale')
   })
 })
