@@ -249,8 +249,10 @@ export default function KeyBackupSection({ busy }: { busy: boolean }) {
       ) : (
         <>
           <p className="card-sub" style={{ marginTop: 2 }}>
-            Paste your backup and its passphrase. This replaces the key on this
-            phone with the backed-up one.
+            Paste your backup and its passphrase. A backup with a guardian key
+            replaces the key on this phone with it; a family-only backup (an
+            identity in My Signet) brings back the family and leaves this
+            phone's key alone.
           </p>
           <textarea
             className="input"
