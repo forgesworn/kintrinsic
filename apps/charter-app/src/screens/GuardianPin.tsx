@@ -115,7 +115,8 @@ export default function GuardianPin({
       </p>
       <p className="card-sub">
         At least {MIN_PIN_LENGTH} digits. Kintrinsic doesn't keep it: write it down somewhere safe, and tell the
-        other parent in person if they will confirm at a phone.
+        other parent in person if they will confirm at a phone. It's set on the child's phone the next time that
+        phone checks in, usually within minutes.
       </p>
       <div className="stack" style={{ marginTop: 12 }}>
         <label className="field">

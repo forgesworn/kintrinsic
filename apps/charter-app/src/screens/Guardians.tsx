@@ -428,7 +428,8 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
             <div className="banner banner-warn">
               <p style={{ margin: "0 0 8px" }}>
                 You stop being a guardian of every device at once, and this phone stops receiving anything from them.
-                The other parent stays in charge; the limits you set stay until they change them.
+                No one needs to confirm it. The other parent stays in charge; the limits you set stay until they
+                change them.
               </p>
               <div className="stack">
                 <Button
@@ -607,8 +608,12 @@ function RemoveParent({ target }: { target: string }) {
           <ul className="card-sub" style={{ paddingLeft: 20, margin: 0 }}>
             <li>they get 72 hours' notice, and their phone tells them;</li>
             <li>you must confirm in person at each device;</li>
-            <li>they can object, and then you both stay as guardians.</li>
+            <li>their phone objects for them, and then you both stay as guardians.</li>
           </ul>
+          <p className="card-sub" style={{ margin: 0 }}>
+            So this only works when they've stopped using Kintrinsic or lost their phone. If they want to stop, they
+            can leave the family themselves, at once.
+          </p>
           {error && <ErrorLine>{error}</ErrorLine>}
           <Button
             variant="danger"

@@ -63,6 +63,10 @@ export default function GuardianLostPhone({ onBack }: { onBack: () => void }) {
             Your other phones with Kintrinsic, as your child's devices know them. Withdraw one you've lost or given
             away.
           </p>
+          <p className="card-sub" style={{ margin: 0 }}>
+            Your My Signet approves it, and no one needs to be at the child's devices. Each device stops trusting that
+            phone the next time it checks in, usually within minutes.
+          </p>
           {others.map((w) => (
             <div key={w} className="stack" style={{ gap: 6 }}>
               <div className="row-between">

@@ -138,6 +138,10 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
         The other parent needs My Signet on their phone. Ask them for their guardian ID: in My Signet it's the npub
         under their name, with a QR code.
       </p>
+      <p className="card-sub">
+        Your My Signet approves the invitation. Then the other parent confirms it in person at each of your child's
+        devices, by scanning a code the device shows. They have a week to do it.
+      </p>
       <div className="stack" style={{ marginTop: 12 }}>
         {scanning ? (
           <>

@@ -120,9 +120,9 @@ export default function GuardianMove({ onBack, onConfirm }: { onBack: () => void
             </p>
           )}
           <p className="card-sub" style={{ margin: 0 }}>
-            Moves you to another guardian identity, for example a new My Signet or a Heartwood. Your current identity
-            signs the move, the new one approves this phone, and then you confirm in person at every device. The other
-            parent isn't affected.
+            Moves you to another guardian identity, for example a new My Signet or a Heartwood. Your current My Signet
+            approves the move and the new one approves this phone. Then you confirm in person at each of your
+            child's devices within a week; each one switches as you confirm there. The other parent isn't affected.
           </p>
           <div className="seg" role="group" aria-label="New identity is in">
             <button type="button" className="seg-btn" aria-pressed={via === "signet"} onClick={() => setVia("signet")}>
