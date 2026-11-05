@@ -27,7 +27,6 @@ interface Harness {
   keys: () => GuardianKeysState;
   children: KeysChild[];
   published: { relays: string[]; wrap: NostrEvent }[];
-  resigned: string[];
   setRoot: (ops: GuardianOps | null) => void;
   setNow: (t: number) => void;
 }
@@ -52,7 +51,6 @@ function harness(children: KeysChild[], rootOps: GuardianOps | null = opsOf(rSk)
   let root = rootOps;
   let clock = T;
   const published: Harness["published"] = [];
-  const resigned: string[] = [];
   const gk = new GuardianKeys({
     read: () => ({ keys, children }),
     write: (f) => {
@@ -65,16 +63,12 @@ function harness(children: KeysChild[], rootOps: GuardianOps | null = opsOf(rSk)
     },
     now: () => clock,
     defaultRelays: ["wss://default.example"],
-    resignClauses: async (id) => {
-      resigned.push(id);
-    },
   });
   return {
     gk,
     keys: () => keys,
     children,
     published,
-    resigned,
     setRoot: (o) => (root = o),
     setNow: (t) => (clock = t),
   };
@@ -197,7 +191,6 @@ describe("connecting My Signet as root", () => {
   it("removing the other parent is refused for a family whose root is this phone's own key", async () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
     await expect(h.gk.removeCoGuardian(R2)).rejects.toThrow(/kept on this phone/);
-    expect(h.resigned).toEqual([]);
     expect(h.published).toHaveLength(0);
   });
 
@@ -378,32 +371,14 @@ describe("statements", () => {
     expect(h.published).toHaveLength(0);
   });
 
-  it("removing the other parent re-signs the clauses first (rule 4)", async () => {
+  it("removing the other parent sends only the removal: nothing is re-signed first (D2)", async () => {
     await h.gk.removeCoGuardian(R2);
-    expect(h.resigned).toEqual(["c1"]);
+    expect(delivered()).toHaveLength(child.devices.length);
     for (const o of delivered()) {
       const st = parseStatement(o.inner);
       expect(st.ok && st.statement).toMatchObject({ type: "removal", d: `kintrinsic/unguardian/${R2}`, p: R2, signer: R });
     }
     await expect(h.gk.removeCoGuardian(R)).rejects.toThrow(/leave the family/);
-  });
-
-  it("a failed re-sign aborts the removal", async () => {
-    const hh = new GuardianKeys({
-      read: () => ({ keys: h.keys(), children: [child] }),
-      write: () => {},
-      workingKey: () => wSk,
-      root: () => opsOf(rSk),
-      publish: async () => {
-        throw new Error("must not publish");
-      },
-      now: () => T,
-      defaultRelays: [],
-      resignClauses: async () => {
-        throw new Error("signer unreachable");
-      },
-    });
-    await expect(hh.removeCoGuardian(R2)).rejects.toThrow(/signer unreachable/);
   });
 
   it("objection: signed AND sealed by the root being removed, p = the remover", async () => {
@@ -441,11 +416,10 @@ describe("statements", () => {
     await expect(h.gk.cancelPending(`kintrinsic/device/${W}`)).rejects.toThrow(/isn't a pending/);
   });
 
-  it("withdrawing another install: signed by R, sealed by this W; re-signs first", async () => {
+  it("withdrawing another install: signed by R, sealed by this W", async () => {
     const W2 = getPublicKey(generateSecretKey());
     child.devices[0].guardians!.roots[0].keys.push(W2);
     await h.gk.withdrawInstall(W2);
-    expect(h.resigned).toEqual(["c1"]);
     for (const o of delivered()) {
       const st = parseStatement(o.inner);
       expect(st.ok && st.statement).toMatchObject({ type: "withdrawal", d: `kintrinsic/revoke/${W2}`, p: W2, signer: R });
@@ -453,33 +427,15 @@ describe("statements", () => {
     }
   });
 
-  it("withdrawing this install's own W is sealed by R itself, after R re-signs the clauses", async () => {
-    let keyDuringResign: string | null = null;
-    const hh = new GuardianKeys({
-      read: () => ({ keys: h.keys(), children: [child] }),
-      write: () => {},
-      workingKey: () => wSk,
-      root: () => opsOf(rSk),
-      publish: async () => {},
-      now: () => T,
-      defaultRelays: [],
-      resignClauses: async () => {
-        keyDuringResign = hh.keyFor(PHONE);
-      },
-    });
-    expect(hh.keyFor(PHONE)).toBe("working");
-    await hh.withdrawInstall(W);
-    expect(keyDuringResign).toBe("root"); // W is the key departing: rule 4 needs R
-    expect(hh.keyFor(PHONE)).toBe("working");
+  it("withdrawing this install's own W is sealed by R itself", async () => {
+    expect(h.gk.keyFor(PHONE)).toBe("working");
     await h.gk.withdrawInstall(W);
-    expect(h.resigned).toEqual(["c1"]);
     for (const o of delivered()) expect(o.sealAuthor).toBe(R);
   });
 
-  it("withdrawing this install's own W without R connected re-signs nothing and sends nothing", async () => {
+  it("withdrawing this install's own W without R connected sends nothing", async () => {
     h.setRoot(null);
     await expect(h.gk.withdrawInstall(W)).rejects.toThrow(/Connect/);
-    expect(h.resigned).toEqual([]);
     expect(h.published).toHaveLength(0);
   });
 
@@ -564,7 +520,7 @@ describe("root move", () => {
     const h = harness([child]);
     await connectSignetRoot(h);
     await h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "bunker://r2", via: "heartwood" });
-    expect(h.resigned).toEqual(["c1"]);
+    expect(h.published).toHaveLength(1);
     const moved = open(h.published[0].wrap, phoneSk);
     expect(moved.sealAuthor).toBe(W);
     const st = parseStatement(moved.inner);

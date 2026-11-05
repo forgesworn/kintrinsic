@@ -638,9 +638,6 @@ function RemoveParent({ target }: { target: string }) {
             <li>you must confirm in person at each device;</li>
             <li>they can object, and then you both stay as guardians.</li>
           </ul>
-          <p className="card-sub" style={{ margin: 0 }}>
-            Your limits are signed again with your own key first, so the rules stay as they are now once they've gone.
-          </p>
           {error && <ErrorLine>{error}</ErrorLine>}
           <Button
             variant="danger"

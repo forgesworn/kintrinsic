@@ -94,8 +94,6 @@ export interface UseGuardianKeysDeps {
   /** The provider's current signer (read lazily: it is built after this hook runs). */
   signer: () => Signer | null;
   localRoute: LocalRouteHooks;
-  /** Rule 4: re-sign one child's clause set; throws when it couldn't be sent. */
-  resign: (childId: string) => Promise<void>;
   /** Record `key` as the pinned key of every paired device with none yet (see guardianKeysWiring). */
   stampPinnedKeys: (key: string, opts?: { onlyUnheard?: boolean }) => void;
   /** A root move landed on every ward: switch the signer to the new bunker. */
@@ -145,7 +143,6 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       },
       now: () => Math.floor(Date.now() / 1000),
       defaultRelays: DEFAULT_RELAYS,
-      resignClauses: (childId) => depsRef.current.resign(childId),
     });
   }
   const keys = gk.current;

@@ -175,7 +175,7 @@ export class RealSigner implements Signer {
   private lastIssuedAt = RealSigner.loadLastIssuedAt();
 
   private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
-  /** The last non-policy clause sent per child and device: what rule 4 re-signs. */
+  /** The last non-policy clause sent per child and device. */
   private static readonly STANDING_KEY = "charter.signer.standing.v1";
 
   private static loadStanding(): Record<string, Record<string, ClausePayload>> {
@@ -193,7 +193,7 @@ export class RealSigner implements Signer {
    * Remember a gift, stand-down, maintenance window, update or debugging
    * clause as the latest of its kind for each device it went to. Only once it
    * was sent or held for the home network: a send that failed outright is not
-   * standing anywhere, and re-signing it later would deliver it after all.
+   * standing anywhere.
    */
   private recordStanding(childId: string, machines: string[], clause: ClausePayload): void {
     const all = RealSigner.loadStanding();
@@ -203,7 +203,7 @@ export class RealSigner implements Signer {
     try {
       localStorage.setItem(RealSigner.STANDING_KEY, JSON.stringify(all));
     } catch {
-      // Private mode / quota: the re-sign covers what it can.
+      // Private mode / quota: the record is best-effort.
     }
   }
 
@@ -217,50 +217,6 @@ export class RealSigner implements Signer {
       if (err instanceof QueuedForHomeNetworkError) this.recordStanding(childId, machines, clause);
       throw err;
     }
-  }
-
-  /**
-   * Rule 4: re-sign the latest gift, stand-down, maintenance window, update
-   * and debugging clause this install sent to each of the child's devices,
-   * unchanged but for a fresh `issuedAt` (and the same `id`, so a gift is
-   * never added twice). Sent before a departure, so a relay can't replay an
-   * older clause of those kinds once the departing key's own stops counting.
-   * Nothing recorded = nothing to re-sign.
-   */
-  async resignStanding(childId: string): Promise<SignOutcome> {
-    const guardian = this.guardian;
-    if (!guardian) throw new Error("signer not connected");
-    const target = this.deps.resolveChild(childId);
-    if (!target) throw new Error(`unknown child: ${childId}`);
-    const recorded = RealSigner.loadStanding()[childId] ?? {};
-    const sends = Object.entries(recorded).flatMap(([key, clause]) => {
-      const machine = key.slice(key.indexOf(":") + 1);
-      const device = target.devices.find((d) => d.pubkey === machine);
-      return device ? [{ device, clause }] : [];
-    });
-    // A debugging clause sent before the standing record existed is known
-    // only from the device's own record: re-sign that too (batch 3b review L6).
-    for (const device of target.devices) {
-      if (!device.debugging || recorded[`debugging:${device.pubkey}`]) continue;
-      const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt: 0, body: debuggingToGrant(device.debugging, 0) };
-      if (target.subject) clause.subject = target.subject;
-      sends.push({ device, clause });
-    }
-    if (sends.length === 0) return { ok: true };
-    await this.authorize("clause", `Re-send ${target.name ?? childId}'s current rules`);
-    const issuedAt = this.nextIssuedAt();
-    const held = new SendBatch();
-    for (const { device, clause } of sends) {
-      const body = clause.body as unknown as Record<string, unknown>;
-      const fresh: ClausePayload = {
-        ...clause,
-        issuedAt,
-        body: ("issuedAt" in body ? { ...body, issuedAt } : body) as unknown as ClausePayload["body"],
-      };
-      const wrap = await giftWrapClause(fresh, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
-      await this.send(target.relays, wrap, CLAUSE_META, held);
-    }
-    return this.settle(held);
   }
 
   private static loadLastIssuedAt(): number {
@@ -282,8 +238,9 @@ export class RealSigner implements Signer {
    * opens an approved app. Stand-down used to carry its own per-session bump;
    * one clock for every clause covers them all, and it is persisted so a
    * reload inside the same second can't step back under it. It only ever runs
-   * ahead by as many seconds as clauses were signed in a burst; the device has
-   * no future-skew gate (its own clock may be dead), so that costs nothing.
+   * ahead by as many seconds as clauses were signed in a burst, and a ward
+   * treats a claimed time ahead of its own clock as its own clock (it clamps,
+   * it doesn't refuse), so carrying the last issue time forward costs nothing.
    */
   private nextIssuedAt(): number {
     const issuedAt = Math.max(this.deps.now(), this.lastIssuedAt + 1);

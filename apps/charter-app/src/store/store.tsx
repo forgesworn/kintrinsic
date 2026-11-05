@@ -951,9 +951,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [localRoute],
   );
 
-  // Guardian roots and working keys (./useGuardianKeys). Rule 4's re-sign
-  // goes through the ordinary clause path, defined further down.
-  const signClauseRef = useRef<((childId: string, policy: Policy) => Promise<ClauseDelivery>) | null>(null);
+  // Guardian roots and working keys (./useGuardianKeys).
   const onRootMovedRef = useRef<(bunkerUri: string) => void>(() => {});
   const guardianKeys = useGuardianKeys(
     {
@@ -961,36 +959,6 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       save: (keys) => dispatch({ type: "SET_GUARDIAN_KEYS", keys }),
       signer: () => signer.current,
       localRoute,
-      // Rule 4: every clause this install has standing on the child's
-      // devices goes out again with a live key, and only counts once it was
-      // SENT: one held for the home network could arrive after the
-      // departure, which is the replay window the re-sign exists to close.
-      resign: async (childId) => {
-        const sign = signClauseRef.current;
-        if (!sign) throw new Error("Rules can't be re-sent yet.");
-        const child = stateRef.current.children.find((c) => c.id === childId);
-        const who = child?.name ?? "your child";
-        const held = () =>
-          new Error(
-            `${who}'s current rules are still waiting to reach a device that isn't on the home network. Nothing else was sent; try again once it's back.`,
-          );
-        for (const policy of child?.policies ?? []) {
-          const d = await sign(childId, policy);
-          if (d.outcome === "queued") throw held();
-          if (d.outcome !== "sent") {
-            throw new Error(`${who}'s current rules couldn't be re-sent first, so nothing else was sent.`);
-          }
-        }
-        const s = signer.current;
-        if (s?.resignStanding) {
-          try {
-            await s.resignStanding(childId);
-          } catch (e) {
-            if (e instanceof QueuedForHomeNetworkError) throw held();
-            throw e;
-          }
-        }
-      },
       stampPinnedKeys: (key, opts) => {
         const children = stampPinnedKeys(stateRef.current.children, key, opts);
         if (children === stateRef.current.children) return;
@@ -2433,7 +2401,6 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     },
     [resolveChild, queuedDelivery],
   );
-  signClauseRef.current = signClauseIfConnected;
 
   // Close the claim loop: a just-claimed phone has never been a target of any
   // rule save, so the guardian's standing charter goes to it by itself the

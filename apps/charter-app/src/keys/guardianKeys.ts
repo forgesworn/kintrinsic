@@ -112,11 +112,6 @@ export interface GuardianKeysDeps {
   /** Unix seconds. */
   now(): number;
   defaultRelays: readonly string[];
-  /**
-   * Rule 4: re-sign the child's current clause set with a live key. Called
-   * before this install sends a departure; a failure aborts the departure.
-   */
-  resignClauses?(childId: string): Promise<void>;
 }
 
 /** What happened to one statement (or confirmation, PIN, roster) fan-out. */
@@ -194,9 +189,6 @@ function truncateLabel(label: string): string {
 
 export class GuardianKeys {
   constructor(private readonly deps: GuardianKeysDeps) {}
-
-  /** > 0 while a rule 4 re-sign must use the root, not W (W is the key departing). */
-  private rootSigning = 0;
 
   // ---------------------------------------------------------------------
   // Keys and the per-ward choice
@@ -304,7 +296,6 @@ export class GuardianKeys {
     const standing = keyStanding(device.guardians, this.workingPubkey());
     if (standing.as === "root") return "working";
     if (standing.as !== "working") return "root";
-    if (this.rootSigning > 0) return "root";
     if (keys.nextRoot && standing.root === keys.nextRoot.pubkey) return "working";
     if (standing.root !== keys.root.pubkey) return "root";
     return this.childReadiness(device.childId).ready ? "working" : "root";
@@ -649,23 +640,6 @@ export class GuardianKeys {
   }
 
   /**
-   * Re-sign every child's clauses with a live key before a departure (rule 4).
-   * `asRoot`: W itself is departing, so the re-sign must come from R.
-   */
-  private async resignAll(opts: { asRoot?: boolean } = {}): Promise<void> {
-    if (!this.deps.resignClauses) return;
-    if (opts.asRoot) this.rootOps(); // R must be connected to re-sign for W
-    if (opts.asRoot) this.rootSigning += 1;
-    try {
-      for (const c of this.deps.read().children) {
-        if (c.devices.some((d) => HEX64.test(d.machine))) await this.deps.resignClauses(c.id);
-      }
-    } finally {
-      if (opts.asRoot) this.rootSigning -= 1;
-    }
-  }
-
-  /**
    * Invite another parent: a co-guardian statement for R2, signed by this
    * install's root, to every ward of every child. It takes effect at each
    * ward once the new parent confirms in person there (`confirmPresence`).
@@ -703,9 +677,8 @@ export class GuardianKeys {
    * ward that reports its guardians has another root (the last root leaves
    * only by unpairing), and when no ward reports them at all.
    *
-   * Rule 4 isn't run: every key this install holds departs with it, so it has
-   * no live key to re-sign with. The other parent's next clause of each kind
-   * replaces what this install set.
+   * What this install set stays enforced until the other parent's next clause
+   * of the same kind replaces it (rule 4).
    */
   async leaveFamily(): Promise<SendReport> {
     const me = this.rootPubkey();
@@ -740,8 +713,8 @@ export class GuardianKeys {
   /**
    * Remove the other parent R2: a root removal signed by this install's root.
    * Each ward holds it pending for 72 hours and until this install confirms
-   * in person there; R2 can object meanwhile. Re-signs the clauses first
-   * (rule 4).
+   * in person there; R2 can object meanwhile. Nothing is re-signed first:
+   * R2's clauses stay enforced until a current signer replaces them (rule 4).
    */
   async removeCoGuardian(r2: string, opts: { expiresAt?: number } = {}): Promise<SendReport> {
     const key = parseGuardianKey(r2);
@@ -751,7 +724,6 @@ export class GuardianKeys {
     // install's root; a phone-held root has none, so the ward would drop it.
     this.requireSignetRoot("remove the other parent");
     this.requireNoMovedWards("remove the other parent");
-    await this.resignAll();
     const event = await this.signAsRoot((s) =>
       buildRootRemoval(s, key, {
         issuedAt: this.deps.now(),
@@ -813,8 +785,8 @@ export class GuardianKeys {
    * Withdraw a working key for good (a lost or replaced phone). Signed by its
    * binding root, which must be this install's root: sealed by this install's
    * W (another W of the same root), or by R itself when withdrawing this
-   * install's own W. Re-signs the clauses first (rule 4): with R when it is
-   * this install's own key, since W is the one departing.
+   * install's own W. Nothing is re-signed first: W's clauses stay enforced
+   * until a current signer replaces them (rule 4).
    */
   async withdrawInstall(w: string): Promise<SendReport> {
     const key = parseGuardianKey(w);
@@ -828,8 +800,6 @@ export class GuardianKeys {
     }
     this.requireNoMovedWards("withdraw that phone");
     const own = key === this.workingPubkey();
-    // Rule 4: W itself departs when it is this install's own, so R re-signs.
-    await this.resignAll({ asRoot: own });
     const event = await this.signAsRoot((s) => buildWithdrawal(s, key, { issuedAt: this.deps.now() }));
     const report = await this.fanOut(event, own ? "root" : "working-or-root");
     this.remember(event);
@@ -857,7 +827,6 @@ export class GuardianKeys {
       throw new Error("Some of your devices already use the guardian identity you were moving to. Finish that move first.");
     }
     this.requireFamilyReady("move your guardian identity");
-    await this.resignAll();
     const issuedAt = this.deps.now();
     const event = await this.signAsRoot((s) => buildRootMove(s, next.ops.pubkey, { issuedAt }));
     const w = this.workingPubkey();
