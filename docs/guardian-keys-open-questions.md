@@ -56,6 +56,8 @@ last applied), which the reference models.
 
 **Raised by:** batch 1.
 
+**Decided 2026-11-05:** *Who may sign what*: a GRANT keeps its existing skew rule, USAGE_SYNC is not gated by time, a pasted RELAYS code keeps its 600-second rule, and a PIN-only RELAYS has no age rule (rule 11).
+
 ## Cancel or objection before its statement
 
 **Where:** *Pending statements* (cancel), rule 7 (objection);
@@ -170,6 +172,8 @@ build keeps the literal reading until the design session decides; the vector
 `rule7_objection` pins it and would flip.
 
 **Raised by:** batch 1.
+
+**Decided 2026-11-05:** Rule 7 and *Delivery*: the root being removed or any active W bound to it may sign an objection, such a W may seal it, and a guardian install objects automatically.
 
 ## Removal that expires before it can take effect
 
@@ -310,6 +314,8 @@ contract everything the PIN gates besides presence tokens.
 
 **Raised by:** batch 2 (planning).
 
+**Decided 2026-11-05:** *Presence confirmation* and rule 11: the PIN travels in a gift-wrapped PIN-only RELAYS with no 600-second age limit, and the app resends it until STATUS shows `pinSet`.
+
 ## Removal notice measured from receipt
 
 **Where:** rule 7 ("takes effect at the later of the confirmation and
@@ -366,6 +372,8 @@ session may prefer to tie this to a relationship change instead of a time.
 Vector `removal_reissued_after_objection`.
 
 **Raised by:** batch 1 review.
+
+**Decided 2026-11-05:** Rule 7: an objection drops every removal of R2 by R1 that reaches the ward within 7 days of it, as anti-spam.
 
 ## A moving root escapes a pending removal
 
@@ -507,6 +515,8 @@ before it writes the new record.
 
 **Raised by:** batch 2c-A; the second paragraph by the batch 2 review.
 
+**Decided 2026-11-05:** Rule 10: the state is kept in two copies and read from either, and fails closed only when neither can be read, never rebuilt from the pairing record.
+
 ## The clause pairing floor on a ward that paired before the section
 
 **Where:** *Who may sign what* ("All existing checks (… pairing floor …) still
@@ -536,6 +546,8 @@ held the slot for ever, and the remaining guardians could not replace a
 permissive rule.)
 
 **Raised by:** batch 2c-A; corrected by the batch 2 review.
+
+**Decided 2026-11-05:** *Who may sign what*: a CLAUSE has no pairing floor, so the question no longer arises; a GRANT and a RELAYS keep theirs.
 
 ## One presence token at a time
 
@@ -584,6 +596,8 @@ while offline, does not. Should the ACK and STATUS name this refusal?
 is reported as `refused`, like any other. Batch 2a review, L1.
 
 **Raised by:** batch 2c-A.
+
+**Decided 2026-11-05:** a time ahead of the ward's clock is clamped, never refused (*Who may sign what*), and STATUS `guardians.clamped` counts the clamped events so a parent can see that a clock is adrift.
 
 ## Presence code encoding (build-defined)
 
@@ -817,6 +831,8 @@ screen.
 
 **Raised by:** batch 2c-B.
 
+**Decided 2026-11-05:** Rule 5: pending statements are not shown on the child-facing screen, CLI or any world-readable file, only in the privileged confirm-in-person flow.
+
 ## The roster's subject for a child with no dependant key
 
 **Where:** *Family roster* (`subject` per child); `mergeRoster`'s 64-hex
@@ -855,6 +871,8 @@ on pending entries would remove the guess.
 
 **Raised by:** batch 3a.
 
+**Decided 2026-11-05:** STATUS `guardians.pending[].signer` names the key that signed the removal, which the objection names as its `p`.
+
 ## Rule 4 when a parent leaves
 
 **Where:** rule 4 ("A guardian app re-signs the current clause set with a
@@ -879,6 +897,8 @@ do re-sign first, and abort if the re-sign can't be sent:
   of that kind stays enforced until someone sends one.
 
 **Raised by:** batch 3a; widened by the batch 3a review.
+
+**Decided 2026-11-05:** Rule 4: a guardian app does not re-sign its copy of the rules when it withdraws, removes, leaves or moves, so leaving overwrites nothing.
 
 ## A working-key PAIR_OFFER to a ward that predates the section
 
@@ -948,6 +968,8 @@ it has been heard from (fail-closed).
 **Raised by:** batch 3a; tightened after the batch 3a review (it skipped
 devices not heard from).
 
+**Decided 2026-11-05:** *Phone-held roots*: connecting My Signet as a new root is a root move (rule 8), offered instead of refused, with no re-pair.
+
 ## Moving a phone-held root
 
 **Where:** rule 8; open question "Presence confirmation details" (the
@@ -964,6 +986,8 @@ family that wants My Signet waits for a design decision (a fresh working key
 on the phone, or a re-pair).
 
 **Raised by:** batch 3a.
+
+**Decided 2026-11-05:** *Phone-held roots*: R2 approves the phone's W inline, R signs the move, the parent confirms at each ward with the phone, and no re-pair is needed.
 
 ## Android pairing under a Signet root
 
@@ -1015,6 +1039,8 @@ the lost W withdrawn. Design session.
 
 **Raised by:** batch 3a.
 
+**Decided 2026-11-05:** *Phone-held roots*: the key backup carries the root, never a working key; a restored install mints a fresh W and has it approved.
+
 ## When the guardian app sends W's approval
 
 **Where:** *Delivery and the two seal exceptions* ("A W sends its own
@@ -1064,6 +1090,8 @@ ward refuses an unknown RELAYS field outright). The derivation matches
 
 **Raised by:** batch 3a.
 
+**Decided 2026-11-05:** *Presence confirmation*: the guardian app asks for at least 6 digits; the ward sees only the record and sets no length.
+
 ## The typed presence code needs the statement's id
 
 **Where:** *Presence confirmation* (the confirmation names the pending
@@ -1080,6 +1108,8 @@ the full code. A STATUS `id` on pending entries would let the short form
 cover invitations.
 
 **Raised by:** batch 3b.
+
+**Decided 2026-11-05:** STATUS `guardians.pending[].id` carries each pending statement's event id, so a typed code can name any of them.
 
 ## Whether a ward phone has a guardian PIN
 
@@ -1099,6 +1129,8 @@ flag (`pinSet: true`) would remove the guess.
 
 **Raised by:** batch 3b.
 
+**Decided 2026-11-05:** STATUS `guardians.pinSet` says whether a PIN is set (*Presence confirmation*).
+
 ## Removing the other parent from a phone-held root
 
 **Where:** rule 7 (presence by an install bound to R1); `applyPresenceConfirm`
@@ -1116,6 +1148,8 @@ otherwise. `removeCoGuardian` and `confirmPresence` refuse it too
 parent confirms with their own working key.
 
 **Raised by:** batch 3b; updated after the batch 3 review.
+
+**Decided 2026-11-05:** *Phone-held roots*: the phone mints a fresh W that R approves, and that W confirms presence for the removal, bound to R (rule 7).
 
 ## Checking the invited identity when joining
 
@@ -1233,6 +1267,8 @@ second live signer; design session.
 
 **Raised by:** batch 3a review; the way to finish by the batch 3 review.
 
+**Decided 2026-11-05:** Rule 8: a move confirmed on some wards and lapsed on others can only be finished, by restarting it to the same R2.
+
 ## Who decides which roots may send a roster
 
 **Where:** *Family roster* ("An install accepts a roster only from a W
@@ -1293,6 +1329,8 @@ back from STATUS) would let the joining install start from the rules in
 force; design session.
 
 **Raised by:** batch 3 review.
+
+**Decided 2026-11-05:** *Family roster*: the roster carries the rules in force per `(subject, kind, device)`, so a joining parent's app starts from the family's rules.
 
 ## A second install of the same identity
 
@@ -1369,6 +1407,8 @@ by the next of its kind. Moving the record into the household state (so the
 backup carries it) is left for a later batch.
 
 **Raised by:** batch 3 review.
+
+**Decided 2026-11-05:** Rule 4: nothing is re-signed before a departure; the departed keys' clauses stay enforced until a current signer replaces them.
 
 ## Anchoring a joining parent's trust
 
@@ -1535,3 +1575,45 @@ by the root (so My Signet is asked), and never wraps one, so a working-key code
 is accepted by the ward but not yet produced by the app.
 
 **Raised by:** bringing the branch up to main.
+
+**Decided 2026-11-05:** Rule 11: a working key may set the battery settings and `guardianPin` but must leave the relay list unchanged; only a pinned root may change it.
+
+## A future-dated statement dropped on arrival is not remembered
+
+**Where:** *Who may sign what* (a clamped statement's `id` is remembered for
+its slot); *Pending statements*; `StoredStatement.remembered`,
+`MAX_REMEMBERED_PER_STATEMENT_SLOT`.
+
+**Question:** a statement whose `issuedAt` was clamped is remembered only
+once it is stored. One dropped on arrival is never stored: objected by a held
+objection, already expired, or cancelled by a held cancel received in the
+same second. Its `id` is not remembered, so a relay that re-delivers it later
+gives it a fresh effective time, and it may pend again.
+
+**Build's interim reading:** accepted, documented. It is bounded: every
+pending co-guardian, removal or move still needs presence confirmation at the
+ward before it takes effect, and an objection blocks a re-delivered removal
+for 7 days (rule 7). A guardian install that sees in STATUS a statement it
+cancelled signs and sends a fresh cancel (*Pending statements*).
+
+**Raised by:** build 2026-11-05.
+
+## A clause seeded from a pre-upgrade store has no event id
+
+**Where:** *Who may sign what* (a clamped clause's `id` is remembered for its
+`(subject, kind)`); `charter-spine` `SlotSeed::Held`, which seeds a slot from
+the clause store the first time a clause for it arrives.
+
+**Question:** a slot seeded from a clause stored before the upgrade has the
+held clause's signer and `issuedAt`, but no event id. If that clause was far
+in the future, its `id` cannot be remembered, so once a newer clause replaces
+it, a relay re-delivering the old one cannot be refused by `id`.
+
+**Build's interim reading:** accepted, documented. It is bounded by the
+2-day gift-wrap window on wards from before the section: a wrap whose
+timestamp is more than 2 days from the ward's clock is refused (*Wrap
+freshness jitter*), so a relay can re-deliver such a clause only while its
+wrap is inside that window. Every clause that arrives after the upgrade is
+remembered as usual.
+
+**Raised by:** build 2026-11-05.

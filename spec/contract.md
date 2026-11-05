@@ -2792,6 +2792,11 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
        A parent who wants to go leaves by self-removal, which applies at once.
        A stolen phone whose W is still active could object for its root; it
        is answered by withdrawing that W, not by removing the parent.
+     - An objection also blocks a removal re-issued after it: every removal
+       of R2 signed by R1 that reaches the ward within **7 days** of the
+       objection reaching it is dropped, on arrival, at confirmation and when
+       its notice ends. After that a newer removal pends as usual. With the
+       automatic objection this is anti-spam, not the defence.
    - Removal never leaves a ward with no roots; a removal that would is
      refused.
    - Once a removal applies, every pending statement signed by R2 is dropped.
@@ -2823,6 +2828,14 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
       A root at its quota can't approve new working keys until a re-pair;
       other roots are unaffected.
     - A ward persists a statement before it applies it.
+    - A ward keeps its guardian-keys state in two copies, each written
+      atomically, and reads either. If neither can be read, it fails closed:
+      the signer set is empty, so nothing signed is accepted, nothing is
+      encrypted to a key that may have departed, and the stored clauses stay
+      enforced. It never rebuilds the state from the pairing record, which
+      would re-admit a root since removed or moved. The ward's own screen
+      says that rules can't be changed. Recovery is a local unpair by an
+      administrator on Linux, or a re-pair or factory reset on Android.
 11. **Re-pairing and relays on a ward with this section.**
     - Pinning a different root in place of a current one happens only through
       a confirmed root move, or a local unpair by an administrator. No signer,
@@ -2877,6 +2890,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
     again on each STATUS without it.
   - A ward with no PIN set can't mint a token. The guardian app sets one
     before it offers anything that needs presence.
+  - The guardian app asks for at least **6 digits**. The ward never sees the
+    PIN, only the record, so it sets no length of its own.
   - Wrong entries back off: after 5 failures the next try waits 1 minute,
     doubling to a 1-hour cap. The counter survives restarts.
 - The ward then shows the one-time token as a code to scan, with a short form
