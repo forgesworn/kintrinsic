@@ -106,13 +106,13 @@ function ward(machine: string, platform: Device["platform"], label: string, guar
     devicePubkey: machine,
     pinnedKey: pinned,
     keysViewAt: T - 100,
-    appVersionCode: platform === "android" ? 49 : 713,
+    appVersionCode: platform === "android" ? 54 : 803,
     guardians,
   };
 }
 
 const status = (machine: string, ts: number, guardians: StatusGuardians): DeviceStatus =>
-  ({ v: 1, machine, ts, appVersionCode: 49, guardians }) as unknown as DeviceStatus;
+  ({ v: 1, machine, ts, appVersionCode: 54, guardians }) as unknown as DeviceStatus;
 
 const code = (machine: string, d: string, s: string) =>
   `charter://presence?m=${machine}&t=${"0".repeat(32)}&d=${encodeURIComponent(d)}&s=${s}`;
@@ -131,6 +131,9 @@ function intakeFor(b: Install): WrapIngestContext & { outcomes: string[] } {
     hasRequest: () => false,
     ingestStatus: () => {},
     ingestRequest: () => false,
+    seenAudits: new Set(),
+    hasAudit: () => false,
+    ingestAudit: () => false,
     ingestRoster: (inbound) => {
       const r = b.gk.receiveRoster(inbound);
       outcomes.push(r.ok ? "ok" : r.reason);

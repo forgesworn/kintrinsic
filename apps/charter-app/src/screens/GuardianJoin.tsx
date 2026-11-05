@@ -59,7 +59,7 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
         <p className="card-sub">
           {hasDevices
             ? "This phone already looks after devices with a guardian key of its own, so it can't join another parent's family. Use Kintrinsic on another phone to join."
-            : "This phone keeps a guardian key of its own. To join another parent's family with My Signet, turn off parent approval first (Family → Parent approval)."}
+            : "This phone keeps a guardian key of its own. To join another parent's family with My Signet, turn off parent approval first (Settings → Parent approval)."}
         </p>
         <Button variant="ghost" block onClick={onBack}>
           Back
@@ -75,7 +75,7 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
       <Card>
         <h2 className="card-title">Scan the other parent's guardian code</h2>
         <p className="card-sub">
-          This phone shares the family only with the parent who invited you. On their phone, they open Family →
+          This phone shares the family only with the parent who invited you. On their phone, they open Settings →
           Guardians → Show my guardian code. Scan it here, in person.
         </p>
         <div className="stack" style={{ marginTop: 12 }}>
@@ -121,7 +121,7 @@ export default function GuardianJoin({ onBack, onConfirm }: { onBack: () => void
         </p>
         <p className="card-sub">
           Adding a second phone for your own guardian identity? Nothing waits to be confirmed then. Instead connect one
-          device by its device code: on Family, add the child, choose Set up a device, then type the code the device
+          device by its device code: in Settings, add the child; on the child's settings choose Set up a device, then type the code the device
           shows. Your other phone then shares the rest of the family.
         </p>
         {roster.length > 0 && (

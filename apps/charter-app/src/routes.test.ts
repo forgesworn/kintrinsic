@@ -119,6 +119,7 @@ describe("route table", () => {
     expect(resolveRoute("settings", FAMILY)).toEqual({ kind: "settings", sub: "" });
     expect(resolveRoute("settings/key-backup", FAMILY)).toEqual({ kind: "settings", sub: "key-backup" });
     expect(resolveRoute("family", FAMILY)).toEqual({ kind: "settings", sub: "" });
+    expect(resolveRoute("settings/guardians/join", FAMILY)).toEqual({ kind: "settings", sub: "guardians/join" });
     expect(resolveRoute("family/anything", FAMILY)).toEqual({ kind: "settings", sub: "" });
   });
 

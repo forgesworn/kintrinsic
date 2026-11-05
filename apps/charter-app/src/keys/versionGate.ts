@@ -18,11 +18,14 @@ import type { Device } from "../domain/types";
  * The first ward builds that implement *Guardian roots and working keys*.
  *
  * MUST be recorded in spec/contract.md (*Versioning*) when these builds are
- * released; until then they are the build's own numbers.
+ * released. Until then each is one above the last build released without the
+ * section (ward 0.7.4, code 53; Linux 0.8.2), so a released ward can never
+ * count as ready. See docs/guardian-keys-open-questions.md, "The versioning
+ * gate's thresholds before release".
  */
 export const GUARDIAN_KEYS_MIN_VERSION: Readonly<Record<Device["platform"], number>> = {
-  android: 49,
-  linux: 713,
+  android: 54,
+  linux: 803,
 };
 
 export type WardReadiness =

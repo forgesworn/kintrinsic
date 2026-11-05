@@ -86,7 +86,7 @@ function ward(machine: string, platform: Device["platform"], label: string, guar
     devicePubkey: machine,
     pinnedKey: R_A,
     keysViewAt: T - 100,
-    appVersionCode: platform === "android" ? 49 : 713,
+    appVersionCode: platform === "android" ? 54 : 803,
     guardians,
   };
 }
@@ -97,7 +97,7 @@ function g(roots: { root: string; keys: string[] }[], pending: StatusGuardians["
 
 /** A ward heartbeat, with only what admission and the keys view read. */
 function status(machine: string, ts: number, guardians: StatusGuardians, platform: Device["platform"]): DeviceStatus {
-  return { v: 1, machine, ts, appVersionCode: platform === "android" ? 49 : 713, guardians } as unknown as DeviceStatus;
+  return { v: 1, machine, ts, appVersionCode: platform === "android" ? 54 : 803, guardians } as unknown as DeviceStatus;
 }
 
 const presenceCode = (machine: string, d: string, statement: string) =>
@@ -119,6 +119,9 @@ function intakeFor(b: Install): WrapIngestContext {
     hasRequest: () => false,
     ingestStatus: () => {},
     ingestRequest: () => false,
+    seenAudits: new Set(),
+    hasAudit: () => false,
+    ingestAudit: () => false,
     ingestRoster: (inbound) => {
       const r = b.gk.receiveRoster(inbound);
       if (!r.ok) return r.reason;

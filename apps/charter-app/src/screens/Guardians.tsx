@@ -107,7 +107,7 @@ export default function Guardians({ sub }: { sub: string }) {
         <Card>
           <h2 className="card-title">Scan their new guardian code</h2>
           <p className="card-sub">
-            On the other parent's phone: Family → Guardians → Show my guardian code. Scan it here, in person.
+            On the other parent's phone: Settings → Guardians → Show my guardian code. Scan it here, in person.
           </p>
           <div className="stack" style={{ marginTop: 12 }}>
             <AnchorScanFields onAnchored={() => back()} />
@@ -219,8 +219,8 @@ function Overview() {
   return (
     <>
       <div style={{ margin: "0 4px 12px" }}>
-        <Button variant="ghost" onClick={() => (window.location.hash = "/family")}>
-          ‹ Family
+        <Button variant="ghost" onClick={() => (window.location.hash = "/settings")}>
+          ‹ Settings
         </Button>
       </div>
 

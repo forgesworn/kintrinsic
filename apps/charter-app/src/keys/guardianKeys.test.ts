@@ -99,7 +99,7 @@ function tag(e: SignedEvent, name: string) {
 function readyWard(machine: string, platform: "android" | "linux", extraRoots: { root: string; keys: string[] }[] = []) {
   return device(machine, platform, {
     statusSeen: true,
-    appVersionCode: platform === "android" ? 49 : 713,
+    appVersionCode: platform === "android" ? 54 : 803,
     guardians: { roots: [{ root: R, keys: [W] }, ...extraRoots], pending: [], tombstones: 0, relays: ["wss://ward.example", "wss://b.example"] },
   });
 }
@@ -256,7 +256,7 @@ describe("which key signs for a ward", () => {
     expect(h.gk.childReadiness("c1").wards[1].readiness).toEqual({ ready: false, reason: "silent" });
 
     // An old sibling ward also closes it.
-    child.devices[1] = device(LAPTOP, "linux", { statusSeen: true, appVersionCode: 712 });
+    child.devices[1] = device(LAPTOP, "linux", { statusSeen: true, appVersionCode: 802 });
     expect(h.gk.keyFor(PHONE)).toBe("root");
     child.devices[1] = readyWard(LAPTOP, "linux");
     expect(h.gk.keyFor(PHONE)).toBe("working");
@@ -742,7 +742,7 @@ describe("guardian PIN", () => {
       id: "c2",
       name: "Jo",
       colour: "#111",
-      devices: [device(old, "android", { name: "Old tablet", statusSeen: true, appVersionCode: 48 })],
+      devices: [device(old, "android", { name: "Old tablet", statusSeen: true, appVersionCode: 53 })],
     };
     const h = harness([child, sibling]);
     await connectSignetRoot(h);
@@ -902,7 +902,7 @@ describe("anchoring the other parent's root (batch 3 re-review N-H1)", () => {
     h.gk.notePresenceStatus({
       machine: PHONE,
       ts: T + 10,
-      appVersionCode: 49,
+      appVersionCode: 54,
       // A presence ward can claim anything, even keys under a trusted root.
       guardians: { roots: [{ root: R2, keys: [W_X] }], pending: [], tombstones: 0, relays: [] },
     });

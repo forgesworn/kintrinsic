@@ -147,6 +147,9 @@ describe("a departed key's last STATUS (farewell)", () => {
       hasRequest: () => false,
       ingestStatus: () => seen.push("status"),
       ingestRequest: () => true,
+      seenAudits: new Set(),
+      hasAudit: () => false,
+      ingestAudit: () => false,
       ingestFarewell: (f) => seen.push(`farewell:${f.machine}`),
     };
     expect(ingestWrap(wardWrap(farewellBody([]), W), ctx)).toEqual({ kind: "farewell" });

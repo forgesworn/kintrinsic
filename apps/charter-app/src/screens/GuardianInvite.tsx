@@ -64,11 +64,11 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
           It lasts a week. Now the other parent:
         </p>
         <ol className="card-sub" style={{ paddingLeft: 20, margin: "4px 0 0" }}>
-          <li>opens Kintrinsic on their phone and chooses Family → Guardians → Join a family;</li>
+          <li>opens Kintrinsic on their phone and chooses Settings → Guardians → Join a family;</li>
           <li>connects their My Signet (the identity you just invited);</li>
           <li>scans your guardian code (below) with their phone, so it trusts your family list and no one else's;</li>
           <li>
-            visits each device, asks it for a presence code, and scans it with Kintrinsic (Family → Guardians →
+            visits each device, asks it for a presence code, and scans it with Kintrinsic (Settings → Guardians →
             Confirm in person){wards.length > 0 ? `: ${wards.map((w) => w.device.label).join(", ")}` : ""}.
           </li>
         </ol>
@@ -78,7 +78,7 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
         </p>
         <div style={{ fontWeight: 600, marginTop: 8 }}>Your guardian code</div>
         <GuardianCodeCard />
-        <p className="card-sub">You can show it again later: Family → Guardians → Show my guardian code.</p>
+        <p className="card-sub">You can show it again later: Settings → Guardians → Show my guardian code.</p>
         {hasAndroid && (
           <p className="card-sub">
             A ward phone asks for the guardian PIN before it shows the code. Tell them the PIN in person, never where

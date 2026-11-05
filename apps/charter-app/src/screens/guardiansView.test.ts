@@ -5,6 +5,7 @@ import {
   androidWardsWithoutPin,
   durationWords,
   familyWards,
+  guardiansSubroute,
   leaveGate,
   moveGate,
   pendingFor,
@@ -126,5 +127,12 @@ describe("guardians view", () => {
     expect(durationWords(90)).toBe("1 minute");
     expect(durationWords(10)).toBe("less than a minute");
     expect(stripNostrPrefix(" nostr:npub1xyz ")).toBe("npub1xyz");
+  });
+
+  it("finds the Guardians screens under Settings", () => {
+    expect(guardiansSubroute("#/settings/guardians")).toBe("");
+    expect(guardiansSubroute("#/settings/guardians/join")).toBe("join");
+    expect(guardiansSubroute("#/settings")).toBeNull();
+    expect(guardiansSubroute("#/settings/add-child")).toBeNull();
   });
 });
