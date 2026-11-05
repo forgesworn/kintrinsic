@@ -3,6 +3,8 @@
 Status: **agreed 2026-10-28**, not yet built. Where this note and `spec/contract.md` (*Guardian roots and working keys*) differ, the contract wins: it carries the fixes from its independent review. Once agreed, the wire
 parts move into `spec/contract.md` and this note is cut down to the reasoning.
 
+Updated 2026-11-05: several decisions below were changed after review (statement kind 31120 instead of 30078; no re-sign before a departure; times ahead of a device's clock are clamped, not refused; a working key may object for its parent; relay-list changes need the parent's identity). `spec/contract.md` is authoritative; `docs/guardian-keys-open-questions.md` records each decision; `docs/guardian-keys.md` explains the result for parents.
+
 ## Why
 
 Today a family has one guardian key. It is generated and kept in the guardian
