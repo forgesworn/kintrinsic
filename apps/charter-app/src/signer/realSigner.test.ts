@@ -1137,7 +1137,11 @@ describe("RealSigner re-sends a rule set on another phone as it is (decision 3)"
     await signer.connect("local");
     await signer.signClause("child_sam", devicePolicy, { resend: true });
     const budget = published.map((w) => unwrapClause(w, DEV1, GUARDIAN).payload).find((p) => p.kind === "budget")!;
-    expect(budget).toEqual(JSON.parse(other.content));
+    // The body as the other phone set it, dated now: a newly paired phone
+    // refuses a clause issued before its pairing.
+    const stored = JSON.parse(other.content);
+    expect(budget).toEqual({ ...stored, issuedAt: 1_700_000_000, body: { ...stored.body, issuedAt: 1_700_000_000 } });
+    for (const w of published) expect(w.created_at).toBeGreaterThan(1_699_000_000);
     expect(kept.map((r) => JSON.parse(r.inner.content).kind)).toEqual(["schedule"]);
 
     // A fresh decision sends this phone's own.

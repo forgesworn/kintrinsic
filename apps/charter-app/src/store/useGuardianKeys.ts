@@ -263,9 +263,15 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
     ]);
     if (sig === lastRoster.current) return;
     lastRoster.current = sig;
-    void keys.sendRoster().catch(() => {
-      lastRoster.current = null;
-    });
+    void keys
+      .sendRoster()
+      .then((r) => {
+        // A child's roster over 48 KB left rules out to fit (decision 2).
+        if (r.dropped.length > 0) console.warn("family roster: rules left out to fit", r.dropped);
+      })
+      .catch(() => {
+        lastRoster.current = null;
+      });
   }, [children, rootKey, keys, rules]);
 
   const approveInstall = useCallback<GuardianKeysApi["approveInstall"]>(

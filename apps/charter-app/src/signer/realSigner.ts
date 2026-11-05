@@ -490,15 +490,18 @@ export class RealSigner implements Signer {
     const signed = new RulesSigned();
     const wrapOne = async (clause: ClausePayload, device: string) => {
       // A re-send keeps a rule set on another phone that this phone can't
-      // show as it was: its payload unchanged (same body, same issuedAt),
-      // signed by this install because a ward takes a clause only from its
-      // sealer. Not kept for the roster: the held rule stays the other
-      // phone's own.
+      // show as it was: its body unchanged, signed by this install because a
+      // ward takes a clause only from its sealer, and dated now because a
+      // newly set-up phone refuses a clause issued before it was paired (and
+      // a relay read looks for recent wraps). Not kept for the roster: the
+      // held rule stays the other phone's own.
       const kept = opts.resend ? this.deps.inForce?.(childId, clause.kind, device) : undefined;
       if (kept) {
+        const stored = JSON.parse(kept.content) as ClausePayload;
+        const body = { ...stored.body, ...("issuedAt" in stored.body ? { issuedAt } : {}) } as ClausePayload["body"];
         const ops = this.sealerFor(device, guardian);
-        const inner = await signClauseInner(JSON.parse(kept.content) as ClausePayload, ops, kept.created_at);
-        return giftWrapSigned(inner, device, ops, kept.created_at);
+        const inner = await signClauseInner({ ...stored, issuedAt, body }, ops, issuedAt);
+        return giftWrapSigned(inner, device, ops, issuedAt);
       }
       return this.wrapRule(clause, device, guardian, issuedAt, signed);
     };
