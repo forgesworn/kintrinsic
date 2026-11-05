@@ -121,8 +121,9 @@ cd ../linux && cargo run -q -p xtask -- deb
      accepted and About shows the new battery line. A second paste of the same
      code is refused.
    - **Locked Settings row:** lock the ward (a schedule or a used-up limit),
-     then open **Settings** from the lock screen. **Expect:** Wi-Fi and
-     Bluetooth open and obey the tiers above. Accounts, app controls (force
+     then use the Wi-Fi and Bluetooth buttons on the lock screen. **Expect:**
+     the phone's own Settings pages open and obey the tiers above, and no
+     third-party app can serve them. Accounts, app controls (force
      stop, disable, clear) and default apps are restricted, and lifted again on
      unlock. The default dialer still works past the lock, and a call from the
      lock screen connects, exactly as on ward 0.7.4.
