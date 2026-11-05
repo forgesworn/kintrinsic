@@ -1,4 +1,6 @@
 import "./rule-editor.css";
+import { SetElsewhereGate } from "./SetElsewhere";
+import { TIME_KINDS } from "./setElsewhereView";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Banner, Button, Card } from "../components/ui";
 import { RuleSaveBar, useLeaveGuard } from "../components/RuleSaveBar";
@@ -154,14 +156,16 @@ export default function TimeEditor({
     );
   }
   return (
-    <TimeEditorForm
-      child={child}
-      policy={policy}
-      existing={existing}
-      template={template ?? "custom"}
-      name={name}
-      onDone={done}
-    />
+    <SetElsewhereGate child={child} kinds={TIME_KINDS}>
+      <TimeEditorForm
+        child={child}
+        policy={policy}
+        existing={existing}
+        template={template ?? "custom"}
+        name={name}
+        onDone={done}
+      />
+    </SetElsewhereGate>
   );
 }
 

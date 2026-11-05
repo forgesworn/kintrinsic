@@ -3,13 +3,8 @@ import { Button, Card } from "../components/ui";
 import { QRScanner } from "../components/QRScanner";
 import { useCharter } from "../store/store";
 import { parsePresenceCode, parsePresenceToken } from "../keys/presenceCode";
-import {
-  familyWards,
-  myRootOf,
-  pendingFor,
-  pendingTitle,
-  presenceCodeFrom,
-} from "./guardiansView";
+import { familyWards, myRootOf, pendingTitle, presenceCodeFrom, typedPresenceItems } from "./guardiansView";
+import PhoneJoinNote from "./PhoneJoinNote";
 
 /** Where each kind of ward shows its presence code. */
 export function PresenceWhere() {
@@ -98,6 +93,7 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
             : "It takes effect there as soon as the device has it."}{" "}
           The device's own screen shows it once it's done.
         </p>
+        {result.kind === "coguardian" && <PhoneJoinNote />}
         <div className="stack" style={{ marginTop: 12 }}>
           <Button
             block
@@ -119,18 +115,11 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
     );
   }
 
-  // The short form: which device and which pending item it is for. Only an
-  // item this phone sent can be picked, since only then does it know the
-  // statement the confirmation names; an invitation must be scanned.
+  // The short form: which device and which pending item it is for. Any
+  // pending item a device reports with its id can be picked, so a joining
+  // parent whose device already reports to this phone can type it too.
   if (token) {
-    const items = wards.flatMap((w) =>
-      pendingFor(w.device.guardians, guardianKeys.state, me)
-        // Only what this phone itself confirms: a removal it started, or its
-        // own identity move. An invitation it sent is confirmed by the other
-        // parent's phone, never this one.
-        .filter((p) => p.statement && p.role === "mine" && p.kind !== "coguardian")
-        .map((p) => ({ machine: w.device.devicePubkey, device: w.device.label, ...p })),
-    );
+    const items = typedPresenceItems(wards, guardianKeys.state, me, Math.floor(Date.now() / 1000));
     const devicesWithItems = [...new Map(items.map((i) => [i.machine, i.device])).entries()];
     const forDevice = items.filter((i) => i.machine === machine);
     const chosen = forDevice.find((i) => i.d === d);
@@ -139,8 +128,8 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
         <h2 className="card-title">Which device and what for?</h2>
         {items.length === 0 ? (
           <p className="card-sub">
-            The short code only works for something this phone asked for. To accept an invitation, scan the code on
-            the device instead.
+            None of your devices has told this phone about a change it can confirm. Scan the code on the device
+            instead: that always works, including for an invitation on a device this phone doesn't know yet.
           </p>
         ) : (
           <div className="stack" style={{ marginTop: 8 }}>
@@ -178,7 +167,7 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
             <Button
               block
               disabled={busy || !chosen}
-              onClick={() => chosen && void confirm(presenceCodeFrom(chosen.machine, token, chosen.d, chosen.statement!))}
+              onClick={() => chosen && void confirm(presenceCodeFrom(chosen.machine, token, chosen.d, chosen.statement))}
             >
               {busy ? "Sending…" : "Confirm in person"}
             </Button>

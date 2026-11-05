@@ -154,6 +154,17 @@ export interface SignOutcomeAt extends SignOutcome {
   issuedAt: number;
 }
 
+/** How `signClause` treats the policy it is given. */
+export interface SignClauseOptions {
+  /**
+   * The child's standing rules going out again (a newly set-up phone), not
+   * a fresh decision: a kind whose rule in force was set on another phone,
+   * and that this phone's screen can't hold, is sent as that phone set it
+   * (decision 3).
+   */
+  resend?: boolean;
+}
+
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
   signRelayConfig?(machine: string, relays: string[], label: string, battery?: import("../domain/battery").BatterySettings): Promise<string>;
@@ -170,7 +181,7 @@ export interface Signer {
   setAutoSign(on: boolean): Promise<void>;
 
   /** Sign a rule change (a new/updated policy) for a child. */
-  signClause(childId: string, policy: Policy): Promise<SignOutcome>;
+  signClause(childId: string, policy: Policy, opts?: SignClauseOptions): Promise<SignOutcome>;
 
   /**
    * Publish each device its consolidated cross-device usage view
@@ -256,14 +267,6 @@ export interface Signer {
     devicePubkey: string,
     grant: { allow: boolean; until?: number },
   ): Promise<SignOutcomeAt>;
-
-  /**
-   * Rule 4 (guardian keys): re-sign the latest gift, stand-down, maintenance,
-   * update and debugging clause this install sent to each of the child's
-   * devices, with a fresh `issuedAt`. Throws `QueuedForHomeNetworkError` when
-   * any of it was only held for the home network. Absent = nothing recorded.
-   */
-  resignStanding?(childId: string): Promise<SignOutcome>;
 
   /**
    * Sign + publish a parent-gated RELEASE to a device's machine pubkey — the

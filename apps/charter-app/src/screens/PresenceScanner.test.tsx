@@ -2,9 +2,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PresenceScanner from "./PresenceScanner";
-import { presenceCodeFrom } from "./guardiansView";
+import { PHONE_JOIN_DONE, presenceCodeFrom } from "./guardiansView";
 import {
   LAPTOP,
+  ME,
   OTHER,
   STATEMENT,
   TOKEN,
@@ -72,6 +73,28 @@ describe("presence scanner", () => {
     expect(container.textContent).toContain("Sent to Laptop.");
   });
 
+  it("a parent who joined with this phone only is told what to back up, after confirming the invitation", async () => {
+    const invite = `kintrinsic/guardian/${ME}`;
+    const code = presenceCodeFrom(LAPTOP, TOKEN, invite, STATEMENT);
+    s.guardianKeys.state = { ...s.guardianKeys.state, root: { ...signetRoot()!, via: "phone" } };
+    act(() => root.render(<PresenceScanner key="phone" />));
+    await act(async () => button(container, "Scan the code")!.click());
+    await act(async () => {
+      scanner.onScan!(code);
+    });
+    expect(container.textContent).toContain("Confirmation sent");
+    expect(container.textContent).toContain(PHONE_JOIN_DONE);
+    expect(button(container, "Move my identity to My Signet")).toBeDefined();
+  });
+
+  it("a My Signet parent sees no phone-only note after confirming", async () => {
+    await act(async () => button(container, "Scan the code")!.click());
+    await act(async () => {
+      scanner.onScan!(valid);
+    });
+    expect(container.textContent).not.toContain(PHONE_JOIN_DONE);
+  });
+
   it("keeps scanning past a QR that isn't a presence code", async () => {
     await act(async () => button(container, "Scan the code")!.click());
     expect(scanner.onScan!("https://example.com")).toBe(false);
@@ -102,5 +125,20 @@ describe("presence scanner", () => {
     act(() => typeInto(itemSelect, removal));
     await act(async () => button(container, "Confirm in person")!.click());
     expect(s.guardianKeys.confirmPresence).toHaveBeenCalledWith(valid);
+  });
+
+  it("takes the short form for an invitation the device reports with its id (D10)", async () => {
+    const invite = `kintrinsic/guardian/${ME}`;
+    const ID = "9".repeat(64);
+    const g = guardians({ pending: [{ d: invite, id: ID, kind: "coguardian", expiresAt: 9_999_999_999 }] });
+    s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys: { root: signetRoot() } });
+    store.current = s;
+    act(() => root.render(<PresenceScanner key="invite" />));
+    act(() => typeInto(container.querySelector("input")!, TOKEN));
+    await act(async () => button(container, "Use this code")!.click());
+    act(() => typeInto([...container.querySelectorAll("select")][0], LAPTOP));
+    act(() => typeInto([...container.querySelectorAll("select")][1], invite));
+    await act(async () => button(container, "Confirm in person")!.click());
+    expect(s.guardianKeys.confirmPresence).toHaveBeenCalledWith(presenceCodeFrom(LAPTOP, TOKEN, invite, ID));
   });
 });

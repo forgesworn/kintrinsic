@@ -12,7 +12,7 @@ import { npubOf } from "./guardiansView";
  * machine (docs/guardian-keys-open-questions.md, "Anchoring a joining
  * parent's trust").
  */
-export function GuardianCodeCard() {
+export function GuardianCodeCard({ intro }: { intro?: string } = {}) {
   const { guardianKeys } = useCharter();
   const root = guardianKeys.state.root?.pubkey;
   const npub = root ? npubOf(root) : null;
@@ -36,16 +36,16 @@ export function GuardianCodeCard() {
   if (!npub) {
     return (
       <p className="card-sub" style={{ margin: 0 }}>
-        Your guardian identity is kept on this phone, so there's no guardian code to share. Connect My Signet as your
-        guardian identity first.
+        Your guardian identity is kept on this phone and has no guardian code yet. It gets one when you first invite a
+        parent: invite them, then show them this code.
       </p>
     );
   }
   return (
     <div className="stack" style={{ gap: 8 }}>
       <p className="card-sub" style={{ margin: 0 }}>
-        The parent joining your family scans this with their phone (Join a family → Scan the other parent's guardian
-        code). Show it to them in person.
+        {intro ??
+          "The parent joining your family scans this with their phone (Join a family → Scan the other parent's guardian code). Show it to them in person."}
       </p>
       {src && (
         <img

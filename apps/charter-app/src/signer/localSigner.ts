@@ -8,7 +8,7 @@ import {
 } from "nostr-tools";
 import type { GuardianOps } from "../wire/giftwrap";
 import type { Policy, SignerState } from "../domain/types";
-import { RealSigner, type ChildTarget } from "./realSigner";
+import { RealSigner, type ChildTarget, type RealSignerDeps } from "./realSigner";
 import { loadOrCreateGuardianKey } from "./guardianKey";
 import type { ConfirmGate } from "./mockSigner";
 import { localRelayAuth } from "./relayAuth";
@@ -30,6 +30,16 @@ export interface LocalSignerConfig {
   initial?: SignerState;
   /** Home-network delivery bookkeeping (device names, delivery tracking). */
   localRoute?: LocalRouteHooks;
+  /**
+   * Per-ward key choice (see RealSignerDeps): during a phone-held identity's
+   * move, a device that already follows the new identity takes the rules
+   * from this phone's day-to-day key, not its old key.
+   */
+  pickOps?: RealSignerDeps["pickOps"];
+  /** Keep a rule change's signed clauses for the family roster (Q3). */
+  onRulesSigned?: RealSignerDeps["onRulesSigned"];
+  /** A rule set on another phone to re-send as it is (decision 3). */
+  inForce?: RealSignerDeps["inForce"];
 }
 
 /**
@@ -75,5 +85,8 @@ export function createLocalSigner(config: LocalSignerConfig): RealSigner {
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),
     confirmGate: config.confirmGate,
     initial: config.initial,
+    pickOps: config.pickOps,
+    onRulesSigned: config.onRulesSigned,
+    inForce: config.inForce,
   });
 }

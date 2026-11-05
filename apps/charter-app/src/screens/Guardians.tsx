@@ -8,14 +8,20 @@ import GuardianMove from "./GuardianMove";
 import GuardianLostPhone from "./GuardianLostPhone";
 import PresenceScanner from "./PresenceScanner";
 import GuardianCode from "./GuardianCode";
+import RemovalNotice from "./RemovalNotice";
+import RestoreNotice from "./RestoreNotice";
 import { AnchorScanFields } from "./AnchorScan";
 import { familyGateReason } from "../keys/guardianKeys";
+import { phoneHeldRoot } from "../keys/state";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
   androidWardsWithoutPin,
+  clockBehindLine,
+  clockBehindWards,
   departedWards,
   durationWords,
   familyWards,
+  MINT_NOTICE,
   myRootOf,
   goGuardians,
   isUnconfirmed,
@@ -24,8 +30,8 @@ import {
   moveNeedsFinishing,
   pendingFor,
   pendingTitle,
+  pinStateOf,
   readinessLine,
-  removalsAgainstMe,
   removeGate,
   rootsView,
   shortNpub,
@@ -62,39 +68,29 @@ function Reason({ gate }: { gate: Gate }) {
 
 /**
  * Before anything that needs a guardian in person: a family with an Android
- * ward this phone hasn't sent a guardian PIN to sets one first, since a ward
- * phone with no PIN can't show a presence code.
+ * ward that says it has no guardian PIN (or has never said) sets one first,
+ * since a ward phone with no PIN can't show a presence code. Whether one is
+ * set comes from the ward's own STATUS, whoever set it.
  */
-function PinGate({ wards, children, multiRoot }: { wards: WardRef[]; children: ReactNode; multiRoot: boolean }) {
+function PinGate({ wards, children }: { wards: WardRef[]; children: ReactNode }) {
   const { guardianKeys } = useCharter();
   const [passed, setPassed] = useState(false);
   const missing = androidWardsWithoutPin(wards, guardianKeys.state);
   if (passed || missing.length === 0) return <>{children}</>;
-  return (
-    <div className="stack">
-      <GuardianPin wards={missing} onDone={() => setPassed(true)} onCancel={() => goGuardians()} />
-      {multiRoot && (
-        <Button variant="ghost" block onClick={() => setPassed(true)}>
-          The other parent already set a PIN
-        </Button>
-      )}
-    </div>
-  );
+  return <GuardianPin wards={missing} onDone={() => setPassed(true)} onCancel={() => goGuardians()} />;
 }
 
 /** Guardians: who looks after the family's devices, and the changes waiting at each. */
 export default function Guardians({ sub }: { sub: string }) {
-  const { state, guardianKeys } = useCharter();
+  const { state } = useCharter();
   const wards = familyWards(state.children);
-  const me = myRootOf(guardianKeys);
-  const multiRoot = rootsView(wards, me).length > 1;
   const back = () => goGuardians();
   const [page, arg] = sub.split("/");
 
   switch (page) {
     case "invite":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <GuardianInvite onBack={back} />
         </PinGate>
       );
@@ -119,7 +115,7 @@ export default function Guardians({ sub }: { sub: string }) {
       );
     case "presence":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <PresenceScanner onBack={back} />
         </PinGate>
       );
@@ -138,7 +134,7 @@ export default function Guardians({ sub }: { sub: string }) {
     }
     case "move":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <GuardianMove onBack={back} onConfirm={() => goGuardians("presence")} />
         </PinGate>
       );
@@ -146,16 +142,19 @@ export default function Guardians({ sub }: { sub: string }) {
       return <GuardianLostPhone onBack={back} />;
     case "remove":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <RemoveParent target={arg ?? ""} />
         </PinGate>
       );
+    case "leave":
+      // From the removal notice: the overview with leaving already asked.
+      return <Overview key="leave" leaving />;
     default:
       return <Overview />;
   }
 }
 
-function Overview() {
+function Overview({ leaving = false }: { leaving?: boolean }) {
   const { state, guardianKeys } = useCharter();
   const now = useNowUnix();
   const wards = familyWards(state.children);
@@ -164,7 +163,6 @@ function Overview() {
   const roots = rootsView(wards, me);
   const keys = guardianKeys.state;
   const readiness = guardianKeys.familyReadiness();
-  const againstMe = removalsAgainstMe(wards, keys, me);
   const movedAway = guardianKeys.movedAwayRoots();
   // Adopted roster devices show in the device list; only ones no child holds show apart.
   const roster = guardianKeys
@@ -181,7 +179,7 @@ function Overview() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<{ what: string; report: ReportLike } | null>(null);
-  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(leaving);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
 
   async function act(what: string, fn: () => Promise<ReportLike>) {
@@ -204,17 +202,20 @@ function Overview() {
   const remove = removeGate(keys);
   const progress = guardianKeys.moveProgress();
   const move = moveGate(keys, readiness.ready, progress);
-  const confirmGate: Gate = keys.root
-    ? { ok: true }
-    : {
-        ok: false,
-        reason:
-          "Confirming in person needs your guardian identity in My Signet or a Heartwood: a key kept only on this phone can't confirm.",
-      };
+  // A phone-held identity mints its day-to-day key on first need (D5), so
+  // confirming in person is always offered.
+  const confirmGate: Gate = { ok: true };
+  const phoneKeyFirst = !keys.root && state.signer.kind === "local";
   const otherRoots = roots.filter((r) => !r.you);
   const rosterGate: Gate = keys.root
     ? { ok: true }
-    : { ok: false, reason: "Only a My Signet or Heartwood identity shares the family with another guardian." };
+    : phoneKeyFirst
+      ? {
+          ok: false,
+          reason:
+            "This phone shares the family once it uses a separate day-to-day key. That starts when you invite a parent or confirm in person.",
+        }
+      : { ok: false, reason: "Approve this phone in My Signet first, then share the family." };
 
   return (
     <>
@@ -237,29 +238,8 @@ function Overview() {
         </div>
       ))}
 
-      {againstMe.map((r) => (
-        <div key={r.d} style={{ marginBottom: 12 }}>
-          <Banner tone="warn">
-            <strong>The other parent has asked to remove you</strong> from {r.devices.join(", ")}.
-            {r.takesEffectAt !== undefined &&
-              (r.takesEffectAt > now
-                ? ` It can take effect in ${durationWords(r.takesEffectAt - now)}, once they confirm in person.`
-                : " It takes effect as soon as they confirm in person.")}{" "}
-            If you object, it's dropped and you both stay. Your{" "}
-            {keys.root?.via === "heartwood" ? "Heartwood" : "My Signet"} signs the objection and may ask more than
-            once.
-            <div style={{ marginTop: 8 }}>
-              <Button
-                variant="danger"
-                disabled={busy !== null}
-                onClick={() => void act("Objection", () => guardianKeys.objectToRemoval(r.d))}
-              >
-                {busy === "Objection" ? "Objecting…" : "Object"}
-              </Button>
-            </div>
-          </Banner>
-        </div>
-      ))}
+      <RestoreNotice />
+      <RemovalNotice />
 
       {report && (
         <Card style={{ marginBottom: 12 }}>
@@ -296,7 +276,7 @@ function Overview() {
                 </p>
                 {r.keys.length === 0 ? (
                   <p className="card-sub" style={{ margin: 0 }}>
-                    {r.root === guardianKeys.workingPubkey ? "Kept on this phone." : "Signs for itself."}
+                    {r.you && phoneHeldRoot(keys) ? "Kept on this phone." : "Signs for itself."}
                   </p>
                 ) : (
                   r.keys.map((k) => (
@@ -365,6 +345,12 @@ function Overview() {
       <SectionLabel>Changes</SectionLabel>
       <Card>
         <div className="stack">
+          {phoneKeyFirst && (
+            <p className="card-sub" style={{ margin: 0 }}>
+              Inviting or removing a parent, confirming in person and moving your identity each need a separate
+              day-to-day key on this phone, made the first time you do one of them. {MINT_NOTICE}
+            </p>
+          )}
           <Button block disabled={!inviteGate.ok} onClick={() => goGuardians("invite")}>
             Invite a parent
           </Button>
@@ -389,7 +375,7 @@ function Overview() {
 
           {wards.some((w) => w.device.platform === "android") && (
             <Button variant="secondary" block onClick={() => goGuardians("pin")}>
-              {wards.some((w) => keys.pinSentAt[w.device.devicePubkey] !== undefined)
+              {wards.some((w) => w.device.platform === "android" && pinStateOf(w, keys) === "set")
                 ? "Change the guardian PIN"
                 : "Set the guardian PIN"}
             </Button>
@@ -457,7 +443,8 @@ function Overview() {
             <div className="banner banner-warn">
               <p style={{ margin: "0 0 8px" }}>
                 You stop being a guardian of every device at once, and this phone stops receiving anything from them.
-                The other parent stays in charge; the limits you set stay until they change them.
+                No one needs to confirm it. The other parent stays in charge; the limits you set stay until they
+                change them.
               </p>
               <div className="stack">
                 <Button
@@ -500,7 +487,7 @@ function DeviceCard({
   const me = myRootOf(guardianKeys);
   const r = guardianKeys.childReadiness(ward.childId).wards.find((w) => w.machine === ward.device.devicePubkey);
   const line = r ? readinessLine(r.readiness) : null;
-  const pending = pendingFor(ward.device.guardians, guardianKeys.state, me);
+  const pending = pendingFor(ward.device.guardians, guardianKeys.state, me, now);
   const unconfirmed = isUnconfirmed(ward.device);
   const silent = r && !r.readiness.ready && r.readiness.reason === "silent";
   return (
@@ -531,6 +518,11 @@ function DeviceCard({
             {line}
           </p>
         )
+      )}
+      {clockBehindWards([ward], guardianKeys.state, now).length > 0 && (
+        <p className="card-sub" style={{ margin: "4px 0 0" }}>
+          {clockBehindLine(ward.device.label)}
+        </p>
       )}
       {pending.map((p) => (
         <PendingRow key={p.d} p={p} me={me} now={now} busy={busy} act={act} />
@@ -564,7 +556,7 @@ function PendingRow({
         ? "Waiting for them to confirm in person here."
         : "Waiting for you to confirm in person here."
       : p.role === "against-me"
-        ? "You can object (see above)."
+        ? "This phone objects for you (see above)."
         : null;
   return (
     <div className="stack" style={{ gap: 4, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
@@ -636,10 +628,11 @@ function RemoveParent({ target }: { target: string }) {
           <ul className="card-sub" style={{ paddingLeft: 20, margin: 0 }}>
             <li>they get 72 hours' notice, and their phone tells them;</li>
             <li>you must confirm in person at each device;</li>
-            <li>they can object, and then you both stay as guardians.</li>
+            <li>their phone objects for them, and then you both stay as guardians.</li>
           </ul>
           <p className="card-sub" style={{ margin: 0 }}>
-            Your limits are signed again with your own key first, so the rules stay as they are now once they've gone.
+            So this only works when they've stopped using Kintrinsic or lost their phone. If they want to stop, they
+            can leave the family themselves, at once.
           </p>
           {error && <ErrorLine>{error}</ErrorLine>}
           <Button

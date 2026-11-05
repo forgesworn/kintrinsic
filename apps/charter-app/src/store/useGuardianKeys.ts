@@ -8,12 +8,15 @@ import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "
 import { getPublicKey, SimplePool, type NostrEvent } from "nostr-tools";
 import type { Child, SignerState } from "../domain/types";
 import { GuardianKeys, type SendReport } from "../keys/guardianKeys";
+import { inForceToResend } from "../domain/receivedRules";
+import type { SignedEvent } from "../keys/sdk";
 import { reviveGuardianKeys, type GuardianKeysState, type InstallRoot, type RootVia } from "../keys/state";
 import type { ChildReadiness } from "../keys/versionGate";
 import type { GuardianOps } from "../wire/giftwrap";
 import type { Signer } from "../signer/Signer";
 import type { SelectSignerDeps } from "../signer/selectSigner";
-import { loadOrCreateGuardianKey, readGuardianKey } from "../signer/guardianKey";
+import { importGuardianKey, loadOrCreateGuardianKey, readGuardianKey } from "../signer/guardianKey";
+import { clearPhoneWorkingKey, mintPhoneWorkingKey, readPhoneWorkingKey } from "../signer/phoneWorkingKey";
 import { localRelayAuth } from "../signer/relayAuth";
 import { withLocalRoute, type LocalRouteHooks } from "../signer/routePublish";
 import { connectBunker } from "../signer/signetSigner";
@@ -43,6 +46,13 @@ export interface GuardianKeysApi {
    * joining parent's side passes `expectRoot` (their own identity, R2).
    */
   approveInstall(opts?: { expectRoot?: string; label?: string }): Promise<InstallRoot>;
+  /**
+   * Join another parent's family with this phone only: this phone's own key
+   * becomes the guardian identity (the local signer must be on), and it
+   * approves a fresh day-to-day key. Refused on a phone that already looks
+   * after devices.
+   */
+  joinWithThisPhone(): Promise<InstallRoot>;
   /** Invite another parent (npub or hex): R signs a co-guardian statement to every ward. */
   inviteCoGuardian(r2: string, opts?: { label?: string; expiresAt?: number }): Promise<SendReport>;
   /** Confirm a pending co-guardian, removal or move at a ward, from its presence code. */
@@ -85,6 +95,22 @@ export interface GuardianKeysApi {
   waitingPresenceWards(): ReturnType<GuardianKeys["waitingPresenceWards"]>;
   /** Other parents whose family list stopped because they changed identity (scan their new code). */
   movedAwayRoots(): string[];
+  /** After a restore from backup: the lost phone's working keys the devices still list. Null when nothing was restored. */
+  restoreFollowUp(): ReturnType<GuardianKeys["restoreFollowUp"]>;
+  /** Done with the restore notice. */
+  forgetRestore(): void;
+  /**
+   * After a phone-held identity moved to My Signet or a Heartwood and every
+   * device follows the new one: may the old key be deleted from this phone?
+   */
+  phoneKeyRetirable(): boolean;
+  /**
+   * Delete the old guardian key from this phone (only once `phoneKeyRetirable`).
+   * The day-to-day key the new identity approved takes its place. Can't be undone.
+   */
+  retirePhoneKey(): void;
+  /** The roots (and their working keys) the family's devices report, merged. */
+  reportedRoots(): { root: string; keys: string[] }[];
 }
 
 export interface UseGuardianKeysDeps {
@@ -94,12 +120,10 @@ export interface UseGuardianKeysDeps {
   /** The provider's current signer (read lazily: it is built after this hook runs). */
   signer: () => Signer | null;
   localRoute: LocalRouteHooks;
-  /** Rule 4: re-sign one child's clause set; throws when it couldn't be sent. */
-  resign: (childId: string) => Promise<void>;
   /** Record `key` as the pinned key of every paired device with none yet (see guardianKeysWiring). */
   stampPinnedKeys: (key: string, opts?: { onlyUnheard?: boolean }) => void;
-  /** A root move landed on every ward: switch the signer to the new bunker. */
-  onRootMoved: (bunkerUri: string) => void;
+  /** A root move landed on every ward: switch the signer to the new bunker (held in My Signet or a Heartwood). */
+  onRootMoved: (bunkerUri: string, via: RootVia) => void;
   /**
    * Re-open the paired bunker when the signer isn't connected (a family
    * paired with My Signet before this version, after a reload).
@@ -112,6 +136,28 @@ export function listensWithLocalKey(s: { signer: SignerState; guardianKeys?: Gua
   return s.signer.kind === "local" || !!s.guardianKeys?.root;
 }
 
+/**
+ * This install's working key W: the separate key a phone-held root minted
+ * (decision D5), else the local guardian key. Throws like
+ * `loadOrCreateGuardianKey` when the local key is unreadable.
+ */
+export function installWorkingKey(): Uint8Array {
+  return readPhoneWorkingKey() ?? loadOrCreateGuardianKey();
+}
+
+/**
+ * The keys ward traffic is addressed to, each read with its own secret: the
+ * local guardian key, and a phone-held root's W once minted. A ward encrypts
+ * to every W in its signer set, and to a pinned root only while that root has
+ * none (contract rule 9), so a phone that minted W listens on both until
+ * every ward has taken W.
+ */
+export function listeningKeys(): Uint8Array[] {
+  const local = loadOrCreateGuardianKey();
+  const w = readPhoneWorkingKey();
+  return w && getPublicKey(w) !== getPublicKey(local) ? [local, w] : [local];
+}
+
 export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], keysState: GuardianKeysState | undefined) {
   const depsRef = useRef(deps);
   depsRef.current = deps;
@@ -122,7 +168,8 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   if (gk.current === null) {
     const relayPublish = async (relays: string[], event: NostrEvent): Promise<void> => {
       pool.current ??= new SimplePool();
-      const sk = loadOrCreateGuardianKey();
+      // Any key in a ward's signer set may answer AUTH: W once a root approved it.
+      const sk = keysRef.current.root ? installWorkingKey() : loadOrCreateGuardianKey();
       const results = await Promise.allSettled(pool.current.publish(relays, event, { onauth: localRelayAuth(sk) }));
       if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
         throw new Error("Couldn't reach any relay — check your connection and try again.");
@@ -135,7 +182,9 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
         keysRef.current = update(keysRef.current);
         depsRef.current.save(keysRef.current);
       },
-      workingKey: loadOrCreateGuardianKey,
+      workingKey: installWorkingKey,
+      localKey: loadOrCreateGuardianKey,
+      mintWorkingKey: mintPhoneWorkingKey,
       root: () => {
         const s = depsRef.current.signer() as (Signer & { rootOps?: () => GuardianOps | null }) | null;
         return s?.status().connected ? (s.rootOps?.() ?? null) : null;
@@ -145,7 +194,6 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       },
       now: () => Math.floor(Date.now() / 1000),
       defaultRelays: DEFAULT_RELAYS,
-      resignClauses: (childId) => depsRef.current.resign(childId),
     });
   }
   const keys = gk.current;
@@ -154,8 +202,24 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   const signerKeys = useMemo<NonNullable<SelectSignerDeps["keys"]>>(
     () => ({
       knownRoot: () => keysRef.current.root?.pubkey,
-      workingKey: loadOrCreateGuardianKey,
+      workingKey: installWorkingKey,
       pickOps: (machine) => (keys.keyFor(machine) === "working" ? keys.workingOps() : undefined),
+      onRulesSigned: (childId, signed) => {
+        const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
+        if (child?.rosterId) {
+          keys.recordRules(
+            child.rosterId,
+            signed.map(({ inner, machine }) => (machine ? { event: inner as SignedEvent, machine } : { event: inner as SignedEvent })),
+            { local: true },
+          );
+        }
+      },
+      inForce: (childId, kind, machine) => {
+        const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
+        if (!child?.rosterId) return undefined;
+        const subject = child.rosterId;
+        return inForceToResend(child, kind, machine, (k, m) => keys.ruleInForce(subject, k, m)) as NostrEvent | undefined;
+      },
     }),
     [keys],
   );
@@ -165,13 +229,14 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   // rate-limited inside, so a heartbeat that changes nothing costs nothing.
   const syncing = useRef(false);
   const rootKey = keysState?.root?.pubkey;
+  const rules = keysState?.rules;
   useEffect(() => {
     if (!rootKey || syncing.current) return;
     syncing.current = true;
     void (async () => {
       try {
         const moved = keys.settleRootMove();
-        if (moved) depsRef.current.onRootMoved(moved);
+        if (moved) depsRef.current.onRootMoved(moved, keysRef.current.root?.via ?? "signet");
         await keys.syncApprovals();
       } catch {
         // Offline, or no relay took it: the next change retries.
@@ -200,13 +265,21 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       keysChildren(children, DEFAULT_RELAYS).map((c) => [c.rosterId, c.name, c.colour, c.devices.map((d) => [d.machine, d.name])]),
       keys.reportedRoots(),
       keys.trustedRoots(),
+      // The rules in force travel with it (Q3): a new rule shares it again.
+      Object.entries(rules ?? {}).map(([subject, byKey]) => [subject, Object.entries(byKey).map(([k, e]) => `${k}:${e.id}`).sort()]),
     ]);
     if (sig === lastRoster.current) return;
     lastRoster.current = sig;
-    void keys.sendRoster().catch(() => {
-      lastRoster.current = null;
-    });
-  }, [children, rootKey, keys]);
+    void keys
+      .sendRoster()
+      .then((r) => {
+        // A child's roster over 48 KB left rules out to fit (decision 2).
+        if (r.dropped.length > 0) console.warn("family roster: rules left out to fit", r.dropped);
+      })
+      .catch(() => {
+        lastRoster.current = null;
+      });
+  }, [children, rootKey, keys, rules]);
 
   const approveInstall = useCallback<GuardianKeysApi["approveInstall"]>(
     async (opts = {}) => {
@@ -228,11 +301,13 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
         depsRef.current.stampPinnedKeys(rootKey, { onlyUnheard: true });
         s = depsRef.current.stateRef.current;
       }
-      const w = keys.workingPubkey();
-      const pinned = devicesPinningLocalKey(s.children, w);
+      // The phone's own guardian key, which its devices pin (for a phone-held
+      // root that minted W, that is R, not W).
+      const local = getPublicKey(loadOrCreateGuardianKey());
+      const pinned = devicesPinningLocalKey(s.children, local);
       if (pinned.length > 0) {
         throw new Error(
-          `${pinned.join(", ")} already trust the key on this phone. Moving them to My Signet is a guardian identity move, not a new connection.`,
+          `${pinned.join(", ")} already trust the key on this phone. Move your guardian identity to My Signet instead (Guardians → Change my identity): nothing is re-paired.`,
         );
       }
       const root = await keys.approveThisInstall({
@@ -262,6 +337,8 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   }, [moveRoot]);
 
   const workingPubkey = (() => {
+    const minted = readPhoneWorkingKey();
+    if (minted) return getPublicKey(minted);
     const k = readGuardianKey();
     return k.kind === "ok" ? getPublicKey(k.key) : null;
   })();
@@ -274,6 +351,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       childReadiness: (id) => keys.childReadiness(id),
       familyReadiness: () => keys.familyReadiness(),
       approveInstall,
+      joinWithThisPhone: () => keys.joinWithThisPhone(),
       inviteCoGuardian: (r2, opts) => keys.inviteCoGuardian(r2, opts),
       confirmPresence: (code) => keys.confirmPresence(code),
       leaveFamily: () => keys.leaveFamily(),
@@ -291,6 +369,22 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       trustedRoots: () => keys.trustedRoots(),
       waitingPresenceWards: () => keys.waitingPresenceWards(),
       movedAwayRoots: () => keys.movedAwayRoots(),
+      restoreFollowUp: () => keys.restoreFollowUp(),
+      phoneKeyRetirable: () => keys.phoneKeyRetirable(),
+      retirePhoneKey: () => {
+        if (!keys.phoneKeyRetirable()) throw new Error("Your devices still need the old key on this phone.");
+        const w = readPhoneWorkingKey();
+        if (!w) throw new Error("This phone has no separate day-to-day key to keep.");
+        // Promote W into the guardian key slot, then forget its own slot: the
+        // phone is from now on exactly an install with a My Signet identity.
+        importGuardianKey(w);
+        clearPhoneWorkingKey();
+        // Re-render with the promoted key.
+        keysRef.current = { ...keysRef.current };
+        depsRef.current.save(keysRef.current);
+      },
+      forgetRestore: () => keys.forgetRestore(),
+      reportedRoots: () => keys.reportedRoots(),
     }),
     [keys, keysState, workingPubkey, approveInstall, moveRoot, finishMove],
   );

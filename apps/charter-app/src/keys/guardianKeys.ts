@@ -8,6 +8,10 @@
 //   has one, and every inbound wrap is opened with it.
 // - A local-only family has no separate root: the local key IS the pinned
 //   root and signs directly (unchanged). `root()` then returns the local key.
+//   On first need (presence, a removal, an invitation or a move) it mints a
+//   fresh W on the phone and approves it with R (decision D5): `root` is then
+//   `{ R, approval, via: "phone" }`. R keeps signing the rules day to day
+//   until a move; W confirms in person, seals what R signs and objects.
 // - With My Signet connected as root R (or a Heartwood behind My Signet, the
 //   same bunker flow), R approves W once. From then on W signs and seals for
 //   every ward that lists W under R and whose child passes the versioning
@@ -26,11 +30,13 @@
 // - approval: sealed by the W it names (proof of possession);
 // - withdrawal, co-guardian, removal, move, cancel: signed by R, sealed by W
 //   where the ward holds W bound to R, else by R itself;
-// - objection: signed AND sealed by R (docs/guardian-keys-open-questions.md,
-//   "Sealing an objection");
+// - objection: sent automatically when a ward reports a pending removal of
+//   this install's root (decision Q1), signed AND sealed by W, bound to that
+//   root; a phone-held root signs and seals it itself (`noteWardStatus`). The
+//   manual `objectToRemoval` still signs and seals with R;
 // - presence confirmation and roster: signed and sealed by W;
-// - RELAYS with the guardian PIN: signed and sealed by the same key, the one
-//   the ward's other events use.
+// - the guardian PIN, a PIN-only RELAYS (no relay list): signed and sealed by
+//   the same key, the one the ward's other events use.
 //
 // Every action builds its statement with the reference builders
 // (`@forgesworn/charter/guardians`). Nothing here talks to React: the store
@@ -42,6 +48,7 @@ import {
   buildCancel,
   buildCoGuardian,
   buildFamilyRoster,
+  familyRosterTemplate,
   buildObjection,
   buildPresenceConfirm,
   buildRootMove,
@@ -54,20 +61,20 @@ import {
   splitPendingD,
   MAX_LABEL_BYTES,
   type EventSigner,
+  type GuardianPinRecord,
   type LocalRoster,
   type LocalRosterChild,
   type RosterReason,
   type SignedEvent,
   type StatementType,
-  type StatusGuardians,
 } from "./sdk";
-import { giftWrapSigned, type GuardianOps } from "../wire/giftwrap";
+import { CHARTER_DEVICE_CLAUSE, giftWrapSigned, type GuardianOps } from "../wire/giftwrap";
 import { QueuedForHomeNetworkError } from "../signer/routePublish";
 import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } from "./versionGate";
-import { keyStanding } from "./statusGuardians";
+import { keyStanding, type StatusGuardians } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
-import { makeGuardianPinRecord, relaysWithPinTemplate } from "./pin";
-import type { AnchoredRoot, GuardianKeysState, HeldRoster, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
+import { makeGuardianPinRecord, pinOnlyRelaysTemplate } from "./pin";
+import { phoneHeldRoot, type AnchoredRoot, type GuardianKeysState, type HeldRoster, type InstallRoot, type NextRoot, type PresenceWard, type RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
 export interface KeysDevice {
@@ -100,8 +107,19 @@ export interface GuardianKeysDeps {
   read(): { keys: GuardianKeysState; children: KeysChild[] };
   /** Apply an update to the persisted keys state. */
   write(update: (k: GuardianKeysState) => GuardianKeysState): void;
-  /** W's secret key (the install's local guardian key). */
+  /**
+   * W's secret key: the install's local guardian key, or, for a phone-held
+   * root that has minted one, the separate working key.
+   */
   workingKey(): Uint8Array;
+  /**
+   * The install's local guardian key: W under a My Signet root, R itself for
+   * a phone-held root. Defaults to `workingKey` (the two are one key until a
+   * phone-held root mints W).
+   */
+  localKey?(): Uint8Array;
+  /** Generate and keep a fresh W for a phone-held root; `workingKey` returns it from then on. */
+  mintWorkingKey?(): Uint8Array;
   /**
    * R's operations: the NIP-46 bunker for a My Signet / Heartwood root, the
    * local key for a local-only family; null when no root is connected.
@@ -112,11 +130,6 @@ export interface GuardianKeysDeps {
   /** Unix seconds. */
   now(): number;
   defaultRelays: readonly string[];
-  /**
-   * Rule 4: re-sign the child's current clause set with a live key. Called
-   * before this install sends a departure; a failure aborts the departure.
-   */
-  resignClauses?(childId: string): Promise<void>;
 }
 
 /** What happened to one statement (or confirmation, PIN, roster) fan-out. */
@@ -143,8 +156,17 @@ export const PENDING_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
  */
 export const PRESENCE_WARD_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
 
-/** At most this many senders' rosters are held for a self-vouched ward's report. */
-export const MAX_HELD_ROSTERS = 4;
+/**
+ * At most this many rosters (one per sender and child) are held for a
+ * self-vouched ward's report: four senders of four children each.
+ */
+export const MAX_HELD_ROSTERS = 16;
+
+/**
+ * A child's roster event, serialised before it is wrapped, is kept at or
+ * under this many bytes (decision 2): rules are left out to fit.
+ */
+export const MAX_ROSTER_BYTES = 48 * 1024;
 
 /** A held roster is dropped this long after it arrived. */
 export const HELD_ROSTER_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
@@ -195,9 +217,6 @@ function truncateLabel(label: string): string {
 export class GuardianKeys {
   constructor(private readonly deps: GuardianKeysDeps) {}
 
-  /** > 0 while a rule 4 re-sign must use the root, not W (W is the key departing). */
-  private rootSigning = 0;
-
   // ---------------------------------------------------------------------
   // Keys and the per-ward choice
   // ---------------------------------------------------------------------
@@ -218,14 +237,27 @@ export class GuardianKeys {
   }
 
   /**
-   * The key a ward pins for this install: R when a Signet root is connected,
-   * otherwise the local key. What a pairing link or SAS must name.
+   * The key a ward pins for this install: R when a root is recorded (My
+   * Signet, or the phone's own key once it minted W), otherwise the local
+   * key. What a pairing link or SAS must name.
    */
   rootPubkey(): string {
-    return this.signetRoot()?.pubkey ?? this.workingPubkey();
+    return this.signetRoot()?.pubkey ?? getPublicKey(this.localSecret());
+  }
+
+  private localSecret(): Uint8Array {
+    return this.deps.localKey ? this.deps.localKey() : this.deps.workingKey();
   }
 
   private rootOps(): GuardianOps {
+    // A phone-held root that minted W is the local key itself: no prompt, and
+    // no need for the signer to be connected.
+    const root = this.signetRoot();
+    if (root?.via === "phone") {
+      const local = opsFromSecret(this.localSecret());
+      if (local.pubkey !== root.pubkey) throw new Error("This phone's guardian key isn't the family's guardian identity any more.");
+      return local;
+    }
     const ops = this.deps.root();
     if (!ops) throw new Error("Connect your approval app first.");
     const want = this.rootPubkey();
@@ -304,9 +336,10 @@ export class GuardianKeys {
     const standing = keyStanding(device.guardians, this.workingPubkey());
     if (standing.as === "root") return "working";
     if (standing.as !== "working") return "root";
-    if (this.rootSigning > 0) return "root";
     if (keys.nextRoot && standing.root === keys.nextRoot.pubkey) return "working";
     if (standing.root !== keys.root.pubkey) return "root";
+    // A phone-held root keeps signing the rules itself until a move (D5).
+    if (keys.root.via === "phone") return "root";
     return this.childReadiness(device.childId).ready ? "working" : "root";
   }
 
@@ -384,14 +417,88 @@ export class GuardianKeys {
       : (next.expiresAt ?? (sentAt !== undefined ? sentAt + PENDING_LIFETIME_SECONDS : undefined));
   }
 
-  /** A family whose root is this phone's own key can't take part in presence or removal (OQ "Moving a phone-held root"). */
-  private requireSignetRoot(what: string): InstallRoot {
+  /**
+   * This install's root with an approved W, minting one first for a family
+   * whose root is this phone's own key (decision D5): presence, a removal, an
+   * invitation and a move all need a working key bound to the root.
+   */
+  async ensureRoot(what: string): Promise<InstallRoot> {
     const root = this.signetRoot();
-    if (!root) {
-      throw new Error(
-        `Your guardian identity is kept on this phone, so you can't ${what} here. Connect My Signet as your guardian identity first.`,
-      );
+    if (root) return root;
+    return this.mintPhoneWorkingKey(what);
+  }
+
+  /**
+   * A parent joins another parent's family with this phone only (design
+   * note, "Two parents", decision 1(b)): this phone's own key becomes their
+   * guardian identity R2, exactly as for a parent who starts phone-first,
+   * and it mints a fresh working key W approved by R2. The inviting parent
+   * then invites R2 (this phone's guardian code), and W confirms in person
+   * at each device with R2's approval inline (rule 6).
+   *
+   * Refused on a phone that already looks after devices, and on one whose
+   * identity is My Signet or a Heartwood. A My Signet identity remembered
+   * from an earlier, disconnected connection names nothing when no device
+   * is known here at all, so it is dropped rather than block the join.
+   */
+  async joinWithThisPhone(): Promise<InstallRoot> {
+    const root = this.signetRoot();
+    if (root && root.via !== "phone") {
+      throw new Error("This phone already uses My Signet as your guardian identity. Join with My Signet instead.");
     }
+    if (root) return root;
+    if (this.allDevices().length > 0) {
+      throw new Error("This phone already looks after devices, so it can't join another parent's family. Use Kintrinsic on another phone to join.");
+    }
+    if (this.deps.read().keys.forgottenRoot !== undefined) {
+      this.deps.write((k) => {
+        const { forgottenRoot: _f, ...rest } = k;
+        void _f;
+        return rest;
+      });
+    }
+    return this.mintPhoneWorkingKey("join a family");
+  }
+
+  /**
+   * A phone-held root R mints a fresh working key W on this phone and signs
+   * its approval, then sends the approval to every ward (sealed by W, as any
+   * approval). Never W === R: the reference refuses a key that is its own
+   * root. A W already minted here (the root was forgotten since) is re-used.
+   */
+  private async mintPhoneWorkingKey(what: string): Promise<InstallRoot> {
+    const local = opsFromSecret(this.localSecret());
+    // Only while this phone's own key is the connected signer: a My Signet
+    // that hasn't approved this phone yet (or isn't reachable) is the
+    // identity, and this phone's own key mustn't act for it.
+    const connected = this.deps.root();
+    if (!connected) throw new Error(`Turn on parent approval on this phone first, then ${what}.`);
+    if (connected.pubkey !== local.pubkey) {
+      throw new Error(`Approve this phone in My Signet first (Settings → Parent approval), then ${what}.`);
+    }
+    // A forgotten My Signet root is still what the devices pin: this phone's
+    // own key can't approve anything for them.
+    const reported = this.reportedRoots();
+    const { keys } = this.deps.read();
+    if (reported.length > 0 ? !reported.some((r) => r.root === local.pubkey) : keys.forgottenRoot !== undefined && keys.forgottenRoot !== local.pubkey) {
+      throw new Error(`Your devices use another guardian identity, not this phone's key. Reconnect it first, then ${what}.`);
+    }
+    let w = this.workingPubkey();
+    if (w === local.pubkey) {
+      if (!this.deps.mintWorkingKey) throw new Error(`This phone can't make a separate day-to-day key, so you can't ${what} here.`);
+      w = getPublicKey(this.deps.mintWorkingKey());
+    }
+    if (w === local.pubkey) throw new Error("This phone's own key can't approve itself.");
+    const label = truncateLabel(keys.installLabel ?? "") || "Kintrinsic";
+    const approval = await buildApproval(signerOf(local), w, { issuedAt: this.deps.now(), label });
+    this.requireApproval(approval, local.pubkey, w);
+    const root: InstallRoot = { pubkey: local.pubkey, approval: plain(approval), via: "phone" };
+    this.deps.write((k) => {
+      const { forgottenRoot: _f, ...rest } = k;
+      void _f;
+      return { ...rest, root, installLabel: label, approvalSentAt: {} };
+    });
+    await this.syncApprovals({ force: true }).catch(() => []);
     return root;
   }
 
@@ -636,6 +743,9 @@ export class GuardianKeys {
     if (!key) throw new Error("That isn't a guardian code. It starts with npub1.");
     if (key === this.workingPubkey()) throw new Error("That's this phone's own key, not the other parent's guardian code.");
     if (key === this.signetRoot()?.pubkey) {
+      // A phone-held identity has no second phone to approve (that is a
+      // restore from its backup), so the second-phone hint is My Signet's alone.
+      if (this.signetRoot()?.via === "phone") throw new Error("That's this phone's own code. Ask the other parent for theirs.");
       throw new Error(
         "That's your own guardian code. Scan the code on the phone of the parent who invited you. (For a second phone of your own, skip this step.)",
       );
@@ -646,23 +756,6 @@ export class GuardianKeys {
 
   private addAnchor(root: string, anchor: AnchoredRoot): void {
     this.deps.write((k) => ({ ...k, anchoredRoots: { ...(k.anchoredRoots ?? {}), [root]: anchor } }));
-  }
-
-  /**
-   * Re-sign every child's clauses with a live key before a departure (rule 4).
-   * `asRoot`: W itself is departing, so the re-sign must come from R.
-   */
-  private async resignAll(opts: { asRoot?: boolean } = {}): Promise<void> {
-    if (!this.deps.resignClauses) return;
-    if (opts.asRoot) this.rootOps(); // R must be connected to re-sign for W
-    if (opts.asRoot) this.rootSigning += 1;
-    try {
-      for (const c of this.deps.read().children) {
-        if (c.devices.some((d) => HEX64.test(d.machine))) await this.deps.resignClauses(c.id);
-      }
-    } finally {
-      if (opts.asRoot) this.rootSigning -= 1;
-    }
   }
 
   /**
@@ -679,6 +772,7 @@ export class GuardianKeys {
     }
     this.requireFamilyReady("invite another parent");
     this.requireNoMovedWards("invite another parent");
+    await this.ensureRoot("invite another parent");
     const event = await this.signAsRoot((s) =>
       buildCoGuardian(s, key, {
         issuedAt: this.deps.now(),
@@ -703,9 +797,8 @@ export class GuardianKeys {
    * ward that reports its guardians has another root (the last root leaves
    * only by unpairing), and when no ward reports them at all.
    *
-   * Rule 4 isn't run: every key this install holds departs with it, so it has
-   * no live key to re-sign with. The other parent's next clause of each kind
-   * replaces what this install set.
+   * What this install set stays enforced until the other parent's next clause
+   * of the same kind replaces it (rule 4).
    */
   async leaveFamily(): Promise<SendReport> {
     const me = this.rootPubkey();
@@ -740,18 +833,18 @@ export class GuardianKeys {
   /**
    * Remove the other parent R2: a root removal signed by this install's root.
    * Each ward holds it pending for 72 hours and until this install confirms
-   * in person there; R2 can object meanwhile. Re-signs the clauses first
-   * (rule 4).
+   * in person there; R2 can object meanwhile. Nothing is re-signed first:
+   * R2's clauses stay enforced until a current signer replaces them (rule 4).
    */
   async removeCoGuardian(r2: string, opts: { expiresAt?: number } = {}): Promise<SendReport> {
     const key = parseGuardianKey(r2);
     if (!key) throw new Error("That isn't a guardian ID (npub).");
     if (key === this.rootPubkey()) throw new Error("To remove yourself, leave the family instead.");
-    // Its presence confirmation must come from a working key bound to this
-    // install's root; a phone-held root has none, so the ward would drop it.
-    this.requireSignetRoot("remove the other parent");
     this.requireNoMovedWards("remove the other parent");
-    await this.resignAll();
+    // Its presence confirmation must come from a working key bound to this
+    // install's root: a phone-held root mints one now, and its approval goes
+    // out ahead of the removal.
+    await this.ensureRoot("remove the other parent");
     const event = await this.signAsRoot((s) =>
       buildRootRemoval(s, key, {
         issuedAt: this.deps.now(),
@@ -778,10 +871,14 @@ export class GuardianKeys {
     let p = remover ? parseGuardianKey(remover) : null;
     if (remover && !p) throw new Error("That isn't a guardian ID (npub).");
     if (!p) {
+      // The devices name the signer where they can; otherwise the one other parent there.
       const others = new Set<string>();
       for (const dev of this.allDevices()) {
-        if (!dev.guardians?.pending.some((x) => x.d === d)) continue;
-        for (const r of dev.guardians.roots) if (r.root !== me) others.add(r.root);
+        const entry = dev.guardians?.pending.find((x) => x.d === d);
+        if (!entry || !dev.guardians) continue;
+        const named = removerOn(dev.guardians, me, entry);
+        if (named) others.add(named);
+        else for (const r of dev.guardians.roots) if (r.root !== me) others.add(r.root);
       }
       if (others.size !== 1) {
         throw new Error("Couldn't tell which parent asked for this removal.");
@@ -813,8 +910,8 @@ export class GuardianKeys {
    * Withdraw a working key for good (a lost or replaced phone). Signed by its
    * binding root, which must be this install's root: sealed by this install's
    * W (another W of the same root), or by R itself when withdrawing this
-   * install's own W. Re-signs the clauses first (rule 4): with R when it is
-   * this install's own key, since W is the one departing.
+   * install's own W. Nothing is re-signed first: W's clauses stay enforced
+   * until a current signer replaces them (rule 4).
    */
   async withdrawInstall(w: string): Promise<SendReport> {
     const key = parseGuardianKey(w);
@@ -828,8 +925,6 @@ export class GuardianKeys {
     }
     this.requireNoMovedWards("withdraw that phone");
     const own = key === this.workingPubkey();
-    // Rule 4: W itself departs when it is this install's own, so R re-signs.
-    await this.resignAll({ asRoot: own });
     const event = await this.signAsRoot((s) => buildWithdrawal(s, key, { issuedAt: this.deps.now() }));
     const report = await this.fanOut(event, own ? "root" : "working-or-root");
     this.remember(event);
@@ -840,14 +935,16 @@ export class GuardianKeys {
    * Move this install's root to a new identity R2 (`next`, the newly
    * connected bunker): R signs the move to every ward, then R2 approves W.
    * Each ward replaces R with R2 once this install confirms in person there
-   * (`confirmPresence` carries R2's approval). Refused for a local-only
-   * family, whose local key is the root and can't become a working key
-   * (docs/guardian-keys-open-questions.md, "Moving a phone-held root").
+   * (`confirmPresence` carries R2's approval, contract rule 8). A phone-held
+   * root first mints its W (decision D5): R2 approves that W, never R, and R
+   * stays on the phone until the guardian chooses to delete it
+   * (`phoneKeyRetirable`).
    */
   async moveRoot(next: { ops: GuardianOps; bunkerUri: string; via: RootVia }): Promise<SendReport> {
-    const root = this.signetRoot();
-    if (!root) throw new Error("Moving a guardian identity held on this phone isn't available yet.");
-    if (next.ops.pubkey === root.pubkey) throw new Error("That's already your guardian identity.");
+    if (next.via === "phone") throw new Error("A move goes to My Signet or a Heartwood.");
+    const current = this.signetRoot();
+    if (current && next.ops.pubkey === current.pubkey) throw new Error("That's already your guardian identity.");
+    if (next.ops.pubkey === this.rootPubkey()) throw new Error("That's already your guardian identity.");
     if (next.ops.pubkey === this.workingPubkey()) throw new Error("This phone's own key can't be the new identity.");
     const pending = this.deps.read().keys.nextRoot;
     if (pending && pending.pubkey !== next.ops.pubkey && this.movedWards().length > 0) {
@@ -857,7 +954,8 @@ export class GuardianKeys {
       throw new Error("Some of your devices already use the guardian identity you were moving to. Finish that move first.");
     }
     this.requireFamilyReady("move your guardian identity");
-    await this.resignAll();
+    await this.ensureRoot("move your guardian identity");
+    if (next.ops.pubkey === this.workingPubkey()) throw new Error("This phone's own key can't be the new identity.");
     const issuedAt = this.deps.now();
     const event = await this.signAsRoot((s) => buildRootMove(s, next.ops.pubkey, { issuedAt }));
     const w = this.workingPubkey();
@@ -912,6 +1010,32 @@ export class GuardianKeys {
       return { ...rest, root: { pubkey: next.pubkey, approval: next.approval, via: next.via }, approvalSentAt: {} };
     });
     return next.bunkerUri;
+  }
+
+  /**
+   * After a phone-held root moved to My Signet or a Heartwood (decision D5):
+   * the old key R is still on this phone, beside the W the new identity
+   * approved. It may be deleted once every ward this install looks after
+   * reports the new root with W under it and none still pins R. False while
+   * anything still needs R, or when there is no separate W to keep.
+   */
+  phoneKeyRetirable(): boolean {
+    const { keys } = this.deps.read();
+    const root = keys.root;
+    if (!root || root.via === "phone" || keys.nextRoot) return false;
+    const old = getPublicKey(this.localSecret());
+    const w = this.workingPubkey();
+    if (old === w || old === root.pubkey) return false;
+    const wards = this.ownWards();
+    return (
+      wards.length > 0 &&
+      wards.every(
+        (d) =>
+          !!d.guardians &&
+          d.guardians.roots.some((r) => r.root === root.pubkey && r.keys.includes(w)) &&
+          !d.guardians.roots.some((r) => r.root === old),
+      )
+    );
   }
 
   /**
@@ -978,6 +1102,35 @@ export class GuardianKeys {
   }
 
   // ---------------------------------------------------------------------
+  // After a restore from backup
+  // ---------------------------------------------------------------------
+
+  /**
+   * What is left to do after this household was restored from a backup
+   * (decision D5): the working keys the backup listed that the devices still
+   * list under this identity and that aren't this phone's, i.e. the lost
+   * phone's, to offer for withdrawal. Null when nothing was restored.
+   */
+  restoreFollowUp(): { at: number; lost: { pubkey: string; label?: string }[] } | null {
+    const restored = this.deps.read().keys.restoredFrom;
+    if (!restored) return null;
+    const me = this.rootPubkey();
+    const w = this.workingPubkey();
+    const listed = new Set(this.reportedRoots().find((r) => r.root === me)?.keys ?? []);
+    return { at: restored.at, lost: restored.workingKeys.filter((k) => k.pubkey !== w && listed.has(k.pubkey)) };
+  }
+
+  /** The guardian is done with the restore notice. */
+  forgetRestore(): void {
+    if (!this.deps.read().keys.restoredFrom) return;
+    this.deps.write((k) => {
+      const { restoredFrom: _r, ...rest } = k;
+      void _r;
+      return rest;
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Presence confirmation
   // ---------------------------------------------------------------------
 
@@ -991,9 +1144,9 @@ export class GuardianKeys {
   async confirmPresence(input: string | PresenceCode): Promise<SendReport> {
     const code = typeof input === "string" ? parsePresenceCode(input) : input;
     if (!code) throw new Error("That isn't a Kintrinsic presence code.");
-    // Only a working key bound to a root may confirm; a phone-held root
-    // signs as the root itself, and the ward would drop it.
-    this.requireSignetRoot("confirm in person");
+    // Only a working key bound to a root may confirm: a phone-held root
+    // mints one first (its approval travels inline for an invitation).
+    await this.ensureRoot("confirm in person");
     const { keys } = this.deps.read();
     let approval: SignedEvent | undefined;
     if (code.kind === "coguardian") {
@@ -1017,6 +1170,13 @@ export class GuardianKeys {
       }
     }
     const known = this.findDevice(code.machine);
+    // A removal's confirmation carries no approval: the device must already
+    // list this phone's day-to-day key, or it drops the confirmation.
+    if (code.kind === "removal" && known?.guardians && !this.holdsWorkingKey(code.machine, this.rootPubkey())) {
+      throw new Error(
+        `${known.name} hasn't taken this phone's day-to-day key yet. Keep Kintrinsic open on it, connected to the internet, for a minute, then confirm again.`,
+      );
+    }
     // A joining parent trusts the family only through the inviting parent's
     // guardian code: without it, nothing this ward later says, and no roster,
     // can be checked (OQ "Anchoring a joining parent's trust").
@@ -1126,11 +1286,13 @@ export class GuardianKeys {
   // ---------------------------------------------------------------------
 
   /**
-   * Set the guardian PIN on Android wards (one child's, or all): a RELAYS
-   * event with the ward's current relays and `guardianPin` (scrypt, 16-byte
-   * salt), signed and sealed by the ward's usual key and gift-wrapped — never
-   * a pasted code. A ward below the versioning threshold is skipped (it
-   * refuses an unknown RELAYS field outright) and reported as failed.
+   * Set the guardian PIN on Android wards (one child's, or all): a PIN-only
+   * RELAYS (`guardianPin`, scrypt with a 16-byte salt, and no `relays`
+   * field, so it never touches the relay list), signed and sealed by the
+   * ward's usual key and gift-wrapped — never a pasted code. A ward below the
+   * versioning threshold is skipped (it refuses an unknown RELAYS field
+   * outright) and reported as failed. Each ward it reached is "sending" until
+   * its STATUS shows `pinSet` (`noteWardStatus`).
    */
   async setGuardianPin(pin: string, opts: { childId?: string; machines?: readonly string[] } = {}): Promise<Omit<SendReport, "event">> {
     const record = await makeGuardianPinRecord(pin);
@@ -1149,11 +1311,7 @@ export class GuardianKeys {
         continue;
       }
       try {
-        const relays = d.guardians?.relays.length ? d.guardians.relays : d.relays;
-        const ops = this.opsFor(d.machine);
-        const inner = (await ops.signEvent(relaysWithPinTemplate(d.machine, relays, record, now))) as SignedEvent;
-        const wrap = await giftWrapSigned(inner, d.machine, ops, now);
-        await this.deps.publish(this.relaysFor(d), wrap);
+        await this.sendPin(d, record, now, this.opsFor(d.machine));
         report.sent.push(d.machine);
       } catch (e) {
         if (e instanceof QueuedForHomeNetworkError) report.held.push(d.machine);
@@ -1163,12 +1321,305 @@ export class GuardianKeys {
     const done = [...report.sent, ...report.held];
     if (done.length > 0) {
       this.deps.write((k) => {
-        const pinSentAt = { ...k.pinSentAt };
-        for (const m of done) pinSentAt[m] = now;
-        return { ...k, pinSentAt };
+        const pins = { ...k.pins };
+        for (const m of done) pins[m] = { state: "sending", record, sentAt: now };
+        return { ...k, pins };
       });
     }
     return report;
+  }
+
+  /** Sign, wrap and publish one PIN-only RELAYS to `d`. */
+  private async sendPin(d: KeysDevice, record: GuardianPinRecord, createdAt: number, ops: GuardianOps): Promise<void> {
+    const inner = (await ops.signEvent(pinOnlyRelaysTemplate(d.machine, record, createdAt))) as SignedEvent;
+    const wrap = await giftWrapSigned(inner, d.machine, ops, this.deps.now());
+    await this.deps.publish(this.relaysFor(d), wrap);
+  }
+
+  /**
+   * A STATUS from a paired ward, as it arrived (the household may not have
+   * recorded it yet): what this install does in reply. Only a STATUS newer
+   * than the last one replied to counts: polling delivers the same and older
+   * ones again, and replying to those would resend on every poll.
+   *
+   * The guardian PIN: a ward this install is sending a PIN to becomes "set"
+   * once its STATUS shows `pinSet`; until then each newer STATUS resends the
+   * same record, once. Only where no approval prompt is needed (W, or a
+   * local-only family's own key): a resend runs unattended.
+   */
+  async noteWardStatus(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
+    const m = status.machine;
+    const last = this.deps.read().keys.statusRepliedTs?.[m];
+    if (last !== undefined && status.ts <= last) return;
+    this.deps.write((k) => ({ ...k, statusRepliedTs: { ...k.statusRepliedTs, [m]: status.ts } }));
+    this.noteClamped(m, status.guardians?.clamped);
+    await this.resendPin(status);
+    await this.objectAutomatically(status);
+  }
+
+  /**
+   * Decision D1: a ward counts the events dated ahead of its clock that it
+   * took at its own time instead. A rise between two STATUS reports means its
+   * clock is behind a sender's; it is remembered (when) for a plain notice.
+   * The first report only sets the baseline.
+   */
+  private noteClamped(m: string, count: number | undefined): void {
+    if (count === undefined) return;
+    const prev = this.deps.read().keys.clamped?.[m];
+    if (prev && prev.count === count) return;
+    const rose = prev !== undefined && count > prev.count;
+    const at = this.deps.now();
+    this.deps.write((k) => ({
+      ...k,
+      clamped: { ...(k.clamped ?? {}), [m]: { count, ...(rose ? { roseAt: at } : prev?.roseAt !== undefined ? { roseAt: prev.roseAt } : {}) } },
+    }));
+  }
+
+  /**
+   * Decision Q1: a ward reports a pending removal of this install's root
+   * that this install didn't send, so this install objects at once, to that
+   * ward only, and once per removal there (`keys.objected`). The objection
+   * names the remover (`p`): the one other root that ward pins, and nothing
+   * is sent when there is more than one. It is signed and sealed by W where
+   * the ward lists W under this install's root (no approval prompt: this runs
+   * unattended), or by the local key where that key is the root itself.
+   * Nothing is recorded for a send that failed, so the next STATUS retries.
+   */
+  private async objectAutomatically(status: { machine: string; guardians?: StatusGuardians }): Promise<void> {
+    const g = status.guardians;
+    const m = status.machine;
+    const d = this.findDevice(m);
+    if (!g || !d) return;
+    const { keys } = this.deps.read();
+    const me = this.rootPubkey();
+    const now = this.deps.now();
+    const against = g.pending.filter(
+      (p) => p.kind === "removal" && splitPendingD(p.d)?.key === me && p.expiresAt > now && !this.sentByMe(p, keys),
+    );
+    const before = keys.objected[m] ?? [];
+    const done = before.filter((x) => against.some((p) => (p.id ?? p.d) === x));
+    const ops = this.objectorOps(g);
+    for (const p of against) {
+      const mark = p.id ?? p.d;
+      const remover = removerOn(g, me, p);
+      if (done.includes(mark) || !remover || !ops) continue;
+      try {
+        const event = await buildObjection(signerOf(ops), p.d, remover, { issuedAt: now });
+        const wrap = await giftWrapSigned(event, m, ops, now);
+        try {
+          await this.deps.publish(this.relaysFor(d), wrap);
+        } catch (e) {
+          if (!(e instanceof QueuedForHomeNetworkError)) throw e;
+        }
+        done.push(mark);
+        this.remember(event);
+      } catch {
+        // Offline, or no relay took it: the next STATUS from this ward tries again.
+      }
+    }
+    if (JSON.stringify(done) !== JSON.stringify(before)) {
+      this.deps.write((k) => {
+        const objected = { ...k.objected };
+        if (done.length > 0) objected[m] = done;
+        else delete objected[m];
+        return { ...k, objected };
+      });
+    }
+  }
+
+  /**
+   * Who may sign and seal an objection unattended at a ward: W where the ward
+   * lists it under this install's root; otherwise, for a phone-held root, R
+   * itself (no prompt), which a ward pins and so accepts. A My Signet root
+   * would prompt, so it is never used here. Null when neither applies.
+   */
+  private objectorOps(g: StatusGuardians): GuardianOps | null {
+    const { keys } = this.deps.read();
+    const me = this.rootPubkey();
+    const standing = keyStanding(g, this.workingPubkey());
+    if (keys.root && standing.as === "working" && standing.root === me) return this.workingOps();
+    if (phoneHeldRoot(keys) && keyStanding(g, me).as === "root") return opsFromSecret(this.localSecret());
+    return null;
+  }
+
+  /** Did this install send the pending statement `p` (by its id, or by its `d` and age without one)? */
+  private sentByMe(p: { d: string; id?: string; expiresAt: number }, keys: GuardianKeysState): boolean {
+    const own = keys.sent[p.d];
+    if (!own) return false;
+    if (p.id !== undefined) return own.id === p.id;
+    return p.expiresAt <= own.issuedAt + PENDING_LIFETIME_SECONDS + 300;
+  }
+
+  private async resendPin(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
+    const m = status.machine;
+    const cur = this.deps.read().keys.pins[m];
+    if (!cur || cur.state !== "sending") return;
+    if (cur.statusTs !== undefined && status.ts <= cur.statusTs) return;
+    if (status.guardians?.pinSet === true) {
+      this.deps.write((k) => ({ ...k, pins: { ...k.pins, [m]: { state: "set", sentAt: cur.sentAt, statusTs: status.ts } } }));
+      return;
+    }
+    // Claim this STATUS before anything async, so a second delivery of it can't resend too.
+    this.deps.write((k) => (k.pins[m] ? { ...k, pins: { ...k.pins, [m]: { ...k.pins[m], statusTs: status.ts } } } : k));
+    const d = this.findDevice(m);
+    if (!cur.record || !d || d.platform !== "android") return;
+    // A My Signet root would prompt; a phone-held root signs unattended.
+    if (!phoneHeldRoot(this.deps.read().keys) && this.keyFor(m) !== "working") return;
+    // Strictly after the last one, so the ward's RELAYS replay floor takes it.
+    const createdAt = Math.max(this.deps.now(), cur.sentAt + 1);
+    try {
+      await this.sendPin(d, cur.record, createdAt, this.opsFor(m));
+    } catch (e) {
+      if (!(e instanceof QueuedForHomeNetworkError)) return;
+    }
+    this.deps.write((k) => {
+      const p = k.pins[m];
+      return p && p.state === "sending" ? { ...k, pins: { ...k.pins, [m]: { ...p, sentAt: createdAt } } } : k;
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // The rules in force, carried by the roster (decision Q3)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Keep signed inner CLAUSE events as the rules in force for the child with
+   * roster subject `subject`, keyed by `(kind, device)`: a family-wide rule
+   * (no `machine`) went the same to every device, a device rule to that
+   * device only. Per key the newest `issuedAt` wins; a tie goes to the lower
+   * event id, whether this install signed it or not, so both phones and the
+   * wards agree. A ward holds one rule per kind, so a family-wide
+   * rule replaces that kind's device rules it beats, and a device rule the
+   * family-wide one beats is already replaced: newer `issuedAt` wins, a tie
+   * goes to the lower event id, whichever arrives first. `local`
+   * marks rules this install signed itself. A malformed event is ignored.
+   * Returns the keys that changed (`ruleKey`).
+   */
+  recordRules(subject: string, entries: readonly RuleEntry[], opts: { local?: boolean } = {}): string[] {
+    if (!HEX64.test(subject)) return [];
+    const state = this.deps.read().keys;
+    const held = { ...(state.rules?.[subject] ?? {}) };
+    const local = { ...(state.localRules?.[subject] ?? {}) };
+    const changed = new Set<string>();
+    const issuedAtOf = (key: string) => (held[key] ? (clauseOf(held[key])?.issuedAt ?? -1) : -1);
+    for (const { event: e, machine } of entries) {
+      const c = clauseOf(e);
+      if (!c || (machine !== undefined && !HEX64.test(machine))) continue;
+      const key = ruleKey(c.kind, machine);
+      const cur = held[key] ? clauseOf(held[key]) : null;
+      if (cur) {
+        if (cur.issuedAt > c.issuedAt) continue;
+        // A tie goes to the lower event id, local or received, as on the wards.
+        if (cur.issuedAt === c.issuedAt && held[key].id <= e.id) continue;
+      }
+      // Family-wide against device rules: newer issuedAt wins, a tie goes to the lower event id.
+      if (machine !== undefined && held[c.kind] && !beats(c.issuedAt, e.id, issuedAtOf(c.kind), held[c.kind].id)) continue;
+      held[key] = plain(e);
+      if (opts.local) local[key] = e.id;
+      else delete local[key];
+      changed.add(key);
+      if (machine === undefined) {
+        for (const k of Object.keys(held)) {
+          if (k.startsWith(`${c.kind}@`) && beats(c.issuedAt, e.id, issuedAtOf(k), held[k].id)) {
+            delete held[k];
+            delete local[k];
+            changed.add(k);
+          }
+        }
+      }
+    }
+    if (changed.size > 0) {
+      this.deps.write((k) => ({
+        ...k,
+        rules: { ...(k.rules ?? {}), [subject]: held },
+        localRules: { ...(k.localRules ?? {}), [subject]: local },
+      }));
+    }
+    return [...changed].sort();
+  }
+
+  /**
+   * The rule in force for one child, kind and device: the device's own rule
+   * when it has one, else the family-wide one; whether this install signed
+   * it, and its key. Undefined when none is held.
+   */
+  ruleInForce(subject: string, kind: string, machine?: string): { key: string; event: SignedEvent; local: boolean } | undefined {
+    return ruleInForceIn(this.deps.read().keys, subject, kind, machine);
+  }
+
+  /**
+   * Received rules this install has not put on its own screens yet (decision
+   * 3, seeding): held, not signed here, and not marked by `markRulesApplied`
+   * since they arrived. By key.
+   */
+  rulesToApply(subject: string): Record<string, SignedEvent> {
+    const { rules, localRules, appliedRules } = this.deps.read().keys;
+    const held = rules?.[subject] ?? {};
+    const out: Record<string, SignedEvent> = {};
+    for (const [key, event] of Object.entries(held)) {
+      if (localRules?.[subject]?.[key] === event.id || appliedRules?.[subject]?.[key] === event.id) continue;
+      out[key] = event;
+    }
+    return out;
+  }
+
+  /** Mark received rules as put on this install's screens (or left as set elsewhere), by key and event id. */
+  markRulesApplied(subject: string, applied: Record<string, string>): void {
+    if (Object.keys(applied).length === 0) return;
+    this.deps.write((k) => {
+      const held = k.rules?.[subject] ?? {};
+      // Only keys still held: a superseded rule needs no mark.
+      const prev = Object.fromEntries(Object.entries(k.appliedRules?.[subject] ?? {}).filter(([key]) => held[key]));
+      return { ...k, appliedRules: { ...(k.appliedRules ?? {}), [subject]: { ...prev, ...applied } } };
+    });
+  }
+
+  /** The rules in force this install holds for one child, by key (`ruleKey` order). */
+  rulesFor(subject: string): RuleEntry[] {
+    const held = this.deps.read().keys.rules?.[subject] ?? {};
+    return Object.keys(held)
+      .sort()
+      .map((k) => {
+        const machine = machineOfRuleKey(k);
+        return machine ? { event: held[k], machine } : { event: held[k] };
+      });
+  }
+
+  /**
+   * The rules a verified roster carried (content `children[].rules` for the
+   * family-wide ones, `children[].deviceRules` as `{ machine, rule }` for the
+   * device ones), each kept only if it verifies as a CLAUSE and its author is
+   * a current signer of the family: a root or working key that a ward this
+   * install vouches for reports. Older rosters carry none, or no device
+   * rules. Returns the subjects that changed.
+   */
+  private takeRosterRules(inner: SignedEvent): string[] {
+    let children: unknown;
+    try {
+      children = (JSON.parse(inner.content) as { children?: unknown }).children;
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(children)) return [];
+    const signers = new Set(this.vouchedRoots({ presenceWards: false }).flatMap((r) => [r.root, ...r.keys]));
+    const fromSigner = (e: unknown): e is SignedEvent => isSignedClause(e) && signers.has((e as SignedEvent).pubkey);
+    const changed: string[] = [];
+    for (const ch of children) {
+      const c = ch as { subject?: unknown; rules?: unknown; deviceRules?: unknown };
+      if (typeof c.subject !== "string" || !HEX64.test(c.subject)) continue;
+      const entries: RuleEntry[] = [];
+      if (Array.isArray(c.rules)) for (const e of c.rules.slice(0, MAX_ROSTER_RULES)) if (fromSigner(e)) entries.push({ event: e });
+      if (Array.isArray(c.deviceRules)) {
+        for (const d of c.deviceRules.slice(0, MAX_ROSTER_RULES)) {
+          const o = d as { machine?: unknown; rule?: unknown } | null;
+          if (o && typeof o.machine === "string" && HEX64.test(o.machine) && fromSigner(o.rule)) {
+            entries.push({ event: o.rule, machine: o.machine });
+          }
+        }
+      }
+      if (this.recordRules(c.subject, entries).length > 0) changed.push(c.subject);
+    }
+    return changed.sort();
   }
 
   // ---------------------------------------------------------------------
@@ -1211,13 +1662,16 @@ export class GuardianKeys {
   /**
    * Send the family roster to every other working key that a ward this
    * install vouches for itself (`vouchedRoots`) lists under a trusted root
-   * (this root's other installs, and anchored parents' installs), signed and sealed by W and carrying W's approval. An
-   * install with no Signet root has no approval to carry and sends none (OQ
-   * "A phone-held root has no approval for the roster").
+   * (this root's other installs, and anchored parents' installs), signed and
+   * sealed by W and carrying W's approval: one roster event per child
+   * (receivers merge per child), each kept under `MAX_ROSTER_BYTES` by
+   * leaving rules out (`fitRoster`), never by failing. An install with no
+   * Signet root has no approval to carry and sends none (OQ "A phone-held
+   * root has no approval for the roster").
    */
-  async sendRoster(): Promise<Omit<SendReport, "event"> & { event?: SignedEvent }> {
+  async sendRoster(): Promise<RosterSendReport> {
     const root = this.signetRoot();
-    if (!root) return { sent: [], held: [], failed: [] };
+    if (!root) return { events: [], sent: [], held: [], failed: [], dropped: [] };
     const me = this.workingPubkey();
     const trusted = new Set(this.trustedRoots());
     const recipients = [
@@ -1235,30 +1689,40 @@ export class GuardianKeys {
       const kept = k.roster.children.filter((x) => !children.some((c) => c.subject === x.subject));
       return { ...k, roster: { children: [...kept, ...children] } };
     });
-    if (recipients.length === 0 || children.length === 0) return { sent: [], held: [], failed: [] };
+    const report: RosterSendReport = { events: [], sent: [], held: [], failed: [], dropped: [] };
+    if (recipients.length === 0 || children.length === 0) return report;
     const w = this.workingOps();
-    const event = await buildFamilyRoster(signerOf(w), {
-      children: children.map(({ subject, issuedAt, name, colour, devices }) => ({
-        subject,
-        issuedAt,
-        name,
-        colour,
-        devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })),
-      })),
-      approval: root.approval,
-      createdAt: this.deps.now(),
-    });
     const relays = [...new Set(this.allDevices().flatMap((d) => this.relaysFor(d)).concat(this.deps.defaultRelays))];
-    const report = { event, sent: [] as string[], held: [] as string[], failed: [] as { to: string; error: string }[] };
-    for (const to of recipients) {
-      try {
-        const wrap = await giftWrapSigned(event, to, w, this.deps.now());
-        await this.deps.publish(relays, wrap);
-        report.sent.push(to);
-      } catch (e) {
-        report.failed.push({ to, error: e instanceof Error ? e.message : String(e) });
+    const sent = new Set<string>();
+    for (const { subject, issuedAt, name, colour, devices } of children) {
+      const createdAt = this.deps.now();
+      // The child also carries the rules in force (Q3), outside the record's
+      // own `issuedAt`: rules merge per (kind, device), records per child.
+      const fitted = fitRoster(
+        { subject, issuedAt, name, colour, devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })) },
+        this.rulesFor(subject),
+        { approval: root.approval, createdAt, pubkey: me },
+      );
+      if (fitted.dropped.length > 0) report.dropped.push({ subject, keys: fitted.dropped });
+      const event = await buildFamilyRoster(signerOf(w), {
+        children: [fitted.child as Parameters<typeof buildFamilyRoster>[1]["children"][number] & typeof fitted.child],
+        approval: root.approval,
+        createdAt,
+      });
+      report.events.push(event);
+      for (const to of recipients) {
+        try {
+          const wrap = await giftWrapSigned(event, to, w, this.deps.now());
+          await this.deps.publish(relays, wrap);
+          sent.add(to);
+        } catch (e) {
+          if (!report.failed.some((f) => f.to === to)) report.failed.push({ to, error: e instanceof Error ? e.message : String(e) });
+        }
       }
     }
+    report.event = report.events[0];
+    // Sent means every child's roster went; a key one of them failed for is listed as failed.
+    report.sent = [...sent].filter((to) => !report.failed.some((f) => f.to === to));
     return report;
   }
 
@@ -1342,18 +1806,26 @@ export class GuardianKeys {
     const merged = mergeRoster(this.localRoster(), inbound, this.vouchedRoots(), this.deps.now());
     if (!merged.ok) return merged;
     this.deps.write((k) => ({ ...k, roster: merged.roster }));
+    // The sender checked out: take the rules it carries, each checked itself.
+    this.takeRosterRules(inbound.inner);
     return { ok: true, updated: merged.updated };
   }
 
-  /** Keep the newest roster per sender, a few senders at most (the oldest go first). */
+  /**
+   * Keep the newest roster per sender and child (a roster carries one child;
+   * an older sender's carries the family and is kept per sender), a few at
+   * most (the oldest go first).
+   */
   private hold(inbound: { sealAuthor: string; inner: SignedEvent }): void {
     const now = this.deps.now();
     this.deps.write((k) => {
       const held: Record<string, HeldRoster> = { ...(k.heldRosters ?? {}) };
       const sender = inbound.inner.pubkey;
-      const cur = held[sender];
+      const only = rosterSubjects(inbound.inner);
+      const slot = only.length === 1 ? `${sender}:${only[0]}` : sender;
+      const cur = held[slot];
       if (cur && cur.inner.created_at > inbound.inner.created_at) return k;
-      held[sender] = { sealAuthor: inbound.sealAuthor, inner: inbound.inner, heldAt: now };
+      held[slot] = { sealAuthor: inbound.sealAuthor, inner: inbound.inner, heldAt: now };
       const order = Object.entries(held).sort((a, b) => b[1].heldAt - a[1].heldAt);
       return { ...k, heldRosters: Object.fromEntries(order.slice(0, MAX_HELD_ROSTERS)) };
     });
@@ -1436,6 +1908,155 @@ export class GuardianKeys {
   }
 }
 
+/** A rule in force: a signed inner CLAUSE event, and the device it went to when it went to one only. */
+export interface RuleEntry {
+  event: SignedEvent;
+  /** The ward machine (64 hex) of a device rule; absent for a family-wide one. */
+  machine?: string;
+}
+
+/** Does a rule (`issuedAt`, event id) beat another: newer wins, a tie goes to the lower id. */
+function beats(at: number, id: string, otherAt: number, otherId: string): boolean {
+  return at > otherAt || (at === otherAt && id < otherId);
+}
+
+/** Roster rules per child per list (family-wide, device): more are ignored. */
+const MAX_ROSTER_RULES = 64;
+
+/** A held rule's key: the clause kind, and `@machine` for a device rule. */
+export function ruleKey(kind: string, machine?: string): string {
+  return machine ? `${kind}@${machine}` : kind;
+}
+
+/**
+ * The rule in force held for one child, kind and device: the device's own
+ * rule when it has one, else the family-wide one; whether this install
+ * signed it, and its key. Undefined when none is held.
+ */
+export function ruleInForceIn(
+  keys: Pick<GuardianKeysState, "rules" | "localRules">,
+  subject: string,
+  kind: string,
+  machine?: string,
+): { key: string; event: SignedEvent; local: boolean } | undefined {
+  const held = keys.rules?.[subject] ?? {};
+  const key = machine && held[ruleKey(kind, machine)] ? ruleKey(kind, machine) : kind;
+  const event = held[key];
+  if (!event) return undefined;
+  return { key, event, local: keys.localRules?.[subject]?.[key] === event.id };
+}
+
+/** The machine of a device rule's key; undefined for a family-wide one. */
+export function machineOfRuleKey(key: string): string | undefined {
+  const at = key.indexOf("@");
+  return at < 0 ? undefined : key.slice(at + 1);
+}
+
+/** The clause kind of a held rule's key. */
+export function kindOfRuleKey(key: string): string {
+  const at = key.indexOf("@");
+  return at < 0 ? key : key.slice(0, at);
+}
+
+/** What `sendRoster` did: one roster event per child, and the rules left out to fit, per child (`ruleKey`s). */
+export interface RosterSendReport extends Omit<SendReport, "event"> {
+  /** The first child's roster event (the only one, for a one-child family). */
+  event?: SignedEvent;
+  events: SignedEvent[];
+  dropped: { subject: string; keys: string[] }[];
+}
+
+/** The subjects a roster event's content names (none when it can't be read). */
+function rosterSubjects(inner: SignedEvent): string[] {
+  try {
+    const children = (JSON.parse(inner.content) as { children?: unknown }).children;
+    if (!Array.isArray(children)) return [];
+    return children.flatMap((c) => {
+      const subject = (c as { subject?: unknown } | null)?.subject;
+      return typeof subject === "string" ? [subject] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * One child's roster record with the rules it can carry within
+ * `MAX_ROSTER_BYTES`, measured as the signed event would serialise before
+ * wrapping. Over the bound, device rules go first, then family-wide rules,
+ * the oldest `issuedAt` first within each. Returns the keys it left out.
+ */
+export function fitRoster<C extends { subject: string; issuedAt: number; name: string; colour: string; devices: unknown[] }>(
+  base: C,
+  held: readonly RuleEntry[],
+  meta: { approval: SignedEvent; createdAt: number; pubkey: string },
+  maxBytes = MAX_ROSTER_BYTES,
+): { child: C & { rules?: SignedEvent[]; deviceRules?: { machine: string; rule: SignedEvent }[] }; dropped: string[] } {
+  const issuedAtOf = (r: RuleEntry) => clauseOf(r.event)?.issuedAt ?? 0;
+  const keyOf = (r: RuleEntry) => ruleKey(clauseOf(r.event)?.kind ?? "", r.machine);
+  // Drop order: device rules, oldest first, then family-wide rules, oldest first.
+  const order = [...held].sort(
+    (a, b) => Number(!a.machine) - Number(!b.machine) || issuedAtOf(a) - issuedAtOf(b) || (keyOf(a) < keyOf(b) ? -1 : 1),
+  );
+  const build = (kept: readonly RuleEntry[]) => {
+    const rules = kept.filter((r) => !r.machine).map((r) => r.event);
+    const deviceRules = kept.flatMap((r) => (r.machine ? [{ machine: r.machine, rule: r.event }] : []));
+    return { ...base, ...(rules.length > 0 ? { rules } : {}), ...(deviceRules.length > 0 ? { deviceRules } : {}) };
+  };
+  const size = (child: C) => {
+    const t = familyRosterTemplate({ children: [child as never], approval: meta.approval, createdAt: meta.createdAt });
+    const json = JSON.stringify({ ...t, id: "0".repeat(64), pubkey: meta.pubkey, sig: "0".repeat(128) });
+    return new TextEncoder().encode(json).length;
+  };
+  // Keep the held order (by key) on the wire; drop from `order`.
+  let kept = [...held];
+  const dropped: string[] = [];
+  let child = build(kept);
+  for (const r of order) {
+    if (size(child) <= maxBytes) break;
+    kept = kept.filter((x) => x !== r);
+    dropped.push(keyOf(r));
+    child = build(kept);
+  }
+  return { child, dropped };
+}
+
+/** A CLAUSE payload's kind and `issuedAt`, from a signed inner event; null when it isn't one. */
+function clauseOf(e: SignedEvent): { kind: string; issuedAt: number } | null {
+  if (e.kind !== CHARTER_DEVICE_CLAUSE) return null;
+  try {
+    const c = JSON.parse(e.content) as { v?: unknown; kind?: unknown; issuedAt?: unknown };
+    if (c.v !== 1 || typeof c.kind !== "string" || c.kind.length === 0 || c.kind.length > 32) return null;
+    if (typeof c.issuedAt !== "number" || !Number.isSafeInteger(c.issuedAt) || c.issuedAt < 0) return null;
+    return { kind: c.kind, issuedAt: c.issuedAt };
+  } catch {
+    return null;
+  }
+}
+
+/** A well-formed, validly signed CLAUSE event. */
+function isSignedClause(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const o = e as Record<string, unknown>;
+  if (
+    typeof o.id !== "string" ||
+    typeof o.pubkey !== "string" ||
+    !HEX64.test(o.pubkey) ||
+    typeof o.sig !== "string" ||
+    typeof o.content !== "string" ||
+    typeof o.created_at !== "number" ||
+    !Array.isArray(o.tags)
+  ) {
+    return false;
+  }
+  if (!clauseOf(o as unknown as SignedEvent)) return false;
+  try {
+    return verifyEvent(o as unknown as NostrEvent);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The root that signed the approval a roster carries, before anything else
  * is checked; null when there is none to read (`mergeRoster` refuses it).
@@ -1448,6 +2069,19 @@ function rosterApprovalSigner(inner: SignedEvent): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The remover a ward's pending removal of `me` must name in an objection's
+ * `p`: the signer the ward reports for that entry (`pending[].signer`), and,
+ * from a ward that doesn't report it yet, the one other root that ward pins;
+ * null when it pins none or several (OQ "The objection's p when STATUS
+ * doesn't name the remover").
+ */
+export function removerOn(g: StatusGuardians, me: string, p?: { signer?: string }): string | null {
+  if (p?.signer !== undefined && p.signer !== me) return p.signer;
+  const others = [...new Set(g.roots.map((r) => r.root).filter((r) => r !== me))];
+  return others.length === 1 ? others[0] : null;
 }
 
 /**

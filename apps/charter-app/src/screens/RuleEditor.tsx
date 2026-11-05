@@ -5,6 +5,9 @@ import { wardPath, wardSettingsPath } from "../domain/wardRoute";
 import { useCharter } from "../store/store";
 import { AppRuleEditor, DeviceLimits, SECTION_TITLE, type SectionId } from "./Limits";
 import { ruleSummaries } from "./ruleSummaries";
+import { namesList } from "./guardiansView";
+import { SetElsewhereGate } from "./SetElsewhere";
+import { ALL_RULE_KINDS, APP_RULE_KINDS, SECTION_KINDS, useOtherSetters, useSetElsewhere } from "./setElsewhereView";
 
 // A child's rules. On the child page they are one list in three plain groups:
 // each row shows what the rule currently says and opens its own editor page
@@ -36,6 +39,13 @@ export function ChildRules({ child }: { child: Child }) {
     devicePolicy ?? { id: "", scope: { kind: "device" } },
     Math.floor(Date.now() / 1000),
   );
+  // A rule set on another phone that this screen can't show reads as set there.
+  const elsewhere = useSetElsewhere(child, ALL_RULE_KINDS);
+  const otherSetters = useOtherSetters(child);
+  const setFrom = (id: SectionId): string | null => {
+    const names = [...new Set(elsewhere.rules.filter((r) => SECTION_KINDS[id].includes(r.kind)).map((r) => r.name))];
+    return names.length > 0 ? `Set from ${namesList(names)}` : null;
+  };
 
   return (
     <div className="stack">
@@ -59,6 +69,13 @@ export function ChildRules({ child }: { child: Child }) {
           </span>
         </Banner>
       )}
+      {/* The other parent's rules arrive with the family list (decision 5). */}
+      {otherSetters.length > 0 && (
+        <Banner tone="info">
+          Rules set by {namesList(otherSetters)} appear here too. Whoever changed a rule most recently wins, on every
+          device.
+        </Banner>
+      )}
       {!devicePolicy && (
         <Banner tone="warn">
           {child.name} has no charter to edit yet. Setting up a device creates one.
@@ -74,7 +91,7 @@ export function ChildRules({ child }: { child: Child }) {
                   <span className="row-main">
                     <span className="row-title">{SECTION_TITLE[id]}</span>
                     <br />
-                    <span className="row-sub">{summaries[id]}</span>
+                    <span className="row-sub">{setFrom(id) ?? summaries[id]}</span>
                   </span>
                   {devicePolicy && (
                     <span className="row-chevron" aria-hidden="true">
@@ -137,13 +154,15 @@ export default function RuleEditor({
     );
   }
   return (
-    <DeviceLimits
-      key={`${child.id}:${section}`}
-      child={child}
-      policy={policy}
-      only={section}
-      onDone={onDone ?? (() => toChildSettings(child.id))}
-    />
+    <SetElsewhereGate key={`${child.id}:${section}`} child={child} kinds={SECTION_KINDS[section]}>
+      <DeviceLimits
+        key={`${child.id}:${section}`}
+        child={child}
+        policy={policy}
+        only={section}
+        onDone={onDone ?? (() => toChildSettings(child.id))}
+      />
+    </SetElsewhereGate>
   );
 }
 
@@ -175,5 +194,9 @@ export function AppRulePage({
       </Card>
     );
   }
-  return <AppRuleEditor key={policy.id} child={child} policy={policy} onDone={done} />;
+  return (
+    <SetElsewhereGate key={policy.id} child={child} kinds={APP_RULE_KINDS}>
+      <AppRuleEditor key={policy.id} child={child} policy={policy} onDone={done} />
+    </SetElsewhereGate>
+  );
 }

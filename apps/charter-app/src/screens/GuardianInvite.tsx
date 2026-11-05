@@ -65,7 +65,7 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
         </p>
         <ol className="card-sub" style={{ paddingLeft: 20, margin: "4px 0 0" }}>
           <li>opens Kintrinsic on their phone and chooses Settings → Guardians → Join a family;</li>
-          <li>connects their My Signet (the identity you just invited);</li>
+          <li>connects their My Signet, or carries on with their phone only (whichever identity you just invited);</li>
           <li>scans your guardian code (below) with their phone, so it trusts your family list and no one else's;</li>
           <li>
             visits each device, asks it for a presence code, and scans it with Kintrinsic (Settings → Guardians →
@@ -97,7 +97,7 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
     return (
       <Card>
         <h2 className="card-title">Invite this parent?</h2>
-        <p className="card-sub">Check this matches the guardian ID their My Signet shows:</p>
+        <p className="card-sub">Check this matches the guardian ID their phone shows (in My Signet, or in Kintrinsic if they join with their phone only):</p>
         <p style={{ overflowWrap: "anywhere", userSelect: "all", fontSize: 13 }}>{npub}</p>
         <p className="card-sub">
           Once they confirm in person, they have the same say as you on every device: they can set limits, answer
@@ -135,8 +135,13 @@ export default function GuardianInvite({ onBack }: { onBack: () => void }) {
     <Card>
       <h2 className="card-title">Invite a parent</h2>
       <p className="card-sub">
-        The other parent needs My Signet on their phone. Ask them for their guardian ID: in My Signet it's the npub
-        under their name, with a QR code.
+        Ask the other parent for their guardian ID. With My Signet, it's the npub under their name, with a QR code.
+        Without it, they choose Join a family → Join with this phone only in Kintrinsic, and it shows their guardian ID
+        as a QR code.
+      </p>
+      <p className="card-sub">
+        Your guardian identity signs the invitation. Then the other parent confirms it in person at each of your child's
+        devices, by scanning a code the device shows. They have a week to do it.
       </p>
       <div className="stack" style={{ marginTop: 12 }}>
         {scanning ? (

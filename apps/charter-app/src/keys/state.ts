@@ -3,20 +3,27 @@
 // family backup carries it with everything else.
 //
 // - W, the working key, is the install's existing local guardian key
-//   (`signer/guardianKey.ts`); it is not stored here.
-// - `root` is set once My Signet (or a Heartwood behind My Signet) is
-//   connected as this install's root R and R has approved W. With no `root`,
-//   the install is a local-only family: the local key IS the pinned root and
-//   signs directly, as before the section.
+//   (`signer/guardianKey.ts`), or, for a family whose root is this phone's own
+//   key, a separate key minted for it (`signer/phoneWorkingKey.ts`, decision
+//   D5). Neither secret is stored here.
+// - `root` is set once R has approved W: My Signet (or a Heartwood behind My
+//   Signet) connected as this install's root, or the phone's own key (`via:
+//   "phone"`) once it has minted W. With no `root`, the install is a
+//   local-only family that hasn't needed W yet: the local key IS the pinned
+//   root and signs directly, as before the section.
 
-import type { LocalRoster, SignedEvent, StatementType } from "./sdk";
+import type { GuardianPinRecord, LocalRoster, SignedEvent, StatementType } from "./sdk";
 import type { StatusGuardians } from "./statusGuardians";
 
-/** How the root is held. Both are reached through My Signet's NIP-46 bunker. */
-export type RootVia = "signet" | "heartwood";
+/**
+ * How the root is held: "signet" and "heartwood" are reached through My
+ * Signet's NIP-46 bunker; "phone" is this phone's own guardian key, which
+ * signs without a prompt.
+ */
+export type RootVia = "signet" | "heartwood" | "phone";
 
 export interface InstallRoot {
-  /** R, 64 lowercase hex: the bunker's pubkey. */
+  /** R, 64 lowercase hex: the bunker's pubkey, or the phone's own guardian key. */
   pubkey: string;
   /** R's signed approval of this install's working key (kind 31120). */
   approval: SignedEvent;
@@ -83,6 +90,24 @@ export interface HeldRoster {
   heldAt: number;
 }
 
+/**
+ * The guardian PIN on one Android ward, as this install sent it (decision D4):
+ * "sending" from the send until a STATUS from that ward shows `pinSet`, then
+ * "set". The PIN itself is never kept.
+ */
+export interface PinDelivery {
+  state: "sending" | "set";
+  /**
+   * While "sending": the record (salt and scrypt hash) that was sent, resent
+   * unchanged on each STATUS that doesn't yet show `pinSet`. Dropped once set.
+   */
+  record?: GuardianPinRecord;
+  /** `created_at` of the last RELAYS that carried it (unix s). */
+  sentAt: number;
+  /** `ts` of the last STATUS from the ward acted on, so one STATUS triggers one resend at most. */
+  statusTs?: number;
+}
+
 export interface GuardianKeysState {
   v: 1;
   /** This install's root and its approval of W; absent for a local-only family. */
@@ -93,10 +118,45 @@ export interface GuardianKeysState {
   installLabel?: string;
   /** Per ward machine: when W's approval was last sent there (unix s). */
   approvalSentAt: Record<string, number>;
-  /** Per Android ward machine: when a guardian PIN was last sent (unix s). The PIN itself is never kept. */
-  pinSentAt: Record<string, number>;
+  /** Per Android ward machine: the guardian PIN this install sent, until the ward says it holds one. */
+  pins: Record<string, PinDelivery>;
+  /**
+   * Per ward machine: the pending removals of this install's root it has
+   * objected to there (decision Q1), by the removal's event id, or its `d`
+   * from a ward that doesn't report ids. Kept while the ward still lists them.
+   */
+  objected: Record<string, string[]>;
+  /**
+   * Per ward machine: the `ts` of the newest STATUS this install has replied
+   * to (`noteWardStatus`). STATUS is polled, so the same or an older one
+   * arrives again; only a newer one is acted on.
+   */
+  statusRepliedTs: Record<string, number>;
+  /**
+   * Per ward machine: its STATUS `clamped` counter (events dated ahead of its
+   * clock, taken at its own time instead, decision D1) as last read, and when
+   * it last rose between two STATUS reports (unix s, this phone's clock).
+   */
+  clamped: Record<string, { count: number; roseAt?: number }>;
   /** The family roster as merged from other guardians' installs (subject = `Child.rosterId`). */
   roster: LocalRoster;
+  /**
+   * The rules in force per child (roster subject), as signed inner CLAUSE
+   * events keyed by `(kind, device)`: the kind alone for a family-wide rule,
+   * `kind@machine` for a rule that went to one device (decision Q3). Newest
+   * `issuedAt` per key wins. What this install signed itself, and what
+   * another guardian's roster carried from a current signer. Shared in the
+   * roster so both phones hold the same.
+   */
+  rules: Record<string, Record<string, SignedEvent>>;
+  /** Per child and rule key: the event id of the rule this install signed itself, while it is the one held. */
+  localRules: Record<string, Record<string, string>>;
+  /**
+   * Per child and rule key: the event id of the received rule last put on
+   * this install's rule screens (or left as set elsewhere when the screen
+   * can't hold it), so each received rule seeds the screens once.
+   */
+  appliedRules: Record<string, Record<string, string>>;
   /** Statements this install sent, by `d`. */
   sent: Record<string, SentStatement>;
   /** Wards confirmed in person here that no child of this install has yet, by machine. */
@@ -129,24 +189,91 @@ export interface GuardianKeysState {
    * reports its guardians.
    */
   forgottenRoot?: string;
+  /**
+   * Set when this household was restored from a backup (decision D5): when,
+   * and the working keys (public keys and labels) this identity had then. The
+   * lost phone's key is offered for withdrawal while the devices still list
+   * it; cleared when the guardian is done.
+   */
+  restoredFrom?: { at: number; workingKeys: { pubkey: string; label?: string }[] };
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, rules: {}, localRules: {}, appliedRules: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+}
+
+/** Per child (64 hex) and rule key: an event id. */
+function reviveIdMaps(x: unknown): Record<string, Record<string, string>> {
+  if (typeof x !== "object" || x === null) return {};
+  return Object.fromEntries(
+    Object.entries(x as Record<string, unknown>)
+      .filter(([k, v]) => /^[0-9a-f]{64}$/.test(k) && typeof v === "object" && v !== null)
+      .map(([k, v]) => [k, Object.fromEntries(Object.entries(v as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string"))]),
+  );
+}
+
+function reviveRestored(x: unknown): GuardianKeysState["restoredFrom"] {
+  if (typeof x !== "object" || x === null) return undefined;
+  const o = x as { at?: unknown; workingKeys?: unknown };
+  if (typeof o.at !== "number" || !Array.isArray(o.workingKeys)) return undefined;
+  const workingKeys = o.workingKeys.flatMap((k) => {
+    const e = k as { pubkey?: unknown; label?: unknown } | null;
+    if (!e || typeof e.pubkey !== "string" || !/^[0-9a-f]{64}$/.test(e.pubkey)) return [];
+    return [{ pubkey: e.pubkey, ...(typeof e.label === "string" ? { label: e.label } : {}) }];
+  });
+  return { at: o.at, workingKeys };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
 export function reviveGuardianKeys(x: unknown): GuardianKeysState {
   const empty = emptyGuardianKeys();
   if (typeof x !== "object" || x === null || Array.isArray(x)) return empty;
-  const o = x as Partial<GuardianKeysState>;
+  // `pinSentAt` was the PIN record before D4: dropped, since STATUS `pinSet` now says.
+  const { pinSentAt: _legacy, ...o } = x as Partial<GuardianKeysState> & { pinSentAt?: unknown };
+  void _legacy;
   if (o.v !== 1) return empty;
   const rec = (r: unknown) => (typeof r === "object" && r !== null && !Array.isArray(r) ? r : {});
   return {
     ...empty,
     ...o,
     approvalSentAt: rec(o.approvalSentAt) as Record<string, number>,
-    pinSentAt: rec(o.pinSentAt) as Record<string, number>,
+    pins: Object.fromEntries(
+      Object.entries(rec(o.pins) as Record<string, PinDelivery>).filter(
+        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set") && typeof v.sentAt === "number",
+      ),
+    ),
+    objected: Object.fromEntries(
+      Object.entries(rec(o.objected) as Record<string, unknown>).filter(
+        (e): e is [string, string[]] => Array.isArray(e[1]) && e[1].every((x) => typeof x === "string"),
+      ),
+    ),
+    statusRepliedTs: Object.fromEntries(
+      Object.entries(rec(o.statusRepliedTs) as Record<string, unknown>).filter(
+        (e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1]),
+      ),
+    ),
+    clamped: Object.fromEntries(
+      Object.entries(rec(o.clamped) as Record<string, unknown>).filter(
+        (e): e is [string, { count: number; roseAt?: number }] =>
+          typeof e[1] === "object" &&
+          e[1] !== null &&
+          typeof (e[1] as { count?: unknown }).count === "number" &&
+          ((e[1] as { roseAt?: unknown }).roseAt === undefined || typeof (e[1] as { roseAt?: unknown }).roseAt === "number"),
+      ),
+    ),
+    rules: Object.fromEntries(
+      Object.entries(rec(o.rules) as Record<string, unknown>)
+        .filter(([k]) => /^[0-9a-f]{64}$/.test(k))
+        .map(([k, v]) => [
+          k,
+          // Kind keys from before device rules existed are family-wide rules.
+          Object.fromEntries(
+            Object.entries(rec(v) as Record<string, SignedEvent>).filter(([key]) => /^[a-z]{1,32}(@[0-9a-f]{64})?$/.test(key)),
+          ),
+        ]),
+    ),
+    localRules: reviveIdMaps(o.localRules),
+    appliedRules: reviveIdMaps(o.appliedRules),
     roster:
       typeof o.roster === "object" && o.roster !== null && Array.isArray(o.roster.children)
         ? o.roster
@@ -160,5 +287,16 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     ),
     presenceConfirmed: rec(o.presenceConfirmed) as Record<string, number>,
     heldRosters: rec(o.heldRosters) as Record<string, HeldRoster>,
+    restoredFrom: reviveRestored(o.restoredFrom),
   };
+}
+
+/** This install's root when it is reached through My Signet (a bunker that prompts), not the phone's own key. */
+export function bunkerRoot(k: Pick<GuardianKeysState, "root"> | undefined): InstallRoot | undefined {
+  return k?.root && k.root.via !== "phone" ? k.root : undefined;
+}
+
+/** Is this family's guardian identity this phone's own key (with or without a minted working key)? */
+export function phoneHeldRoot(k: Pick<GuardianKeysState, "root"> | undefined): boolean {
+  return !k?.root || k.root.via === "phone";
 }

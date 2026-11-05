@@ -132,6 +132,19 @@ describe("a departed key's last STATUS (farewell)", () => {
     expect(applyFarewell(after, f, W, [R])).toBe(after);
   });
 
+  it("a phone-held identity's old key told it departed after a move keeps the device: the new identity holds it (D5)", () => {
+    // The phone listens on its old key P as well as W. The device moved to R2
+    // and says farewell to P, before and after this phone settles the move.
+    const P = "a3".repeat(32);
+    const kids = [child([device({ keysViewAt: T - 10, guardians: g([{ root: P, keys: [W] }]) })])];
+    const f = parseFarewell(JSON.stringify(farewellBody([{ root: R2, keys: [W] }])))!;
+    const preSettle = applyFarewell(kids, f, P, [P, R2]);
+    expect(preSettle[0].devices[0].departedAt).toBeUndefined();
+    expect(preSettle[0].devices[0].guardians?.roots).toEqual([{ root: R2, keys: [W] }]);
+    const postSettle = applyFarewell(kids, f, P, [R2]);
+    expect(postSettle[0].devices[0].departedAt).toBeUndefined();
+  });
+
   it("ignores a farewell that still lists W, or one older than the view held", () => {
     const kids = [child([device({ keysViewAt: T })])];
     expect(applyFarewell(kids, parseFarewell(JSON.stringify(farewellBody([{ root: R, keys: [W] }])))!, W)).toBe(kids);

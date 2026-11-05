@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Avatar, Banner, Button, Card, SectionLabel } from "../components/ui";
+import { Avatar, Button, Card, SectionLabel } from "../components/ui";
 import { wardPath } from "../domain/wardRoute";
 import { useCharter } from "../store/store";
 import GuardianBattery from "./GuardianBattery";
@@ -10,6 +10,7 @@ import { ColorChoice } from "./ColorChoice";
 import KeyBackupNudge, { KEY_BACKUP_ANCHOR } from "./KeyBackupNudge";
 import SignerCard from "./SignerCard";
 import Guardians from "./Guardians";
+import RemovalNotice from "./RemovalNotice";
 import {
   familyWards,
   goGuardians,
@@ -78,21 +79,15 @@ function GuardiansCard() {
   const wards = familyWards(state.children);
   const me = myRootOf(guardianKeys);
   const roots = rootsView(wards, me);
-  const againstMe = removalsAgainstMe(wards, guardianKeys.state, me);
+  const againstMe = removalsAgainstMe(wards, guardianKeys.state, me, Math.floor(Date.now() / 1000));
   const others = roots.filter((r) => !r.you).length;
   const reported = wards.some((w) => w.device.guardians);
   return (
     <Card>
-      {againstMe.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          <Banner tone="warn">
-            The other parent has asked to remove you as a guardian. Open Guardians to object.
-          </Banner>
-        </div>
-      )}
+      <RemovalNotice />
       <p className="card-sub" style={{ marginTop: 0 }}>
         {wards.length === 0
-          ? "Another parent already uses Kintrinsic for your child? Join their family with your own My Signet."
+          ? "Another parent already uses Kintrinsic for your child? Join their family, with My Signet or with this phone only."
           : !reported
             ? "Your devices haven't said who their guardians are yet. They do once they have the latest Kintrinsic."
             : others === 0

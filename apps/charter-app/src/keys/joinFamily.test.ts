@@ -77,6 +77,34 @@ function install(wSk: Uint8Array, rootSk: Uint8Array, children: Child[]): Instal
   return { gk, keys: () => keys, children: () => kids, setChildren: (c) => (kids = c), published };
 }
 
+/**
+ * An install whose guardian identity is this phone's own key (decision
+ * 1(b)): the local signer is connected, so `root()` is the local key, and a
+ * fresh working key is minted on first need (D5).
+ */
+function phoneInstall(localSk: Uint8Array, children: Child[]): Install & { minted: () => Uint8Array | null } {
+  let keys = emptyGuardianKeys();
+  let kids = children;
+  let minted: Uint8Array | null = null;
+  const published: Install["published"] = [];
+  const gk = new GuardianKeys({
+    read: () => ({ keys, children: keysChildren(kids, ["wss://default.example"]) }),
+    write: (f) => {
+      keys = f(keys);
+    },
+    workingKey: () => minted ?? localSk,
+    localKey: () => localSk,
+    mintWorkingKey: () => (minted = generateSecretKey()),
+    root: () => opsOf(localSk),
+    publish: async (relays, wrap) => {
+      published.push({ relays, wrap });
+    },
+    now: () => T,
+    defaultRelays: ["wss://default.example"],
+  });
+  return { gk, keys: () => keys, children: () => kids, setChildren: (c) => (kids = c), published, minted: () => minted };
+}
+
 function ward(machine: string, platform: Device["platform"], label: string, guardians: StatusGuardians): Device {
   return {
     id: `dev-${label}`,
@@ -111,9 +139,9 @@ const mint = () => ({
 });
 
 /** The store's intake for one wrap, as `wrapContext` wires it, for install B. */
-function intakeFor(b: Install): WrapIngestContext {
+function intakeFor(b: Install, sk: Uint8Array = wBSk): WrapIngestContext {
   return {
-    guardianSk: wBSk,
+    guardianSk: sk,
     handledWraps: new Set(),
     seenReqIds: new Set(),
     hasRequest: () => false,
@@ -232,8 +260,8 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     B.setChildren(applyDeviceKeysView(B.children(), status(PHONE, T + 120, withRemoval, "android")));
     B.setChildren(applyDeviceKeysView(B.children(), status(LAPTOP, T + 120, withRemoval, "linux")));
     const wards = familyWards(B.children());
-    expect(pendingFor(wards[0].device.guardians, B.keys(), R_B)[0].role).toBe("against-me");
-    expect(removalsAgainstMe(wards, B.keys(), R_B).map((r) => r.d)).toEqual([removalD]);
+    expect(pendingFor(wards[0].device.guardians, B.keys(), R_B, T + 120)[0].role).toBe("against-me");
+    expect(removalsAgainstMe(wards, B.keys(), R_B, T + 120).map((r) => r.d)).toEqual([removalD]);
     const objection = await B.gk.objectToRemoval(removalD);
     expect(objection.sent.sort()).toEqual([PHONE, LAPTOP].sort());
     const parsed = parseStatement(objection.event as SignedEvent);
@@ -250,6 +278,117 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     expect(withdraw.sent.sort()).toEqual([PHONE, LAPTOP].sort());
     const opened = unwrapToWorkingKey(B.published.at(-1)!.wrap, B.published.at(-1)!.wrap.tags[0][1] === PHONE ? phoneSk : laptopSk);
     expect(opened?.sealAuthor).toBe(W_B);
+  });
+
+  it("with this phone only: its key is the identity, a fresh day-to-day key confirms with the approval inline", async () => {
+    const onlyA = g([{ root: R_A, keys: [W_A] }]);
+    const A = install(wASk, rASk, [
+      {
+        id: "a1",
+        name: "Sam",
+        color: "#3B6FB2",
+        dependantPubkey: null,
+        rosterId: SUBJECT,
+        policies: [{ id: "p1", scope: { kind: "device" } }],
+        devices: [ward(PHONE, "android", "Sam's phone", onlyA), ward(LAPTOP, "linux", "Sam's laptop", onlyA)],
+      },
+    ]);
+    const r2Sk = generateSecretKey();
+    const R2 = getPublicKey(r2Sk);
+    const B = phoneInstall(r2Sk, []);
+    // A My Signet once connected and dropped on this phone names no device here.
+    B.gk["deps"].write((k) => ({ ...k, forgottenRoot: R_B }));
+
+    // B joins with this phone only: R2 is this phone's key, and it approves a fresh W.
+    const made = await B.gk.joinWithThisPhone();
+    const wSk = B.minted()!;
+    const W = getPublicKey(wSk);
+    expect(W).not.toBe(R2);
+    expect(made).toMatchObject({ pubkey: R2, via: "phone" });
+    expect(B.keys().forgottenRoot).toBeUndefined();
+    const approval = parseStatement(made.approval);
+    expect(approval.ok && approval.statement).toMatchObject({ type: "approval", signer: R2, key: W, d: `kintrinsic/device/${W}` });
+    expect(B.gk.workingPubkey()).toBe(W);
+    expect(B.gk.rootPubkey()).toBe(R2);
+    expect(B.published).toEqual([]); // no device to send the approval to yet
+    // Asking again keeps the same identity and key.
+    expect((await B.gk.joinWithThisPhone()).approval.id).toBe(made.approval.id);
+    expect(B.minted()).toBe(wSk);
+
+    // B's guardian code carries R2; A scans it and invites it, exactly as an npub from My Signet.
+    const code = `nostr:${nip19.npubEncode(R2)}`;
+    await A.gk.approveThisInstall({ via: "signet", label: "A's phone" });
+    const invite = await A.gk.inviteCoGuardian(code.replace(/^nostr:/, ""));
+    const inviteD = `kintrinsic/guardian/${R2}`;
+    const st = parseStatement(invite.event as SignedEvent);
+    expect(st.ok && st.statement).toMatchObject({ type: "coguardian", signer: R_A, key: R2, d: inviteD });
+    expect(invite.event.tags.find((t) => t[0] === "p")?.[1]).toBe(R2);
+    expect(A.gk.trustedRoots()).toEqual([R_A, R2].sort());
+
+    // Its own code, pasted where the other parent's goes: a hint true for a phone-held identity.
+    expect(() => B.gk.anchorRoot(code)).toThrow("That's this phone's own code. Ask the other parent for theirs.");
+    expect(() => B.gk.anchorRoot(code)).not.toThrow(/second phone/);
+    // B scans A's code, then confirms in person: W signs and seals, with R2's approval of W inline (rule 6).
+    expect(B.gk.anchorRoot(`nostr:${nip19.npubEncode(R_A)}`)).toBe(R_A);
+    const confirm = await B.gk.confirmPresence(presenceCode(PHONE, inviteD, invite.event.id));
+    expect(confirm.sent).toEqual([PHONE]);
+    const opened = unwrapToWorkingKey(B.published.at(-1)!.wrap, phoneSk)!;
+    expect(opened.sealAuthor).toBe(W);
+    expect(opened.inner).toMatchObject({ kind: 31121, pubkey: W });
+    const content = JSON.parse(opened.inner.content) as { v: number; token: string; statement: string; approval: SignedEvent };
+    expect(content).toMatchObject({ v: 1, token: "0123456789abcdef".repeat(2), statement: invite.event.id });
+    expect(content.approval.id).toBe(made.approval.id);
+    expect(content.approval.pubkey).toBe(R2);
+    expect(content.approval.tags).toContainEqual(["p", W]);
+    expect(Object.keys(B.keys().presenceWards)).toEqual([PHONE]);
+
+    // The phone pins R2 and binds W under it, and reports both parents.
+    const both = g([
+      { root: R_A, keys: [W_A] },
+      { root: R2, keys: [W] },
+    ]);
+    const phoneStatus = status(PHONE, T + 60, both, "android");
+    B.gk.notePresenceStatus(phoneStatus);
+
+    // A's roster reaches W and becomes B's family, as for a My Signet joiner.
+    A.setChildren(applyDeviceKeysView(A.children(), phoneStatus));
+    const roster = await A.gk.sendRoster();
+    expect(roster.sent).toEqual([W]);
+    const toB = A.published.filter((p) => p.wrap.tags.some((t) => t[0] === "p" && t[1] === W)).at(-1)!.wrap;
+    expect(ingestWrap(toB, intakeFor(B, wSk))).toEqual({ kind: "roster" });
+    expect(B.children()).toHaveLength(1);
+    expect(B.children()[0]).toMatchObject({ name: "Sam", rosterId: SUBJECT });
+    expect(B.keys().presenceWards).toEqual({});
+
+    // R2 keeps signing the rules itself until a move (D5); W carries R2's statements where listed.
+    expect(B.gk.keyFor(PHONE)).toBe("root");
+    expect(B.gk.opsFor(PHONE).pubkey).toBe(R2);
+
+    // B's own roster carries R2's approval of W, and A takes it.
+    const back = await B.gk.sendRoster();
+    expect(back.sent).toEqual([W_A]);
+    const toA = B.published.filter((p) => p.wrap.tags.some((t) => t[0] === "p" && t[1] === W_A)).at(-1)!.wrap;
+    const fromB = unwrapToWorkingKey(toA, wASk)!;
+    expect(fromB.sealAuthor).toBe(W);
+    expect(A.gk.receiveRoster(fromB)).toMatchObject({ ok: true });
+
+    // The move to My Signet later is open to B, as to any phone-held identity.
+    expect(B.gk.familyReadiness().ready).toBe(true);
+  });
+
+  it("with this phone only: refused on a phone that looks after devices, or whose identity is My Signet", async () => {
+    const onlyMine = g([{ root: R_B, keys: [] }]);
+    const busy = phoneInstall(rBSk, [
+      { id: "b1", name: "Kit", color: "#000000", dependantPubkey: null, policies: [], devices: [ward(PHONE, "android", "Kit's phone", onlyMine)] },
+    ]);
+    await expect(busy.gk.joinWithThisPhone()).rejects.toThrow(/already looks after devices/);
+    expect(busy.minted()).toBeNull();
+
+    const signet = install(wBSk, rBSk, []);
+    await signet.gk.approveThisInstall({ via: "signet", label: "B's phone" });
+    await expect(signet.gk.joinWithThisPhone()).rejects.toThrow(/already uses My Signet/);
+    // A My Signet identity keeps the second-phone hint.
+    expect(() => signet.gk.anchorRoot(nip19.npubEncode(R_B))).toThrow(/For a second phone of your own, skip this step/);
   });
 
   it("a roster child that shares a device with one this install added keeps one child, under the smaller id", () => {

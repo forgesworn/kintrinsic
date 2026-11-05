@@ -3,6 +3,7 @@ import { Button, Card } from "../components/ui";
 import { useCharter } from "../store/store";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import { familyWards, myRootOf, rootsView } from "./guardiansView";
+import { bunkerRoot, phoneHeldRoot } from "../keys/state";
 
 /**
  * A lost or replaced phone: withdraw its working key from every device, for
@@ -50,10 +51,10 @@ export default function GuardianLostPhone({ onBack }: { onBack: () => void }) {
   return (
     <Card>
       <h2 className="card-title">Lost a phone?</h2>
-      {!guardianKeys.state.root ? (
+      {others.length === 0 && phoneHeldRoot(guardianKeys.state) ? (
         <p className="card-sub">
-          Your guardian key is kept on this phone only, so there are no other phones to withdraw. If you lose this
-          phone, restore your key backup on a new one.
+          Your guardian key is kept on this phone, and your devices don't list another phone of yours to withdraw. If
+          you lose this phone, restore your key backup on a new one.
         </p>
       ) : others.length === 0 ? (
         <p className="card-sub">Your devices don't list any phone of yours other than this one.</p>
@@ -62,6 +63,11 @@ export default function GuardianLostPhone({ onBack }: { onBack: () => void }) {
           <p className="card-sub" style={{ margin: 0 }}>
             Your other phones with Kintrinsic, as your child's devices know them. Withdraw one you've lost or given
             away.
+          </p>
+          <p className="card-sub" style={{ margin: 0 }}>
+            {bunkerRoot(guardianKeys.state) ? "Your My Signet approves it" : "Your guardian key on this phone approves it"},
+            and no one needs to be at the child's devices. Each device stops trusting that
+            phone the next time it checks in, usually within minutes.
           </p>
           {others.map((w) => (
             <div key={w} className="stack" style={{ gap: 6 }}>

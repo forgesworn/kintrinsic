@@ -22,6 +22,7 @@ import RuleEditor, { AppRulePage, ChildRules } from "./RuleEditor";
 import { SECTION_TITLE, type SectionId } from "./Limits";
 import { CharterProvider, STORAGE_KEY, type CharterState } from "../store/store";
 import type { Child } from "../domain/types";
+import { emptyGuardianKeys } from "../keys/state";
 
 const SAM: Child = {
   id: "c1",
@@ -438,6 +439,77 @@ describe("rule editors as pages", () => {
       expect(text()).toContain("Sam has no charter to edit yet.");
       expect(container.querySelectorAll("button.row")).toHaveLength(0);
       expect(text()).toContain("Daily schedule");
+    });
+  });
+
+  describe("a rule set on another phone that this screen can't show (decision 3)", () => {
+    const subject = "ab".repeat(32);
+    const other = "cd".repeat(32);
+    const lossy = {
+      id: "ef".repeat(32),
+      pubkey: other,
+      sig: "00".repeat(64),
+      kind: 31113,
+      created_at: 1_800_000_000,
+      tags: [["t", "charter-device"]],
+      content: JSON.stringify({ v: 1, kind: "budget", issuedAt: 1_800_000_000, body: { v: 1, tz: "UTC", revoked: true, issuedAt: 1_800_000_000 } }),
+    };
+    const seedKeys = () => {
+      const state = JSON.parse(localStorage.getItem(STORAGE_KEY)!) as CharterState;
+      state.children[0].rosterId = subject;
+      state.guardianKeys = {
+        ...emptyGuardianKeys(),
+        anchoredRoots: { [other]: { anchoredAt: 1, how: "scanned", label: "Robin" } },
+        rules: { [subject]: { budget: lossy } },
+        appliedRules: { [subject]: { budget: lossy.id } },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    };
+
+    it("puts a received rule the screen can hold on this phone's own screen, once", async () => {
+      seed();
+      const state = JSON.parse(localStorage.getItem(STORAGE_KEY)!) as CharterState;
+      state.children[0].rosterId = subject;
+      const weekly = { tue: [{ start: "09:00", end: "10:00" }] };
+      const received = { ...lossy, id: "aa".repeat(32), content: JSON.stringify({ v: 1, kind: "schedule", issuedAt: 1_800_000_000, body: { v: 1, tz: "UTC", weekly, issuedAt: 1_800_000_000 } }) };
+      state.guardianKeys = { ...emptyGuardianKeys(), rules: { [subject]: { schedule: received } } };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      await act(async () => {
+        root.render(
+          <CharterProvider>
+            <RuleEditor childId="c1" section="schedule" />
+          </CharterProvider>,
+        );
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!) as CharterState;
+      expect(saved.children[0].policies.find((p) => p.id === "p1")!.schedule).toEqual({ tz: "UTC", weekly });
+      expect(saved.guardianKeys!.appliedRules[subject]).toEqual({ schedule: received.id });
+      expect(text()).not.toContain("Set from");
+    });
+
+    it("is read-only with who set it, on the list and the page, until Replace", async () => {
+      seed();
+      seedKeys();
+      act(() => {
+        root.render(
+          <CharterProvider>
+            <ChildRules child={{ ...SAM, rosterId: subject }} />
+          </CharterProvider>,
+        );
+      });
+      expect(text()).toContain("Set from Robin");
+      expect(text()).toContain("Rules set by Robin appear here too. Whoever changed a rule most recently wins, on every device.");
+      act(() => {
+        root.render(
+          <CharterProvider>
+            <RuleEditor childId="c1" section="budget" />
+          </CharterProvider>,
+        );
+      });
+      expect(text()).toContain("Robin set this rule in a way this screen can’t show.");
+      await click(button("Replace"));
+      expect(text()).not.toContain("Set from Robin");
     });
   });
 });

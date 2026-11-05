@@ -1,7 +1,7 @@
 // RealSigner under guardian roots and working keys: each ward's events are
 // signed and sealed by the key `pickOps` chooses for it (W where the ward
-// holds it, else the root); a scan-to-pair offer always goes out from the
-// root; and rule 4's re-sign of the standing one-off clauses.
+// holds it, else the root); and a scan-to-pair offer always goes out from
+// the root.
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip44, type NostrEvent } from "nostr-tools";
@@ -91,63 +91,6 @@ describe("RealSigner with working keys", () => {
     expect(out.inner.pubkey).toBe(R);
     expect(out.inner.kind).toBe(31117);
     expect(JSON.parse(out.inner.content).approval).toBeUndefined();
-  });
-});
-
-describe("rule 4: re-signing standing clauses", () => {
-  it("re-signs the last gift, stand-down and debugging per device with a fresh issuedAt and the same id", async () => {
-    const published: NostrEvent[] = [];
-    let now = 1_800_000_000;
-    const s = signer(published, { now: () => now });
-    await s.connect("signet");
-    await s.signGiftClause("c1", 15);
-    await s.signStandDownClause("c1");
-    await s.signDebuggingClause("c1", B, { allow: true, until: now + 3600 });
-    const first = published.map((e) => unwrapToWorkingKey(e, sk(e))!);
-    const giftId = (JSON.parse(first[0].inner.content) as { body: { id: string } }).body.id;
-    published.length = 0;
-    now += 100;
-    await s.resignStanding("c1");
-    const again = published.map((e) => ({ to: e.tags.find((t) => t[0] === "p")![1], c: JSON.parse(unwrapToWorkingKey(e, sk(e))!.inner.content) }));
-    // gift + standdown to both devices, debugging to B only
-    expect(again.map((x) => `${x.c.kind}:${x.to === A ? "A" : "B"}`).sort()).toEqual(
-      ["debugging:B", "gift:A", "gift:B", "standdown:A", "standdown:B"],
-    );
-    for (const x of again) {
-      expect(x.c.issuedAt).toBeGreaterThan(1_800_000_000 + 99);
-      if ("issuedAt" in x.c.body) expect(x.c.body.issuedAt).toBe(x.c.issuedAt);
-    }
-    expect(again.filter((x) => x.c.kind === "gift").every((x) => x.c.body.id === giftId)).toBe(true);
-  });
-
-  it("does not record a clause whose send failed outright, and re-signs nothing when nothing is recorded", async () => {
-    const published: NostrEvent[] = [];
-    const s = signer(published, {
-      publish: async () => {
-        throw new Error("no relay");
-      },
-    });
-    await s.connect("signet");
-    await expect(s.signGiftClause("c1", 15)).rejects.toThrow();
-    const ok = signer(published);
-    await ok.connect("signet");
-    await expect(ok.resignStanding("c1")).resolves.toEqual({ ok: true });
-    expect(published).toHaveLength(0);
-  });
-
-  it("re-signs a debugging clause sent before the standing record existed, from the device's own record (L6)", async () => {
-    const published: NostrEvent[] = [];
-    const withDebugging: ChildTarget = {
-      ...target,
-      devices: [target.devices[0], { ...target.devices[1], debugging: { allow: true, until: 1_800_003_600 } }],
-    };
-    const s = signer(published, { resolveChild: () => withDebugging });
-    await s.connect("signet");
-    await s.resignStanding("c-upgraded");
-    expect(published).toHaveLength(1);
-    const out = unwrapToWorkingKey(published[0], bSk)!;
-    const c = JSON.parse(out.inner.content);
-    expect(c).toMatchObject({ kind: "debugging", issuedAt: 1_800_000_000, body: { allow: true, until: 1_800_003_600, issuedAt: 1_800_000_000 } });
   });
 });
 

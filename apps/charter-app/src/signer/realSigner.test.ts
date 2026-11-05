@@ -12,7 +12,7 @@ import { appRulesToGrant } from "../wire/clause";
 import type { GrantAppRules } from "../wire/types";
 import { unwrapClause, unwrapGrant, type GuardianOps } from "../wire/giftwrap";
 import type { DecisionContext } from "./Signer";
-import { RealSigner, type ChildTarget } from "./realSigner";
+import { RealSigner, type ChildTarget, type SignedRule } from "./realSigner";
 
 // The signer persists its clause clock (`nextIssuedAt`) so a reload can't step
 // back under it; with a frozen `now` that floor would leak between tests.
@@ -1037,5 +1037,117 @@ describe("RealSigner.signMaintenanceClause", () => {
     // ...and never older than the window it is closing, or the store's floor
     // would drop it and the window would stay open to its full length.
     expect(shut.issuedAt).toBeGreaterThanOrEqual(open.issuedAt);
+  });
+});
+
+describe("RealSigner keeps a rule change's signed clauses for the family roster (Q3)", () => {
+  it("hands on one family-wide signed inner per kind once sent, and nothing when every send failed", async () => {
+    const kept: { childId: string; signed: SignedRule[] }[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }, { id: "dev2", pubkey: DPK2 }], relays: RELAYS };
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async () => {},
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (childId, signed) => kept.push({ childId, signed }),
+    });
+    await signer.connect("local");
+    await signer.signClause("child_sam", devicePolicy);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].childId).toBe("child_sam");
+    expect(kept[0].signed.map((r) => JSON.parse(r.inner.content).kind).sort()).toEqual(["budget", "schedule"]);
+    for (const r of kept[0].signed) {
+      expect(r.machine).toBeUndefined();
+      expect(r.inner.kind).toBe(31113);
+      expect(r.inner.pubkey).toBe(GUARDIAN);
+    }
+
+    const failing = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async () => {
+        throw new Error("no relay");
+      },
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (childId, signed) => kept.push({ childId, signed }),
+    });
+    await failing.connect("local");
+    await expect(failing.signClause("child_sam", devicePolicy)).rejects.toThrow();
+    expect(kept).toHaveLength(1);
+  });
+
+  it("keeps a rule per device when the devices' clauses differ, and the device kinds always per device", async () => {
+    const kept: SignedRule[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }, { id: "dev2", pubkey: DPK2 }], relays: RELAYS };
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async () => {},
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (_c, signed) => kept.push(...signed),
+    });
+    await signer.connect("local");
+    const split: Policy = {
+      ...devicePolicy,
+      deviceOverrides: { dev2: { budget: { ...devicePolicy.budget!, dailyMinutes: 30 } } },
+    };
+    await signer.signClause("child_sam", split);
+    const view = kept.map((r) => [JSON.parse(r.inner.content).kind, r.machine ?? null]).sort();
+    expect(view).toEqual(
+      [
+        ["budget", DPK1],
+        ["budget", DPK2],
+        ["schedule", null],
+      ].sort(),
+    );
+
+    kept.length = 0;
+    await signer.signDebuggingClause("child_sam", DPK2, { allow: true });
+    expect(kept.map((r) => [JSON.parse(r.inner.content).kind, r.machine])).toEqual([["debugging", DPK2]]);
+    kept.length = 0;
+    await signer.signMaintenanceClause("child_sam", 10);
+    expect(kept.map((r) => r.machine).sort()).toEqual([DPK1, DPK2].sort());
+  });
+});
+
+describe("RealSigner re-sends a rule set on another phone as it is (decision 3)", () => {
+  it("sends the stored payload for a re-send only, and doesn't keep it as this install's own", async () => {
+    const other = finalizeEvent(
+      {
+        kind: 31113,
+        created_at: 1_699_000_000,
+        tags: [["t", "charter-device"]],
+        content: JSON.stringify({ v: 1, kind: "budget", subject: SUBJECT, issuedAt: 1_699_000_000, body: { v: 1, tz: "UTC", revoked: true, issuedAt: 1_699_000_000 } }),
+      },
+      generateSecretKey(),
+    );
+    const published: NostrEvent[] = [];
+    const kept: SignedRule[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }], relays: RELAYS };
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async (_r, wrap) => {
+        published.push(wrap);
+      },
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (_c, signed) => kept.push(...signed),
+      inForce: (_c, kind) => (kind === "budget" ? other : undefined),
+    });
+    await signer.connect("local");
+    await signer.signClause("child_sam", devicePolicy, { resend: true });
+    const budget = published.map((w) => unwrapClause(w, DEV1, GUARDIAN).payload).find((p) => p.kind === "budget")!;
+    // The body as the other phone set it, dated now: a newly paired phone
+    // refuses a clause issued before its pairing.
+    const stored = JSON.parse(other.content);
+    expect(budget).toEqual({ ...stored, issuedAt: 1_700_000_000, body: { ...stored.body, issuedAt: 1_700_000_000 } });
+    for (const w of published) expect(w.created_at).toBeGreaterThan(1_699_000_000);
+    expect(kept.map((r) => JSON.parse(r.inner.content).kind)).toEqual(["schedule"]);
+
+    // A fresh decision sends this phone's own.
+    published.length = 0;
+    await signer.signClause("child_sam", devicePolicy);
+    const fresh = published.map((w) => unwrapClause(w, DEV1, GUARDIAN).payload).find((p) => p.kind === "budget")!;
+    expect(fresh.issuedAt).toBe(1_700_000_000 + 1);
   });
 });
