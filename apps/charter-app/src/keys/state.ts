@@ -93,10 +93,12 @@ export interface HeldRoster {
 /**
  * The guardian PIN on one Android ward, as this install sent it (decision D4):
  * "sending" from the send until a STATUS from that ward shows `pinSet`, then
- * "set". The PIN itself is never kept.
+ * "set". "unconfirmed" once `PIN_RESEND_LIMIT` STATUS reports in a row came
+ * without `pinSet`: nothing more is sent until the guardian sets the PIN
+ * again. The PIN itself is never kept.
  */
 export interface PinDelivery {
-  state: "sending" | "set";
+  state: "sending" | "set" | "unconfirmed";
   /**
    * While "sending": the record (salt and scrypt hash) that was sent, resent
    * unchanged on each STATUS that doesn't yet show `pinSet`. Dropped once set.
@@ -106,7 +108,12 @@ export interface PinDelivery {
   sentAt: number;
   /** `ts` of the last STATUS from the ward acted on, so one STATUS triggers one resend at most. */
   statusTs?: number;
+  /** While "sending": how many STATUS reports without `pinSet` were answered with a resend (absent = none). */
+  resends?: number;
 }
+
+/** How many times a PIN is resent to one ward before this install stops and asks the guardian. */
+export const PIN_RESEND_LIMIT = 20;
 
 export interface GuardianKeysState {
   v: 1;
@@ -144,13 +151,21 @@ export interface GuardianKeysState {
    * The rules in force per child (roster subject), as signed inner CLAUSE
    * events keyed by `(kind, device)`: the kind alone for a family-wide rule,
    * `kind@machine` for a rule that went to one device (decision Q3). Newest
-   * `issuedAt` per key wins. What this install signed itself, and what
+   * effective time per key wins (`ruleSeenAt`). What this install signed itself, and what
    * another guardian's roster carried from a current signer. Shared in the
    * roster so both phones hold the same.
    */
   rules: Record<string, Record<string, SignedEvent>>;
   /** Per child and rule key: the event id of the rule this install signed itself, while it is the one held. */
   localRules: Record<string, Record<string, string>>;
+  /**
+   * When this install first saw a rule dated ahead of its own clock (unix s),
+   * by event id. A rule's effective time is `min(issuedAt, first seen)`, as a
+   * ward clamps it (decision D1), so one rule dated far ahead can't hide every
+   * later rule. Recorded once, so a rule that arrives again in a later roster
+   * keeps its first time. Rules dated at or before their arrival need none.
+   */
+  ruleSeenAt?: Record<string, number>;
   /**
    * Per child and rule key: the event id of the received rule last put on
    * this install's rule screens (or left as set elsewhere when the screen
@@ -239,7 +254,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     approvalSentAt: rec(o.approvalSentAt) as Record<string, number>,
     pins: Object.fromEntries(
       Object.entries(rec(o.pins) as Record<string, PinDelivery>).filter(
-        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set") && typeof v.sentAt === "number",
+        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set" || v.state === "unconfirmed") && typeof v.sentAt === "number",
       ),
     ),
     objected: Object.fromEntries(
@@ -287,6 +302,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     ),
     presenceConfirmed: rec(o.presenceConfirmed) as Record<string, number>,
     heldRosters: rec(o.heldRosters) as Record<string, HeldRoster>,
+    ruleSeenAt: Object.fromEntries(Object.entries(rec(o.ruleSeenAt)).filter(([, v]) => typeof v === "number" && Number.isFinite(v))) as Record<string, number>,
     restoredFrom: reviveRestored(o.restoredFrom),
   };
 }

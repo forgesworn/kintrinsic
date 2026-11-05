@@ -7,8 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import { getPublicKey, SimplePool, type NostrEvent } from "nostr-tools";
 import type { Child, SignerState } from "../domain/types";
-import { GuardianKeys, type SendReport } from "../keys/guardianKeys";
-import { inForceToResend } from "../domain/receivedRules";
+import { GuardianKeys, kindOfRuleKey, type SendReport } from "../keys/guardianKeys";
 import type { SignedEvent } from "../keys/sdk";
 import { reviveGuardianKeys, type GuardianKeysState, type InstallRoot, type RootVia } from "../keys/state";
 import type { ChildReadiness } from "../keys/versionGate";
@@ -214,11 +213,15 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
           );
         }
       },
-      inForce: (childId, kind, machine) => {
+      heldRules: (childId, machine) => {
         const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
-        if (!child?.rosterId) return undefined;
+        if (!child?.rosterId) return [];
         const subject = child.rosterId;
-        return inForceToResend(child, kind, machine, (k, m) => keys.ruleInForce(subject, k, m)) as NostrEvent | undefined;
+        const kinds = new Set(Object.keys(keysRef.current.rules?.[subject] ?? {}).map(kindOfRuleKey));
+        return [...kinds].flatMap((kind) => {
+          const r = keys.ruleInForce(subject, kind, machine);
+          return r ? [{ kind, event: r.event as NostrEvent, local: r.local }] : [];
+        });
       },
     }),
     [keys],

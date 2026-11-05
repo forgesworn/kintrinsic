@@ -303,6 +303,33 @@ let askMins = 20;    // the slider's amount, in 5-minute steps
 // slider — mirrors charter-tray's BUCKET_ASK_MINUTES exactly.
 const BUCKET_ASK_MINUTES = 15;
 
+// What is waiting to be confirmed in person is the parents' business, so the
+// page shows it only briefly. The host re-sends the list it holds with every
+// status, so the page takes it only once, straight after the administrator
+// asked for it with their password, and forgets it as soon as a code has
+// been minted, when the card is closed (Close, or leaving the page), or after
+// two minutes with no key press or click.
+const PRESENCE_IDLE_MS = 2*60*1000;
+let presenceAsk = "none";  // "pending" once asked, "ok" once the host said yes
+let presenceListAt = 0;    // when the list on screen arrived (0 = none shown)
+let lastInput = Date.now();
+function clearPresenceList(){ S.presenceList = null; presenceListAt = 0; presenceAsk = "none"; }
+function takePresenceList(incoming, now){
+  if(S.presence){ clearPresenceList(); return; }
+  if(presenceAsk === "ok" && Array.isArray(incoming)){
+    S.presenceList = incoming; presenceListAt = now; lastInput = now; presenceAsk = "none";
+    return;
+  }
+  // Not asked for just now: the host's held copy is not shown again.
+  if(!presenceListAt || !Array.isArray(incoming)) S.presenceList = null;
+}
+// True when the list was cleared for being left idle.
+function presenceIdle(now){
+  if(!presenceListAt || now - lastInput < PRESENCE_IDLE_MS) return false;
+  clearPresenceList();
+  return true;
+}
+
 // Host pushes status here.
 window.__charter = function(data){
   // The Rust host pushes an OBJECT (window.__charter({...})); the demo
@@ -311,14 +338,22 @@ window.__charter = function(data){
   // swallowed EVERY real status, so the app was permanently stuck on the
   // "not configured" screen even with a valid child on disk (found on-metal
   // 2026-07-24, once the paint fix made the screen visible).
+  const shown = S.presenceList;
   try { S = Object.assign(S, typeof data === "string" ? JSON.parse(data) : data); } catch(e){}
+  const incoming = S.presenceList;
+  S.presenceList = shown;
+  takePresenceList(incoming, Date.now());
   // Remember that a code was shown at least once, so "expired" is
   // distinguishable from "never asked" — they need different words.
   if (S.invited) S.invitedOnce = true;
   S.busy = false;
   render();
 };
-window.__toast = function(msg, kind){ showToast(msg, kind||"ok"); };
+window.__toast = function(msg, kind){
+  // The host's answer to "list what is waiting" comes just before its status.
+  if(presenceAsk === "pending") presenceAsk = (kind === "err") ? "none" : "ok";
+  showToast(msg, kind||"ok");
+};
 window.__busy = function(on){ S.busy = !!on; render(); };
 
 function showToast(msg, kind){
@@ -361,6 +396,8 @@ function render(){
   // NAVIGATION starts at the top.
   const navigated = render._route !== route;
   render._route = route;
+  // Leaving the Connect page closes the "Confirm in person" card.
+  if(route !== "connect" && (presenceListAt || S.presenceList)) clearPresenceList();
   const keep = navigated ? 0 : main.scrollTop;
   v.innerHTML = stuckBanner() + ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery, about:vAbout}[route]||vToday)();
   wire();
@@ -845,7 +882,8 @@ function presenceCard(){
         ${pendingWhen(p)?`<span class="muted">${esc(pendingWhen(p))}</span>`:""}
         <button class="btn btn-wax btn-block" data-presence="${esc(p.d)}">${busySpin("Show the code to confirm")}</button>
       </div>`).join("")
-      + `<p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password again.</p>`;
+      + `<p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password again.</p>
+      <button class="btn btn-ghost btn-block" id="do-presence-close" style="margin-top:10px">Close</button>`;
   } else {
     body = `${list?`<div class="banner info" style="margin-bottom:14px"><span>Nothing is waiting to be confirmed in person.</span></div>`:""}
       <p class="muted">When a parent adds another parent, removes one, or moves to a new identity, the change waits until a parent standing at this computer confirms it.</p>
@@ -998,7 +1036,9 @@ function wire(){
   const inv=document.getElementById("do-invite");
   if(inv) inv.onclick=()=>{ act(); send({cmd:"invite"}); };
   const plist=document.getElementById("do-presence-list");
-  if(plist) plist.onclick=()=>{ act(); send({cmd:"presenceList"}); };
+  if(plist) plist.onclick=()=>{ presenceAsk = "pending"; act(); send({cmd:"presenceList"}); };
+  const pclose=document.getElementById("do-presence-close");
+  if(pclose) pclose.onclick=()=>{ clearPresenceList(); render(); };
   document.querySelectorAll("[data-presence]").forEach(b=>b.onclick=()=>{ act(); send({cmd:"presence", d:b.dataset.presence}); });
   const rec=document.getElementById("do-recovery"); if(rec) rec.onclick=()=>{ send({cmd:"recovery"}); showToast("Opening Recovery…"); };
   // Amount chooser + the give/take/ask verbs.
@@ -1048,6 +1088,9 @@ document.querySelectorAll("#nav .item").forEach(b=>b.onclick=()=>{ route=b.datas
 // ward was doing, and hunting for a close button to get back is friction the
 // full app doesn't have (there, Escape does nothing).
 document.addEventListener("keydown", e=>{ if(POPUP && e.key==="Escape") send({cmd:"close"}); });
+// Any key press or click counts as someone still at the list (see presenceIdle).
+document.addEventListener("keydown", ()=>{ lastInput = Date.now(); }, true);
+document.addEventListener("pointerdown", ()=>{ lastInput = Date.now(); }, true);
 
 // initial paint + ask host for status
 render();
@@ -1056,6 +1099,8 @@ send({cmd:"refresh"});
 // network, so nothing here would otherwise tell us it landed. Poll until it
 // does — then the Connect page flips to "Connected" unaided.
 setInterval(()=>{ if(route==="connect" && ((!S.paired && (S.invited||S.invitedOnce)) || (S.presence && !S.busy))) send({cmd:"refresh"}); }, 1000);
+// The pending list goes after two minutes with nobody at it.
+setInterval(()=>{ if(presenceIdle(Date.now())) render(); }, 5000);
 // Today is a LIVE panel: the numbers move on their own as time is used, and a
 // panel that only updates when you press something is how a ward ends up
 // staring at a figure that stopped being true ten minutes ago. Only while

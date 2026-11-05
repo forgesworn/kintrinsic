@@ -15,6 +15,7 @@ import { familyGateReason } from "../keys/guardianKeys";
 import { phoneHeldRoot } from "../keys/state";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
+  androidWardsPinUnconfirmed,
   androidWardsWithoutPin,
   clockBehindLine,
   clockBehindWards,
@@ -31,6 +32,7 @@ import {
   pendingFor,
   pendingTitle,
   pinStateOf,
+  pinUnconfirmedLine,
   readinessLine,
   removeGate,
   rootsView,
@@ -373,6 +375,11 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
             </Button>
           )}
 
+          {androidWardsPinUnconfirmed(wards, keys).map((w) => (
+            <p key={w.device.devicePubkey} className="card-sub" role="status" style={{ margin: 0 }}>
+              {pinUnconfirmedLine(w.device.label)}
+            </p>
+          ))}
           {wards.some((w) => w.device.platform === "android") && (
             <Button variant="secondary" block onClick={() => goGuardians("pin")}>
               {wards.some((w) => w.device.platform === "android" && pinStateOf(w, keys) === "set")

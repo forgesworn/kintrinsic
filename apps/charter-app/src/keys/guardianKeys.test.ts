@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19, nip44, verifyEvent, type NostrEvent } from "nostr-tools";
 import { fitRoster, GuardianKeys, MAX_ROSTER_BYTES, unwrapToWorkingKey, type KeysChild, type KeysDevice } from "./guardianKeys";
-import { emptyGuardianKeys, type GuardianKeysState } from "./state";
+import { emptyGuardianKeys, PIN_RESEND_LIMIT, type GuardianKeysState } from "./state";
 import { guardianPinHash } from "./pin";
 import { familyRosterTemplate, parseStatement, CHARTER_PRESENCE_CONFIRM, CHARTER_FAMILY_ROSTER, type SignedEvent } from "./sdk";
 import type { GuardianOps } from "../wire/giftwrap";
@@ -860,6 +860,49 @@ describe("guardian PIN", () => {
     expect(h.published).toHaveLength(2);
   }, 30_000);
 
+  it("stops resending after PIN_RESEND_LIMIT reports without pinSet, until the guardian tries again", async () => {
+    const ward = readyWard(PHONE, "android");
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    await h.gk.setGuardianPin("123456");
+    h.published.length = 0;
+    const g = { ...ward.guardians!, pinSet: false };
+    for (let i = 1; i <= PIN_RESEND_LIMIT; i++) await h.gk.noteWardStatus({ machine: PHONE, ts: T + i * 10, guardians: g });
+    expect(PIN_RESEND_LIMIT).toBe(20);
+    expect(h.published).toHaveLength(20);
+    expect(h.keys().pins[PHONE].state).toBe("sending");
+    // The 21st: nothing sent, and the guardian is told.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 1000, guardians: g });
+    expect(h.published).toHaveLength(20);
+    expect(h.keys().pins[PHONE]).toEqual({ state: "unconfirmed", sentAt: T + 20, statusTs: T + 1000 });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 2000, guardians: g });
+    expect(h.published).toHaveLength(20);
+    // Trying again starts over.
+    await h.gk.setGuardianPin("123456");
+    expect(h.published).toHaveLength(21);
+    expect(h.keys().pins[PHONE].state).toBe("sending");
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 3000, guardians: g });
+    expect(h.published).toHaveLength(22);
+    expect(h.keys().pins[PHONE].resends).toBe(1);
+  }, 60_000);
+
+  it("never sends a PIN to a ward below the versioning gate, one that never reports pinSet", async () => {
+    const old = device(PHONE, "android", {
+      statusSeen: true,
+      appVersionCode: 54,
+      guardians: { roots: [{ root: R, keys: [W] }], pending: [], tombstones: 0, relays: [] },
+    });
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [old] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    const report = await h.gk.setGuardianPin("123456");
+    expect(report.sent).toEqual([]);
+    expect(report.failed.map((f) => f.to)).toEqual([PHONE]);
+    for (let i = 1; i <= 3; i++) await h.gk.noteWardStatus({ machine: PHONE, ts: T + i * 10, guardians: old.guardians });
+    expect(h.published).toHaveLength(0);
+    expect(h.keys().pins[PHONE]).toBeUndefined();
+  }, 30_000);
+
   it("doesn't resend unattended where the root would have to sign (an approval prompt)", async () => {
     // The ward doesn't list W yet: its events are signed by R over My Signet.
     const ward = device(PHONE, "android", {
@@ -1394,6 +1437,34 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(other.rulesFor(subject).map((r) => r.event.id)).toEqual([held.budget.id, held.schedule.id]);
   });
 
+  it("a rule dated far ahead counts from when it arrived, so a later rule from the other parent still wins", async () => {
+    const W2sk = generateSecretKey();
+    const subject = "aa".repeat(32);
+    const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", rosterId: subject, devices: [readyWard(PHONE, "android")] };
+    const h = harness([child]);
+    const YEAR = 365 * 86400;
+    // This parent's phone was a year ahead once: its rule arrives dated then.
+    const ahead = clause(wSk, "schedule", T + YEAR, { ahead: 1 });
+    expect(h.gk.recordRules(subject, [{ event: ahead }], { local: true })).toEqual(["schedule"]);
+    expect(h.keys().ruleSeenAt?.[ahead.id]).toBe(T);
+    // The other parent's ordinary rule, set a minute later: it is the rule in force.
+    h.setNow(T + 60);
+    const later = clause(W2sk, "schedule", T + 60, { later: 1 });
+    expect(h.gk.recordRules(subject, [{ event: later }])).toEqual(["schedule"]);
+    expect(h.gk.ruleInForce(subject, "schedule")?.event.id).toBe(later.id);
+    // The far-ahead rule coming round again in a roster keeps its first time.
+    h.setNow(T + 3600);
+    expect(h.gk.recordRules(subject, [{ event: ahead }])).toEqual([]);
+    expect(h.gk.ruleInForce(subject, "schedule")?.event.id).toBe(later.id);
+    // An ordinary rule no later than the far-ahead one's arrival still loses to it.
+    const h2 = harness([child]);
+    h2.gk.recordRules(subject, [{ event: ahead }]);
+    expect(h2.gk.recordRules(subject, [{ event: clause(W2sk, "schedule", T - 1) }])).toEqual([]);
+    // The same goes for a device rule against a far-ahead family-wide one.
+    h2.setNow(T + 10);
+    expect(h2.gk.recordRules(subject, [{ event: clause(W2sk, "schedule", T + 10, { phone: 1 }), machine: PHONE }])).toEqual([`schedule@${PHONE}`]);
+  });
+
   it("keys rules by device: device rules travel apart, and a newer family-wide rule replaces older ones", async () => {
     const W2sk = generateSecretKey();
     const W2 = getPublicKey(W2sk);
@@ -1539,6 +1610,7 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(h2.gk.ruleInForce(subject, "schedule")!.event.id).toBe(low.id);
 
     // A newer received one wins, and is to be put on the screens once.
+    h.setNow(T + 5);
     const theirs = clause(other, "schedule", T + 5);
     expect(h.gk.recordRules(subject, [{ event: theirs }])).toEqual(["schedule"]);
     expect(Object.keys(h.gk.rulesToApply(subject))).toEqual(["schedule"]);
@@ -1547,6 +1619,7 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(h.gk.ruleInForce(subject, "schedule", PHONE)).toMatchObject({ key: "schedule", local: false });
 
     // A local edit made after it wins.
+    h.setNow(T + 6);
     const later = clause(wSk, "schedule", T + 6);
     expect(h.gk.recordRules(subject, [{ event: later }], { local: true })).toEqual(["schedule"]);
     expect(h.gk.ruleInForce(subject, "schedule")).toMatchObject({ local: true });

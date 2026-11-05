@@ -147,6 +147,28 @@ describe("backups never carry a working key (decision D5)", () => {
     await expect(encryptGuardianBackup(null, null, "hunter22222")).rejects.toThrow(/must carry the family/);
   });
 
+  it("an old v2 backup that carries a My Signet install's working key restores without it", async () => {
+    const w = new Uint8Array(32).fill(7);
+    const R = "cd".repeat(32);
+    const household = JSON.stringify({ children: [{ id: "c1", name: "Robin" }], guardianKeys: { v: 1, root: { pubkey: R, via: "signet" } } });
+    const blob = await encryptGuardianBackup(w, household, "hunter22222");
+    expect(blob.startsWith("CHARTER-KEYBAK.2.")).toBe(true);
+    const back = await decryptGuardianBackup(blob, "hunter22222");
+    expect(back.secret).toBeUndefined();
+    expect(back.stateJson).toBe(household);
+    // The corrupt-key screen takes the family-only path too, with the family to boot from.
+    const local = JSON.stringify({ children: [{ id: "c1" }] });
+    const recovered = await recoverGuardianBackup(blob, "hunter22222", local);
+    expect(recovered.secret).toBeUndefined();
+    expect(recovered.stateJson).toBe(household);
+    // Listed as a working key, whatever the household says: dropped as well.
+    const listed = await encryptGuardianBackup(w, state, "hunter22222", [{ pubkey: getPublicKey(w) }]);
+    expect((await decryptGuardianBackup(listed, "hunter22222")).secret).toBeUndefined();
+    // A phone-held identity's own key stays.
+    const phone = JSON.stringify({ children: [], guardianKeys: { v: 1, root: { pubkey: getPublicKey(w), via: "phone" } } });
+    expect(Array.from((await decryptGuardianBackup(await encryptGuardianBackup(w, phone, "hunter22222"), "hunter22222")).secret!)).toEqual(Array.from(w));
+  });
+
   it("a phone-held identity backs up its own key and lists its working keys by public key", async () => {
     const secret = new Uint8Array(32).fill(9);
     const back = await decryptGuardianBackup(await encryptGuardianBackup(secret, state, "hunter22222", [{ pubkey: W }]), "hunter22222");

@@ -402,11 +402,14 @@ export function moveGate(keys: GuardianKeysState, familyReady: boolean, progress
  * Where an Android ward's guardian PIN stands (decision D4):
  * - "set": its STATUS says it holds one (whoever set it);
  * - "sending": this install sent one and the ward hasn't said it holds it yet;
+ * - "unconfirmed": this install sent one, resent it as often as it will, and
+ *   the ward never said it holds it;
  * - "none": it says it has none, or has never said.
  */
-export function pinStateOf(w: WardRef, keys: GuardianKeysState): "set" | "sending" | "none" {
+export function pinStateOf(w: WardRef, keys: GuardianKeysState): "set" | "sending" | "unconfirmed" | "none" {
   if (w.device.guardians?.pinSet === true) return "set";
-  return keys.pins[w.device.devicePubkey]?.state === "sending" ? "sending" : "none";
+  const s = keys.pins[w.device.devicePubkey]?.state;
+  return s === "sending" || s === "unconfirmed" ? s : "none";
 }
 
 /**
@@ -415,7 +418,17 @@ export function pinStateOf(w: WardRef, keys: GuardianKeysState): "set" | "sendin
  * already sending a PIN to isn't asked again (a second PIN would replace it).
  */
 export function androidWardsWithoutPin(wards: readonly WardRef[], keys: GuardianKeysState): WardRef[] {
-  return wards.filter((w) => w.device.platform === "android" && pinStateOf(w, keys) === "none");
+  return wards.filter((w) => w.device.platform === "android" && ["none", "unconfirmed"].includes(pinStateOf(w, keys)));
+}
+
+/** Android wards whose guardian PIN this install stopped resending without the ward confirming it. */
+export function androidWardsPinUnconfirmed(wards: readonly WardRef[], keys: GuardianKeysState): WardRef[] {
+  return wards.filter((w) => w.device.platform === "android" && pinStateOf(w, keys) === "unconfirmed");
+}
+
+/** The line for a ward whose guardian PIN could not be confirmed. */
+export function pinUnconfirmedLine(label: string): string {
+  return `Couldn't confirm the guardian PIN on ${label}. Open the PIN screen to try again.`;
 }
 
 /** Android wards this install is still setting a guardian PIN on. */

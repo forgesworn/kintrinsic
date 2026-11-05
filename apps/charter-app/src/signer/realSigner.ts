@@ -31,7 +31,7 @@ import {
   endOfDayUnix,
   DEFAULT_STANDDOWN_GRACE_SECS,
 } from "../wire/grant";
-import type { DecisionContext, GiftOptions, SignClauseOptions, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
+import type { DecisionContext, GiftOptions, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
 import { FREE_TIME_ID, isValidTimeId } from "../wire/times";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
@@ -132,12 +132,21 @@ export interface RealSignerDeps {
    */
   onRulesSigned?: (childId: string, signed: SignedRule[]) => void;
   /**
-   * For a re-send (`signClause` with `resend`): the signed clause another
-   * guardian's phone set for this child, kind and device, when this phone's
-   * screen can't hold it (decision 3, lossy seeding). Its payload goes out as
-   * it is instead of this phone's own copy. Undefined = send this phone's own.
+   * For `resendRulesTo`: the rules in force held for one child as they apply
+   * to one device, one per kind (the device's own rule where it has one,
+   * else the family-wide one), and whether this install signed each.
+   * Absent = none held.
    */
-  inForce?: (childId: string, kind: string, machine: string) => NostrEvent | undefined;
+  heldRules?: (childId: string, machine: string) => HeldRuleFor[];
+}
+
+/** One rule in force for a device, as `RealSignerDeps.heldRules` gives it. */
+export interface HeldRuleFor {
+  kind: string;
+  /** The signed inner CLAUSE event. */
+  event: NostrEvent;
+  /** This install signed it. */
+  local: boolean;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -476,7 +485,7 @@ export class RealSigner implements Signer {
     return giftWrapSigned(inner, device, ops, issuedAt);
   }
 
-  async signClause(childId: string, policy: Policy, opts: SignClauseOptions = {}): Promise<SignOutcome> {
+  async signClause(childId: string, policy: Policy): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
     const target = this.deps.resolveChild(childId);
@@ -488,23 +497,7 @@ export class RealSigner implements Signer {
     const issuedAt = this.nextIssuedAt();
     // Every device's signed inner, per kind, for the family roster.
     const signed = new RulesSigned();
-    const wrapOne = async (clause: ClausePayload, device: string) => {
-      // A re-send keeps a rule set on another phone that this phone can't
-      // show as it was: its body unchanged, signed by this install because a
-      // ward takes a clause only from its sealer, and dated now because a
-      // newly set-up phone refuses a clause issued before it was paired (and
-      // a relay read looks for recent wraps). Not kept for the roster: the
-      // held rule stays the other phone's own.
-      const kept = opts.resend ? this.deps.inForce?.(childId, clause.kind, device) : undefined;
-      if (kept) {
-        const stored = JSON.parse(kept.content) as ClausePayload;
-        const body = { ...stored.body, ...("issuedAt" in stored.body ? { issuedAt } : {}) } as ClausePayload["body"];
-        const ops = this.sealerFor(device, guardian);
-        const inner = await signClauseInner({ ...stored, issuedAt, body }, ops, issuedAt);
-        return giftWrapSigned(inner, device, ops, issuedAt);
-      }
-      return this.wrapRule(clause, device, guardian, issuedAt, signed);
-    };
+    const wrapOne = (clause: ClausePayload, device: string) => this.wrapRule(clause, device, guardian, issuedAt, signed);
     if (policy.scope.kind === "app") {
       // App-scope rebuilds the child's ONE aggregate `appRules` clause, which
       // is the same set for every device — per-app rules are not splittable.
@@ -532,6 +525,70 @@ export class RealSigner implements Signer {
       }
     }
     return this.settleRules(held, childId, signed);
+  }
+
+  async resendRulesTo(childId: string, machine: string, policies: Policy[]): Promise<SignOutcome> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const target = this.deps.resolveChild(childId);
+    if (!target) throw new Error(`unknown child: ${childId}`);
+    const device = target.devices.find((d) => d.pubkey === machine);
+    if (!device) throw new Error("that device isn't set up for this child yet");
+    await this.authorize("clause", `Send ${target.name ?? childId}'s rules to their new device`);
+    const ops = this.sealerFor(machine, guardian);
+    const batch = new SendBatch();
+    const held = this.deps.heldRules?.(childId, machine) ?? [];
+    // This install's own rules, re-signed as they are: same payload, same
+    // issuedAt (a ward has no pairing floor for clauses, decision D6), and
+    // to this device alone. The wrap is dated now, for relay reads. The
+    // signer's clock doesn't move: these are not new rules.
+    for (const r of held) {
+      if (!r.local) continue; // another guardian's: their app and the roster bring it
+      const payload = JSON.parse(r.event.content) as ClausePayload;
+      const inner = await signClauseInner(payload, ops, r.event.created_at);
+      await this.send(target.relays, await giftWrapSigned(inner, machine, ops, this.deps.now()), CLAUSE_META, batch);
+    }
+    // A kind of this install's charter with no rule held for this device at
+    // all (signed before rules were kept, or split per device) goes as a
+    // fresh rule for this device alone.
+    const heldKinds = new Set(held.map((r) => r.kind));
+    const missing = this.charterClauses(target.subject, device.id, policies, 0).filter((c) => !heldKinds.has(c.kind));
+    const fresh: SignedRule[] = [];
+    if (missing.length > 0) {
+      const issuedAt = this.nextIssuedAt();
+      const kinds = new Set(missing.map((c) => c.kind));
+      for (const clause of this.charterClauses(target.subject, device.id, policies, issuedAt).filter((c) => kinds.has(c.kind))) {
+        const inner = await signClauseInner(clause, ops, issuedAt);
+        fresh.push({ inner, machine });
+        await this.send(target.relays, await giftWrapSigned(inner, machine, ops, issuedAt), CLAUSE_META, batch);
+      }
+    }
+    const note = () => {
+      if (fresh.length > 0) this.deps.onRulesSigned?.(childId, fresh);
+    };
+    try {
+      const out = this.settle(batch);
+      note();
+      return out;
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) note();
+      throw err;
+    }
+  }
+
+  /** Every clause a child's charter gives one device: each device-scope policy as it applies there, and the app rules. */
+  private charterClauses(subject: string | null, deviceId: string, policies: Policy[], issuedAt: number): ClausePayload[] {
+    const out: ClausePayload[] = [];
+    for (const p of policies) {
+      if (p.scope.kind === "device") out.push(...policyToClauses(subject, effectivePolicyForDevice(p, deviceId), issuedAt));
+    }
+    const apps = policies.filter((p) => p.scope.kind === "app");
+    if (apps.length > 0) {
+      const clause: ClausePayload = { v: 1, kind: "apprules", issuedAt, body: appRulesToGrant(apps, issuedAt) };
+      if (subject) clause.subject = subject;
+      out.push(clause);
+    }
+    return out;
   }
 
   /** `settle`, handing the signed rules on once they were sent or held (a send that failed outright set nothing). */

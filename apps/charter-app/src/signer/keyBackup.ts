@@ -271,7 +271,29 @@ export async function decryptGuardianBackup(
     });
     if (keys.length > 0) out.workingKeys = keys;
   }
+  // A v2 backup made on a My Signet install before backups left W out
+  // carries that install's working key as its `secret`. Restoring it would
+  // put one W on two phones, so the key is dropped and the backup restores
+  // as a family-only one: the new phone mints its own W.
+  if (out.secret && isWorkingKey(out.secret, out.stateJson, out.workingKeys)) delete out.secret;
   return out;
+}
+
+/**
+ * Is `secret` a working key rather than the guardian identity, by what the
+ * backup itself says: the identity it records is in My Signet (or another
+ * bunker) and is not this key, or the key is among the working keys it lists.
+ */
+function isWorkingKey(secret: Uint8Array, stateJson: string | undefined, workingKeys: readonly BackedUpWorkingKey[] | undefined): boolean {
+  if (!stateJson) return false;
+  const pubkey = getPublicKey(secret);
+  if (workingKeys?.some((k) => k.pubkey === pubkey)) return true;
+  try {
+    const root = (JSON.parse(stateJson) as { guardianKeys?: { root?: { pubkey?: unknown; via?: unknown } } }).guardianKeys?.root;
+    return !!root && typeof root.via === "string" && root.via !== "phone" && root.pubkey !== pubkey;
+  } catch {
+    return false;
+  }
 }
 
 /** True when `stateJson` (the persisted store) holds at least one child. */
