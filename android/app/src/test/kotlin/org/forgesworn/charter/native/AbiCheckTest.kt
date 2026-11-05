@@ -15,12 +15,13 @@ import org.junit.Test
  */
 class AbiCheckTest {
 
-    /** ABI 7: guardian roots and working keys (PIN, presence, guardian list),
-     *  on top of ABI 5 (times) and ABI 6 (connections). Moves together with
-     *  `ABI_VERSION` in android/jni/src/lib.rs. */
+    /** ABI 8: pending statements only behind the guardian PIN, on top of
+     *  ABI 7 (guardian roots and working keys), ABI 6 (connections) and
+     *  ABI 5 (times). Moves together with `ABI_VERSION` in
+     *  android/jni/src/lib.rs. */
     @Test
-    fun thisBuildExpectsAbiSeven() {
-        assertEquals(7, CharterCore.EXPECTED_ABI_VERSION)
+    fun thisBuildExpectsAbiEight() {
+        assertEquals(8, CharterCore.EXPECTED_ABI_VERSION)
     }
 
     @Test

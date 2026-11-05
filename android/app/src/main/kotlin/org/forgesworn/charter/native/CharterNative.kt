@@ -276,10 +276,15 @@ object CharterNative {
      */
     external fun charterVerifyGuardianPin(pin: String, nowUnix: Long): String
 
-    /** The pending co-guardian / removal / move statements: a JSON list of
-     *  `{d, kind, signer, key, label, issuedAt, expiresAt, takesEffectAt,
-     *  confirmed}`. */
-    external fun charterPendingStatements(nowUnix: Long): String
+    /**
+     * The pending co-guardian / removal / move statements a guardian may
+     * confirm here, only behind a correct guardian PIN checked in this same
+     * call: `{ok: true, pending: [{d, statement, kind, signer, key, label,
+     * issuedAt, expiresAt, takesEffectAt}]}` or `{error, failures,
+     * waitSeconds}`. Runs scrypt: worker thread only. Nothing pending is
+     * returned without the PIN (the child never sees a pending change).
+     */
+    external fun charterConfirmablePending(pin: String, nowUnix: Long): String
 
     /**
      * Mint a presence token for the pending statement [d] (null: any), only
@@ -289,7 +294,7 @@ object CharterNative {
      */
     external fun charterMintPresenceToken(d: String?, pin: String, nowUnix: Long): String
 
-    /** `{available, paired, roots: [{root, label, keys, keyLabels, rules}],
-     *  pending, pin: {set, failures, waitSeconds}}`. */
+    /** `{available, paired, stuck, roots: [{root, label, keys, keyLabels,
+     *  rules}], pin: {set, failures, waitSeconds}}`. No pending statements. */
     external fun charterGuardiansSummary(nowUnix: Long): String
 }

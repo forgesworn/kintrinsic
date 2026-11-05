@@ -48,12 +48,14 @@ object GuardianCopy {
         return guardianName(r.label, r.root) + "\n" + apps + rules
     }
 
-    /** The guardian list's footer: anything waiting for a guardian in person. */
-    fun pendingLine(pending: Int): String = when (pending) {
-        0 -> "Nothing is waiting for a guardian to confirm here."
-        1 -> "1 change is waiting for a guardian to confirm it at this device."
-        else -> "$pending changes are waiting for a guardian to confirm them at this device."
-    }
+    /** Behind the PIN, when nothing can be confirmed. (No screen the child
+     *  sees says whether anything is waiting, not even a count.) */
+    const val NOTHING_WAITING = "Nothing is waiting for a guardian to confirm here."
+
+    /** Paired, but neither copy of the guardian-keys state reads: the rules
+     *  already on the phone stay enforced, and nothing can change them here
+     *  (re-pair or factory reset). First on the lock screen and on About. */
+    const val STUCK = "Rules can't be changed on this phone. Ask a parent."
 
     /** What a pending statement asks for, in a sentence. */
     fun pendingTitle(p: CharterCore.PendingStatement): String = when (p.kind) {
@@ -90,14 +92,21 @@ object GuardianCopy {
     }
 
     /** The PIN error after a refused mint. */
-    fun mintError(r: CharterCore.PresenceResult): String = when (r.error) {
+    fun mintError(r: CharterCore.PresenceResult): String = pinError(r.error, r.waitSeconds)
+        ?: "Could not make a code. Try again."
+
+    /** The PIN error after a refused list. */
+    fun listError(r: CharterCore.Confirmable): String = pinError(r.error, r.waitSeconds)
+        ?: "Could not check the PIN. Try again."
+
+    private fun pinError(error: String?, waitSeconds: Long): String? = when (error) {
         "noPin" -> NO_PIN
         "wrongPin" -> "That PIN is not right." +
-            (waitLine(r.waitSeconds)?.let { " $it" } ?: "")
-        "wait" -> waitLine(r.waitSeconds) ?: "Try again."
+            (waitLine(waitSeconds)?.let { " $it" } ?: "")
+        "wait" -> waitLine(waitSeconds) ?: "Try again."
         "notPending" -> "That change is no longer waiting. Go back and look again."
         "unavailable" -> "This device can't check guardian changes right now."
-        else -> "Could not make a code. Try again."
+        else -> null
     }
 
     /** "mm:ss". */
@@ -112,6 +121,7 @@ object GuardianCopy {
 
     const val EXPLAIN =
         "Some changes to who looks after this device need a guardian to be here in " +
-            "person. A guardian enters the PIN, then scans the code with their " +
-            "Kintrinsic app. Nothing on this screen confirms a change by itself."
+            "person. A guardian enters the PIN to see what is waiting, picks one, then " +
+            "scans the code with their Kintrinsic app. Nothing on this screen confirms " +
+            "a change by itself."
 }

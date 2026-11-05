@@ -26,9 +26,11 @@ import org.forgesworn.charter.native.CharterCore
  * and scans it with their Kintrinsic app.
  *
  * Reached from About, not from the child's normal flow; a child may open it,
- * but nothing happens without the guardian PIN, which a guardian sets from
- * the Kintrinsic app. The PIN is checked in the same native call that mints
- * the token, with a backoff that survives restarts. There is deliberately no
+ * but nothing is shown without the guardian PIN, which a guardian sets from
+ * the Kintrinsic app: the screen asks for the PIN first, and the pending
+ * list is read in the same native call that checks it (nothing waiting is
+ * shown or counted before then). The guardian picks one; the mint checks
+ * the PIN again in its own call, with a backoff that survives restarts. There is deliberately no
  * "confirm" button: the ward's own screen never accepts a tap as
  * confirmation; only a guardian install bound to the right root, scanning
  * the code, can confirm.
@@ -43,7 +45,9 @@ class GuardianPresenceActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var body: LinearLayout
-    private var selected: CharterCore.PendingStatement? = null
+    /** The PIN that opened the list, kept only until a code is made or the
+     *  screen leaves view, so picking a change needs no second entry. */
+    private var heldPin: String? = null
     private var tickers = mutableListOf<Runnable>()
 
     private fun now() = System.currentTimeMillis() / 1000
@@ -74,9 +78,10 @@ class GuardianPresenceActivity : Activity() {
         load()
     }
 
-    /** Read the PIN state and the pending list, then draw the list. */
+    /** Read whether a PIN is set (nothing pending), then ask for it. */
     private fun load() {
         stopTickers()
+        heldPin = null
         body.removeAllViews()
         body.addView(CharterTheme.text(this, "…", CharterTheme.FS_BODY))
         worker.post {
@@ -87,64 +92,44 @@ class GuardianPresenceActivity : Activity() {
                 )
             }
             val summary = runCatching { CharterCore.guardiansSummary(now()) }.getOrNull()
-            val pending = runCatching { CharterCore.pendingStatements(now()) }.getOrDefault(emptyList())
-            runOnUiThread { showList(summary, pending) }
+            runOnUiThread { showStart(summary) }
         }
     }
 
-    private fun showList(summary: CharterCore.GuardiansSummary?, pending: List<CharterCore.PendingStatement>) {
+    private fun showStart(summary: CharterCore.GuardiansSummary?) {
         body.removeAllViews()
-        if (summary == null || !summary.paired) {
-            body.addView(CharterTheme.text(this, "This device is not paired with a guardian.", CharterTheme.FS_BODY))
-            return
-        }
-        if (!summary.pinSet) {
-            // No PIN: explain, mint nothing.
-            body.addView(CharterTheme.text(this, GuardianCopy.NO_PIN, CharterTheme.FS_BODY, CharterTheme.WARN))
-            return
-        }
-        val open = pending.filter { !it.confirmed }
-        if (open.isEmpty()) {
-            body.addView(CharterTheme.text(this, GuardianCopy.pendingLine(0), CharterTheme.FS_BODY))
-            return
-        }
-        body.addView(CharterTheme.text(this, "Choose the change to confirm", CharterTheme.FS_SECTION, bold = true))
-        for (p in open) {
-            val card = CharterTheme.card(this)
-            card.addView(CharterTheme.text(this, GuardianCopy.pendingTitle(p), CharterTheme.FS_BODY, bold = true))
-            card.addView(
-                CharterTheme.text(this, GuardianCopy.pendingDetail(p, now()), CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 4),
-            )
-            val pick = CharterTheme.secondaryButton(this, "Show a code for this")
-            pick.setOnClickListener {
-                selected = p
-                showPin(summary.pinWaitSeconds)
-            }
-            card.addView(pick, CharterTheme.stackParams(this, 10))
-            body.addView(card, CharterTheme.stackParams(this, 12))
+        when {
+            summary == null || !summary.paired ->
+                body.addView(CharterTheme.text(this, "This device is not paired with a guardian.", CharterTheme.FS_BODY))
+            summary.stuck ->
+                body.addView(CharterTheme.text(this, GuardianCopy.STUCK, CharterTheme.FS_BODY, CharterTheme.WARN))
+            // No PIN: explain, list nothing, mint nothing.
+            !summary.pinSet ->
+                body.addView(CharterTheme.text(this, GuardianCopy.NO_PIN, CharterTheme.FS_BODY, CharterTheme.WARN))
+            else -> showPin(summary.pinWaitSeconds, null)
         }
     }
 
-    /** PIN entry for [selected], with the backoff counting down. */
-    private fun showPin(initialWait: Long) {
+    /**
+     * PIN entry, with the backoff counting down. The pending list is read in
+     * the same native call that checks the PIN, so nothing waiting is shown,
+     * or counted, before a guardian has entered it.
+     */
+    private fun showPin(initialWait: Long, message: String?) {
         stopTickers()
-        val p = selected ?: return load()
+        heldPin = null
         body.removeAllViews()
-        body.addView(CharterTheme.text(this, GuardianCopy.pendingTitle(p), CharterTheme.FS_SECTION, bold = true))
-        body.addView(CharterTheme.text(this, "Guardian PIN", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 14))
+        body.addView(CharterTheme.text(this, "Guardian PIN", CharterTheme.FS_SECTION, bold = true))
         val pin = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
             maxLines = 1
             textSize = CharterTheme.FS_SECTION
         }
         body.addView(pin)
-        val status = CharterTheme.text(this, "", CharterTheme.FS_SMALL, CharterTheme.WARN, 6)
+        val status = CharterTheme.text(this, message ?: "", CharterTheme.FS_SMALL, CharterTheme.WARN, 6)
         body.addView(status)
-        val go = CharterTheme.primaryButton(this, "Show code")
+        val go = CharterTheme.primaryButton(this, "Continue")
         body.addView(go, CharterTheme.stackParams(this, 12))
-        val back = CharterTheme.secondaryButton(this, "Back")
-        back.setOnClickListener { load() }
-        body.addView(back, CharterTheme.stackParams(this, 8))
 
         var waitUntil = now() + initialWait
         val tick = object : Runnable {
@@ -166,18 +151,68 @@ class GuardianPresenceActivity : Activity() {
             go.isEnabled = false
             status.text = "Checking…"
             worker.post {
-                val r = runCatching { CharterCore.mintPresenceToken(p.d, entered, now()) }
-                    .getOrDefault(CharterCore.PresenceResult(false, null, "failed", 0, 0))
+                val r = runCatching { CharterCore.confirmablePending(entered, now()) }
+                    .getOrDefault(CharterCore.Confirmable(false, emptyList(), "failed", 0, 0))
                 runOnUiThread {
                     pin.text.clear()
-                    val token = r.token
-                    if (token != null) {
-                        showCode(p, token)
+                    if (r.ok) {
+                        heldPin = entered
+                        showList(r.pending)
                     } else {
                         waitUntil = now() + r.waitSeconds
-                        status.text = GuardianCopy.mintError(r)
+                        status.text = GuardianCopy.listError(r)
                         go.isEnabled = r.waitSeconds <= 0
                     }
+                }
+            }
+        }
+    }
+
+    /** Behind the PIN: what can be confirmed here, to pick one. */
+    private fun showList(pending: List<CharterCore.PendingStatement>) {
+        stopTickers()
+        body.removeAllViews()
+        val done = CharterTheme.secondaryButton(this, "Done")
+        done.setOnClickListener { load() }
+        if (pending.isEmpty()) {
+            body.addView(CharterTheme.text(this, GuardianCopy.NOTHING_WAITING, CharterTheme.FS_BODY))
+            body.addView(done, CharterTheme.stackParams(this, 14))
+            return
+        }
+        body.addView(CharterTheme.text(this, "Choose the change to confirm", CharterTheme.FS_SECTION, bold = true))
+        val status = CharterTheme.text(this, "", CharterTheme.FS_SMALL, CharterTheme.WARN, 6)
+        for (p in pending) {
+            val card = CharterTheme.card(this)
+            card.addView(CharterTheme.text(this, GuardianCopy.pendingTitle(p), CharterTheme.FS_BODY, bold = true))
+            card.addView(
+                CharterTheme.text(this, GuardianCopy.pendingDetail(p, now()), CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 4),
+            )
+            val pick = CharterTheme.secondaryButton(this, "Show a code for this")
+            pick.setOnClickListener { mint(p, status) }
+            card.addView(pick, CharterTheme.stackParams(this, 10))
+            body.addView(card, CharterTheme.stackParams(this, 12))
+        }
+        body.addView(status)
+        body.addView(done, CharterTheme.stackParams(this, 14))
+    }
+
+    /** Mint a token bound to [p], with the PIN entered for the list (checked
+     *  again in the mint itself). Any PIN refusal returns to PIN entry. */
+    private fun mint(p: CharterCore.PendingStatement, status: android.widget.TextView) {
+        val pin = heldPin ?: return load()
+        status.text = "Making a code…"
+        worker.post {
+            val r = runCatching { CharterCore.mintPresenceToken(p.d, pin, now()) }
+                .getOrDefault(CharterCore.PresenceResult(false, null, "failed", 0, 0))
+            runOnUiThread {
+                val token = r.token
+                when {
+                    token != null -> {
+                        heldPin = null
+                        showCode(p, token)
+                    }
+                    r.error == "notPending" || r.error == "failed" -> status.text = GuardianCopy.mintError(r)
+                    else -> showPin(r.waitSeconds, GuardianCopy.mintError(r))
                 }
             }
         }
@@ -239,6 +274,18 @@ class GuardianPresenceActivity : Activity() {
     private fun stopTickers() {
         tickers.forEach { ui.removeCallbacks(it) }
         tickers.clear()
+    }
+
+    /** Out of view: forget the PIN and the list, so a phone handed back to
+     *  the child never shows what is waiting. */
+    override fun onStop() {
+        heldPin = null
+        super.onStop()
+    }
+
+    override fun onRestart() {
+        super.onRestart()
+        load()
     }
 
     override fun onDestroy() {

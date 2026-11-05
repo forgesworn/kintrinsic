@@ -85,11 +85,9 @@ class AboutActivity : Activity() {
         val batteryLine = CharterTheme.text(this, org.forgesworn.charter.service.RelayPollPace.status(), CharterTheme.FS_BODY)
         root.addView(batteryLine)
         val guardiansList = CharterTheme.text(this, "…", CharterTheme.FS_BODY, top = 4)
-        val pendingLine = CharterTheme.text(this, "", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 8)
         val guardiansCard = CharterTheme.card(this)
         guardiansCard.addView(CharterTheme.text(this, "Guardians", CharterTheme.FS_SECTION, bold = true))
         guardiansCard.addView(guardiansList)
-        guardiansCard.addView(pendingLine)
         val presence = CharterTheme.secondaryButton(this, "Guardian presence").apply { isEnabled = false }
         presence.setOnClickListener { startActivity(Intent(this, GuardianPresenceActivity::class.java)) }
         guardiansCard.addView(presence, CharterTheme.stackParams(this, 10))
@@ -193,7 +191,6 @@ class AboutActivity : Activity() {
                     !guardians.available -> "This device can't read its guardian list right now."
                     else -> guardians.roots.joinToString("\n\n") { GuardianCopy.rootLines(it) }
                 }
-                pendingLine.text = if (guardians?.available == true) GuardianCopy.pendingLine(guardians.pending) else ""
                 presence.isEnabled = guardians?.paired == true
                 codeFull.text = code
                 publicNpub.text = PairingSas.npub(code.filterNot { it.isWhitespace() }) ?: "Public key unavailable."

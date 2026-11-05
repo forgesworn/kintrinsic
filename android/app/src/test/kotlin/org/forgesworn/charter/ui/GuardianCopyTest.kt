@@ -25,13 +25,14 @@ class GuardianCopyTest {
 
     @Test
     fun theSummaryParsesAndReadsAsLines() {
-        val raw = """{"available":true,"paired":true,"pending":1,
+        val raw = """{"available":true,"paired":true,"stuck":false,
             "pin":{"set":true,"failures":5,"waitSeconds":42},
             "roots":[{"root":"$root","label":null,"keys":2,"keyLabels":["phone"],"rules":["budget","schedule"]}]}"""
         val s = CharterCore.parseGuardiansSummary(raw)
         assertNotNull(s)
         s!!
         assertTrue(s.available && s.paired && s.pinSet)
+        assertFalse(s.stuck)
         assertEquals(42L, s.pinWaitSeconds)
         assertEquals(5L, s.pinFailures)
         assertEquals(1, s.roots.size)
@@ -43,18 +44,46 @@ class GuardianCopyTest {
     }
 
     @Test
+    fun aStuckWardSaysSoInTheParentsWords() {
+        val s = CharterCore.parseGuardiansSummary(
+            """{"available":false,"paired":true,"stuck":true,"roots":[],"pin":{"set":false}}""",
+        )!!
+        assertTrue(s.stuck)
+        assertEquals("Rules can't be changed on this phone. Ask a parent.", GuardianCopy.STUCK)
+        // An older core with no `stuck` field is not read as stuck.
+        assertFalse(CharterCore.parseGuardiansSummary("""{"available":true,"paired":true,"roots":[]}""")!!.stuck)
+    }
+
+    @Test
     fun pendingStatementsParseAndReadAsSentences() {
-        val raw = """[{"d":"kintrinsic/guardian/$other","kind":"coguardian","signer":"$root",
-            "key":"$other","label":"Dad","issuedAt":100,"expiresAt":7300,"takesEffectAt":null,"confirmed":false}]"""
-        val list = CharterCore.parsePendingStatements(raw)
-        assertEquals(1, list.size)
-        val p = list[0]
+        val raw = """{"ok":true,"pending":[{"d":"kintrinsic/guardian/$other","statement":"${"e".repeat(64)}",
+            "kind":"coguardian","signer":"$root","key":"$other","label":"Dad","issuedAt":100,
+            "expiresAt":7300,"takesEffectAt":null}]}"""
+        val r = CharterCore.parseConfirmable(raw)
+        assertTrue(r.ok)
+        assertNull(r.error)
+        assertEquals(1, r.pending.size)
+        val p = r.pending[0]
+        assertEquals("e".repeat(64), p.statement)
         assertNull(p.takesEffectAt)
         assertTrue(GuardianCopy.pendingTitle(p).startsWith("Add Dad (npub1"))
         val detail = GuardianCopy.pendingDetail(p, 100)
         assertTrue(detail, detail.startsWith("Asked by A guardian (npub1"))
         assertTrue(detail, detail.contains("Expires in 2 h"))
-        assertEquals(emptyList<CharterCore.PendingStatement>(), CharterCore.parsePendingStatements("garbage"))
+        assertFalse(CharterCore.parseConfirmable("garbage").ok)
+    }
+
+    @Test
+    fun aRefusedListCarriesNoStatements() {
+        val wrong = CharterCore.parseConfirmable(
+            """{"ok":false,"failures":5,"waitSeconds":60,"error":"wrongPin","pending":[{"d":"x"}]}""",
+        )
+        assertFalse(wrong.ok)
+        assertTrue(wrong.pending.isEmpty())
+        assertEquals("wrongPin", wrong.error)
+        assertTrue(GuardianCopy.listError(wrong).contains("1 min"))
+        val noPin = CharterCore.parseConfirmable("""{"ok":false,"noPin":true,"error":"noPin","waitSeconds":0}""")
+        assertEquals(GuardianCopy.NO_PIN, GuardianCopy.listError(noPin))
     }
 
     @Test

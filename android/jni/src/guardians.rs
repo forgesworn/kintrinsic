@@ -273,80 +273,63 @@ impl Warden {
     /// The guardian-keys document as stored (labels and the PIN counter are
     /// not on the port's API). Read only; `None` when absent or unreadable.
     fn raw_state(&self) -> Option<Value> {
-        FileGuardianStateStore::in_dir(&self.base)
-            .load()
-            .ok()
-            .flatten()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        raw_state_in(&self.base)
     }
 
-    /// The pending co-guardian, removal and move statements, for the ward's
-    /// Guardian presence screen. A JSON list of `{d, kind, signer, key,
-    /// label, issuedAt, expiresAt, takesEffectAt, confirmed}`: `signer` is
-    /// the root that signed it, `key` the root it names (R2).
-    pub fn pending_statements_json(&self, now: u64) -> String {
-        let Some(keys) = &self.guardian_keys else {
-            return "[]".into();
-        };
-        let raw = self.raw_state();
-        let list: Vec<Value> = keys
-            .pending_statements(now)
-            .into_iter()
-            .map(|p| {
-                let key = p.d.rsplit('/').next().unwrap_or_default().to_owned();
-                json!({
-                    "d": p.d,
-                    "kind": serde_json::to_value(p.kind).unwrap_or(Value::Null),
-                    "signer": p.signer,
-                    "key": key,
-                    "label": statement_label(raw.as_ref(), &p.d),
-                    "issuedAt": p.issued_at,
-                    "expiresAt": p.expires_at,
-                    "takesEffectAt": p.takes_effect_at,
-                    "confirmed": p.confirmed_at.is_some(),
-                })
-            })
-            .collect();
-        Value::Array(list).to_string()
+    /// The Device Owner's private base dir, where the guardian-keys state
+    /// lives (for the labels a pending statement carried).
+    pub fn state_dir(&self) -> std::path::PathBuf {
+        self.base.clone()
     }
 
-    /// The guardian list for About (and rule 5's "who set a rule"): each
-    /// pinned root (hex; Kotlin shows it as a short npub beside its label),
-    /// its active working keys, the rule kinds it set, plus the pending count
-    /// and the PIN's state (set, failures, seconds until the next try).
+    /// The guardian list for About and the lock screen, from the ward view
+    /// (rule 5): each pinned root (hex; Kotlin shows it as a short npub
+    /// beside its label), its active working keys, the rule kinds set under
+    /// it, and the PIN's state (set, failures, seconds until the next try).
+    ///
+    /// No pending statement, and no count of them: a pending removal is a
+    /// dispute between the parents, not something enforced on the child
+    /// (Q2). Those are read only behind the guardian PIN
+    /// ([`confirmable_json`]).
+    ///
+    /// `stuck` is true when the ward is paired but neither copy of the
+    /// guardian-keys state reads (D7): its rules stay enforced, and nothing
+    /// can change them on this phone.
     pub fn guardians_summary_json(&self, now: u64) -> String {
+        let no_pin = json!({"set": false, "failures": 0, "waitSeconds": 0});
         let Some(keys) = &self.guardian_keys else {
-            return json!({"available": false, "paired": false, "roots": [], "pending": 0,
-                "pin": {"set": false, "failures": 0, "waitSeconds": 0}})
+            return json!({"available": false, "paired": false, "stuck": false,
+                "roots": [], "pin": no_pin})
             .to_string();
         };
-        let Some(projected) = keys.project(now) else {
-            return json!({"available": false, "paired": true, "roots": [], "pending": 0,
-                "pin": {"set": false, "failures": 0, "waitSeconds": 0}})
+        let Some(view) = keys.ward_view(now) else {
+            return json!({"available": false, "paired": true, "stuck": true,
+                "roots": [], "pin": no_pin})
             .to_string();
         };
         let raw = self.raw_state();
-        let roots: Vec<Value> = projected
+        let roots: Vec<Value> = view
             .roots
             .iter()
             .map(|r| {
                 let key_labels: Vec<Value> = r
-                    .keys
+                    .key_labels
                     .iter()
-                    .filter_map(|k| PubKey::from_hex(k).ok())
-                    .filter_map(|k| keys.signer_label(&k).map(Value::String))
+                    .flatten()
+                    .map(|l| Value::String(l.clone()))
                     .collect();
-                let mut rules: Vec<String> = projected
-                    .clauses
+                let mut rules: Vec<String> = view
+                    .rules
                     .iter()
-                    .filter(|c| c.root == r.root)
+                    .filter(|c| c.root == Some(r.root))
                     .map(|c| c.kind.clone())
                     .collect();
                 rules.sort();
                 rules.dedup();
+                let root = r.root.to_hex();
                 json!({
-                    "root": r.root,
-                    "label": statement_label(raw.as_ref(), &format!("kintrinsic/guardian/{}", r.root)),
+                    "label": statement_label(raw.as_ref(), &format!("kintrinsic/guardian/{root}")),
+                    "root": root,
                     "keys": r.keys.len(),
                     "keyLabels": key_labels,
                     "rules": rules,
@@ -366,16 +349,78 @@ impl Warden {
         json!({
             "available": true,
             "paired": true,
+            "stuck": false,
             "roots": roots,
-            "pending": projected.pending.len(),
             "pin": {
-                "set": projected.guardian_pin.is_some(),
+                "set": view.pin_set,
                 "failures": failures,
                 "waitSeconds": pin_wait(failures, last, now),
             },
         })
         .to_string()
     }
+}
+
+/// The guardian-keys document as stored under `base` (labels and the PIN
+/// counter are not on the port's API). Read only; `None` when absent or
+/// unreadable.
+fn raw_state_in(base: &std::path::Path) -> Option<Value> {
+    FileGuardianStateStore::in_dir(base)
+        .load()
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+}
+
+/// `confirmablePending`: the Guardian presence screen's list, only behind
+/// a correct guardian PIN checked in this same call (counted and backed off
+/// as any try). On success `{ok: true, pending: [{d, statement, kind,
+/// signer, key, label, issuedAt, expiresAt, takesEffectAt}]}` from the
+/// privileged view, unconfirmed statements only: `signer` is the root that
+/// signed it, `key` the key it names. Otherwise the PIN answer's fields
+/// with `error` (`noPin`, `wrongPin`, `wait`, `unavailable`) and no list,
+/// so nothing pending reaches the screen before the PIN (Q2).
+pub fn confirmable_json(
+    keys: Option<&GuardianKeys>,
+    base: &std::path::Path,
+    pin: &str,
+    now: u64,
+) -> String {
+    let Some(keys) = keys else {
+        return pin_json(PinCheck::Unavailable, now).to_string();
+    };
+    let check = keys.verify_guardian_pin(pin, now);
+    if check != PinCheck::Correct {
+        let mut v = pin_json(check, now);
+        if matches!(check, PinCheck::Wrong { .. }) {
+            v["error"] = json!("wrongPin");
+        }
+        return v.to_string();
+    }
+    let Some(view) = keys.privileged_view(now) else {
+        return pin_json(PinCheck::Unavailable, now).to_string();
+    };
+    let raw = raw_state_in(base);
+    let list: Vec<Value> = view
+        .pending
+        .into_iter()
+        .filter(|p| p.confirmed_at.is_none())
+        .map(|p| {
+            let key = p.d.rsplit('/').next().unwrap_or_default().to_owned();
+            json!({
+                "label": statement_label(raw.as_ref(), &p.d),
+                "d": p.d,
+                "statement": p.statement,
+                "kind": serde_json::to_value(p.kind).unwrap_or(Value::Null),
+                "signer": p.signer,
+                "key": key,
+                "issuedAt": p.issued_at,
+                "expiresAt": p.expires_at,
+                "takesEffectAt": p.takes_effect_at,
+            })
+        })
+        .collect();
+    json!({"ok": true, "pending": list}).to_string()
 }
 
 /// Seconds until the next PIN try is checked (contract: after 5 failures the
@@ -832,8 +877,12 @@ mod tests {
             json!({"label": "Other parent"}),
         );
         assert_eq!(ward.deliver(&cg, W1, 2), AckResult::Applied);
-        let pending = parse(&ward.w.pending_statements_json(ward.now));
+        let (keys, _) = ward.handle();
+        let listed = parse(&confirmable_json(Some(&keys), &ward.base, PIN, ward.now));
+        assert_eq!(listed["ok"], true);
+        let pending = &listed["pending"];
         assert_eq!(pending.as_array().unwrap().len(), 1);
+        assert_eq!(pending[0]["statement"], cg.id.to_hex());
         assert_eq!(pending[0]["kind"], "coguardian");
         assert_eq!(pending[0]["key"], pk(ROOT2).to_hex());
         assert_eq!(pending[0]["signer"], pk(ROOT).to_hex());
@@ -972,7 +1021,7 @@ mod tests {
             .collect();
         assert_eq!(roots.len(), 2);
         assert!(roots.contains(&pk(ROOT2).to_hex().as_str()));
-        assert_eq!(summary["pending"], 0);
+        assert!(summary.get("pending").is_none());
         // W2 (the other parent) sets a rule, equal authority.
         assert_eq!(
             ward.deliver(&ward.clause(W2, ward.now - 1, 20), W2, 8),
@@ -1398,6 +1447,60 @@ mod tests {
         let v = mint(Some(&d), PIN);
         assert_eq!(v["error"], "wait");
         assert!(v.get("code").is_none());
+    }
+
+    /// Q2: nothing pending reaches the child-facing summary, not even a
+    /// count, and the presence screen's list comes only with the right PIN.
+    #[test]
+    fn pending_statements_are_shown_only_behind_the_guardian_pin() {
+        let ward = Ward::new("q2");
+        ward.approve_w1();
+        let cg = ward.statement(
+            ROOT,
+            format!("kintrinsic/guardian/{}", pk(ROOT2).to_hex()),
+            pk(ROOT2),
+            ward.now - 50,
+            json!({"label": "Other parent"}),
+        );
+        assert_eq!(ward.deliver(&cg, W1, 2), AckResult::Applied);
+        let (keys, _) = ward.handle();
+        let list = |pin: &str| parse(&confirmable_json(Some(&keys), &ward.base, pin, ward.now));
+
+        let summary = ward.w.guardians_summary_json(ward.now);
+        assert!(!summary.contains("pending"), "{summary}");
+        assert!(!summary.contains(&pk(ROOT2).to_hex()), "{summary}");
+        assert!(!summary.contains("Other parent"), "{summary}");
+
+        // No PIN set yet: nothing listed.
+        let v = list(PIN);
+        assert_eq!(v["error"], "noPin");
+        assert!(v.get("pending").is_none());
+        ward.set_pin();
+        // The wrong PIN: counted, nothing listed.
+        let v = list("654321");
+        assert_eq!(v["error"], "wrongPin");
+        assert_eq!(v["failures"], 1);
+        assert!(v.get("pending").is_none());
+        // The right one: the list, with what the screen names.
+        let v = list(PIN);
+        assert_eq!(v["ok"], true);
+        let p = &v["pending"][0];
+        assert_eq!(p["kind"], "coguardian");
+        assert_eq!(p["key"], pk(ROOT2).to_hex());
+        assert_eq!(p["signer"], pk(ROOT).to_hex());
+        assert_eq!(p["label"], "Other parent");
+        assert_eq!(p["statement"], cg.id.to_hex());
+        assert!(p["expiresAt"].as_i64().unwrap() > ward.now as i64);
+        // A backoff holds even the right PIN back.
+        for _ in 0..5 {
+            let _ = list("000000");
+        }
+        let v = list(PIN);
+        assert_eq!(v["error"], "wait");
+        assert!(v.get("pending").is_none());
+        // No warden handle: unavailable, nothing listed.
+        let v = parse(&confirmable_json(None, &ward.base, PIN, ward.now));
+        assert_eq!(v["error"], "unavailable");
     }
 
     /// Main's Wi-Fi and Bluetooth tiers under guardian keys: a working key's

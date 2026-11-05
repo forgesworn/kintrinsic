@@ -55,7 +55,7 @@ class HomeCopyTest {
         val other = "b".repeat(64)
         fun summary(vararg roots: CharterCore.GuardianRoot, available: Boolean = true) = CharterCore.GuardiansSummary(
             available = available, paired = true, roots = roots.toList(),
-            pending = 0, pinSet = false, pinFailures = 0, pinWaitSeconds = 0,
+            pinSet = false, pinFailures = 0, pinWaitSeconds = 0,
         )
         fun guardian(hex: String, label: String?) =
             CharterCore.GuardianRoot(root = hex, label = label, keys = 1, keyLabels = emptyList(), rules = emptyList())

@@ -34,7 +34,11 @@ use warden::{Warden, WARDEN};
 /// 7: guardian roots and working keys — `charterHasGuardianPin`,
 ///    `charterVerifyGuardianPin`, `charterPendingStatements`,
 ///    `charterMintPresenceToken`, `charterGuardiansSummary`.
-pub const ABI_VERSION: jint = 7;
+/// 8: pending statements only behind the guardian PIN —
+///    `charterPendingStatements(now)` becomes
+///    `charterConfirmablePending(pin, now)`; `charterGuardiansSummary` drops
+///    `pending` and gains `stuck`.
+pub const ABI_VERSION: jint = 8;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -860,14 +864,36 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterV
     out(&env, &res)
 }
 
-/// The pending co-guardian, removal and move statements (JSON list).
+/// The pending co-guardian, removal and move statements a guardian may
+/// confirm in person, only behind a correct guardian PIN checked in this
+/// same call: `{ok: true, pending: [...]}` or the PIN answer with `error`.
+/// Runs scrypt with the warden lock RELEASED, like the PIN check. Nothing
+/// pending is ever returned without the PIN (Q2).
 #[no_mangle]
-pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterPendingStatements(
-    env: JNIEnv,
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterConfirmablePending(
+    mut env: JNIEnv,
     _class: JClass,
+    pin: JString,
     now_unix: jlong,
 ) -> jstring {
-    with_warden(&env, |w| w.pending_statements_json(now_unix.max(0) as u64))
+    let pin = match jstr(&mut env, pin) {
+        Ok(s) => s,
+        Err(e) => return out(&env, &err_json(&e)),
+    };
+    let handle = {
+        let guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|w| (w.presence_handle().map(|(k, _)| k), w.state_dir()))
+    };
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match handle {
+        Some((keys, base)) => {
+            warden::guardians::confirmable_json(keys.as_ref(), &base, &pin, now_unix.max(0) as u64)
+        }
+        None => err_json("not initialized"),
+    }))
+    .unwrap_or_else(|_| err_json("internal error (panic recovered)"));
+    out(&env, &res)
 }
 
 /// Mint a presence token for the pending statement `d` (null or empty: any),
@@ -900,8 +926,9 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterM
     out(&env, &res)
 }
 
-/// About's guardian list: `{available, paired, roots: [{root, label, keys,
-/// keyLabels, rules}], pending, pin: {set, failures, waitSeconds}}`.
+/// About's and the lock screen's guardian list, from the ward view:
+/// `{available, paired, stuck, roots: [{root, label, keys, keyLabels,
+/// rules}], pin: {set, failures, waitSeconds}}`. No pending statements.
 #[no_mangle]
 pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterGuardiansSummary(
     env: JNIEnv,
