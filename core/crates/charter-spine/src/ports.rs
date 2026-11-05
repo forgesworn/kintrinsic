@@ -114,9 +114,14 @@ impl GuardianApplied {
     }
 }
 
-/// A per-child CLAUSE the broker has authenticated (id, signature, kind, the
-/// signer-set gate, the 300-second future refusal), for the port's rules 4
-/// and 5 to judge against the clause it holds for the same `(subject, kind)`.
+/// The subject the machine-wide `content` slot (a Linux ward's web filter)
+/// is judged under: never a child's, which are 64 hex characters.
+pub const MACHINE_SUBJECT: &str = "";
+
+/// A CLAUSE the broker has authenticated (id, signature, kind, the
+/// signer-set gate; no skew gate, D1), for the port's rules 4 and 5 to judge
+/// against the clause it holds for the same `(subject, kind)`: a child's
+/// slot, or the machine-wide one under [`MACHINE_SUBJECT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClauseCandidate<'a> {
     /// The CLAUSE event's id: a clause dated ahead of the ward clock is
@@ -124,7 +129,7 @@ pub struct ClauseCandidate<'a> {
     pub id: EventId,
     pub author: PubKey,
     pub seal_author: PubKey,
-    /// 64 lowercase hex.
+    /// 64 lowercase hex, or [`MACHINE_SUBJECT`] for the machine-wide slot.
     pub subject_hex: &'a str,
     /// The clause kind's wire name (`"budget"`, `"apps"`, …).
     pub kind: &'a str,
@@ -156,7 +161,7 @@ pub enum ClauseGate {
     /// the slot is this one (same signer, same `issuedAt`), so a store that
     /// does not have it yet (its write failed after the port's) takes it.
     NotNewer { held_is_this: bool },
-    /// Refused (not a signer, seal mismatch, before pairing, future).
+    /// Refused (not a signer, seal mismatch, the slot's clamp quota full).
     Refused,
     /// The port holds nothing for the slot and the store's slot is
     /// unreadable: no floor is known, so the broker's unreadable-floor rule
@@ -254,10 +259,12 @@ pub trait GuardianStatements: Send + Sync {
         Vec::new()
     }
 
-    /// Rules 4 and 5 for a per-child clause. `None`: this port does not judge
-    /// clauses, and the clause store's replay floor does. The machine-wide
-    /// `content` slot is never brought here (open question "Rule 4 for the
-    /// machine-wide content clause").
+    /// Rules 4 and 5, with D1's clamp, for a clause. `None`: this port does
+    /// not judge clauses, and the clause store's replay floor does. The
+    /// machine-wide `content` slot is brought here under [`MACHINE_SUBJECT`]
+    /// (open question "Rule 4 for the machine-wide content clause": its
+    /// replay floor is kept and the clamp applies; the departure lowering of
+    /// rule 4 is a no-op once every bar is an effective time).
     fn judge_clause(
         &self,
         _clause: &ClauseCandidate<'_>,

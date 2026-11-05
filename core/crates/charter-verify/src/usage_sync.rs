@@ -10,7 +10,6 @@ use charter_proto::UsageSyncPayload;
 use charter_schedule::MinuteSet;
 
 use crate::event::{event_id, signature_is_valid};
-use crate::verify::FRESHNESS_SKEW_SECS;
 
 /// An authenticated usage-sync. Fields are private; only
 /// [`verify_usage_sync`] builds it.
@@ -40,8 +39,6 @@ pub enum UsageSyncError {
     BadSignature,
     /// The author is not in the signer set.
     UntrustedSigner,
-    /// `ts` is more than [`FRESHNESS_SKEW_SECS`] ahead of the ward's clock.
-    FutureTs,
     /// `ts` was at or below the highest already seen for this subject (replay).
     StaleTs,
 }
@@ -49,12 +46,14 @@ pub enum UsageSyncError {
 /// Authenticate a USAGE_SYNC event. `prev_ts` is the highest `ts` previously
 /// accepted for this subject (None if never). Order mirrors `verify_clause`:
 /// malformed (incl. the bitmap, fail-closed) → event-id integrity → signature
-/// → author in the signer set → not future-dated → monotonic ts.
+/// → author in the signer set → monotonic ts. No skew gate (D1): a
+/// USAGE_SYNC dated ahead of the ward's clock is judged by its replay floor
+/// alone, as before the guardian-keys section.
 pub fn verify_usage_sync(
     event: &NostrEvent,
     signers: &dyn SignerSet,
     prev_ts: Option<u64>,
-    now: u64,
+    _now: u64,
 ) -> Result<VerifiedUsageSync, UsageSyncError> {
     if event.kind != charter_primitives::kinds::CHARTER_DEVICE_USAGE_SYNC {
         return Err(UsageSyncError::Malformed);
@@ -78,9 +77,6 @@ pub fn verify_usage_sync(
     }
     if !signers.is_signer(&event.pubkey) {
         return Err(UsageSyncError::UntrustedSigner);
-    }
-    if payload.ts > now.saturating_add(FRESHNESS_SKEW_SECS) {
-        return Err(UsageSyncError::FutureTs);
     }
 
     if let Some(prev) = prev_ts {

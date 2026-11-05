@@ -219,6 +219,33 @@ fn ack(outcome: &cg::Outcome) -> AckResult {
     }
 }
 
+/// A held clause persisted before the clamp (D1) has no effective time
+/// (`floor: None`, read by the reference as its `issuedAt`). Give it one,
+/// min(`issuedAt`, now), so a far-future clause from before the upgrade pins
+/// nothing; and if it was ahead of now and its id is known, remember the id
+/// (as `accept_clause` would have), so a relay can't replay it over a newer
+/// rule. Returns whether anything changed.
+fn normalise_legacy_floors(state: &mut GuardianState, now: u64) -> bool {
+    let now = secs(now);
+    let mut changed = false;
+    for held in state.clauses.iter_mut().filter(|c| c.floor.is_none()) {
+        held.floor = Some(held.issued_at.min(now));
+        let ahead = held.issued_at > now && !held.id.is_empty();
+        if ahead
+            && !held.remembered.iter().any(|r| r.id == held.id)
+            && held.remembered.len() < cg::MAX_REMEMBERED_PER_SLOT
+        {
+            held.remembered.push(cg::RememberedClause {
+                id: held.id.clone(),
+                issued_at: held.issued_at,
+            });
+            held.remembered.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        changed = true;
+    }
+    changed
+}
+
 /// What the store holds, read from both copies (D7).
 // Short-lived, built once per read: the size difference costs nothing.
 #[allow(clippy::large_enum_variant)]
@@ -394,7 +421,8 @@ impl GuardianKeys {
             Loaded::Doc { mut doc, repair } => match doc_pairing(&doc, paired_at, &guardian) {
                 DocPairing::Same => {
                     let followed = follow_pairing_relays(&mut doc.state, pairing, now);
-                    if (followed || repair) && persist {
+                    let normalised = normalise_legacy_floors(&mut doc.state, now);
+                    if (followed || repair || normalised) && persist {
                         if let Err(e) = store.save(&to_json(&doc)) {
                             eprintln!(
                                 "charter: could not rewrite the guardian-keys state ({e}); \
@@ -1270,13 +1298,13 @@ impl GuardianStatements for GuardianKeys {
         let mut held = self.held();
         if let Held::Unavailable("unreadable") = *held {
             // A transient read error heals here.
-            if let Loaded::Doc { doc, repair } = read_doc(&*self.inner.store) {
+            if let Loaded::Doc { mut doc, repair } = read_doc(&*self.inner.store) {
                 if doc.v == DOC_VERSION
                     && doc_pairing(&doc, self.inner.paired_at, &self.inner.paired_guardian)
                         == DocPairing::Same
                 {
                     eprintln!("charter: guardian-keys state readable again");
-                    if repair {
+                    if normalise_legacy_floors(&mut doc.state, now) || repair {
                         if let Err(e) = self.inner.store.save(&to_json(&doc)) {
                             eprintln!("charter: could not rewrite the guardian-keys state ({e})");
                         }
@@ -1318,20 +1346,25 @@ impl GuardianStatements for GuardianKeys {
                     SlotSeed::Unreadable => return (None, ClauseGate::Unknown),
                     SlotSeed::Held { signer, bound } => {
                         // A slot this state has never judged (the ward paired
-                        // before the section): the store's floor, and its
-                        // signer, carry over. A signer no longer in the set
-                        // departed before the slot was seeded, so no departure
-                        // clamped it: its floor is min(its issuedAt, the
-                        // departure), as rule 4 has it, or now when the
-                        // departure time is not known. A far-future clause
-                        // from a departed key can't pin the slot (review
-                        // batch 2, core L1).
+                        // before the section, or the machine-wide slot before
+                        // it came here): the store's floor, and its signer,
+                        // carry over, as an effective time (D1): min(its
+                        // issuedAt, now). The store's own floor sits at the
+                        // real issuedAt, which would let a far-future clause
+                        // pin the slot. A signer no longer in the set
+                        // departed before the slot was seeded, so no
+                        // departure clamped it: its floor is also at most the
+                        // departure, as rule 4 has it (review batch 2, core
+                        // L1). The store keeps no event id, so a seeded
+                        // far-future clause can't be remembered against a
+                        // replay; see `normalise_legacy_floors`.
                         let signer = hex(&signer);
                         let root = cg::root_of(&base, &signer).unwrap_or_else(|| signer.clone());
                         let issued_at = secs(bound);
-                        let floor = (!cg::is_signer(&base, &signer)).then(|| {
-                            issued_at.min(departed_at(&base, &signer).unwrap_or(secs(now)))
-                        });
+                        let mut floor = issued_at.min(secs(now));
+                        if !cg::is_signer(&base, &signer) {
+                            floor = floor.min(departed_at(&base, &signer).unwrap_or(secs(now)));
+                        }
                         base.clauses.push(cg::state::HeldClause {
                             subject: clause.subject_hex.to_owned(),
                             kind: clause.kind.to_owned(),
@@ -1339,7 +1372,7 @@ impl GuardianStatements for GuardianKeys {
                             root,
                             id: String::new(),
                             issued_at,
-                            floor,
+                            floor: Some(floor),
                             remembered: Vec::new(),
                         });
                     }

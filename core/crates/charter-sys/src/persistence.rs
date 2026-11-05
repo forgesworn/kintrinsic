@@ -126,6 +126,14 @@ pub trait ClauseStore: Send + Sync {
     fn replay_floor(&self, kind: u16) -> SysResult<Option<ReplayFloor>> {
         Ok(self.highest_issued_at(kind)?.map(ReplayFloor::Record))
     }
+    /// Store a clause whose acceptance the guardian-keys state has already
+    /// decided (the machine-wide `content` slot of a ward with that section,
+    /// D1): no replay-floor check here, because the state's bar is the held
+    /// clause's effective time, min(`issuedAt`, the ward clock at
+    /// acceptance), which can be BELOW this slot's floor at the real
+    /// `issuedAt`. The sidecar floor is set to `issued_at` first, then the
+    /// record, as for every put.
+    fn replace_clause(&self, kind: u16, issued_at: u64, json: &str) -> SysResult<()>;
 }
 
 /// Cache of signature-verified curator web lists, keyed by an opaque string
@@ -558,6 +566,16 @@ mod mock {
         fn replay_floor(&self, kind: u16) -> SysResult<Option<ReplayFloor>> {
             let high = self.highest_issued_at(kind)?;
             Ok(self.disk.floor_of(high))
+        }
+        fn replace_clause(&self, kind: u16, issued_at: u64, json: &str) -> SysResult<()> {
+            if self.disk.clause_writes_broken() {
+                return Err(unwritable());
+            }
+            let mut g = self.disk.0.lock().expect("disk lock");
+            g.records_torn = false;
+            g.clause_high.insert(kind, issued_at);
+            g.clauses.insert(kind, (issued_at, json.to_string()));
+            Ok(())
         }
     }
 
@@ -1162,6 +1180,12 @@ mod real {
             // Locked: `floor_of` may backfill the sidecar.
             let _g = self.lock.lock().expect("clause lock");
             floor_of(self.current(kind), &self.floor(kind))
+        }
+        fn replace_clause(&self, kind: u16, issued_at: u64, json: &str) -> SysResult<()> {
+            let _g = self.lock.lock().expect("clause lock");
+            // No floor: the guardian-keys state decided. The record may be
+            // torn or unreadable; it is replaced either way.
+            put_rec(&self.file(kind), &self.floor(kind), None, issued_at, json).map(|_| ())
         }
     }
 

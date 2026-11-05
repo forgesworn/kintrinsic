@@ -16,7 +16,7 @@ use charter_proto::{
 };
 use charter_sys::error::SysResult;
 use charter_sys::persistence::{
-    ChildClauseStore, ClauseStore, PairingStore, PendingStore, ReplayFloor,
+    ChildClauseStore, ClauseStore, HeldSigner, PairingStore, PendingStore, ReplayFloor, SlotState,
 };
 use charter_sys::{Clock, SystemLayer};
 use charter_transport::{Entropy, GuardianSealed, ReceivedClause, ReceivedGrant};
@@ -28,7 +28,9 @@ use charter_verify::{
 use crate::enactor::{EnactContext, EnactorRegistry};
 use crate::error::BrokerError;
 use crate::lifecycle::{transition, Effect, Event, RequestRecord, RequestState};
-use crate::ports::{ClauseCandidate, ClauseGate, RelaysChange, RelaysRecord, SlotSeed};
+use crate::ports::{
+    ClauseCandidate, ClauseGate, RelaysChange, RelaysRecord, SlotSeed, MACHINE_SUBJECT,
+};
 use crate::ports::{EventSink, GuardianStatements};
 use crate::transport_facade::{LocalInbound, TransportFacade};
 
@@ -1143,16 +1145,19 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             None => ClauseSlot::Machine,
         };
 
-        // A ward with the guardian-keys section: its state judges a per-child
-        // clause against the one it holds (rules 4 and 5), and the store only
-        // keeps the body.
-        if let (ClauseSlot::Child(subject_hex), Some(port)) = (&slot, self.statement_port()) {
+        // A ward with the guardian-keys section: its state judges the clause
+        // against the one it holds (rules 4 and 5, with D1's clamp), and the
+        // store only keeps the body. The machine-wide `content` slot goes
+        // there too, under the subject `""`, so a far-future content clause
+        // is clamped like any other (open question "Rule 4 for the
+        // machine-wide content clause").
+        if let Some(port) = self.statement_port() {
             if let Some(d) = self.judged_clause_disposition(
                 received,
                 &**port,
                 &*signers,
                 payload.kind,
-                subject_hex,
+                &slot,
                 &legacy,
                 now,
             ) {
@@ -1194,17 +1199,25 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         }
     }
 
-    /// A per-child clause on a ward with the guardian-keys section (rules 4
-    /// and 5). The caller holds the handler turn.
+    /// A clause on a ward with the guardian-keys section (rules 4 and 5, D1).
+    /// The caller holds the handler turn.
     ///
     /// The clause is authenticated first with no floor (`verify_clause`: id,
-    /// signature, kind, the signer set, the future refusal). The port then
-    /// judges it against the clause its state holds for `(subject, kind)`
-    /// (seeded from the store for a slot it has never seen) and, accepting
-    /// it, persists that BEFORE the body is written. A crash or write failure
-    /// between the two leaves the state ahead of the store: the floor is
-    /// already raised, so nothing older gets in, and the re-delivery of this
-    /// very clause (`NotNewer { held_is_this }`) writes the body then.
+    /// signature, kind, the signer set). The port then judges it against the
+    /// clause its state holds for `(subject, kind)` (seeded from the store
+    /// for a slot it has never seen): the bar is the held clause's effective
+    /// time, min(`issuedAt`, the ward clock at acceptance), and a clamped
+    /// clause's id is remembered against replay. Accepting it, the port
+    /// persists that BEFORE the body is written, and the store writes the
+    /// body with no floor of its own (its floor sits at the real `issuedAt`,
+    /// which a clamped bar can be below). A crash or write failure between
+    /// the two leaves the state ahead of the store: the bar is already
+    /// raised, so nothing older gets in, and the re-delivery of this very
+    /// clause (`NotNewer { held_is_this }`) writes the body then.
+    ///
+    /// The machine-wide `content` slot is judged under the subject `""`
+    /// (never a child's: those are 64 hex characters). Its store records no
+    /// signer, so a seeded record is the pinned root's.
     #[allow(clippy::too_many_arguments)]
     fn judged_clause_disposition(
         &self,
@@ -1212,7 +1225,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
         port: &dyn GuardianStatements,
         signers: &dyn SignerSet,
         kind: ClauseKind,
-        subject_hex: &str,
+        slot: &ClauseSlot,
         legacy: &PubKey,
         now: u64,
     ) -> Option<ClauseDisposition> {
@@ -1221,8 +1234,11 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             Err(_) => return Some(ClauseDisposition::Refused),
         };
         let store_key = kind.store_key();
-        let store = self.sys.child_clauses();
-        let seed = match store.slot_state(subject_hex, store_key) {
+        let subject_hex = match slot {
+            ClauseSlot::Child(subject_hex) => subject_hex.as_str(),
+            ClauseSlot::Machine => MACHINE_SUBJECT,
+        };
+        let seed = match self.slot_seed_state(slot, store_key) {
             Ok(st) => match (
                 st.floor.and_then(ReplayFloor::verify_bound),
                 st.signer.resolve(legacy),
@@ -1252,20 +1268,27 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             issued_at: vc.issued_at(),
         };
         let body = serde_json::to_string(vc.body()).unwrap_or_default();
-        let write = |what: ClauseDisposition| match store.replace_child_clause(
-            subject_hex,
-            store_key,
-            vc.issued_at(),
-            &vc.signer(),
-            &body,
-        ) {
-            Ok(()) => what,
-            Err(e) => {
-                warn_write_failed(
-                    &ClauseSlot::Child(subject_hex.to_owned()).describe(store_key),
-                    e,
-                );
-                ClauseDisposition::WriteFailed
+        let write = |what: ClauseDisposition| {
+            let written = match slot {
+                ClauseSlot::Child(subject_hex) => self.sys.child_clauses().replace_child_clause(
+                    subject_hex,
+                    store_key,
+                    vc.issued_at(),
+                    &vc.signer(),
+                    &body,
+                ),
+                ClauseSlot::Machine => {
+                    self.sys
+                        .clauses()
+                        .replace_clause(store_key, vc.issued_at(), &body)
+                }
+            };
+            match written {
+                Ok(()) => what,
+                Err(e) => {
+                    warn_write_failed(&slot.describe(store_key), e);
+                    ClauseDisposition::WriteFailed
+                }
             }
         };
         let gate = port.judge_clause(&candidate, seed, now)?;
@@ -1275,7 +1298,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 // The port holds exactly this clause. The store has it too
                 // (Unchanged, with an equal body), or its write was lost after
                 // the port's: write it now.
-                let held = store.slot_state(subject_hex, store_key).ok();
+                let held = self.slot_seed_state(slot, store_key).ok();
                 let stored_here = held.is_some_and(|st| {
                     st.floor == Some(ReplayFloor::Record(vc.issued_at()))
                         && st.signer.resolve(legacy) == Some(vc.signer())
@@ -1283,8 +1306,8 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 if !stored_here {
                     return Some(write(ClauseDisposition::Stored));
                 }
-                let same_body = store
-                    .get_child_clause(subject_hex, store_key)
+                let same_body = self
+                    .slot_get(slot, store_key)
                     .ok()
                     .flatten()
                     .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
@@ -1301,13 +1324,28 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             ClauseGate::Refused => ClauseDisposition::Refused,
             ClauseGate::Unknown => {
                 warn_unreadable_floor(
-                    &ClauseSlot::Child(subject_hex.to_owned()).describe(store_key),
+                    &slot.describe(store_key),
                     charter_sys::error::SysError::Io("slot unreadable, nothing held".into()),
                 );
                 ClauseDisposition::WriteFailed
             }
             ClauseGate::Failed => ClauseDisposition::WriteFailed,
         })
+    }
+
+    /// A slot's floor and held signer, for seeding the port. The machine-wide
+    /// slot records no signer: its record is read as the pinned root's
+    /// ([`HeldSigner::Legacy`]).
+    fn slot_seed_state(&self, slot: &ClauseSlot, store_key: u16) -> SysResult<SlotState> {
+        match slot {
+            ClauseSlot::Child(subject_hex) => {
+                self.sys.child_clauses().slot_state(subject_hex, store_key)
+            }
+            ClauseSlot::Machine => Ok(SlotState {
+                floor: self.sys.clauses().replay_floor(store_key)?,
+                signer: HeldSigner::Legacy,
+            }),
+        }
     }
 
     /// An authentic clause at or below its slot's floor is `Unchanged` only

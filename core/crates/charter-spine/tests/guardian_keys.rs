@@ -20,7 +20,7 @@ use charter_spine::{
     GuardianStatements, LocalIngestOptions, PinCheck, PresenceError, RelaysChange, RelaysRecord,
 };
 use charter_sys::guardian_store::{GuardianStateStore, MemoryGuardianStateStore};
-use charter_sys::persistence::{ChildClauseStore, HeldSigner, MockDisk, PairingStore};
+use charter_sys::persistence::{ChildClauseStore, ClauseStore, HeldSigner, MockDisk, PairingStore};
 use charter_sys::relay::{Filter, MockRelayTransport, RelayTransport};
 use charter_sys::{MockSystem, SystemLayer};
 use charter_transport::nip59::{self, Rumor, WrapRandomness};
@@ -255,16 +255,166 @@ async fn single_pinned_records_the_signer_and_refuses_everyone_else() {
     assert_eq!(out.result, AckResult::Superseded);
 }
 
+/// D1: no skew gate in `verify_clause`. Without the port (an unpaired or
+/// pre-section ward) the replay floor alone judges, as on main.
 #[tokio::test]
-async fn a_clause_more_than_300_seconds_ahead_is_refused() {
+async fn without_a_port_a_far_ahead_clause_is_judged_by_the_replay_floor_alone() {
     let w = Ward::new();
     let b = w.broker_with(None);
-    let ev = clause(ROOT_SEED, NOW + 301, 60);
+    let ev = clause(ROOT_SEED, NOW + 86_400, 60);
     let out = b.ingest_local(&w.sealed(&ev, ROOT_SEED, 1), LOCAL).await;
-    assert_eq!(out.result, AckResult::Refused);
-    let ok = clause(ROOT_SEED, NOW + 300, 60);
-    let out = b.ingest_local(&w.sealed(&ok, ROOT_SEED, 2), LOCAL).await;
     assert_eq!(out.result, AckResult::Applied);
+}
+
+/// D1: a guardian-keys ward clamps a clause dated ahead of its clock: the
+/// slot's bar is the effective time, min(issuedAt, now), so the other
+/// parent's correctly dated rule replaces it at once; a relay replaying the
+/// far-future clause over it is refused (its id is remembered); STATUS
+/// counts the clamp.
+#[tokio::test]
+async fn a_far_ahead_clause_is_clamped_not_refused_and_cannot_be_replayed() {
+    let w = Ward::new();
+    let (b, keys) = w.broker();
+    approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+    let ahead = clause(ROOT_SEED, NOW + 86_400, 60);
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 2), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(held_minutes(&b), Some(60));
+    assert_eq!(keys.status_guardians(NOW).unwrap().clamped, 1);
+    // Re-delivered as it is held: unchanged, not a fresh acceptance.
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 3), LOCAL).await;
+    assert_eq!(out.result, AckResult::Unchanged);
+
+    // A clause at the bar (NOW) is not newer; one just above it is.
+    let at_bar = clause(WORKING_SEED, NOW, 10);
+    let out = b
+        .ingest_local(&w.sealed(&at_bar, WORKING_SEED, 4), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Superseded);
+    let next = clause(WORKING_SEED, NOW + 1, 20);
+    let out = b
+        .ingest_local(&w.sealed(&next, WORKING_SEED, 5), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(held_minutes(&b), Some(20));
+    assert_eq!(held_signer(&b), HeldSigner::Key(pk(WORKING_SEED)));
+    // NOW + 1 was ahead of the ward clock too: clamped, and counted.
+    assert_eq!(keys.status_guardians(NOW).unwrap().clamped, 2);
+
+    // The superseded far-future clause, replayed: its issuedAt beats the
+    // bar, but its id is remembered.
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 6), LOCAL).await;
+    assert_eq!(out.result, AckResult::Superseded);
+    assert_eq!(held_minutes(&b), Some(20));
+
+    // After a restart too: the memory is in the persisted state.
+    let (b, _keys) = w.broker();
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 7), LOCAL).await;
+    assert_eq!(out.result, AckResult::Superseded);
+    assert_eq!(held_minutes(&b), Some(20));
+}
+
+/// D1 for the machine-wide `content` slot (a Linux ward's web filter): the
+/// same clamp, the same replay memory, and the store's own floor at the
+/// real issuedAt does not refuse what the state accepts.
+#[tokio::test]
+async fn the_machine_wide_content_slot_is_clamped_too() {
+    let content = |seed: u8, at: u64, tag: u64| {
+        ClauseBuilder::content(at)
+            .body(json!({"v": 1, "issuedAt": at, "tag": tag}))
+            .build(&TestGuardian::from_seed(seed))
+    };
+    let held_tag = |b: &B| {
+        b.sys()
+            .clauses()
+            .get_clause(ClauseKind::Content.store_key())
+            .unwrap()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .and_then(|v| v["tag"].as_u64())
+    };
+    let w = Ward::new();
+    let (b, keys) = w.broker();
+    let ahead = content(ROOT_SEED, NOW + 86_400, 1);
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 1), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(held_tag(&b), Some(1));
+    let next = content(ROOT_SEED, NOW + 1, 2);
+    let out = b.ingest_local(&w.sealed(&next, ROOT_SEED, 2), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(held_tag(&b), Some(2));
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 3), LOCAL).await;
+    assert_eq!(out.result, AckResult::Superseded);
+    assert_eq!(held_tag(&b), Some(2));
+    // Recorded under the machine subject, with who set it.
+    let held = keys.project(NOW).unwrap().clauses;
+    assert!(held.iter().any(|c| c.subject.is_empty()
+        && c.kind == "content"
+        && c.signer == pk(ROOT_SEED).to_hex()));
+    assert_eq!(keys.status_guardians(NOW).unwrap().clamped, 2);
+}
+
+/// D1 at the upgrade: a store slot holding a far-future clause from before
+/// the section (or the content slot from before it came to the port) seeds
+/// the state at its effective time, so it pins nothing.
+#[tokio::test]
+async fn a_far_future_slot_from_before_the_upgrade_is_seeded_at_now() {
+    let w = Ward::new();
+    let (b, _keys) = w.broker();
+    b.sys()
+        .child_clauses()
+        .put_child_clause(
+            &SUBJECT.to_hex(),
+            ClauseKind::Budget.store_key(),
+            NOW + 86_400,
+            &json!({"dailyMinutes": 600, "tz": "UTC"}).to_string(),
+        )
+        .unwrap();
+    let out = b
+        .ingest_local(&w.sealed(&clause(ROOT_SEED, NOW, 30), ROOT_SEED, 1), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Superseded, "at the seeded bar, NOW");
+    let out = b
+        .ingest_local(
+            &w.sealed(&clause(ROOT_SEED, NOW + 1, 30), ROOT_SEED, 2),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(held_minutes(&b), Some(30));
+}
+
+/// D1 at the upgrade of the state itself: a held clause persisted before the
+/// clamp (no `floor`) is given its effective time on load, and its id is
+/// remembered if it was ahead.
+#[tokio::test]
+async fn a_held_clause_from_before_the_clamp_gets_an_effective_time_on_load() {
+    let w = Ward::new();
+    let (b, _keys) = w.broker();
+    let ahead = clause(ROOT_SEED, NOW + 86_400, 60);
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 1), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    // Rewrite the stored state as a build before the clamp left it.
+    let mut doc: serde_json::Value = serde_json::from_str(&w.store.raw().unwrap()).unwrap();
+    let held = &mut doc["state"]["clauses"][0];
+    held["floor"] = serde_json::Value::Null;
+    held.as_object_mut().unwrap().remove("remembered");
+    w.store.set_raw(Some(doc.to_string()));
+
+    let (b, keys) = w.broker();
+    let held = keys.project(NOW).unwrap().clauses;
+    assert_eq!(held[0].floor, Some(NOW as i64));
+    assert_eq!(held[0].remembered.len(), 1);
+    assert_eq!(held[0].remembered[0].id, ahead.id.to_hex());
+    let out = b
+        .ingest_local(
+            &w.sealed(&clause(ROOT_SEED, NOW + 1, 5), ROOT_SEED, 2),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 3), LOCAL).await;
+    assert_eq!(out.result, AckResult::Superseded);
+    assert_eq!(held_minutes(&b), Some(5));
 }
 
 #[tokio::test]
@@ -725,7 +875,7 @@ async fn a_slot_from_before_the_upgrade_keeps_its_replay_floor() {
 async fn a_slot_from_before_the_upgrade_takes_the_departure_floor_of_its_signer() {
     let w = Ward::new();
     // Before the upgrade the pinned root R stored a far-future clause (the
-    // ward had no 300-second refusal then): 600 minutes a day.
+    // ward never refused one): 600 minutes a day.
     let legacy = MockSystem::over_disk(NOW, w.disk.clone());
     legacy
         .child_clauses()
