@@ -386,14 +386,25 @@ fn active_count(s: &GuardianState, root: &str) -> usize {
         .count()
 }
 
-fn held_count(s: &GuardianState, signer: &str) -> usize {
+/// The root a held statement counts against: an objection's objecting root
+/// (the root its removal names, whichever of its keys signed it), else the
+/// signer.
+fn held_owner<'a>(kind: StatementType, d: &'a str, signer: &'a str) -> &'a str {
+    if kind == StatementType::Objection && d.len() >= 64 {
+        &d[d.len() - 64..]
+    } else {
+        signer
+    }
+}
+
+fn held_count(s: &GuardianState, root: &str) -> usize {
     s.held_withdrawals
         .iter()
-        .filter(|h| h.signer == signer)
+        .filter(|h| h.signer == root)
         .count()
         + s.statements
             .iter()
-            .filter(|st| st.held && st.signer == signer)
+            .filter(|st| st.held && held_owner(st.kind, &st.d, &st.signer) == root)
             .count()
 }
 
@@ -668,24 +679,18 @@ fn bind_key(s: &mut GuardianState, approval: &Statement, now: i64) -> usize {
     s.keys.len() - 1
 }
 
-/// An objection by `removed` against removals of it signed by `remover`: it
-/// drops a removal whose effective time is at or below its own, and any
-/// removal judged within 7 days of the objection reaching the ward.
+/// An objection to removal `d` (of the root `d` names) against removals
+/// signed by `remover`: it drops a removal whose effective time is at or
+/// below its own, and any removal judged within 7 days of the objection
+/// reaching the ward. Who signed it (the removed root or one of its working
+/// keys) was checked when it was accepted.
 /// OQ: Cancel or objection before its statement; OQ: Removal re-issued after
 /// an objection.
-fn objected_by(
-    s: &GuardianState,
-    d: &str,
-    removed: &str,
-    remover: &str,
-    effective: i64,
-    now: i64,
-) -> bool {
+fn objected_by(s: &GuardianState, d: &str, remover: &str, effective: i64, now: i64) -> bool {
     let slot = format!("{}{d}|{remover}", StatementType::Objection.prefix());
     stored_for(s, &slot).is_some_and(|o| {
-        o.signer == removed
-            && (effective_time(o.issued_at, o.received_at) >= effective
-                || now < o.received_at + OBJECTION_BLOCK_SECONDS)
+        effective_time(o.issued_at, o.received_at) >= effective
+            || now < o.received_at + OBJECTION_BLOCK_SECONDS
     })
 }
 
@@ -748,7 +753,6 @@ fn advance(s: &mut GuardianState, now: i64) -> Vec<TickEntry> {
         } else if objected_by(
             s,
             &p.d,
-            &p.key,
             &p.signer,
             effective_time(p.issued_at, p.received_at),
             at,
@@ -815,7 +819,8 @@ pub fn tick(state: &GuardianState, now: i64) -> Step {
 /// - An approval only by the W it names (exception 1).
 /// - A withdrawal, co-guardian, removal, move or cancel signed by R by R, or
 ///   by a W bound to R and in the signer set (exception 2).
-/// - An objection only by its signer. OQ: Sealing an objection.
+/// - An objection by its signer, or by a W bound to the objecting root (the
+///   root being removed) and in the signer set (exception 2).
 fn seal_allowed(s: &GuardianState, st: &Statement, seal_author: &str) -> bool {
     if st.kind == StatementType::Approval {
         return seal_author == st.key;
@@ -823,10 +828,12 @@ fn seal_allowed(s: &GuardianState, st: &Statement, seal_author: &str) -> bool {
     if seal_author == st.signer {
         return true;
     }
-    if st.kind == StatementType::Objection {
-        return false;
-    }
-    active_key(s, seal_author).is_some_and(|w| w.root == st.signer)
+    let speaks_for = if st.kind == StatementType::Objection {
+        &st.key
+    } else {
+        &st.signer
+    };
+    active_key(s, seal_author).is_some_and(|w| w.root == *speaks_for)
 }
 
 fn process_approval(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
@@ -1073,7 +1080,7 @@ fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
     if now >= expires_at {
         return drop(Reason::Expired);
     }
-    if objected_by(s, &st.d, r2, &st.signer, effective, now) {
+    if objected_by(s, &st.d, &st.signer, effective, now) {
         return drop(Reason::Objected);
     }
     if cancelled_by(s, &st.d, &st.signer, effective) {
@@ -1084,9 +1091,11 @@ fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
 }
 
 fn hold_or_drop(s: &mut GuardianState, st: &Statement, now: i64, reason: Reason) -> Judged {
+    let owner = held_owner(st.kind, &st.d, &st.signer).to_owned();
     let reclaim = stored_for(s, &slot_of(st))
-        .is_some_and(|prev| prev.held && prev.signer == st.signer) as usize;
-    if held_count(s, &st.signer) - reclaim >= MAX_HELD_PER_ROOT {
+        .is_some_and(|prev| prev.held && held_owner(prev.kind, &prev.d, &prev.signer) == owner)
+        as usize;
+    if held_count(s, &owner) - reclaim >= MAX_HELD_PER_ROOT {
         return drop(Reason::HeldQuota);
     }
     put_statement(s, st, now, true);
@@ -1114,7 +1123,8 @@ fn process_cancel(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
 }
 
 fn process_objection(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
-    if st.signer != st.key {
+    // Rule 7: the removed root, or an active W bound to it, may object.
+    if root_of(s, &st.signer).as_deref() != Some(st.key.as_str()) {
         return drop(Reason::ObjectionMismatch);
     }
     if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st, now) {
@@ -1161,7 +1171,14 @@ pub fn apply_inbound(state: &GuardianState, seal_author: &str, inner: &Value, no
         if !seal_allowed(s, &st, seal_author) {
             return drop(Reason::SealMismatch);
         }
-        if !is_pinned(s, &st.signer) {
+        // Every statement is a root's, except an objection, which an active
+        // W may sign for its root (rule 7).
+        let may_sign = if st.kind == StatementType::Objection {
+            is_signer(s, &st.signer)
+        } else {
+            is_pinned(s, &st.signer)
+        };
+        if !may_sign {
             return drop(Reason::SignerNotPinned);
         }
         let judged = process_statement(s, &st, now);
@@ -1281,7 +1298,7 @@ pub fn apply_presence_confirm(
                 return drop(Reason::ConfirmerNotBound);
             }
             let pend_effective = effective_time(pend.issued_at, pend.received_at);
-            if objected_by(s, &pend.d, &pend.key, &pend.signer, pend_effective, now) {
+            if objected_by(s, &pend.d, &pend.signer, pend_effective, now) {
                 drop_pending_d(s, &pend.d);
                 return drop(Reason::Objected);
             }

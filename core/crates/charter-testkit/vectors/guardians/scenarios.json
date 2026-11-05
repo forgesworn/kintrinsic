@@ -23062,7 +23062,1168 @@
         "7",
         "seal exceptions"
       ],
-      "description": "The root being removed objects; that drops the removal. An objection is not covered by seal exception 2.",
+      "description": "The root being removed, or an active W bound to it, objects; that drops the removal. Seal exception 2 covers the objection: a W bound to the objecting root may seal it.",
+      "steps": [
+        {
+          "input": {
+            "type": "pair_offer",
+            "now": 1700000000,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "5c918493d9aea6539c1a451985fdb587660c2ead976c464e79227443b15280fa",
+              "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+              "created_at": 1700000000,
+              "kind": 31117,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"token\":\"d7d21f989d34d0045199725243b3eba6\",\"relays\":[\"wss://relay.one.example\",\"wss://relay.two.example\"],\"ts\":1700000000,\"approval\":{\"id\":\"4f519423567a5c84ae57fd4c382977d30db7712d325dc3ba03bf722c234912bb\",\"pubkey\":\"e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840\",\"created_at\":1699999000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\"],[\"p\",\"2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1699999000,\\\"label\\\":\\\"Sam's phone\\\"}\",\"sig\":\"536c34ccd8ff41d2a4d4412280d78522ed945d4acb38dd26ec200190af1fb1808dab3c54ee33ba230618e9dd0b6aa65969c2d4626be9ff2b9f0ae3a192c4dfaf\"}}",
+              "sig": "24a39b11058c702021ad5db221d7bba7d9eb8ac906d74eac59a57479db4a39dda8176c09513f5588996bfd6f1ab774a48538f88cdab93d21ffb2ae563f19a124"
+            },
+            "token": {
+              "token": "d7d21f989d34d0045199725243b3eba6",
+              "mintedAt": 1699999970
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "paired",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000010,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000005,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000005}",
+              "sig": "a585b80e0b2cca30698939124aa96251fb7664ed883f43262f8664d4f30747925b9a8a8afc3ea488d842149be23cca30aa99d6fa20c621f99b6588a67977e234"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "coguardian_pending",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "coguardian",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745",
+                  "issuedAt": 1700000005,
+                  "receivedAt": 1700000010,
+                  "expiresAt": 1700604805,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_token",
+            "now": 1700000020,
+            "token": "791bf7a268073d86eddbaf3e177ee1ce",
+            "statementD": "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "token_registered",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "coguardian",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745",
+                  "issuedAt": 1700000005,
+                  "receivedAt": 1700000010,
+                  "expiresAt": 1700604805,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_confirm",
+            "now": 1700000030,
+            "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+            "inner": {
+              "id": "28a7b58e0907995833fa6da156ccda161752105fafa33ebe1c938d5f36740af7",
+              "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+              "created_at": 1700000030,
+              "kind": 31121,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"token\":\"791bf7a268073d86eddbaf3e177ee1ce\",\"statement\":\"31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745\",\"approval\":{\"id\":\"68a1f52c64a6af647517924799999d1b0a41f38c235a60bb04a216d89c8ec975\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000015,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000015,\\\"label\\\":\\\"Alex's phone\\\"}\",\"sig\":\"18ef9d1c8c479dfc5ad45981aedbf18ed989e84aa42adc62cc7bd8d7ae45c00ac80dec50905d179ee3bb4de90c7be15a4996501667b686974fcc3a6a00b8b0db\"}}",
+              "sig": "3ad6e348536f2416c5cc2f40236679f0dd9c33e9f89bbab8c745bf57c458798c189946c2a03b8ed980815c39dbd43d61738440d88e402b71bb74d83a20b2f066"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "coguardian_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000110,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000100,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000100}",
+              "sig": "76e9e62f840283c584e26250d8576df2589736483e9b15c295f1a044a92b4b5ede033aeb88d3af58bed4c1a6a20d24330a73b3c65a0f92e62075258a56172d75"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "removal_pending",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+                  "issuedAt": 1700000100,
+                  "receivedAt": 1700000110,
+                  "expiresAt": 1700604900,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000120,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "f4b16e19a26bb47ec9048495a937f9e76c860d999acbb7b077a86546a2f5d307",
+              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "5d255c10facee0b863fe71550fffed5014449615cb8c6946d431ea86a654b5073d5562496a5a997727e548b76648f6310257eccbf2d4572c001479db351e5203"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "seal_mismatch",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+                  "issuedAt": 1700000100,
+                  "receivedAt": 1700000110,
+                  "expiresAt": 1700604900,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000120,
+            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "inner": {
+              "id": "5497d406c95a0f4d4e70db6207b98a0da94e1035f9348a66685e144d37c8474e",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "b79733eba4aa9e4c859b3255d81ff21f44e81143fd40f03192b3e6e9cd20ba93f5aa6364a20b3014951711bce5b8e9749f7f5334e76d7efd63f736e398c61965"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "objection_mismatch",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+                  "issuedAt": 1700000100,
+                  "receivedAt": 1700000110,
+                  "expiresAt": 1700604900,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000120,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "aeb8b5c53630a2c152d3c194d28350cce6365e43642f0f4763d7e2c36362b5a4",
+              "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "bd2f97b3e6af84f735b3dbec7edfc42b4c370d28c7a5751c5c2a37c4a24b39a91007e5b1b4153aeb73717998aa1115bd3ace1f60215eb8734e2fbe0e3ab8a969"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "objection_mismatch",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+                  "issuedAt": 1700000100,
+                  "receivedAt": 1700000110,
+                  "expiresAt": 1700604900,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000120,
+            "sealAuthor": "29507d2e800d162b5d53381200714d296ce5eb41c8b7161da239a72dececcd26",
+            "inner": {
+              "id": "dba15c10c6d002b072f09ade8fd003402949ec8f8277a58d0334da4ddc858e75",
+              "pubkey": "29507d2e800d162b5d53381200714d296ce5eb41c8b7161da239a72dececcd26",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "def17fff9f8389aa17d3d152dc682575bfcd2423d22b04ba700602033f18651ec49bf3930d257730ff5d9f27897d18662fe32881a8522a64d0463f40f0c892c4"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "signer_not_pinned",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+                  "issuedAt": 1700000100,
+                  "receivedAt": 1700000110,
+                  "expiresAt": 1700604900,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000120,
+            "sealAuthor": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+            "inner": {
+              "id": "ba41ef9a2a0c54ad2fc26b8ed70681a9242f8d4ebd6c588afbbd1e4d87a3066e",
+              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "937dd80e261514dc4ad5fb753fa90aa08a8b50556d79fd47bc218fac6d7b4962"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "feccb82bc79cbd66d92964bd20addc1198debfafac3e01c7fe0bbe3c040781e651a52ac1064c1de326847dee7248f5b08a65806e8598c7b5772f844b73b8c8ec"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "objection_held",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
+                  "issuedAt": 1700000100,
+                  "receivedAt": 1700000110,
+                  "expiresAt": 1700604900,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 1,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000120,
+            "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+            "inner": {
+              "id": "f4b16e19a26bb47ec9048495a937f9e76c860d999acbb7b077a86546a2f5d307",
+              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "5d255c10facee0b863fe71550fffed5014449615cb8c6946d431ea86a654b5073d5562496a5a997727e548b76648f6310257eccbf2d4572c001479db351e5203"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "objection_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 1,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000121,
+            "sealAuthor": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+            "inner": {
+              "id": "f4b16e19a26bb47ec9048495a937f9e76c860d999acbb7b077a86546a2f5d307",
+              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+              "created_at": 1700000101,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000101}",
+              "sig": "5d255c10facee0b863fe71550fffed5014449615cb8c6946d431ea86a654b5073d5562496a5a997727e548b76648f6310257eccbf2d4572c001479db351e5203"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "duplicate",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 1,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "tick",
+            "now": 1700259301
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "ticked",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 1,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "rule7_objection_by_working_key",
+      "rules": [
+        "7"
+      ],
+      "description": "A working key of the root being removed signs the objection itself (its app objects automatically); it drops the removal and blocks a re-issue for 7 days, as the root's own would.",
       "steps": [
         {
           "input": {
@@ -23473,9 +24634,9 @@
             "now": 1700000120,
             "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
             "inner": {
-              "id": "f4b16e19a26bb47ec9048495a937f9e76c860d999acbb7b077a86546a2f5d307",
-              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-              "created_at": 1700000101,
+              "id": "c029722de522d765327a6fb6979fa810957fa729c6cf154a6ed6efe3b6c1bdb9",
+              "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+              "created_at": 1700000111,
               "kind": 31120,
               "tags": [
                 [
@@ -23491,311 +24652,8 @@
                   "charter-device"
                 ]
               ],
-              "content": "{\"v\":1,\"issuedAt\":1700000101}",
-              "sig": "5d255c10facee0b863fe71550fffed5014449615cb8c6946d431ea86a654b5073d5562496a5a997727e548b76648f6310257eccbf2d4572c001479db351e5203"
-            }
-          },
-          "expect": {
-            "result": "dropped",
-            "reason": "seal_mismatch",
-            "ticked": [],
-            "departed": [],
-            "state": {
-              "roots": [
-                {
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "keys": [
-                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
-                  ]
-                },
-                {
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "keys": [
-                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
-                  ]
-                }
-              ],
-              "signers": [
-                {
-                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                },
-                {
-                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                },
-                {
-                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                },
-                {
-                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                }
-              ],
-              "pending": [
-                {
-                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "kind": "removal",
-                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
-                  "issuedAt": 1700000100,
-                  "receivedAt": 1700000110,
-                  "expiresAt": 1700604900,
-                  "confirmedAt": null,
-                  "takesEffectAt": null
-                }
-              ],
-              "tombstones": 0,
-              "held": 0,
-              "departed": [],
-              "recipients": [
-                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
-                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
-              ],
-              "farewell": [],
-              "clauses": [],
-              "relays": [
-                "wss://relay.one.example",
-                "wss://relay.two.example"
-              ],
-              "statusRelays": [
-                "wss://relay.one.example",
-                "wss://relay.two.example"
-              ],
-              "guardianPin": null,
-              "clamped": 0
-            }
-          }
-        },
-        {
-          "input": {
-            "type": "inbound",
-            "now": 1700000120,
-            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-            "inner": {
-              "id": "5497d406c95a0f4d4e70db6207b98a0da94e1035f9348a66685e144d37c8474e",
-              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-              "created_at": 1700000101,
-              "kind": 31120,
-              "tags": [
-                [
-                  "d",
-                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                ],
-                [
-                  "p",
-                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                ],
-                [
-                  "t",
-                  "charter-device"
-                ]
-              ],
-              "content": "{\"v\":1,\"issuedAt\":1700000101}",
-              "sig": "b79733eba4aa9e4c859b3255d81ff21f44e81143fd40f03192b3e6e9cd20ba93f5aa6364a20b3014951711bce5b8e9749f7f5334e76d7efd63f736e398c61965"
-            }
-          },
-          "expect": {
-            "result": "dropped",
-            "reason": "objection_mismatch",
-            "ticked": [],
-            "departed": [],
-            "state": {
-              "roots": [
-                {
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "keys": [
-                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
-                  ]
-                },
-                {
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "keys": [
-                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
-                  ]
-                }
-              ],
-              "signers": [
-                {
-                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                },
-                {
-                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                },
-                {
-                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                },
-                {
-                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                }
-              ],
-              "pending": [
-                {
-                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "kind": "removal",
-                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
-                  "issuedAt": 1700000100,
-                  "receivedAt": 1700000110,
-                  "expiresAt": 1700604900,
-                  "confirmedAt": null,
-                  "takesEffectAt": null
-                }
-              ],
-              "tombstones": 0,
-              "held": 0,
-              "departed": [],
-              "recipients": [
-                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
-                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
-              ],
-              "farewell": [],
-              "clauses": [],
-              "relays": [
-                "wss://relay.one.example",
-                "wss://relay.two.example"
-              ],
-              "statusRelays": [
-                "wss://relay.one.example",
-                "wss://relay.two.example"
-              ],
-              "guardianPin": null,
-              "clamped": 0
-            }
-          }
-        },
-        {
-          "input": {
-            "type": "inbound",
-            "now": 1700000120,
-            "sealAuthor": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-            "inner": {
-              "id": "ba41ef9a2a0c54ad2fc26b8ed70681a9242f8d4ebd6c588afbbd1e4d87a3066e",
-              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-              "created_at": 1700000101,
-              "kind": 31120,
-              "tags": [
-                [
-                  "d",
-                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                ],
-                [
-                  "p",
-                  "937dd80e261514dc4ad5fb753fa90aa08a8b50556d79fd47bc218fac6d7b4962"
-                ],
-                [
-                  "t",
-                  "charter-device"
-                ]
-              ],
-              "content": "{\"v\":1,\"issuedAt\":1700000101}",
-              "sig": "feccb82bc79cbd66d92964bd20addc1198debfafac3e01c7fe0bbe3c040781e651a52ac1064c1de326847dee7248f5b08a65806e8598c7b5772f844b73b8c8ec"
-            }
-          },
-          "expect": {
-            "result": "accepted",
-            "reason": "objection_held",
-            "ticked": [],
-            "departed": [],
-            "state": {
-              "roots": [
-                {
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "keys": [
-                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
-                  ]
-                },
-                {
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "keys": [
-                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
-                  ]
-                }
-              ],
-              "signers": [
-                {
-                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                },
-                {
-                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                },
-                {
-                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                },
-                {
-                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                }
-              ],
-              "pending": [
-                {
-                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-                  "kind": "removal",
-                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
-                  "statement": "f5e647add460f60c2a8ecd83f5693c7826099728d05c6ac1584a5b8377948b8d",
-                  "issuedAt": 1700000100,
-                  "receivedAt": 1700000110,
-                  "expiresAt": 1700604900,
-                  "confirmedAt": null,
-                  "takesEffectAt": null
-                }
-              ],
-              "tombstones": 0,
-              "held": 1,
-              "departed": [],
-              "recipients": [
-                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
-                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
-              ],
-              "farewell": [],
-              "clauses": [],
-              "relays": [
-                "wss://relay.one.example",
-                "wss://relay.two.example"
-              ],
-              "statusRelays": [
-                "wss://relay.one.example",
-                "wss://relay.two.example"
-              ],
-              "guardianPin": null,
-              "clamped": 0
-            }
-          }
-        },
-        {
-          "input": {
-            "type": "inbound",
-            "now": 1700000120,
-            "sealAuthor": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-            "inner": {
-              "id": "f4b16e19a26bb47ec9048495a937f9e76c860d999acbb7b077a86546a2f5d307",
-              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
-              "created_at": 1700000101,
-              "kind": 31120,
-              "tags": [
-                [
-                  "d",
-                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
-                ],
-                [
-                  "p",
-                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
-                ],
-                [
-                  "t",
-                  "charter-device"
-                ]
-              ],
-              "content": "{\"v\":1,\"issuedAt\":1700000101}",
-              "sig": "5d255c10facee0b863fe71550fffed5014449615cb8c6946d431ea86a654b5073d5562496a5a997727e548b76648f6310257eccbf2d4572c001479db351e5203"
+              "content": "{\"v\":1,\"issuedAt\":1700000111}",
+              "sig": "21022d53072cc2a0219a14119b263fdfe72a3ca58e40d72487795b78b007ebab427934535442c322755e3a3d4b65eb974139ad1ab8ec370f7ead7f01e33ba039"
             }
           },
           "expect": {
@@ -23838,7 +24696,7 @@
               ],
               "pending": [],
               "tombstones": 0,
-              "held": 1,
+              "held": 0,
               "departed": [],
               "recipients": [
                 "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
@@ -23861,12 +24719,35 @@
         },
         {
           "input": {
-            "type": "tick",
-            "now": 1700259301
+            "type": "inbound",
+            "now": 1700000200,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "070f34d32a759ace2e464e422603c9b72dd8a1c420aaadc7bb28f760dc701a3b",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000200,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000200}",
+              "sig": "d9bda5730f299cb73edfe116306ef285031b4682b7c380453e6def217cb44e41aa51c4174a95a4310007f004824e915b37642363d69735714b018617df7c19ed"
+            }
           },
           "expect": {
-            "result": "accepted",
-            "reason": "ticked",
+            "result": "dropped",
+            "reason": "objected",
             "ticked": [],
             "departed": [],
             "state": {
@@ -23904,7 +24785,1034 @@
               ],
               "pending": [],
               "tombstones": 0,
-              "held": 1,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000300,
+            "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+            "inner": {
+              "id": "30b3c72bae22219a364e411897c8cd7a82b0f1be701685ed22cea82e4de3ec64",
+              "pubkey": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+              "created_at": 1700000300,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/revoke/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                ],
+                [
+                  "p",
+                  "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000300}",
+              "sig": "13f114ef1abfd65e17f230886e707730acbb0cec3c95e122d3c574e4ef412702922b0dffc323b9ce7ce64f9b5f1d7fe08fc35533f81d3609b479a9717e7a8290"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "withdrawal_applied",
+            "ticked": [],
+            "departed": [
+              "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+            ],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": []
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 1,
+              "held": 0,
+              "departed": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+              ],
+              "farewell": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700604920,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "044a99dc9e0d8e71dedd15d8ae96977fb81f7267d6f19cd0ab141c0c712c62e4",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700604920,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700604920}",
+              "sig": "e903865f01afcdb50eea28dadbba86790a3d7d8d837e876ee117a4dffbd957b637c8eb439ceeab956575e8356898eabd9ecf78b91bf0c9ad1df2abdef01bb2b9"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "removal_pending",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": []
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "044a99dc9e0d8e71dedd15d8ae96977fb81f7267d6f19cd0ab141c0c712c62e4",
+                  "issuedAt": 1700604920,
+                  "receivedAt": 1700604920,
+                  "expiresAt": 1701209720,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 1,
+              "held": 0,
+              "departed": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+              ],
+              "farewell": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700604921,
+            "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+            "inner": {
+              "id": "66cb87389949098dbcb8e2c5e1e92e114aaddb3ff7d27d869bf3c4a6ae8887b9",
+              "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+              "created_at": 1700604921,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/object/kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700604921}",
+              "sig": "9aa2ef0141996f732ef8da0bd2369d01c9699a7e805763ea0f1300b69641bcf8550d7978b6fe1993c1f01fba99d0c68e18f0137e71227e4ebd4b64efad3b8b90"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "signer_not_pinned",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": []
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "044a99dc9e0d8e71dedd15d8ae96977fb81f7267d6f19cd0ab141c0c712c62e4",
+                  "issuedAt": 1700604920,
+                  "receivedAt": 1700604920,
+                  "expiresAt": 1701209720,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 1,
+              "held": 0,
+              "departed": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+              ],
+              "farewell": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "phone_root_mints_working_key",
+      "rules": [
+        "1",
+        "7",
+        "presence confirmation",
+        "versioning"
+      ],
+      "description": "A phone-held root R1 (paired directly) mints a fresh W1 and approves it; W1 binds to R1 and then confirms presence for R1's own removal of R2.",
+      "steps": [
+        {
+          "input": {
+            "type": "pair_offer",
+            "now": 1700000000,
+            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "inner": {
+              "id": "00e88072d5f75645e80a504172970eb157d96030cbfc3a82550349af1b79fd74",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000000,
+              "kind": 31117,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"token\":\"d7d21f989d34d0045199725243b3eba6\",\"relays\":[\"wss://relay.one.example\",\"wss://relay.two.example\"],\"ts\":1700000000}",
+              "sig": "3974010767914d830be78b0738633abe7a90cef6331f667ae1151bc3c4e8395e8f4612294ffa745638de8e1fa871e1788689d35632e5fbeba99e6793e77175aa"
+            },
+            "token": {
+              "token": "d7d21f989d34d0045199725243b3eba6",
+              "mintedAt": 1699999970
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "paired",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                }
+              ],
+              "signers": [
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000010,
+            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "inner": {
+              "id": "31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000005,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000005}",
+              "sig": "a585b80e0b2cca30698939124aa96251fb7664ed883f43262f8664d4f30747925b9a8a8afc3ea488d842149be23cca30aa99d6fa20c621f99b6588a67977e234"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "coguardian_pending",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                }
+              ],
+              "signers": [
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "coguardian",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745",
+                  "issuedAt": 1700000005,
+                  "receivedAt": 1700000010,
+                  "expiresAt": 1700604805,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_token",
+            "now": 1700000020,
+            "token": "d5a4ad5e74f722411c7324253fcccf21",
+            "statementD": "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "token_registered",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                }
+              ],
+              "signers": [
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/guardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "coguardian",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745",
+                  "issuedAt": 1700000005,
+                  "receivedAt": 1700000010,
+                  "expiresAt": 1700604805,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_confirm",
+            "now": 1700000030,
+            "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+            "inner": {
+              "id": "a2e990a440c5c655895db72dc92fdbddefac82f5ab2db25e62350b69ec438ade",
+              "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+              "created_at": 1700000030,
+              "kind": 31121,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"token\":\"d5a4ad5e74f722411c7324253fcccf21\",\"statement\":\"31dbc277348ed2066ede86eeafa618b00fc92b116eff42f62f84a6b9a6ab0745\",\"approval\":{\"id\":\"4b38f64eae364738afe6facd7a66e7282b30f4896f720b5219d6de3d94df6fe1\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000015,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000015}\",\"sig\":\"ffe7d88937400301e737f79ca82d18c98f898ba7003b8d6bd82f57206fa8a48a91f1529d3f8bdcfc4e63ff21fd857960ecce1e041d0e8aadf1c097b9b8e5b33f\"}}",
+              "sig": "aa8b942955a64c352febea35930d0b9beea08067a3cc51e2f101125518eef3aab4a1502304d16185cdbbc1a4d97c7de8a4c992eac35cb258c72029e27e04206e"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "coguardian_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000040,
+            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "inner": {
+              "id": "6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000040,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "p",
+                  "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000040}",
+              "sig": "b9f966d5c934c77776a9e4b368573e88197ab704afd5fb47f7898b07b394c99aeab2cc44553bb5824589549875b81f56ea327e5194e1e6f91d61ff2488a6c97e"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "removal_pending",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b",
+                  "issuedAt": 1700000040,
+                  "receivedAt": 1700000040,
+                  "expiresAt": 1700604840,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_token",
+            "now": 1700000050,
+            "token": "784b01b36c96262f52ed5cca378cabb0",
+            "statementD": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "token_registered",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b",
+                  "issuedAt": 1700000040,
+                  "receivedAt": 1700000040,
+                  "expiresAt": 1700604840,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_confirm",
+            "now": 1700000060,
+            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "inner": {
+              "id": "ff3ecd99bb78faa14eb55a201f24988dc3002ae18f056e14c4c37e7d016d8b70",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000060,
+              "kind": 31121,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"token\":\"784b01b36c96262f52ed5cca378cabb0\",\"statement\":\"6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b\"}",
+              "sig": "d84d98e7279fe2ebb58493e50e172c56a8d8c67e44c212c50c63a8224c77e2f8840abe1c1128f6f0b99060fee246c45c6313aec190631451b6ea666a3512cd81"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "confirmer_not_bound",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": []
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b",
+                  "issuedAt": 1700000040,
+                  "receivedAt": 1700000040,
+                  "expiresAt": 1700604840,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "inbound",
+            "now": 1700000061,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "cac5ebb5be003d0b75451f003213c7ead6a1a940945ae449570e238850eea148",
+              "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+              "created_at": 1700000061,
+              "kind": 31120,
+              "tags": [
+                [
+                  "d",
+                  "kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                ],
+                [
+                  "p",
+                  "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                ],
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"issuedAt\":1700000061,\"label\":\"Sam's phone\"}",
+              "sig": "7d97612eef99abc9f5902544eb029190300cd176cdab5bbefae5a357e26da20fe60a7e1215e4010adf75226267cd07278d9cbd1b2d753c8f22fbf7119446f52e"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "approval_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b",
+                  "issuedAt": 1700000040,
+                  "receivedAt": 1700000040,
+                  "expiresAt": 1700604840,
+                  "confirmedAt": null,
+                  "takesEffectAt": null
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "presence_confirm",
+            "now": 1700000062,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "683114e12ce9e48f3615eded8d22c2a9c5e328a53537d0121a22fd7c23dfcff5",
+              "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+              "created_at": 1700000062,
+              "kind": 31121,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"v\":1,\"token\":\"784b01b36c96262f52ed5cca378cabb0\",\"statement\":\"6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b\"}",
+              "sig": "24806dc13f0d210f3e697a436b1f8fe739cc4469f3a3f95772687faa87fcb97eb8706635cd898fc3df61ae23a82e551c5d7736846f8f87bd7fd3971c19b82478"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "removal_confirmed",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                },
+                {
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "keys": [
+                    "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [
+                {
+                  "d": "kintrinsic/unguardian/77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+                  "kind": "removal",
+                  "signer": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "statement": "6659959b8040176f3e3498059615d71994c65166a3f36c7be0ac797d4ccd329b",
+                  "issuedAt": 1700000040,
+                  "receivedAt": 1700000040,
+                  "expiresAt": 1700604840,
+                  "confirmedAt": 1700000062,
+                  "takesEffectAt": 1700259240
+                }
+              ],
+              "tombstones": 0,
+              "held": 0,
               "departed": [],
               "recipients": [
                 "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",

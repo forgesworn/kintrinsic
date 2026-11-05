@@ -2683,7 +2683,7 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 | root removal | `kintrinsic/unguardian/<R2>` | R2 | R2, or another pinned root | R2 leaves, at once if R2 signed it; otherwise after presence confirmation |
 | root move | `kintrinsic/root/<R2>` | R2 | the root R being replaced | R2 replaces R, after presence confirmation |
 | cancel | `kintrinsic/cancel/<d of the pending statement>` | the pending statement's `p` | the pending statement's signer | a pending co-guardian, removal or move is dropped |
-| objection | `kintrinsic/object/<d of the pending removal>` | the removal's signer | the root being removed | the pending removal is dropped |
+| objection | `kintrinsic/object/<d of the pending removal>` | the removal's signer | the root being removed, or an active W bound to it | the pending removal is dropped |
 
 - `<W>` and `<R2>` are 64 lowercase hex.
 - A statement is ignored if its `d` and `p` disagree, its content is malformed,
@@ -2702,7 +2702,9 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
   2. **A withdrawal, co-guardian, root removal, root move or cancel signed by
      root R may also be sealed by a W bound to R and currently in the signer
      set.** So a Heartwood-held root signs once, and its working keys carry the
-     statement to every ward.
+     statement to every ward. **An objection may be sealed by its signer, or
+     by a W bound to the objecting root (the root being removed) and
+     currently in the signer set.**
 - A W sends its own approval to a ward before its first signed event. A signed
   event from a key that isn't in the signer set is dropped, not buffered; the
   sender re-sends once its approval has landed.
@@ -2758,9 +2760,18 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      - Throughout, it is reported in STATUS to R2's working keys.
      - R2 can **object** with a statement whose `d` is
        `kintrinsic/object/<d of the removal>` and whose `p` is R1. That drops
-       the removal.
+       the removal. R2 itself, or any active W bound to R2, may sign it, so a
+       root held on a Heartwood or in My Signet that is out of reach for the
+       72 hours is not removed against its parent's will.
+     - **A guardian install objects automatically** when a STATUS shows a
+       pending removal of its own root (`pending[]` names the remover as
+       `signer`). It tells the parent, and offers leaving instead.
      - Neither parent can remove the other against their objection. Both
-       remain, with equal authority.
+       remain, with equal authority. A removal therefore succeeds only against
+       a parent with no live install: a lost phone, or a parent who has gone.
+       A parent who wants to go leaves by self-removal, which applies at once.
+       A stolen phone whose W is still active could object for its root; it
+       is answered by withdrawing that W, not by removing the parent.
    - Removal never leaves a ward with no roots; a removal that would is
      refused.
    - Once a removal applies, every pending statement signed by R2 is dropped.
@@ -2911,6 +2922,22 @@ STATUS that shows its departure.
   of that child reports `appVersionCode` at or above the first version that
   implements this section (recorded here at release). This section adds
   `appVersionCode` to STATUS for wards that don't send it already.
+
+**Phone-held roots.**
+- A root held in the guardian app on the phone may sign directly (rule 9's
+  "pinned root with no W"). Once it needs presence confirmation, a root move
+  or a second parent, the phone mints a **fresh working key** W of its own,
+  and R approves it. W is not R and not pinned, so rule 1 binds it to R. The
+  phone then signs day to day with W, and keeps R for approvals, withdrawals,
+  moves and relay-list changes. This is the same shape as a phone whose root
+  is in My Signet or on a Heartwood.
+- Moving such a root to My Signet or a Heartwood follows rule 8: R2 approves
+  the phone's W (inline in the presence confirmation), R signs the move, and
+  the parent confirms at each ward with the phone. W is re-bound to R2; no
+  re-pair is needed. R is deleted once every ward reports R2.
+- The key backup carries the root, never a working key: W is generated per
+  install and never copied. A restored install mints a fresh W and has it
+  approved.
 
 ## NIP-46 methods
 

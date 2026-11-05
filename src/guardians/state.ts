@@ -295,10 +295,19 @@ function activeCount(s: GuardianState, root: string): number {
   return s.keys.filter((k) => k.status === 'active' && k.root === root).length
 }
 
-function heldCount(s: GuardianState, signer: string): number {
+/**
+ * The root a held statement counts against: an objection's objecting root
+ * (the root its removal names, whichever of its keys signed it), else the
+ * signer.
+ */
+function heldOwner(st: { type: Statement['type']; d: string; signer: string }): string {
+  return st.type === 'objection' ? st.d.slice(-64) : st.signer
+}
+
+function heldCount(s: GuardianState, root: string): number {
   return (
-    s.heldWithdrawals.filter((h) => h.signer === signer).length +
-    s.statements.filter((st) => st.held && st.signer === signer).length
+    s.heldWithdrawals.filter((h) => h.signer === root).length +
+    s.statements.filter((st) => st.held && heldOwner(st) === root).length
   )
 }
 
@@ -500,16 +509,17 @@ function bindKey(s: GuardianState, approval: Statement, now: number): WorkingKey
 }
 
 /**
- * An objection by `removed` against removals signed by `remover`: it drops a
- * removal whose effective time is at or below its own, and any removal
- * judged within 7 days of the objection reaching the ward.
+ * An objection to removal `d` (of the root `d` names) against removals
+ * signed by `remover`: it drops a removal whose effective time is at or below
+ * its own, and any removal judged within 7 days of the objection reaching the
+ * ward. Who signed it (the removed root or one of its working keys) was
+ * checked when it was accepted.
  * OQ: Cancel or objection before its statement; OQ: Removal re-issued after an objection.
  */
-function objectedBy(s: GuardianState, d: string, removed: string, remover: string, effective: number, now: number): boolean {
+function objectedBy(s: GuardianState, d: string, remover: string, effective: number, now: number): boolean {
   const o = storedFor(s, `${STATEMENT_PREFIXES.objection}${d}|${remover}`)
   return (
     !!o &&
-    o.signer === removed &&
     (effectiveTime(o.issuedAt, o.receivedAt) >= effective || now < o.receivedAt + OBJECTION_BLOCK_SECONDS)
   )
 }
@@ -555,7 +565,7 @@ function advance(s: GuardianState, now: number): TickEntry[] {
     if (best.act === 'expire') {
       dropPending(s, (x) => x.d === p.d)
       out.push({ d: p.d, result: 'expired', reason: 'expired' })
-    } else if (objectedBy(s, p.d, p.key, p.signer, effectiveTime(p.issuedAt, p.receivedAt), best.at)) {
+    } else if (objectedBy(s, p.d, p.signer, effectiveTime(p.issuedAt, p.receivedAt), best.at)) {
       dropPending(s, (x) => x.d === p.d)
       out.push({ d: p.d, result: 'refused', reason: 'objected' })
     } else if (applyRemoval(s, p, effectiveTime(p.issuedAt, p.receivedAt), best.at) === 'applied') {
@@ -602,14 +612,14 @@ export function tick(state: GuardianState, now: number): StepResult {
  * - An approval only by the W it names (exception 1).
  * - A withdrawal, co-guardian, removal, move or cancel signed by R by R, or by
  *   a W bound to R and in the signer set (exception 2).
- * - Anything else (an objection) only by its signer. OQ: Sealing an objection.
+ * - An objection by its signer, or by a W bound to the objecting root (the
+ *   root being removed) and in the signer set (exception 2).
  */
 function sealAllowed(s: GuardianState, st: Statement, sealAuthor: string): boolean {
   if (st.type === 'approval') return sealAuthor === st.key
   if (sealAuthor === st.signer) return true
-  if (st.type === 'objection') return false
   const w = activeKey(s, sealAuthor)
-  return w !== undefined && w.root === st.signer
+  return w !== undefined && w.root === (st.type === 'objection' ? st.key : st.signer)
 }
 
 function processApproval(s: GuardianState, st: Statement, now: number) {
@@ -744,16 +754,17 @@ function processRemoval(s: GuardianState, st: Statement, now: number) {
   }
   const expiresAt = pendingExpiry(effective, st.expiresAt)
   if (now >= expiresAt) return drop('expired')
-  if (objectedBy(s, st.d, R2, st.signer, effective, now)) return drop('objected')
+  if (objectedBy(s, st.d, st.signer, effective, now)) return drop('objected')
   if (cancelledBy(s, st.d, st.signer, effective)) return drop('cancelled')
   addPending(s, st, 'removal', expiresAt, now)
   return accept('removal_pending')
 }
 
 function holdOrDrop(s: GuardianState, st: Statement, now: number, reason: 'cancel_held' | 'objection_held') {
+  const owner = heldOwner(st)
   const prev = storedFor(s, statementSlot(st))
-  const reclaim = prev && prev.held && prev.signer === st.signer ? 1 : 0
-  if (heldCount(s, st.signer) - reclaim >= MAX_HELD_PER_ROOT) return drop('held_quota')
+  const reclaim = prev && prev.held && heldOwner(prev) === owner ? 1 : 0
+  if (heldCount(s, owner) - reclaim >= MAX_HELD_PER_ROOT) return drop('held_quota')
   putStatement(s, st, now, true)
   return accept(reason)
 }
@@ -775,7 +786,8 @@ function processCancel(s: GuardianState, st: Statement, now: number) {
 }
 
 function processObjection(s: GuardianState, st: Statement, now: number) {
-  if (st.signer !== st.key) return drop('objection_mismatch')
+  // Rule 7: the removed root, or an active W bound to it, may object.
+  if (rootOf(s, st.signer) !== st.key) return drop('objection_mismatch')
   const order = orderAgainst(storedFor(s, statementSlot(st)), st, now)
   if (order) return drop(order)
   const target = st.target as string
@@ -826,7 +838,9 @@ export function applyInbound(state: GuardianState, inbound: Inbound, now: number
     if (!parsed.ok) return drop(parsed.reason)
     const st = parsed.statement
     if (!sealAllowed(s, st, inbound.sealAuthor)) return drop('seal_mismatch')
-    if (!isPinned(s, st.signer)) return drop('signer_not_pinned')
+    // Every statement is a root's, except an objection, which an active W
+    // may sign for its root (rule 7).
+    if (st.type === 'objection' ? !isSigner(s, st.signer) : !isPinned(s, st.signer)) return drop('signer_not_pinned')
     const r = processStatement(s, st, now)
     if (r.result === 'accepted' && st.issuedAt > now) s.clamped += 1
     return r
@@ -900,7 +914,7 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
       const rec = activeKey(s, W)
       if (!rec || rec.root !== pend.signer) return drop('confirmer_not_bound')
       const pendEffective = effectiveTime(pend.issuedAt, pend.receivedAt)
-      if (objectedBy(s, pend.d, pend.key, pend.signer, pendEffective, now)) {
+      if (objectedBy(s, pend.d, pend.signer, pendEffective, now)) {
         dropPending(s, (p) => p.d === pend.d)
         return drop('objected')
       }

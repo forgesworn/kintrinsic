@@ -372,13 +372,32 @@ describe('rule 7: root removal', () => {
     const rm = removal(R1, R2, { issuedAt: T0 + 100 })
     s = ok(inb(s, W1, rm, T0 + 110))
     const ob = objection(R2, dU(R2), R1, { issuedAt: T0 + 101 })
-    dropped(inb(s, W2, ob, T0 + 120), 'seal_mismatch') // objection is not in exception 2
+    dropped(inb(s, W1, ob, T0 + 120), 'seal_mismatch') // W1 is not bound to the objecting root
     dropped(inb(s, R1, objection(R1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
+    dropped(inb(s, W1, objection(W1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'objection_mismatch')
+    dropped(inb(s, X, objection(X, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'signer_not_pinned')
     // An objection naming another remover does not touch this removal; it is held.
     s = ok(inb(s, R2, objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120), 'objection_held')
     expect(s.pending).toHaveLength(1)
-    s = ok(inb(s, R2, ob, T0 + 120), 'objection_applied')
+    // Exception 2: a W bound to R2 may seal R2's objection.
+    s = ok(inb(s, W2, ob, T0 + 120), 'objection_applied')
     expect(s.pending).toEqual([])
+  })
+  test("the removed root's working key may sign the objection itself", () => {
+    let s = twoRoots()
+    s = ok(inb(s, W1, removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 110))
+    s = ok(inb(s, W2, objection(W2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120), 'objection_applied')
+    expect(s.pending).toEqual([])
+    // It blocks a re-issued removal for 7 days like the root's own.
+    dropped(inb(s, W1, removal(R1, R2, { issuedAt: T0 + 200 }), T0 + 200), 'objected')
+  })
+  test('a held objection counts against the objecting root, whichever key signed it', () => {
+    let s = twoRoots()
+    s = ok(inb(s, W2, objection(W2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 110), 'objection_held')
+    expect(projectState(s, T0 + 110).held).toBe(1)
+    // A later one in the same slot replaces it, not adds to it.
+    s = ok(inb(s, W2, objection(W2, dU(R2), R1, { issuedAt: T0 + 102 }), T0 + 111), 'objection_held')
+    expect(projectState(s, T0 + 111).held).toBe(1)
   })
   test('an objection that arrives first drops the removal on arrival', () => {
     let s = twoRoots()

@@ -292,14 +292,16 @@ time min(`issuedAt`, `now`) with the stored one's: the same event id is
 a higher event id (compared as lowercase hex) is `tie_not_newer`, and with a
 lower event id it wins and replaces the stored one. Each stored statement keeps the ward time it
 was accepted. A cancel or objection stored without acting is "held" and counts
-toward its signer's 64.
+toward a root's 64: a cancel toward its signer, an objection toward the
+objecting root (the root its removal `d` names), whichever key signed it.
 
 **Held cancels and objections.** A co-guardian, removal or move arriving later
 is dropped (`cancelled`) if the stored cancel for its `d` from the same signer
 has an effective time ≥ the newcomer's. A removal of R2 by R1 (arriving, being
 confirmed, or falling due) is dropped (`objected`) if the stored objection for
-its `d` naming R1 (signed by R2) has an effective time ≥ the removal's, **or**
-was accepted by the ward less than 604800 s before.
+its `d` naming R1 (signed by R2 or a W bound to R2 when it was accepted) has
+an effective time ≥ the removal's, **or** was accepted by the ward less than
+604800 s before.
 
 ### Reason codes and check order
 
@@ -309,8 +311,10 @@ Every step returns the first failing check's reason, in the order given.
 1. the statement checks above (any statement reason);
 2. `seal_mismatch`: an approval not sealed by the W it names; a withdrawal,
    co-guardian, removal, move or cancel sealed by neither its signer nor an
-   active W bound to its signer; an objection not sealed by its signer;
-3. `signer_not_pinned`: the signer is not a pinned root;
+   active W bound to its signer; an objection sealed by neither its signer
+   nor an active W bound to the root its `d` names;
+3. `signer_not_pinned`: the signer is not a pinned root (for an objection:
+   not in the signer set);
 4. by type:
    - **approval:** `expires_at_not_allowed` (has `expiresAt`) →
      `key_role_conflict` (W is pinned or W = signer) → `key_departed` (W is a
@@ -339,8 +343,8 @@ Every step returns the first failing check's reason, in the order given.
      with the target `d` has another signer) → `cancel_applied` (that
      pending statement's effective time ≤ the cancel's) → `held_quota` →
      `cancel_held`;
-   - **objection:** `objection_mismatch` (signer is not the root named in
-     `d`) → slot order → `objection_applied` (a pending removal with the
+   - **objection:** `objection_mismatch` (the signer is neither the root named
+     in `d` nor an active W bound to it) → slot order → `objection_applied` (a pending removal with the
      target `d` is signed by `p`: dropped whatever the two `issuedAt`) →
      `held_quota` → `objection_held`.
 

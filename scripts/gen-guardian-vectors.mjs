@@ -593,15 +593,43 @@ scenario("rule7_removal_confirmed_after_notice", ["7"], "Confirmed after the 72 
   c.confirm(W1, confirmEv(W1, rm.id, tokenHex("late"), late), late, A("removal_applied"));
 });
 
-scenario("rule7_objection", ["7", "seal exceptions"], "The root being removed objects; that drops the removal. An objection is not covered by seal exception 2.", (c) => {
+scenario("rule7_objection", ["7", "seal exceptions"], "The root being removed, or an active W bound to it, objects; that drops the removal. Seal exception 2 covers the objection: a W bound to the objecting root may seal it.", (c) => {
   twoRoots(c);
   const rm = st.removal(R1, R2, { issuedAt: T0 + 100 });
   c.inbound(W1, rm, T0 + 110, A("removal_pending"));
-  c.inbound(W2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("seal_mismatch"));
+  const ob = st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 });
+  c.inbound(W1, ob, T0 + 120, D("seal_mismatch"));
   c.inbound(R1, st.objection(R1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
+  c.inbound(W1, st.objection(W1, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("objection_mismatch"));
+  c.inbound(X, st.objection(X, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, D("signer_not_pinned"));
   c.inbound(R2, st.objection(R2, dU(R2), R3, { issuedAt: T0 + 101 }), T0 + 120, A("objection_held"));
-  c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 101 }), T0 + 120, A("objection_applied"));
+  c.inbound(W2, ob, T0 + 120, A("objection_applied"));
+  c.inbound(R2, ob, T0 + 121, D("duplicate"));
   c.tick(T0 + 100 + H72 + 1);
+});
+
+scenario("rule7_objection_by_working_key", ["7"], "A working key of the root being removed signs the objection itself (its app objects automatically); it drops the removal and blocks a re-issue for 7 days, as the root's own would.", (c) => {
+  twoRoots(c);
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 110, A("removal_pending"));
+  c.inbound(W2, st.objection(W2, dU(R2), R1, { issuedAt: T0 + 111 }), T0 + 120, A("objection_applied"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 200 }), T0 + 200, D("objected"));
+  c.inbound(W2, st.withdrawal(R2, W2, { issuedAt: T0 + 300 }), T0 + 300, A("withdrawal_applied"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + 120 + 7 * DAY }), T0 + 120 + 7 * DAY, A("removal_pending"));
+  c.inbound(W2, st.objection(W2, dU(R2), R1, { issuedAt: T0 + 121 + 7 * DAY }), T0 + 121 + 7 * DAY, D("signer_not_pinned"));
+});
+
+scenario("phone_root_mints_working_key", ["1", "7", "presence confirmation", "versioning"], "A phone-held root R1 (paired directly) mints a fresh W1 and approves it; W1 binds to R1 and then confirms presence for R1's own removal of R2.", (c) => {
+  c.pair(R1, T0);
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 5 });
+  c.inbound(R1, cg, T0 + 10, A("coguardian_pending"));
+  c.token(tokenHex("phone-cg"), dG(R2), T0 + 20);
+  c.confirm(W2, confirmEv(W2, cg.id, tokenHex("phone-cg"), T0 + 30, st.approval(R2, W2, { issuedAt: T0 + 15 })), T0 + 30, A("coguardian_applied"));
+  const rm = st.removal(R1, R2, { issuedAt: T0 + 40 });
+  c.inbound(R1, rm, T0 + 40, A("removal_pending"));
+  c.token(tokenHex("phone-rm"), dU(R2), T0 + 50);
+  c.confirm(R1, confirmEv(R1, rm.id, tokenHex("phone-rm"), T0 + 60), T0 + 60, D("confirmer_not_bound"));
+  c.inbound(W1, st.approval(R1, W1, { issuedAt: T0 + 61, label: "Sam's phone" }), T0 + 61, A("approval_applied"));
+  c.confirm(W1, confirmEv(W1, rm.id, tokenHex("phone-rm"), T0 + 62), T0 + 62, A("removal_confirmed"));
 });
 
 scenario("rule7_objection_first", ["7"], "An objection that arrives before its removal is held and drops it on arrival; for 7 days after the objection any removal by that remover is refused.", (c) => {
