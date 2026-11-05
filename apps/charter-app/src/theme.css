@@ -1020,26 +1020,29 @@ button.row {
   font-size: var(--fs-small);
 }
 
+/* Five across — (−20) (−5) amount (+5) (+20) — sized to sit on one line at
+   360px with the page's 16px gutters: 4 × 50 + 96 + 4 × 8 = 328. */
 .lever-stepper {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: 8px;
 }
 
 .lever-step {
-  width: 56px;
+  width: 50px;
   min-height: 56px;
   padding: 0;
-  font-size: 26px;
+  font-size: 17px;
+  font-weight: 700;
   flex: 0 0 auto;
 }
 
 .lever-amount {
-  min-width: 110px;
+  min-width: 96px;
   text-align: center;
   font-weight: 700;
-  font-size: 22px;
+  font-size: 20px;
 }
 
 /* An ask as one line plus its answers. */

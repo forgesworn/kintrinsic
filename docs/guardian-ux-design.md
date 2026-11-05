@@ -143,7 +143,7 @@ sheet, built on the existing `.sheet` pattern (SignSheet, AppHoldSheet):
 ```
 ┌ Give Sam more time ──────────────┐
 │  [+15 min] [+30 min] [+1 hour]   │  ← each gives straight away
-│  Or:   (−)   45 min   (+)        │
+│  Or: (−20)(−5) 45 min (+5)(+20)  │
 │  Add it to: [Whole day ▾]        │
 │  [        Give 45 min         ]  │
 │  Extra time for today only.      │
@@ -152,8 +152,9 @@ sheet, built on the existing `.sheet` pattern (SignSheet, AppHoldSheet):
 
 It is full-width with big targets and nothing beside it, so nothing can
 overlap. An ask opens it pre-filled with the amount asked for, and its button
-reads "Approve 15 min". The ask is an opening bid, not a ceiling: the stepper
-goes above it as well as below (the device enacts any grant up to 1440), and a
+reads "Approve 15 min". The stepper's inner buttons move by five and its outer
+ones by twenty, so an hour is a few taps from a ten-minute ask. The ask is an
+opening bid, not a ceiling: the stepper goes above it as well as below (the device enacts any grant up to 1440), and a
 row of set-to presets — 10 min, 20 min, 30 min, 1 hour, the same amounts the
 ward's own chooser offers — answers "give them the hour instead" in one tap.
 

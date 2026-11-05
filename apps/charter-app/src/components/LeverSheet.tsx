@@ -49,6 +49,7 @@ import {
   GIFT_MAX,
   GIFT_MIN,
   GIFT_STEP,
+  GIFT_STEP_BIG,
   useGiveSupport,
   useStopState,
 } from "./leverState";
@@ -126,7 +127,12 @@ function SheetFrame({
   );
 }
 
-/** `(−) 45 min (+)`, centred, with nothing beside it. */
+/**
+ * `(−20) (−5) 45 min (+5) (+20)`, centred, with nothing beside it. Fives for
+ * fine-tuning, twenties so going from a 10-minute ask to an hour is a few
+ * taps rather than ten; both clamp to `min..=max`, and every button on a
+ * side disables together at its bound.
+ */
 function Stepper({
   minutes,
   min,
@@ -145,11 +151,20 @@ function Stepper({
       <Button
         variant="secondary"
         className="lever-step"
-        aria-label="5 minutes less"
+        aria-label={`${GIFT_STEP_BIG} minutes less`}
+        disabled={disabled || minutes <= min}
+        onClick={() => onStep(-GIFT_STEP_BIG)}
+      >
+        −{GIFT_STEP_BIG}
+      </Button>
+      <Button
+        variant="secondary"
+        className="lever-step"
+        aria-label={`${GIFT_STEP} minutes less`}
         disabled={disabled || minutes <= min}
         onClick={() => onStep(-GIFT_STEP)}
       >
-        −
+        −{GIFT_STEP}
       </Button>
       <span className="lever-amount" aria-live="polite">
         {minutes} min
@@ -157,11 +172,20 @@ function Stepper({
       <Button
         variant="secondary"
         className="lever-step"
-        aria-label="5 minutes more"
+        aria-label={`${GIFT_STEP} minutes more`}
         disabled={disabled || minutes >= max}
         onClick={() => onStep(GIFT_STEP)}
       >
-        +
+        +{GIFT_STEP}
+      </Button>
+      <Button
+        variant="secondary"
+        className="lever-step"
+        aria-label={`${GIFT_STEP_BIG} minutes more`}
+        disabled={disabled || minutes >= max}
+        onClick={() => onStep(GIFT_STEP_BIG)}
+      >
+        +{GIFT_STEP_BIG}
       </Button>
     </div>
   );
