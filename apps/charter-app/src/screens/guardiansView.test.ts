@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { emptyGuardianKeys } from "../keys/state";
 import { parsePresenceCode } from "../keys/presenceCode";
 import {
+  androidWardsSettingPin,
   androidWardsWithoutPin,
+  pinStateOf,
   durationWords,
   familyWards,
   guardiansSubroute,
@@ -103,10 +105,23 @@ describe("guardians view", () => {
     expect(removalsAgainstMe(wards, keys, ME)).toEqual([{ d: removalOfMe, devices: ["Laptop", "Phone"], takesEffectAt: 500 }]);
   });
 
-  it("finds Android wards with no guardian PIN sent", () => {
-    const wards = familyWards(family([device("Laptop", LAPTOP, "linux"), device("Phone", PHONE, "android")]));
-    expect(androidWardsWithoutPin(wards, emptyGuardianKeys()).map((w) => w.device.label)).toEqual(["Phone"]);
-    expect(androidWardsWithoutPin(wards, { ...emptyGuardianKeys(), pinSentAt: { [PHONE]: 1 } })).toEqual([]);
+  it("finds Android wards with no guardian PIN from their own STATUS (D4)", () => {
+    const g = (pinSet?: boolean) => ({ roots: [], pending: [], tombstones: 0, relays: [], ...(pinSet !== undefined ? { pinSet } : {}) });
+    const wardsWith = (pinSet?: boolean) =>
+      familyWards(family([device("Laptop", LAPTOP, "linux"), device("Phone", PHONE, "android", g(pinSet))]));
+    const none = emptyGuardianKeys();
+    // Never said, or says none: ask. Says it holds one (whoever set it): don't.
+    expect(androidWardsWithoutPin(familyWards(family([device("Phone", PHONE, "android")])), none).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(androidWardsWithoutPin(wardsWith(undefined), none).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(androidWardsWithoutPin(wardsWith(false), none).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(androidWardsWithoutPin(wardsWith(true), none)).toEqual([]);
+    // A PIN on its way isn't asked for again; once "set" here, the ward's word decides.
+    const sending = { ...none, pins: { [PHONE]: { state: "sending" as const, sentAt: 1 } } };
+    expect(androidWardsWithoutPin(wardsWith(false), sending)).toEqual([]);
+    expect(androidWardsSettingPin(wardsWith(false), sending).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(pinStateOf(wardsWith(true)[1], sending)).toBe("set");
+    const set = { ...none, pins: { [PHONE]: { state: "set" as const, sentAt: 1 } } };
+    expect(androidWardsWithoutPin(wardsWith(false), set).map((w) => w.device.label)).toEqual(["Phone"]);
   });
 
   it("checks a guardian PIN draft", () => {

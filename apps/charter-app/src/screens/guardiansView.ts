@@ -270,9 +270,29 @@ export function moveGate(keys: GuardianKeysState, familyReady: boolean, progress
   return { ok: true };
 }
 
-/** Android wards this install hasn't sent a guardian PIN to. */
+/**
+ * Where an Android ward's guardian PIN stands (decision D4):
+ * - "set": its STATUS says it holds one (whoever set it);
+ * - "sending": this install sent one and the ward hasn't said it holds it yet;
+ * - "none": it says it has none, or has never said.
+ */
+export function pinStateOf(w: WardRef, keys: GuardianKeysState): "set" | "sending" | "none" {
+  if (w.device.guardians?.pinSet === true) return "set";
+  return keys.pins[w.device.devicePubkey]?.state === "sending" ? "sending" : "none";
+}
+
+/**
+ * Android wards that need a guardian PIN before anything that needs presence:
+ * their STATUS says they have none, or has never said. One this install is
+ * already sending a PIN to isn't asked again (a second PIN would replace it).
+ */
 export function androidWardsWithoutPin(wards: readonly WardRef[], keys: GuardianKeysState): WardRef[] {
-  return wards.filter((w) => w.device.platform === "android" && keys.pinSentAt[w.device.devicePubkey] === undefined);
+  return wards.filter((w) => w.device.platform === "android" && pinStateOf(w, keys) === "none");
+}
+
+/** Android wards this install is still setting a guardian PIN on. */
+export function androidWardsSettingPin(wards: readonly WardRef[], keys: GuardianKeysState): WardRef[] {
+  return wards.filter((w) => w.device.platform === "android" && pinStateOf(w, keys) === "sending");
 }
 
 /** One plain line for a device that isn't ready for guardian keys. */

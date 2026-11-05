@@ -3,7 +3,7 @@ import { Button, Card } from "../components/ui";
 import { useCharter } from "../store/store";
 import { MIN_PIN_LENGTH } from "../keys/pin";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
-import { pinProblem, type WardRef } from "./guardiansView";
+import { pinProblem, pinStateOf, type WardRef } from "./guardiansView";
 
 /**
  * A masked text field where the browser can mask one, so it doesn't offer to
@@ -47,6 +47,9 @@ export default function GuardianPin({
   const [report, setReport] = useState<ReportLike | null>(null);
   const problem = pinProblem(pin, again);
   const names = Object.fromEntries(wards.map((w) => [w.device.devicePubkey, w.device.label]));
+  // Where each phone's PIN stands, from its own reports (decision D4).
+  const sending = wards.filter((w) => pinStateOf(w, guardianKeys.state) === "sending").map((w) => w.device.label);
+  const allSet = wards.length > 0 && wards.every((w) => pinStateOf(w, guardianKeys.state) === "set");
 
   async function send() {
     setTouched(true);
@@ -68,13 +71,23 @@ export default function GuardianPin({
   }
 
   if (report) {
-    const reached = report.sent.length + report.held.length > 0;
+    const reached = [...report.sent, ...report.held];
     return (
       <Card>
-        <h2 className="card-title">{reached ? "Guardian PIN sent" : "The PIN didn't reach any phone"}</h2>
+        <h2 className="card-title">
+          {reached.length > 0
+            ? `Setting the guardian PIN on ${reached.map((m) => names[m] ?? "the phone").join(", ")}…`
+            : "The PIN didn't reach any phone"}
+        </h2>
         <SendSummary report={report} names={names} />
+        {reached.length > 0 && (
+          <p className="card-sub">
+            It's set once the phone next checks in, usually within a few minutes. If the phone is off, this phone
+            sends the PIN again when it's back.
+          </p>
+        )}
         <div className="stack" style={{ marginTop: 12 }}>
-          {reached ? (
+          {reached.length > 0 ? (
             <Button block onClick={onDone}>
               Continue
             </Button>
@@ -90,7 +103,12 @@ export default function GuardianPin({
 
   return (
     <Card>
-      <h2 className="card-title">Set a guardian PIN</h2>
+      <h2 className="card-title">{allSet ? "Change the guardian PIN" : "Set a guardian PIN"}</h2>
+      {sending.length > 0 && (
+        <p className="card-sub" role="status">
+          Setting the guardian PIN on {sending.join(", ")}…
+        </p>
+      )}
       <p className="card-sub">
         {wards.length === 1 ? wards[0].device.label : "Your child's phones"} will ask for this PIN before showing a
         code to confirm a guardian in person. Your child must not see it, so choose it somewhere they can't watch.
@@ -131,7 +149,7 @@ export default function GuardianPin({
           </p>
         )}
         <Button block disabled={busy} onClick={() => void send()}>
-          {busy ? "Sending…" : "Set guardian PIN"}
+          {busy ? "Sending…" : allSet ? "Change guardian PIN" : "Set guardian PIN"}
         </Button>
         {onCancel && (
           <Button variant="ghost" block disabled={busy} onClick={onCancel}>

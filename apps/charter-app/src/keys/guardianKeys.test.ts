@@ -685,7 +685,7 @@ describe("root move", () => {
 });
 
 describe("guardian PIN", () => {
-  it("sends a gift-wrapped RELAYS with guardianPin to ready Android wards only", async () => {
+  it("sends a gift-wrapped PIN-only RELAYS to ready Android wards only", async () => {
     const old = "f6".repeat(32);
     const child: KeysChild = {
       id: "c1",
@@ -711,9 +711,10 @@ describe("guardian PIN", () => {
     expect(inner.kind).toBe(31118);
     const body = JSON.parse(inner.content);
     expect(body.machine).toBe(PHONE);
-    expect(body.relays).toEqual(["wss://ward.example", "wss://b.example"]);
+    // PIN-only: no relay list, so it can't change or revert the ward's relays (D4).
+    expect("relays" in body).toBe(false);
     expect(await guardianPinHash("123456", body.guardianPin.salt)).toBe(body.guardianPin.hash);
-    expect(h.keys().pinSentAt).toEqual({ [PHONE]: T });
+    expect(h.keys().pins).toEqual({ [PHONE]: { state: "sending", record: body.guardianPin, sentAt: T } });
     // Only the phones named, when the screen names them (L4).
     h.published.length = 0;
     const named = await h.gk.setGuardianPin("123456", { machines: [old] });
@@ -721,6 +722,55 @@ describe("guardian PIN", () => {
     expect(named.failed.map((f) => f.to)).toEqual([old]);
     expect(h.published).toHaveLength(0);
     expect(JSON.stringify(h.keys())).not.toContain("123456");
+  }, 30_000);
+
+  it("stays sending until a STATUS shows pinSet, resending the same record once per newer STATUS", async () => {
+    const ward = readyWard(PHONE, "android");
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    await h.gk.setGuardianPin("123456");
+    const first = JSON.parse(open(h.published[0].wrap, phoneSk).inner.content).guardianPin;
+    h.published.length = 0;
+    const g = (pinSet?: boolean) => ({ ...ward.guardians!, ...(pinSet !== undefined ? { pinSet } : {}) });
+
+    // A STATUS without pinSet: one resend of the same record, newer created_at.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g(false) });
+    expect(h.published).toHaveLength(1);
+    const again = open(h.published[0].wrap, phoneSk).inner;
+    expect(JSON.parse(again.content)).toEqual({ machine: PHONE, guardianPin: first });
+    expect(again.created_at).toBe(T + 1);
+    // The same STATUS polled again, or an older one: nothing more.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g(false) });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 5, guardians: g() });
+    expect(h.published).toHaveLength(1);
+    // A newer one that doesn't say: once more.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 20, guardians: g() });
+    expect(h.published).toHaveLength(2);
+    expect(h.keys().pins[PHONE].state).toBe("sending");
+
+    // The ward says it holds one: set, the record dropped, nothing sent.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 30, guardians: g(true) });
+    expect(h.published).toHaveLength(2);
+    expect(h.keys().pins[PHONE]).toEqual({ state: "set", sentAt: T + 2, statusTs: T + 30 });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 40, guardians: g(false) });
+    expect(h.published).toHaveLength(2);
+  }, 30_000);
+
+  it("doesn't resend unattended where the root would have to sign (an approval prompt)", async () => {
+    // The ward doesn't list W yet: its events are signed by R over My Signet.
+    const ward = device(PHONE, "android", {
+      statusSeen: true,
+      appVersionCode: 55,
+      guardians: { roots: [{ root: R, keys: [] }], pending: [], tombstones: 0, relays: [] },
+    });
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    await h.gk.setGuardianPin("123456");
+    expect(open(h.published[0].wrap, phoneSk).inner.pubkey).toBe(R);
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: { ...ward.guardians!, pinSet: false } });
+    expect(h.published).toHaveLength(1);
+    expect(h.keys().pins[PHONE].state).toBe("sending");
   }, 30_000);
 });
 

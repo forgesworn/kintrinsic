@@ -104,13 +104,27 @@ describe("Guardians screens", () => {
     expect(button(container, "Change my identity")!.disabled).toBe(true);
   });
 
-  it("asks for a guardian PIN before inviting when an Android ward has none", () => {
-    const children = family([device("Robin's phone", PHONE, "android", guardians())]);
+  it("asks for a guardian PIN before inviting while an Android ward says it has none (D4)", () => {
+    const children = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: false }))]);
     render(mockStore({ children, keys: { root: signetRoot() } }), "invite");
     expect(container.textContent).toContain("Set a guardian PIN");
-    render(mockStore({ children, keys: { root: signetRoot(), pinSentAt: { [PHONE]: 1 } } }), "invite");
+    // No guessing that the other parent set one: the ward's STATUS says.
+    expect(container.textContent).not.toContain("already set a PIN");
+    const set = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: true }))]);
+    render(mockStore({ children: set, keys: { root: signetRoot() } }), "invite");
     expect(container.textContent).toContain("Invite a parent");
     expect(container.textContent).not.toContain("Set a guardian PIN");
+  });
+
+  it("shows a PIN still on its way, and offers to change one that is set", () => {
+    const children = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: false }))]);
+    render(mockStore({ children, keys: { root: signetRoot(), pins: { [PHONE]: { state: "sending", sentAt: 1 } } } }), "pin");
+    expect(container.textContent).toContain("Setting the guardian PIN on Robin's phone…");
+    const set = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: true }))]);
+    render(mockStore({ children: set, keys: { root: signetRoot() } }), "pin");
+    expect(container.textContent).toContain("Change the guardian PIN");
+    render(mockStore({ children: set, keys: { root: signetRoot() } }));
+    expect(button(container, "Change the guardian PIN")).toBeDefined();
   });
 
   it("invites a pasted npub and then shows the other parent's checklist", async () => {

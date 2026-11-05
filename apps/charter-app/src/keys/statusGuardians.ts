@@ -1,16 +1,28 @@
 // STATUS `guardians` (contract, *Guardian roots and working keys*, STATUS):
 // who the ward trusts, as it sees it.
 //
-//   { roots: [{ root, keys: [W…] }], pending: [{ d, kind, takesEffectAt?, expiresAt }],
-//     tombstones, relays }
+//   { roots: [{ root, keys: [W…] }], pending: [{ d, id?, kind, takesEffectAt?, expiresAt }],
+//     tombstones, relays, pinSet?, clamped? }
 //
 // Parsed strictly: anything malformed drops the WHOLE object (undefined), so a
 // half-read view never says a key is or isn't trusted when it can't be sure.
-// Absent means a ward that predates the section.
+// Absent means a ward that predates the section. `pending[].id`, `pinSet` and
+// `clamped` are newer than the rest, so a ward that doesn't send them yet
+// still parses; each is checked when present.
 
-import { splitPendingD, type PendingType, type StatusGuardians } from "./sdk";
+import { splitPendingD, type PendingType, type StatusGuardians as RefStatusGuardians } from "./sdk";
 
-export type { StatusGuardians };
+/** One pending statement a ward reports; `id` is its event id (newer wards). */
+export type StatusPending = RefStatusGuardians["pending"][number] & { id?: string };
+
+/** STATUS `guardians` as this app reads it: the reference's shape plus the newer fields. */
+export interface StatusGuardians extends Omit<RefStatusGuardians, "pending"> {
+  pending: StatusPending[];
+  /** Android: whether the ward holds a guardian PIN. Absent = the ward doesn't say. */
+  pinSet?: boolean;
+  /** Events whose claimed time was ahead of the ward's clock and was clamped to it. */
+  clamped?: number;
+}
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const KINDS: readonly PendingType[] = ["coguardian", "removal", "move"];
@@ -52,8 +64,10 @@ export function parseStatusGuardians(
     if (!split || split.type !== e.kind) return undefined;
     if (!isUint(e.expiresAt)) return undefined;
     if (e.takesEffectAt !== undefined && !isUint(e.takesEffectAt)) return undefined;
+    if (e.id !== undefined && (typeof e.id !== "string" || !HEX64.test(e.id))) return undefined;
     pending.push({
       d: e.d,
+      ...(e.id !== undefined ? { id: e.id as string } : {}),
       kind: e.kind as PendingType,
       ...(e.takesEffectAt !== undefined ? { takesEffectAt: e.takesEffectAt as number } : {}),
       expiresAt: e.expiresAt,
@@ -62,7 +76,16 @@ export function parseStatusGuardians(
   if (!o.relays.every((r): r is string => typeof r === "string" && r.length > 0 && r.length <= 512)) {
     return undefined;
   }
-  return { roots, pending, tombstones: o.tombstones, relays: [...o.relays] };
+  if (o.pinSet !== undefined && typeof o.pinSet !== "boolean") return undefined;
+  if (o.clamped !== undefined && !isUint(o.clamped)) return undefined;
+  return {
+    roots,
+    pending,
+    tombstones: o.tombstones,
+    relays: [...o.relays],
+    ...(o.pinSet !== undefined ? { pinSet: o.pinSet } : {}),
+    ...(o.clamped !== undefined ? { clamped: o.clamped } : {}),
+  };
 }
 
 /** Where a key stands on one ward, from its STATUS `guardians`. */

@@ -24,6 +24,7 @@ import {
   moveNeedsFinishing,
   pendingFor,
   pendingTitle,
+  pinStateOf,
   readinessLine,
   removalsAgainstMe,
   removeGate,
@@ -62,39 +63,29 @@ function Reason({ gate }: { gate: Gate }) {
 
 /**
  * Before anything that needs a guardian in person: a family with an Android
- * ward this phone hasn't sent a guardian PIN to sets one first, since a ward
- * phone with no PIN can't show a presence code.
+ * ward that says it has no guardian PIN (or has never said) sets one first,
+ * since a ward phone with no PIN can't show a presence code. Whether one is
+ * set comes from the ward's own STATUS, whoever set it.
  */
-function PinGate({ wards, children, multiRoot }: { wards: WardRef[]; children: ReactNode; multiRoot: boolean }) {
+function PinGate({ wards, children }: { wards: WardRef[]; children: ReactNode }) {
   const { guardianKeys } = useCharter();
   const [passed, setPassed] = useState(false);
   const missing = androidWardsWithoutPin(wards, guardianKeys.state);
   if (passed || missing.length === 0) return <>{children}</>;
-  return (
-    <div className="stack">
-      <GuardianPin wards={missing} onDone={() => setPassed(true)} onCancel={() => goGuardians()} />
-      {multiRoot && (
-        <Button variant="ghost" block onClick={() => setPassed(true)}>
-          The other parent already set a PIN
-        </Button>
-      )}
-    </div>
-  );
+  return <GuardianPin wards={missing} onDone={() => setPassed(true)} onCancel={() => goGuardians()} />;
 }
 
 /** Guardians: who looks after the family's devices, and the changes waiting at each. */
 export default function Guardians({ sub }: { sub: string }) {
-  const { state, guardianKeys } = useCharter();
+  const { state } = useCharter();
   const wards = familyWards(state.children);
-  const me = myRootOf(guardianKeys);
-  const multiRoot = rootsView(wards, me).length > 1;
   const back = () => goGuardians();
   const [page, arg] = sub.split("/");
 
   switch (page) {
     case "invite":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <GuardianInvite onBack={back} />
         </PinGate>
       );
@@ -119,7 +110,7 @@ export default function Guardians({ sub }: { sub: string }) {
       );
     case "presence":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <PresenceScanner onBack={back} />
         </PinGate>
       );
@@ -138,7 +129,7 @@ export default function Guardians({ sub }: { sub: string }) {
     }
     case "move":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <GuardianMove onBack={back} onConfirm={() => goGuardians("presence")} />
         </PinGate>
       );
@@ -146,7 +137,7 @@ export default function Guardians({ sub }: { sub: string }) {
       return <GuardianLostPhone onBack={back} />;
     case "remove":
       return (
-        <PinGate wards={wards} multiRoot={multiRoot}>
+        <PinGate wards={wards}>
           <RemoveParent target={arg ?? ""} />
         </PinGate>
       );
@@ -389,7 +380,7 @@ function Overview() {
 
           {wards.some((w) => w.device.platform === "android") && (
             <Button variant="secondary" block onClick={() => goGuardians("pin")}>
-              {wards.some((w) => keys.pinSentAt[w.device.devicePubkey] !== undefined)
+              {wards.some((w) => w.device.platform === "android" && pinStateOf(w, keys) === "set")
                 ? "Change the guardian PIN"
                 : "Set the guardian PIN"}
             </Button>

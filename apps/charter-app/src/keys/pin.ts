@@ -1,7 +1,8 @@
 // The Android guardian PIN (contract, *Presence confirmation*): set by a
 // guardian as `{ v: 1, salt, hash }` (scrypt N=2^15, r=8, p=1, 32-byte output,
 // hex) inside a `guardianPin` field of a RELAYS event body, gift-wrapped to the
-// ward. A pasted relay code carrying `guardianPin` is refused by the ward
+// ward. The app sends a PIN-only RELAYS: `guardianPin` and no `relays` field,
+// so it never touches the relay list (decision D4). A pasted relay code carrying `guardianPin` is refused by the ward
 // (docs/guardian-keys-open-questions.md, "How a guardian PIN reaches an
 // Android ward"), so this app only ever sends it wrapped.
 //
@@ -14,7 +15,7 @@ import { scryptAsync } from "@noble/hashes/scrypt.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { EventTemplate } from "nostr-tools";
 import { GUARDIAN_PIN_SCRYPT, validateGuardianPinRecord, type GuardianPinRecord } from "./sdk";
-import { CHARTER_DEVICE_RELAYS, validateRelays } from "../wire/relayConfig";
+import { CHARTER_DEVICE_RELAYS } from "../wire/relayConfig";
 
 /** Smallest PIN the app accepts. The ward stores only the hash. */
 export const MIN_PIN_LENGTH = 6;
@@ -43,21 +44,16 @@ export async function makeGuardianPinRecord(pin: string, saltHex?: string): Prom
 }
 
 /**
- * A RELAYS (31118) template carrying `guardianPin`: the ward's current relay
- * list, unchanged, plus the PIN record. Sign it with a key in the ward's
- * signer set and gift-wrap it (never paste it).
+ * A PIN-only RELAYS (31118) template: the ward's machine and `guardianPin`,
+ * with no `relays` field, so it can't change (or revert) the relay list. Sign
+ * it with a key in the ward's signer set and gift-wrap it (never paste it).
  */
-export function relaysWithPinTemplate(
-  machine: string,
-  relays: string[],
-  record: GuardianPinRecord,
-  now: number,
-): EventTemplate {
+export function pinOnlyRelaysTemplate(machine: string, record: GuardianPinRecord, now: number): EventTemplate {
   if (!/^[0-9a-f]{64}$/.test(machine)) throw new Error("This device has no valid device code.");
   return {
     kind: CHARTER_DEVICE_RELAYS,
     created_at: now,
     tags: [["t", "charter-device"], ["p", machine]],
-    content: JSON.stringify({ machine, relays: validateRelays(relays), guardianPin: record }),
+    content: JSON.stringify({ machine, guardianPin: record }),
   };
 }

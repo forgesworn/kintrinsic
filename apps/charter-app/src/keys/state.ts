@@ -9,7 +9,7 @@
 //   the install is a local-only family: the local key IS the pinned root and
 //   signs directly, as before the section.
 
-import type { LocalRoster, SignedEvent, StatementType } from "./sdk";
+import type { GuardianPinRecord, LocalRoster, SignedEvent, StatementType } from "./sdk";
 import type { StatusGuardians } from "./statusGuardians";
 
 /** How the root is held. Both are reached through My Signet's NIP-46 bunker. */
@@ -83,6 +83,24 @@ export interface HeldRoster {
   heldAt: number;
 }
 
+/**
+ * The guardian PIN on one Android ward, as this install sent it (decision D4):
+ * "sending" from the send until a STATUS from that ward shows `pinSet`, then
+ * "set". The PIN itself is never kept.
+ */
+export interface PinDelivery {
+  state: "sending" | "set";
+  /**
+   * While "sending": the record (salt and scrypt hash) that was sent, resent
+   * unchanged on each STATUS that doesn't yet show `pinSet`. Dropped once set.
+   */
+  record?: GuardianPinRecord;
+  /** `created_at` of the last RELAYS that carried it (unix s). */
+  sentAt: number;
+  /** `ts` of the last STATUS from the ward acted on, so one STATUS triggers one resend at most. */
+  statusTs?: number;
+}
+
 export interface GuardianKeysState {
   v: 1;
   /** This install's root and its approval of W; absent for a local-only family. */
@@ -93,8 +111,8 @@ export interface GuardianKeysState {
   installLabel?: string;
   /** Per ward machine: when W's approval was last sent there (unix s). */
   approvalSentAt: Record<string, number>;
-  /** Per Android ward machine: when a guardian PIN was last sent (unix s). The PIN itself is never kept. */
-  pinSentAt: Record<string, number>;
+  /** Per Android ward machine: the guardian PIN this install sent, until the ward says it holds one. */
+  pins: Record<string, PinDelivery>;
   /** The family roster as merged from other guardians' installs (subject = `Child.rosterId`). */
   roster: LocalRoster;
   /** Statements this install sent, by `d`. */
@@ -132,21 +150,27 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pinSentAt: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
 export function reviveGuardianKeys(x: unknown): GuardianKeysState {
   const empty = emptyGuardianKeys();
   if (typeof x !== "object" || x === null || Array.isArray(x)) return empty;
-  const o = x as Partial<GuardianKeysState>;
+  // `pinSentAt` was the PIN record before D4: dropped, since STATUS `pinSet` now says.
+  const { pinSentAt: _legacy, ...o } = x as Partial<GuardianKeysState> & { pinSentAt?: unknown };
+  void _legacy;
   if (o.v !== 1) return empty;
   const rec = (r: unknown) => (typeof r === "object" && r !== null && !Array.isArray(r) ? r : {});
   return {
     ...empty,
     ...o,
     approvalSentAt: rec(o.approvalSentAt) as Record<string, number>,
-    pinSentAt: rec(o.pinSentAt) as Record<string, number>,
+    pins: Object.fromEntries(
+      Object.entries(rec(o.pins) as Record<string, PinDelivery>).filter(
+        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set") && typeof v.sentAt === "number",
+      ),
+    ),
     roster:
       typeof o.roster === "object" && o.roster !== null && Array.isArray(o.roster.children)
         ? o.roster

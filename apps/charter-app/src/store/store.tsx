@@ -2025,6 +2025,10 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // Guardian keys: what the ward reports about its guardians and version,
     // for the versioning gate and the per-ward key choice.
     dispatch({ type: "SET_DEVICE_KEYS_VIEW", status });
+    // And what this install does in reply: resend a guardian PIN the ward
+    // doesn't hold yet. Decided from this STATUS itself (the dispatch above
+    // hasn't reached the household yet); a failed send waits for the next one.
+    void keysCore.noteWardStatus(status).catch(() => {});
     // Record the day's usage for the weekly picture (B1) + the device's minute
     // journal (B3 union rule). recordUsage keeps the max seen / unions the
     // journal and returns the same ref on a no-op, so repeat polls don't churn.

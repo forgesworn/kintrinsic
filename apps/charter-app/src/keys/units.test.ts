@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { GUARDIAN_KEYS_MIN_VERSION, childReadiness, wardReadiness } from "./versionGate";
 import { parsePresenceCode, parsePresenceToken } from "./presenceCode";
 import { keyStanding, parseStatusGuardians } from "./statusGuardians";
-import { guardianPinHash, makeGuardianPinRecord, relaysWithPinTemplate } from "./pin";
+import { guardianPinHash, makeGuardianPinRecord, pinOnlyRelaysTemplate } from "./pin";
 import { validateGuardianPinRecord } from "./sdk";
 import { parseStatus } from "../wire/status";
 
@@ -175,15 +175,11 @@ describe("guardian PIN", () => {
     await expect(makeGuardianPinRecord("12345a")).rejects.toThrow(/6 digits/);
   });
 
-  it("puts the record in a RELAYS body beside the ward's relays", () => {
+  it("puts the record in a PIN-only RELAYS body: no relays field (D4)", () => {
     const rec = { v: 1 as const, salt: "00".repeat(16), hash: "11".repeat(32) };
-    const t = relaysWithPinTemplate(M, ["wss://nos.lol", "wss://relay.primal.net"], rec, 5);
+    const t = pinOnlyRelaysTemplate(M, rec, 5);
     expect(t.kind).toBe(31118);
     expect(t.tags).toEqual([["t", "charter-device"], ["p", M]]);
-    expect(JSON.parse(t.content)).toEqual({
-      machine: M,
-      relays: ["wss://nos.lol", "wss://relay.primal.net"],
-      guardianPin: rec,
-    });
+    expect(JSON.parse(t.content)).toEqual({ machine: M, guardianPin: rec });
   });
 });

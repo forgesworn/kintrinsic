@@ -64,6 +64,7 @@ describe("guardian PIN", () => {
     await act(async () => button(container, "Set guardian PIN")!.click());
     // Only to the phones it listed (batch 3b review L4).
     expect(s.guardianKeys.setGuardianPin).toHaveBeenCalledWith("123456", { machines: [PHONE] });
+    expect(container.textContent).toContain("Setting the guardian PIN on Robin's phone…");
     expect(container.textContent).toContain("Sent to Robin's phone.");
     await act(async () => button(container, "Continue")!.click());
     expect(onDone).toHaveBeenCalledOnce();

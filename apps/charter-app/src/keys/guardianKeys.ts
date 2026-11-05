@@ -29,8 +29,8 @@
 // - objection: signed AND sealed by R (docs/guardian-keys-open-questions.md,
 //   "Sealing an objection");
 // - presence confirmation and roster: signed and sealed by W;
-// - RELAYS with the guardian PIN: signed and sealed by the same key, the one
-//   the ward's other events use.
+// - the guardian PIN, a PIN-only RELAYS (no relay list): signed and sealed by
+//   the same key, the one the ward's other events use.
 //
 // Every action builds its statement with the reference builders
 // (`@forgesworn/charter/guardians`). Nothing here talks to React: the store
@@ -54,19 +54,19 @@ import {
   splitPendingD,
   MAX_LABEL_BYTES,
   type EventSigner,
+  type GuardianPinRecord,
   type LocalRoster,
   type LocalRosterChild,
   type RosterReason,
   type SignedEvent,
   type StatementType,
-  type StatusGuardians,
 } from "./sdk";
 import { giftWrapSigned, type GuardianOps } from "../wire/giftwrap";
 import { QueuedForHomeNetworkError } from "../signer/routePublish";
 import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } from "./versionGate";
-import { keyStanding } from "./statusGuardians";
+import { keyStanding, type StatusGuardians } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
-import { makeGuardianPinRecord, relaysWithPinTemplate } from "./pin";
+import { makeGuardianPinRecord, pinOnlyRelaysTemplate } from "./pin";
 import type { AnchoredRoot, GuardianKeysState, HeldRoster, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
@@ -1095,11 +1095,13 @@ export class GuardianKeys {
   // ---------------------------------------------------------------------
 
   /**
-   * Set the guardian PIN on Android wards (one child's, or all): a RELAYS
-   * event with the ward's current relays and `guardianPin` (scrypt, 16-byte
-   * salt), signed and sealed by the ward's usual key and gift-wrapped — never
-   * a pasted code. A ward below the versioning threshold is skipped (it
-   * refuses an unknown RELAYS field outright) and reported as failed.
+   * Set the guardian PIN on Android wards (one child's, or all): a PIN-only
+   * RELAYS (`guardianPin`, scrypt with a 16-byte salt, and no `relays`
+   * field, so it never touches the relay list), signed and sealed by the
+   * ward's usual key and gift-wrapped — never a pasted code. A ward below the
+   * versioning threshold is skipped (it refuses an unknown RELAYS field
+   * outright) and reported as failed. Each ward it reached is "sending" until
+   * its STATUS shows `pinSet` (`noteWardStatus`).
    */
   async setGuardianPin(pin: string, opts: { childId?: string; machines?: readonly string[] } = {}): Promise<Omit<SendReport, "event">> {
     const record = await makeGuardianPinRecord(pin);
@@ -1118,11 +1120,7 @@ export class GuardianKeys {
         continue;
       }
       try {
-        const relays = d.guardians?.relays.length ? d.guardians.relays : d.relays;
-        const ops = this.opsFor(d.machine);
-        const inner = (await ops.signEvent(relaysWithPinTemplate(d.machine, relays, record, now))) as SignedEvent;
-        const wrap = await giftWrapSigned(inner, d.machine, ops, now);
-        await this.deps.publish(this.relaysFor(d), wrap);
+        await this.sendPin(d, record, now, this.opsFor(d.machine));
         report.sent.push(d.machine);
       } catch (e) {
         if (e instanceof QueuedForHomeNetworkError) report.held.push(d.machine);
@@ -1132,12 +1130,59 @@ export class GuardianKeys {
     const done = [...report.sent, ...report.held];
     if (done.length > 0) {
       this.deps.write((k) => {
-        const pinSentAt = { ...k.pinSentAt };
-        for (const m of done) pinSentAt[m] = now;
-        return { ...k, pinSentAt };
+        const pins = { ...k.pins };
+        for (const m of done) pins[m] = { state: "sending", record, sentAt: now };
+        return { ...k, pins };
       });
     }
     return report;
+  }
+
+  /** Sign, wrap and publish one PIN-only RELAYS to `d`. */
+  private async sendPin(d: KeysDevice, record: GuardianPinRecord, createdAt: number, ops: GuardianOps): Promise<void> {
+    const inner = (await ops.signEvent(pinOnlyRelaysTemplate(d.machine, record, createdAt))) as SignedEvent;
+    const wrap = await giftWrapSigned(inner, d.machine, ops, this.deps.now());
+    await this.deps.publish(this.relaysFor(d), wrap);
+  }
+
+  /**
+   * A STATUS from a paired ward, as it arrived (the household may not have
+   * recorded it yet): what this install does in reply.
+   *
+   * The guardian PIN: a ward this install is sending a PIN to becomes "set"
+   * once its STATUS shows `pinSet`; until then each newer STATUS resends the
+   * same record, once. Only where no approval prompt is needed (W, or a
+   * local-only family's own key): a resend runs unattended.
+   */
+  async noteWardStatus(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
+    await this.resendPin(status);
+  }
+
+  private async resendPin(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
+    const m = status.machine;
+    const cur = this.deps.read().keys.pins[m];
+    if (!cur || cur.state !== "sending") return;
+    if (cur.statusTs !== undefined && status.ts <= cur.statusTs) return;
+    if (status.guardians?.pinSet === true) {
+      this.deps.write((k) => ({ ...k, pins: { ...k.pins, [m]: { state: "set", sentAt: cur.sentAt, statusTs: status.ts } } }));
+      return;
+    }
+    // Claim this STATUS before anything async, so a second delivery of it can't resend too.
+    this.deps.write((k) => (k.pins[m] ? { ...k, pins: { ...k.pins, [m]: { ...k.pins[m], statusTs: status.ts } } } : k));
+    const d = this.findDevice(m);
+    if (!cur.record || !d || d.platform !== "android") return;
+    if (this.deps.read().keys.root && this.keyFor(m) !== "working") return;
+    // Strictly after the last one, so the ward's RELAYS replay floor takes it.
+    const createdAt = Math.max(this.deps.now(), cur.sentAt + 1);
+    try {
+      await this.sendPin(d, cur.record, createdAt, this.opsFor(m));
+    } catch (e) {
+      if (!(e instanceof QueuedForHomeNetworkError)) return;
+    }
+    this.deps.write((k) => {
+      const p = k.pins[m];
+      return p && p.state === "sending" ? { ...k, pins: { ...k.pins, [m]: { ...p, sentAt: createdAt } } } : k;
+    });
   }
 
   // ---------------------------------------------------------------------
