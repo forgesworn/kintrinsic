@@ -17,6 +17,7 @@ import {
   removeGate,
   rootsView,
   stripNostrPrefix,
+  typedPresenceItems,
 } from "./guardiansView";
 import {
   LAPTOP,
@@ -114,6 +115,37 @@ describe("guardians view", () => {
     const both = { ...keys, objected: { [LAPTOP]: [removalOfMe], [PHONE]: [removalOfMe] } };
     expect(removalsAgainstMe(wards, both, ME, 100)[0].objected).toBe(true);
     expect(removalsAgainstMe(wards, both, ME, 900)).toEqual([]);
+  });
+
+  it("offers the typed code every reported item this phone can confirm, by the device's id (D10)", () => {
+    const ID = "9".repeat(64);
+    const inviteOfMe = `kintrinsic/guardian/${ME}`;
+    const inviteOfOther = `kintrinsic/guardian/${OTHER}`;
+    const removalOfOther = `kintrinsic/unguardian/${OTHER}`;
+    const removalOfMe = `kintrinsic/unguardian/${ME}`;
+    const g = guardians({
+      pending: [
+        { d: inviteOfMe, id: ID, kind: "coguardian", expiresAt: 900 },
+        { d: inviteOfOther, id: ID, kind: "coguardian", expiresAt: 900 },
+        { d: removalOfOther, id: ID, kind: "removal", expiresAt: 900 },
+        { d: removalOfMe, id: ID, kind: "removal", expiresAt: 900 },
+      ],
+    });
+    const wards = familyWards(family([device("Laptop", LAPTOP, "linux", g)]));
+    const keys = { ...emptyGuardianKeys(), root: signetRoot() };
+    // An invitation of this phone's identity, though this phone sent nothing; not
+    // the other parent's invitation, nor a removal someone else started.
+    expect(typedPresenceItems(wards, keys, ME, 100).map((i) => [i.d, i.statement, i.machine])).toEqual([[inviteOfMe, ID, LAPTOP]]);
+    // A removal this phone started: offered, with the device's id.
+    const sent = { ...keys, sent: { [removalOfOther]: { id: ID, type: "removal" as const, issuedAt: 1, key: OTHER } } };
+    expect(typedPresenceItems(wards, sent, ME, 100).map((i) => i.d)).toEqual([inviteOfMe, removalOfOther]);
+    // The device's id names a different statement than this phone sent: not this phone's.
+    const stale = { ...keys, sent: { [removalOfOther]: { id: STATEMENT, type: "removal" as const, issuedAt: 1, key: OTHER } } };
+    expect(typedPresenceItems(wards, stale, ME, 100).map((i) => i.d)).toEqual([inviteOfMe]);
+    // A device that reports no ids: only what this phone sent, by its own record.
+    const old = familyWards(family([device("Laptop", LAPTOP, "linux", guardians({ pending: [{ d: inviteOfMe, kind: "coguardian", expiresAt: 900 }] }))]));
+    expect(typedPresenceItems(old, keys, ME, 100)).toEqual([]);
+    expect(typedPresenceItems(wards, keys, ME, 900)).toEqual([]);
   });
 
   it("finds Android wards with no guardian PIN from their own STATUS (D4)", () => {

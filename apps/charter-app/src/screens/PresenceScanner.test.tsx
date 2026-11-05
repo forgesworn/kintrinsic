@@ -5,6 +5,7 @@ import PresenceScanner from "./PresenceScanner";
 import { presenceCodeFrom } from "./guardiansView";
 import {
   LAPTOP,
+  ME,
   OTHER,
   STATEMENT,
   TOKEN,
@@ -102,5 +103,20 @@ describe("presence scanner", () => {
     act(() => typeInto(itemSelect, removal));
     await act(async () => button(container, "Confirm in person")!.click());
     expect(s.guardianKeys.confirmPresence).toHaveBeenCalledWith(valid);
+  });
+
+  it("takes the short form for an invitation the device reports with its id (D10)", async () => {
+    const invite = `kintrinsic/guardian/${ME}`;
+    const ID = "9".repeat(64);
+    const g = guardians({ pending: [{ d: invite, id: ID, kind: "coguardian", expiresAt: 9_999_999_999 }] });
+    s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys: { root: signetRoot() } });
+    store.current = s;
+    act(() => root.render(<PresenceScanner key="invite" />));
+    act(() => typeInto(container.querySelector("input")!, TOKEN));
+    await act(async () => button(container, "Use this code")!.click());
+    act(() => typeInto([...container.querySelectorAll("select")][0], LAPTOP));
+    act(() => typeInto([...container.querySelectorAll("select")][1], invite));
+    await act(async () => button(container, "Confirm in person")!.click());
+    expect(s.guardianKeys.confirmPresence).toHaveBeenCalledWith(presenceCodeFrom(LAPTOP, TOKEN, invite, ID));
   });
 });

@@ -113,7 +113,11 @@ export interface PendingView {
   takesEffectAt?: number;
   expiresAt: number;
   role: PendingRole;
-  /** The statement's event id, when this install knows it (it sent it). */
+  /**
+   * The statement's event id, what a confirmation names: as the device
+   * reports it, or, from a device that doesn't report ids, when this install
+   * sent it.
+   */
   statement?: string;
   /** The statement's event id as the device reports it (newer devices). */
   id?: string;
@@ -134,12 +138,18 @@ export function pendingFor(g: StatusGuardians | undefined, keys: GuardianKeysSta
     // What this install sent under this `d` is the pending item only if it
     // is the same type and could still be pending: a statement newer than
     // it (another signer's, or after a rejoin) expires later than it can.
+    // With the device's id it is exact; without one, by age.
     const own = keys.sent[p.d];
     const sent =
-      !againstMe && own && own.type === t.type && p.expiresAt <= own.issuedAt + PENDING_LIFETIME_SECONDS + 300 ? own : undefined;
-    const isMove = !againstMe && keys.nextRoot?.moveD === p.d;
+      !againstMe &&
+      own &&
+      own.type === t.type &&
+      (p.id !== undefined ? own.id === p.id : p.expiresAt <= own.issuedAt + PENDING_LIFETIME_SECONDS + 300)
+        ? own
+        : undefined;
+    const isMove = !againstMe && keys.nextRoot?.moveD === p.d && (p.id === undefined || keys.nextRoot.moveId === p.id);
     const role: PendingRole = againstMe ? "against-me" : sent || isMove ? "mine" : "other";
-    const statement = sent?.id ?? (isMove ? keys.nextRoot?.moveId : undefined);
+    const statement = p.id ?? sent?.id ?? (isMove ? keys.nextRoot?.moveId : undefined);
     return [
       {
         d: p.d,
@@ -270,6 +280,35 @@ export function removeGate(keys: GuardianKeysState): Gate {
     };
   }
   return { ok: true };
+}
+
+/**
+ * What the typed short presence code can confirm (decision D10): every
+ * pending statement the devices report with its event id, less what this
+ * phone can't confirm. That is: an invitation of this phone's own identity,
+ * a move to the identity it is moving to, and a removal it started itself
+ * (only the remover's phones may confirm one). A device that doesn't report
+ * ids still offers what this phone sent. `confirmPresence` checks it all again.
+ */
+export function typedPresenceItems(
+  wards: readonly WardRef[],
+  keys: GuardianKeysState,
+  me: string,
+  now: number,
+): (PendingView & { machine: string; device: string; statement: string })[] {
+  return wards.flatMap((w) =>
+    pendingFor(w.device.guardians, keys, me, now)
+      .filter(
+        (p): p is PendingView & { statement: string } =>
+          p.statement !== undefined &&
+          (p.kind === "coguardian"
+            ? !!keys.root && p.key === keys.root.pubkey
+            : p.kind === "move"
+              ? p.key === keys.nextRoot?.pubkey
+              : p.role === "mine"),
+      )
+      .map((p) => ({ ...p, machine: w.device.devicePubkey, device: w.device.label })),
+  );
 }
 
 /** What `moveProgress()` says about a move in progress. */
