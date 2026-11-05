@@ -271,11 +271,16 @@ pub fn apply_signed_config_from(
 ///
 /// - A `guardianPin` is accepted here and returned in
 ///   [`RelaysApplied::pin`]; the pairing never holds it.
-/// - A **PIN-only RELAYS** (a `guardianPin` and no `relays`) is exempt from
-///   the 600-second rule, so a ward that was asleep still takes the PIN. It
-///   keeps the replay floor (not in the future, not before pairing, newer
-///   than the last change), changes no relay list and starts no
-///   previous-relays window.
+/// - A **PIN-only RELAYS** (a `guardianPin` and no `relays`) is checked here
+///   only against the pairing time: not for its age (a ward that was asleep
+///   still takes the PIN), nor for being ahead of the ward clock (a guardian
+///   phone a few minutes fast still sets it), nor against the relay list's
+///   floor. Its replay floor is per signer and lives in the guardian-keys
+///   state, which the caller records it in (rule 11). It changes no relay
+///   list, leaves `relays_updated_at` alone, so a PIN resend never makes a
+///   later relay code look already used, starts no previous-relays window
+///   and applies no battery settings (they would sit outside the relay
+///   list's floor).
 ///
 /// Nothing is mutated on `Err`. The caller must have checked that the seal
 /// author is the event's author.
@@ -292,6 +297,13 @@ pub fn apply_signed_relays(
         }
     }
     let had_relays = config.relays.is_some();
+    if !had_relays && config.guardian_pin.is_some() {
+        return Ok(RelaysApplied {
+            previous: None,
+            had_relays,
+            pin: config.guardian_pin,
+        });
+    }
     let previous = match config.relays {
         Some(relays) if !same_set(&relays, &pairing.relays) => Some(PreviousRelays {
             relays: std::mem::replace(&mut pairing.relays, relays),
@@ -313,8 +325,9 @@ pub fn apply_signed_relays(
 /// The checks every RELAYS event passes, however it arrived, returning its
 /// parsed body with the relay list validated. `authors` is the pinned
 /// guardian for a pasted code, the signer set otherwise. Order as the
-/// reference's `apply_relays`: author, freshness (the 600-second rule skipped
-/// for a gift-wrapped PIN-only RELAYS), the relay list, root-only.
+/// reference's `apply_relays`: author, freshness (only the pairing time for a
+/// gift-wrapped PIN-only RELAYS, whose replay floor the guardian-keys state
+/// keeps per signer), the relay list, root-only.
 fn check_relays_event(
     pairing: &Pairing,
     event: &NostrEvent,
@@ -336,11 +349,11 @@ fn check_relays_event(
         serde_json::from_str(&event.content).map_err(|_| "Invalid relay configuration.")?;
     let pin_only =
         channel == Channel::Wrapped && config.relays.is_none() && config.guardian_pin.is_some();
-    if event.created_at > now
-        || (!pin_only && now.saturating_sub(event.created_at) > CONFIG_TTL_SECS)
-        || event.created_at < pairing.paired_at
-        || event.created_at <= pairing.relays_updated_at.unwrap_or(0)
-    {
+    let fresh = pin_only
+        || (event.created_at <= now
+            && now.saturating_sub(event.created_at) <= CONFIG_TTL_SECS
+            && event.created_at > pairing.relays_updated_at.unwrap_or(0));
+    if !fresh || event.created_at < pairing.paired_at {
         return Err("This relay code has expired or was already used. Create a fresh code.".into());
     }
     if config.machine != pairing.machine {
@@ -712,10 +725,13 @@ mod tests {
     }
 
     /// Rule 11 (D4): a gift-wrapped PIN-only RELAYS is taken from any signer
-    /// however old, under the replay floor; it changes no relay list and
-    /// opens no previous-relays window. Pasted, it is refused.
+    /// however old, and when it is ahead of the ward clock; only the pairing
+    /// time is checked here (its replay floor is per signer, in the
+    /// guardian-keys state). It changes no relay list, leaves the relay
+    /// list's floor alone, opens no previous-relays window and applies no
+    /// battery settings. Pasted, it is refused.
     #[test]
-    fn a_pin_only_relays_has_no_age_limit_but_keeps_the_replay_floor() {
+    fn a_pin_only_relays_has_no_age_limit_and_its_own_floor() {
         let original = pairing();
         let set = root_and_working(&original);
         let pin_only = |at: u64| {
@@ -723,7 +739,8 @@ mod tests {
                 &original,
                 [5; 32],
                 at,
-                serde_json::json!({"machine": original.machine, "guardianPin": pin()}),
+                serde_json::json!({"machine": original.machine, "guardianPin": pin(),
+                    "battery": {"screenOffSecs":600,"ordinarySecs":120,"requestBoost":true,"openingBoost":false,"boostSecs":60}}),
             )
         };
         // A day after it was signed: the 600-second rule does not apply.
@@ -732,14 +749,17 @@ mod tests {
         assert!(applied.pin.is_some());
         assert_eq!(applied.previous, None);
         assert!(!applied.had_relays);
-        assert_eq!(p.relays, original.relays);
-        assert_eq!(p.relays_updated_at, Some(200));
-        // The replay floor holds: the same again, an older one, one from the
-        // future, one from before pairing.
-        assert!(apply_signed_relays(&mut p.clone(), &pin_only(200), &set, 300).is_err());
-        assert!(apply_signed_relays(&mut p.clone(), &pin_only(150), &set, 300).is_err());
-        assert!(apply_signed_relays(&mut original.clone(), &pin_only(301), &set, 300).is_err());
+        assert_eq!(p, original, "nothing in the pairing record changes");
+        // Ahead of the ward clock: accepted too.
+        assert!(apply_signed_relays(&mut original.clone(), &pin_only(400), &set, 300).is_ok());
+        // Before pairing: refused.
         assert!(apply_signed_relays(&mut original.clone(), &pin_only(99), &set, 300).is_err());
+        // A relay code dated before the PIN's created_at still applies.
+        let mut r = original.clone();
+        apply_signed_relays(&mut r, &pin_only(400), &set, 300).unwrap();
+        let later_code = code(&r, [1; 32], 290, default_relays());
+        apply_signed_config_from(&mut r, &later_code, &set, 300).unwrap();
+        assert_eq!(r.relays, default_relays());
         // Pasted, a PIN is refused, and a pasted code keeps the 600 s rule.
         let pasted = serde_json::to_string(&pin_only(200)).unwrap();
         assert!(apply_signed_config_from(&mut original.clone(), &pasted, &set, 200).is_err());

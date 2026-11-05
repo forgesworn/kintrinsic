@@ -1029,14 +1029,18 @@ async fn a_gift_wrapped_relays_change_keeps_its_pin_out_of_the_pairing_record() 
 }
 
 /// Rule 11 (D3, D4): a working key's gift-wrapped RELAYS may carry the PIN
-/// with no relay list, however long it waited, and leaves the list and the
-/// previous-relays window alone; it may not change the list.
+/// with no relay list, however long it waited or however far ahead of the
+/// ward clock, and leaves the list, its floor and the previous-relays window
+/// alone; it may not change the list.
 #[tokio::test]
 async fn a_working_keys_pin_only_relays_applies_late_but_a_list_change_is_refused() {
     let w = Ward::new();
     let (b, keys) = w.broker();
     approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
     let before = b.sys().pairing().load().unwrap();
+    let floor_before = serde_json::from_str::<serde_json::Value>(before.as_deref().unwrap())
+        .unwrap()["relays_updated_at"]
+        .clone();
 
     let change = relays_event(
         WORKING_SEED,
@@ -1066,7 +1070,7 @@ async fn a_working_keys_pin_only_relays_applies_late_but_a_list_change_is_refuse
     let stored: serde_json::Value =
         serde_json::from_str(&b.sys().pairing().load().unwrap().unwrap()).unwrap();
     assert_eq!(stored["relays"], json!(["wss://r"]));
-    assert_eq!(stored["relays_updated_at"], NOW - 900);
+    assert_eq!(stored["relays_updated_at"], floor_before);
     let state: serde_json::Value = serde_json::from_str(&w.store.raw().unwrap()).unwrap();
     assert_eq!(state["state"]["previousRelays"], json!([]));
 
@@ -1075,6 +1079,27 @@ async fn a_working_keys_pin_only_relays_applies_late_but_a_list_change_is_refuse
         .ingest_local(&w.sealed(&pin_only, WORKING_SEED, 4), LOCAL)
         .await;
     assert_eq!(out.result, AckResult::Unchanged);
+
+    // A resend from a phone two minutes ahead of the ward: taken.
+    let ahead = relays_event(
+        WORKING_SEED,
+        NOW + 120,
+        json!({"machine": machine_pk(), "guardianPin": pin_record()}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&ahead, WORKING_SEED, 5), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    // The root's relay change, signed before that PIN, still applies.
+    let change = relays_event(
+        ROOT_SEED,
+        NOW - 5,
+        json!({"machine": machine_pk(), "relays": default_relays()}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&change, ROOT_SEED, 6), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
 }
 
 #[tokio::test]

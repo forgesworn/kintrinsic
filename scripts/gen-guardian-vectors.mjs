@@ -868,7 +868,7 @@ scenario("relays_existing_checks", ["11", "offline relay recovery"], "The existi
   c.relays(R1, T0 + 100, RELAYS, T0 + 110, D("not_newer"));
 });
 
-scenario("relays_guardian_pin", ["presence confirmation", "11"], "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole. A PIN-only RELAYS (no relay list) from any signer is not refused for its age, but keeps the replay floor.", (c) => {
+scenario("relays_guardian_pin", ["presence confirmation", "11"], "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole. A PIN-only RELAYS (no relay list) from any signer is not refused for its age, nor for being ahead of the ward clock, and has its own replay floor per signer.", (c) => {
   pairW1(c);
   const pin = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.0").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash")) };
   const pin2 = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.1").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash2")) };
@@ -878,11 +878,26 @@ scenario("relays_guardian_pin", ["presence confirmation", "11"], "guardianPin is
   c.relays(W1, T0 + 200, null, T0 + 200 + DAY, A("relays_applied"), { guardianPin: pin2 });
   c.relays(W1, T0 + 200, null, T0 + 200 + DAY, D("not_newer"), { guardianPin: pin2 });
   c.relays(W1, T0 + DAY + 300, null, T0 + DAY + 300, D("pin_not_wrapped"), { channel: "pasted", guardianPin: pin });
-  c.relays(W1, T0 + DAY + 401, null, T0 + DAY + 400, D("future"), { guardianPin: pin });
+  c.relays(W1, T0 + DAY + 401, null, T0 + DAY + 400, A("relays_applied"), { guardianPin: pin });
+  c.relays(W1, T0 + DAY + 401, null, T0 + DAY + 402, D("not_newer"), { guardianPin: pin });
   c.relays(W1, T0 + DAY + 300, RELAYS, T0 + DAY + 901, D("stale"), { guardianPin: pin });
   c.relays(R1, T0 + DAY + 500, null, T0 + DAY + 500, A("relays_applied"), { guardianPin: pin });
 });
 
+
+scenario("pin_ahead_then_relay_code", ["11", "presence confirmation"], "A PIN-only RELAYS from a guardian phone ahead of the ward clock is accepted. Its floor is its signer's own, not the relay list's, so a relay code pasted afterwards, dated before the PIN, is not taken as already used; a resent PIN never blocks one either. Another signer's PIN has its own floor.", (c) => {
+  pairW1(c);
+  const pin = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.2").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash3")) };
+  const RELAYS2 = ["wss://relay.three.example", "wss://relay.four.example"];
+  c.relays(W1, T0 + 400, null, T0 + 100, A("relays_applied"), { guardianPin: pin });
+  c.relays(W1, T0 + 400, null, T0 + 110, D("not_newer"), { guardianPin: pin });
+  c.relays(R1, T0 + 150, RELAYS2, T0 + 160, A("relays_applied"), { channel: "pasted" });
+  c.relays(W1, T0 + 401, null, T0 + 170, A("relays_applied"), { guardianPin: pin });
+  c.relays(R1, T0 + 180, RELAYS, T0 + 190, A("relays_applied"), { channel: "pasted" });
+  c.relays(R1, T0 + 180, RELAYS, T0 + 195, D("not_newer"), { channel: "pasted" });
+  c.relays(R1, T0 + 200, null, T0 + 200, A("relays_applied"), { guardianPin: pin });
+  c.relays(W1, T0 + 99, null, T0 + 210, D("not_newer"), { guardianPin: pin });
+});
 
 scenario("coguardian_and_move_same_root", ["6", "8", "7"], "A co-guardian and a move naming the same R2: once one pins R2 the other is dropped, so R2 is never pinned twice and a later self-removal can't empty the ward.", (c) => {
   pairW1(c);

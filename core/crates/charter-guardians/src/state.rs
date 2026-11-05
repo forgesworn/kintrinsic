@@ -280,6 +280,12 @@ pub struct GuardianState {
     pub previous_relays: Vec<PreviousRelays>,
     /// The Android guardian PIN record, set by a gift-wrapped RELAYS.
     pub guardian_pin: Option<GuardianPinRecord>,
+    /// Each signer's PIN replay floor: the highest `created_at` of a RELAYS
+    /// carrying a PIN accepted from it. Sorted by signer. Separate from
+    /// `relays_updated_at`, so a PIN never makes a later relay code look
+    /// used. Absent in a state persisted before this rule: empty.
+    #[serde(default)]
+    pub pin_floors: Vec<SignerFloor>,
     /// Departed keys owed one last STATUS showing their departure.
     pub farewell: Vec<String>,
     /// Accepted clauses and statements whose `issuedAt` was ahead of the
@@ -594,6 +600,7 @@ fn forget_floors(s: &mut GuardianState, keys: &[String]) {
         c.signer_floors.retain(|f| !gone.contains(&f.signer));
     }
     s.statement_floors.retain(|f| !gone.contains(&f.signer));
+    s.pin_floors.retain(|f| !gone.contains(&f.signer));
 }
 
 fn put_statement(s: &mut GuardianState, st: &Statement, seal: &str, now: i64, held: bool) {
@@ -1746,8 +1753,12 @@ fn same_relays(a: &[String], b: &[String]) -> bool {
 /// - The existing RELAYS freshness checks: not in the future, at most 600 s
 ///   old, not before pairing, newer than the last applied.
 /// - A **PIN-only RELAYS** (gift-wrapped, a `guardianPin` and no relay list)
-///   is exempt from the 600 s age rule, so a ward asleep past it still takes
-///   the PIN; it keeps the replay floor.
+///   has its own replay floor per signer, on its real `created_at`, and
+///   leaves the relay list's floor alone, so a PIN resend never makes a
+///   later relay code look already used. It is not refused for its age (a
+///   ward asleep still takes the PIN) nor for being ahead of the ward clock
+///   (a guardian phone a few minutes fast still sets it); it keeps the
+///   pairing floor. Battery settings in it are ignored by the ward.
 /// - Only a pinned root may change the relay list (`relays_root_only`). A
 ///   working key's RELAYS must leave it as it is (no list, or the same set):
 ///   it may carry the PIN and battery settings.
@@ -1767,10 +1778,25 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
         let pin_only = matches!(ev.channel, RelaysChannel::Wrapped { .. })
             && ev.relays.is_none()
             && ev.guardian_pin.is_some();
+        if pin_only {
+            if ev.ts < s.paired_at {
+                return drop(Reason::PairingFloor);
+            }
+            let floor = s.pin_floors.iter().find(|f| f.signer == ev.author);
+            if floor.is_some_and(|f| ev.ts <= f.issued_at) {
+                return drop(Reason::NotNewer);
+            }
+            let Some(rec) = ev.guardian_pin.and_then(validate_pin_record) else {
+                return drop(Reason::BadPinRecord);
+            };
+            s.guardian_pin = Some(rec);
+            raise_floor(&mut s.pin_floors, ev.author, ev.ts);
+            return accept(Reason::RelaysApplied);
+        }
         if ev.ts > now {
             return drop(Reason::Future);
         }
-        if !pin_only && now - ev.ts > RELAYS_TTL_SECONDS {
+        if now - ev.ts > RELAYS_TTL_SECONDS {
             return drop(Reason::Stale);
         }
         if ev.ts < s.paired_at {
@@ -1807,6 +1833,7 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
         s.relays_updated_at = ev.ts;
         if pin.is_some() {
             s.guardian_pin = pin;
+            raise_floor(&mut s.pin_floors, ev.author, ev.ts);
         }
         accept(Reason::RelaysApplied)
     })
@@ -1943,6 +1970,7 @@ pub fn pair_from_seal(
         relays_updated_at: 0,
         previous_relays: Vec::new(),
         guardian_pin: None,
+        pin_floors: Vec::new(),
         farewell: Vec::new(),
         clamped: 0,
     };

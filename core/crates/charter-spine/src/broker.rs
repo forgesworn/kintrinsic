@@ -1944,7 +1944,11 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             pin: applied.pin.as_ref(),
             paired_at: pairing.paired_at,
         };
+        let pin_only = change.relays.is_none() && change.pin.is_some();
         match port.record_relays(&change, now) {
+            // A PIN-only RELAYS changes nothing in the pairing record, and
+            // its replay floor is the port's: at or below it, it's a resend.
+            RelaysRecord::AlreadyHeld if pin_only => return AckResult::Unchanged,
             RelaysRecord::Recorded | RelaysRecord::AlreadyHeld => {}
             RelaysRecord::Refused => return AckResult::Refused,
             RelaysRecord::Failed => {

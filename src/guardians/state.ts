@@ -210,6 +210,12 @@ export interface GuardianState {
   previousRelays: { relays: string[]; until: number }[]
   /** The Android guardian PIN record, set by a gift-wrapped RELAYS. */
   guardianPin: GuardianPinRecord | null
+  /**
+   * Each signer's PIN replay floor: the highest `created_at` of a RELAYS
+   * carrying a PIN accepted from it. Sorted by signer. Separate from
+   * `relaysUpdatedAt`, so a PIN never makes a later relay code look used.
+   */
+  pinFloors: SignerFloor[]
   /** Departed keys owed one last STATUS showing their departure. */
   farewell: string[]
   /**
@@ -450,6 +456,7 @@ function forgetFloors(s: GuardianState, keys: string[]): void {
   if (gone.size === 0) return
   for (const c of s.clauses) c.signerFloors = c.signerFloors.filter((f) => !gone.has(f.signer))
   s.statementFloors = s.statementFloors.filter((f) => !gone.has(f.signer))
+  s.pinFloors = s.pinFloors.filter((f) => !gone.has(f.signer))
 }
 
 function putStatement(s: GuardianState, st: Statement, seal: string, now: number, held = false): void {
@@ -1226,8 +1233,12 @@ function sameRelays(a: readonly string[], b: readonly string[]): boolean {
  * - The existing RELAYS freshness checks: not in the future, at most 600 s
  *   old, not before pairing, newer than the last applied.
  * - A **PIN-only RELAYS** (gift-wrapped, a `guardianPin` and no relay list)
- *   is exempt from the 600 s age rule, so a ward asleep past it still takes
- *   the PIN; it keeps the replay floor.
+ *   has its own replay floor per signer, on its real `created_at`, and
+ *   leaves the relay list's floor alone, so a PIN resend never makes a later
+ *   relay code look already used. It is not refused for its age (a ward
+ *   asleep still takes the PIN) nor for being ahead of the ward clock (a
+ *   guardian phone a few minutes fast still sets it); it keeps the pairing
+ *   floor. Battery settings in it are ignored by the ward.
  * - Only a pinned root may change the relay list. A working key's RELAYS must
  *   leave it as it is (no list, or the same set): it may carry the PIN and
  *   battery settings. A stolen phone can't steer a ward away from the relays
@@ -1242,8 +1253,18 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
     if (ev.channel === 'wrapped' && ev.sealAuthor !== ev.author) return drop('seal_mismatch')
     if (!isSigner(s, ev.author)) return drop('not_signer')
     const pinOnly = ev.channel === 'wrapped' && ev.relays === undefined && ev.guardianPin !== undefined
+    if (pinOnly) {
+      if (ev.ts < s.pairedAt) return drop('pairing_floor')
+      const floor = s.pinFloors.find((f) => f.signer === ev.author)
+      if (floor && ev.ts <= floor.issuedAt) return drop('not_newer')
+      const v = validateGuardianPinRecord(ev.guardianPin)
+      if (!v.ok) return drop('bad_pin_record')
+      s.guardianPin = v.record
+      s.pinFloors = raiseFloor(s.pinFloors, ev.author, ev.ts)
+      return accept('relays_applied')
+    }
     if (ev.ts > now) return drop('future')
-    if (!pinOnly && now - ev.ts > RELAYS_TTL_SECONDS) return drop('stale')
+    if (now - ev.ts > RELAYS_TTL_SECONDS) return drop('stale')
     if (ev.ts < s.pairedAt) return drop('pairing_floor')
     if (ev.ts <= s.relaysUpdatedAt) return drop('not_newer')
     const changes = ev.relays !== undefined && !sameRelays(ev.relays, s.relays)
@@ -1261,7 +1282,10 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
       s.relays = [...ev.relays]
     }
     s.relaysUpdatedAt = ev.ts
-    if (pin) s.guardianPin = pin
+    if (pin) {
+      s.guardianPin = pin
+      s.pinFloors = raiseFloor(s.pinFloors, ev.author, ev.ts)
+    }
     return accept('relays_applied')
   })
 }
@@ -1341,6 +1365,7 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
     relaysUpdatedAt: 0,
     previousRelays: [],
     guardianPin: null,
+    pinFloors: [],
     farewell: [],
     clamped: 0,
   }

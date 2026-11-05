@@ -412,16 +412,21 @@ judged: a GRANT keeps its own skew rule outside this gate, and USAGE_SYNC has
 none.
 
 **`relays`:** `seal_mismatch` (`wrapped` only: seal author ≠ author) →
-`not_signer` → `future` (`ts` > `now`) → `stale` (`now` − `ts` > 600; not
-checked for a **PIN-only RELAYS**: `wrapped`, a `guardianPin` and no
-`relays`) → `pairing_floor` (`ts` < the pairing time) → `not_newer` (`ts` ≤
-the last applied `ts`, initially 0) → `relays_root_only` (`relays` present,
-not the same set as the current list, and the author is not a pinned root) →
-with a `guardianPin`: `pin_not_wrapped` (channel `pasted`) →
-`bad_pin_record` (not a valid record, see `pin.json`) → `relays_applied`.
-An accepted RELAYS sets the last applied `ts`; only one whose `relays` is a
-different set replaces the list (and records the old one for
-`statusRelays`); a valid `guardianPin` replaces the PIN. Relay-list
+`not_signer` → then, for a **PIN-only RELAYS** (`wrapped`, a `guardianPin`
+and no `relays`): `pairing_floor` (`ts` < the pairing time) → `not_newer`
+(`ts` ≤ the author's own PIN floor: the highest `ts` of a RELAYS carrying a
+PIN accepted from it, initially none) → `bad_pin_record` → `relays_applied`,
+which replaces the PIN, raises the author's PIN floor to `ts`, and leaves
+the last applied `ts` alone; neither `future` nor `stale` applies to it.
+Any other RELAYS: `future` (`ts` > `now`) → `stale` (`now` − `ts` > 600) →
+`pairing_floor` → `not_newer` (`ts` ≤ the last applied `ts`, initially 0) →
+`relays_root_only` (`relays` present, not the same set as the current list,
+and the author is not a pinned root) → with a `guardianPin`:
+`pin_not_wrapped` (channel `pasted`) → `bad_pin_record` (not a valid
+record, see `pin.json`) → `relays_applied`. It sets the last applied `ts`;
+only one whose `relays` is a different set replaces the list (and records
+the old one for `statusRelays`); a valid `guardianPin` replaces the PIN and
+raises the author's PIN floor. Scenario `pin_ahead_then_relay_code`. Relay-list
 validation (2–10 distinct secure endpoints) and battery settings are
 existing checks outside these vectors; validation runs first in a ward.
 

@@ -594,15 +594,19 @@ describe('rule 11: relay lists, the guardian PIN', () => {
     t = ok(applyRelays(t, wrapped(R2, T0 + 102, { relays: ['wss://c.example', 'wss://d.example'] }), T0 + 102), 'relays_applied')
     expect(t.relays).toEqual(['wss://c.example', 'wss://d.example'])
   })
-  test('a PIN-only RELAYS is not refused for its age, but keeps the replay floor and the wrap', () => {
+  test('a PIN-only RELAYS is not refused for its age or for being ahead, has its own floor per signer, and needs the wrap', () => {
     const s = pairedR1W1()
     expect(statusGuardians(s).pinSet).toBe(false)
     const t = ok(applyRelays(s, wrapped(W1, T0 + 100, { guardianPin: pin }), T0 + 100 + DAY), 'relays_applied')
     expect(statusGuardians(t).pinSet).toBe(true)
-    expect(t.relaysUpdatedAt).toBe(T0 + 100)
+    // The relay list's floor is untouched; the PIN's is its signer's.
+    expect(t.relaysUpdatedAt).toBe(0)
+    expect(t.pinFloors).toEqual([{ signer: W1.pk, issuedAt: T0 + 100 }])
     dropped(applyRelays(t, wrapped(W1, T0 + 100, { guardianPin: pin }), T0 + 100 + DAY), 'not_newer')
+    ok(applyRelays(t, wrapped(R1, T0 + 50, { guardianPin: pin }), T0 + 100 + DAY), 'relays_applied')
     dropped(applyRelays(s, { author: W1.pk, sealAuthor: null, channel: 'pasted', ts: T0 + 100, guardianPin: pin }, T0 + 100), 'pin_not_wrapped')
-    dropped(applyRelays(s, wrapped(W1, T0 + 101, { guardianPin: pin }), T0 + 100), 'future')
+    ok(applyRelays(s, wrapped(W1, T0 + 400, { guardianPin: pin }), T0 + 100), 'relays_applied')
+    dropped(applyRelays(s, wrapped(W1, T0 - 1, { guardianPin: pin }), T0 + 100), 'pairing_floor')
     // A RELAYS with a list is still held to 600 s.
     dropped(applyRelays(s, wrapped(W1, T0 + 100, { relays: AB, guardianPin: pin }), T0 + 701), 'stale')
   })

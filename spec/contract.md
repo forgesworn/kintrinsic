@@ -2885,10 +2885,19 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
       it can do with the battery settings is slow polling.
     - A **PIN-only RELAYS** is a gift-wrapped RELAYS with `guardianPin` and no
       `relays` field. It is accepted from any signer under the standard
-      gift-wrap handling and the RELAYS replay floor (newer than the last
-      applied, not in the future, not before pairing); the 600-second age
-      rule does not apply to it, so a ward that was asleep still takes the
-      PIN. A pasted relay code carrying `guardianPin` is refused.
+      gift-wrap handling, not before pairing, and **its own replay floor**:
+      per signer, newer than the highest `created_at` of a RELAYS carrying a
+      PIN accepted from that signer. It never touches the relay list's
+      floor, so a PIN resent after a relay code was signed doesn't make that
+      code look already used.
+      - It is not refused for its age (the 600-second rule), so a ward that
+        was asleep still takes the PIN.
+      - It is not refused for a `created_at` ahead of the ward's clock, as a
+        CLAUSE isn't, so a guardian phone a few minutes fast still sets the
+        PIN.
+      - Battery settings in it are ignored: they belong under the relay
+        list's floor.
+      - A pasted relay code carrying `guardianPin` is refused.
     - STATUS `guardians` carries the relay list. For 7 days after a change, a
       ward with more than one root also sends STATUS on its previous relays,
       so the other parent sees the change wherever they are listening.
@@ -2922,9 +2931,11 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
     body. It is signed by any key in the signer set and stored in the Device
     Owner's private storage.
   - It travels in a gift-wrapped **PIN-only RELAYS** (rule 11): no relay list,
-    so it can't revert another signer's relay change, and no 600-second age
-    limit, so it reaches a ward that was asleep. A pasted relay code never
-    carries it.
+    so it can't revert another signer's relay change; no 600-second age
+    limit, so it reaches a ward that was asleep; accepted ahead of the ward's
+    clock, so a phone a few minutes fast still sets it; and a replay floor of
+    its own per signer, so resending it never blocks a relay code. A pasted
+    relay code never carries it.
   - STATUS `guardians.pinSet` says whether a PIN is set. The guardian app
     keeps a PIN marked as sending until a STATUS shows `pinSet`, and sends it
     again on each STATUS without it.

@@ -71847,7 +71847,7 @@
         "presence confirmation",
         "11"
       ],
-      "description": "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole. A PIN-only RELAYS (no relay list) from any signer is not refused for its age, but keeps the replay floor.",
+      "description": "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole. A PIN-only RELAYS (no relay list) from any signer is not refused for its age, nor for being ahead of the ward clock, and has its own replay floor per signer.",
       "steps": [
         {
           "input": {
@@ -72322,8 +72322,8 @@
             }
           },
           "expect": {
-            "result": "dropped",
-            "reason": "future",
+            "result": "accepted",
+            "reason": "relays_applied",
             "ticked": [],
             "departed": [],
             "state": {
@@ -72364,8 +72364,72 @@
               ],
               "guardianPin": {
                 "v": 1,
-                "salt": "9786cd4059bfeb5ecc6ea5224d355bb6",
-                "hash": "cf98a22360a433fa409bdc14ea3a6c69d88b87c54fcdef6b0593821223f65414"
+                "salt": "d414c6c3963614ded791816665c2deef",
+                "hash": "9beb4bbe8497cd3c4008fce090af056489272d5ef3008f3e83035cdd93b06a2b"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700086802,
+            "author": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "channel": "wrapped",
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "ts": 1700086801,
+            "guardianPin": {
+              "v": 1,
+              "salt": "d414c6c3963614ded791816665c2deef",
+              "hash": "9beb4bbe8497cd3c4008fce090af056489272d5ef3008f3e83035cdd93b06a2b"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "not_newer",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "d414c6c3963614ded791816665c2deef",
+                "hash": "9beb4bbe8497cd3c4008fce090af056489272d5ef3008f3e83035cdd93b06a2b"
               },
               "clamped": 0
             }
@@ -72432,8 +72496,8 @@
               ],
               "guardianPin": {
                 "v": 1,
-                "salt": "9786cd4059bfeb5ecc6ea5224d355bb6",
-                "hash": "cf98a22360a433fa409bdc14ea3a6c69d88b87c54fcdef6b0593821223f65414"
+                "salt": "d414c6c3963614ded791816665c2deef",
+                "hash": "9beb4bbe8497cd3c4008fce090af056489272d5ef3008f3e83035cdd93b06a2b"
               },
               "clamped": 0
             }
@@ -72498,6 +72562,595 @@
                 "v": 1,
                 "salt": "d414c6c3963614ded791816665c2deef",
                 "hash": "9beb4bbe8497cd3c4008fce090af056489272d5ef3008f3e83035cdd93b06a2b"
+              },
+              "clamped": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "pin_ahead_then_relay_code",
+      "rules": [
+        "11",
+        "presence confirmation"
+      ],
+      "description": "A PIN-only RELAYS from a guardian phone ahead of the ward clock is accepted. Its floor is its signer's own, not the relay list's, so a relay code pasted afterwards, dated before the PIN, is not taken as already used; a resent PIN never blocks one either. Another signer's PIN has its own floor.",
+      "steps": [
+        {
+          "input": {
+            "type": "pair_offer",
+            "now": 1700000000,
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "inner": {
+              "id": "5c918493d9aea6539c1a451985fdb587660c2ead976c464e79227443b15280fa",
+              "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+              "created_at": 1700000000,
+              "kind": 31117,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"token\":\"d7d21f989d34d0045199725243b3eba6\",\"relays\":[\"wss://relay.one.example\",\"wss://relay.two.example\"],\"ts\":1700000000,\"approval\":{\"id\":\"4f519423567a5c84ae57fd4c382977d30db7712d325dc3ba03bf722c234912bb\",\"pubkey\":\"e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840\",\"created_at\":1699999000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\"],[\"p\",\"2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1699999000,\\\"label\\\":\\\"Sam's phone\\\"}\",\"sig\":\"536c34ccd8ff41d2a4d4412280d78522ed945d4acb38dd26ec200190af1fb1808dab3c54ee33ba230618e9dd0b6aa65969c2d4626be9ff2b9f0ae3a192c4dfaf\"}}",
+              "sig": "24a39b11058c702021ad5db221d7bba7d9eb8ac906d74eac59a57479db4a39dda8176c09513f5588996bfd6f1ab774a48538f88cdab93d21ffb2ae563f19a124"
+            },
+            "token": {
+              "token": "d7d21f989d34d0045199725243b3eba6",
+              "mintedAt": 1699999970
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "paired",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": null,
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000100,
+            "author": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "channel": "wrapped",
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "ts": 1700000400,
+            "guardianPin": {
+              "v": 1,
+              "salt": "6b4198bb2ce2c110c992da7a815ed825",
+              "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "relays_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000110,
+            "author": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "channel": "wrapped",
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "ts": 1700000400,
+            "guardianPin": {
+              "v": 1,
+              "salt": "6b4198bb2ce2c110c992da7a815ed825",
+              "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "not_newer",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000160,
+            "author": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "channel": "pasted",
+            "sealAuthor": null,
+            "ts": 1700000150,
+            "relays": [
+              "wss://relay.three.example",
+              "wss://relay.four.example"
+            ]
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "relays_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.three.example",
+                "wss://relay.four.example"
+              ],
+              "statusRelays": [
+                "wss://relay.three.example",
+                "wss://relay.four.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000170,
+            "author": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "channel": "wrapped",
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "ts": 1700000401,
+            "guardianPin": {
+              "v": 1,
+              "salt": "6b4198bb2ce2c110c992da7a815ed825",
+              "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "relays_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.three.example",
+                "wss://relay.four.example"
+              ],
+              "statusRelays": [
+                "wss://relay.three.example",
+                "wss://relay.four.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000190,
+            "author": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "channel": "pasted",
+            "sealAuthor": null,
+            "ts": 1700000180,
+            "relays": [
+              "wss://relay.one.example",
+              "wss://relay.two.example"
+            ]
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "relays_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000195,
+            "author": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "channel": "pasted",
+            "sealAuthor": null,
+            "ts": 1700000180,
+            "relays": [
+              "wss://relay.one.example",
+              "wss://relay.two.example"
+            ]
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "not_newer",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000200,
+            "author": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "channel": "wrapped",
+            "sealAuthor": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+            "ts": 1700000200,
+            "guardianPin": {
+              "v": 1,
+              "salt": "6b4198bb2ce2c110c992da7a815ed825",
+              "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+            }
+          },
+          "expect": {
+            "result": "accepted",
+            "reason": "relays_applied",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+              },
+              "clamped": 0
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "relays",
+            "now": 1700000210,
+            "author": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "channel": "wrapped",
+            "sealAuthor": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "ts": 1700000099,
+            "guardianPin": {
+              "v": 1,
+              "salt": "6b4198bb2ce2c110c992da7a815ed825",
+              "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
+            }
+          },
+          "expect": {
+            "result": "dropped",
+            "reason": "not_newer",
+            "ticked": [],
+            "departed": [],
+            "state": {
+              "roots": [
+                {
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "keys": [
+                    "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+                  ]
+                }
+              ],
+              "signers": [
+                {
+                  "key": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                },
+                {
+                  "key": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840"
+                }
+              ],
+              "pending": [],
+              "tombstones": 0,
+              "held": 0,
+              "departed": [],
+              "recipients": [
+                "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+              ],
+              "farewell": [],
+              "clauses": [],
+              "relays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "statusRelays": [
+                "wss://relay.one.example",
+                "wss://relay.two.example"
+              ],
+              "guardianPin": {
+                "v": 1,
+                "salt": "6b4198bb2ce2c110c992da7a815ed825",
+                "hash": "95045b2d842d6ca0a8a21c73b0e3ab5051a02d77a11efe6ea4a8772bab978e93"
               },
               "clamped": 0
             }
