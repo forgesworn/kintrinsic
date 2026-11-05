@@ -188,6 +188,8 @@ class AboutActivity : Activity() {
                 guardiansList.text = when {
                     guardians == null -> "Guardians could not be read."
                     !guardians.paired -> "Not paired with a guardian yet."
+                    // D7: the rules on the phone stay; nothing here can change them.
+                    guardians.stuck -> GuardianCopy.STUCK
                     !guardians.available -> "This device can't read its guardian list right now."
                     else -> guardians.roots.joinToString("\n\n") { GuardianCopy.rootLines(it) }
                 }
@@ -195,6 +197,9 @@ class AboutActivity : Activity() {
                 codeFull.text = code
                 publicNpub.text = PairingSas.npub(code.filterNot { it.isWhitespace() }) ?: "Public key unavailable."
                 codeShort.text = if (code.length >= 16) "${code.take(8)} … ${code.takeLast(4)}" else code
+                if (guardians?.stuck == true) {
+                    guardiansList.setTextColor(Color.parseColor(CharterTheme.WARN))
+                }
                 guardianLine.text = HomeCopy.guardianLine(state, guardians)
                 relayLine.text = state?.relays?.joinToString("\n")?.ifEmpty { "No relays configured." }
                     ?: "Relays could not be read."

@@ -913,12 +913,15 @@ impl Warden {
         // previous guardian's web rules.
         let _ = std::fs::remove_dir_all(self.base.join("clauses"));
         // The guardian-keys state (roots, working keys, the guardian PIN,
-        // tombstones) belongs to this pairing: cleared before the pairing
-        // record, as the broker does.
-        if let Some(keys) = self.guardian_keys.take() {
-            if let Err(e) = keys.clear() {
-                eprintln!("charter: could not clear the guardian-keys state on release ({e})");
-            }
+        // tombstones) belongs to this pairing: both copies are cleared before
+        // the pairing record, as the broker does (D7; charterd's
+        // `clear_state`). With no port loaded, the files go by name.
+        let cleared = match self.guardian_keys.take() {
+            Some(keys) => keys.clear().map_err(|e| format!("{e:?}")),
+            None => guardians::clear_guardian_state(&self.base),
+        };
+        if let Err(e) = cleared {
+            eprintln!("charter: could not clear the guardian-keys state on release ({e})");
         }
         let _ = self.pairing.clear();
         self.guardian = None;

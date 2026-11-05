@@ -1368,7 +1368,9 @@ mod tests {
             .try_apply_releases(&[(release(ROOT), pk(ROOT))], ward.now);
         assert!(applied);
         assert!(ward.w.guardian_keys.is_none());
+        // Both copies of the state go (D7).
         assert!(!ward.base.join("guardian-state.json").exists());
+        assert!(!ward.base.join("guardian-state.json.2").exists());
     }
 
     #[test]
@@ -1771,7 +1773,10 @@ mod tests {
             )
             .unwrap();
         drop(w);
+        // Neither copy: a ward from before the section (with only the
+        // primary gone, the second copy would be restored instead).
         std::fs::remove_file(base.join("guardian-state.json")).unwrap();
+        std::fs::remove_file(base.join("guardian-state.json.2")).unwrap();
 
         let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
         assert!(
@@ -1799,6 +1804,53 @@ mod tests {
             .build(&TestGuardian::from_seed(ROOT));
         let r = w.ingest_clause(&serde_json::to_string(&newer).unwrap(), now);
         assert!(r.accepted, "{}", r.reason);
+    }
+
+    /// D7: one copy that will not read is healed from the other; when
+    /// neither reads, the ward fails closed: its rules stay enforced, no new
+    /// rule lands, and the summary says it is stuck.
+    #[test]
+    fn a_ward_whose_state_reads_from_neither_copy_keeps_its_rules_and_says_so() {
+        let ward = Ward::new("stuck");
+        let now = ward.now;
+        let subject = ward.subject().to_hex();
+        let paused = ClauseBuilder::schedule(now - 100)
+            .body(json!({"v": 1, "tz": "UTC", "paused": true, "weekly": {},
+                         "issuedAt": now - 100}))
+            .build(&TestGuardian::from_seed(ROOT));
+        assert_eq!(ward.deliver(&paused, ROOT, 2), AckResult::Applied);
+        let primary = ward.base.join("guardian-state.json");
+        let secondary = ward.base.join("guardian-state.json.2");
+        assert!(secondary.exists(), "a second copy is written");
+
+        // The primary alone unreadable: restored from the second copy.
+        std::fs::write(&primary, "not json").unwrap();
+        let ward = ward.restarted();
+        let summary = parse(&ward.w.guardians_summary_json(now));
+        assert_eq!(summary["stuck"], false);
+        assert_eq!(summary["roots"][0]["root"], pk(ROOT).to_hex());
+
+        // Both unreadable: stuck.
+        std::fs::write(&primary, "not json").unwrap();
+        std::fs::write(&secondary, "not json").unwrap();
+        let mut ward = ward.restarted();
+        let summary = parse(&ward.w.guardians_summary_json(now));
+        assert_eq!(summary["stuck"], true);
+        assert_eq!(summary["paired"], true);
+        assert_eq!(summary["available"], false);
+        assert_eq!(summary["roots"], json!([]));
+        let d = ward.w.tick(Some(&subject), true, now as i64, None);
+        assert!(d.iter().any(|c| c.locked), "its rules stay enforced");
+        let newer = ClauseBuilder::schedule(now - 10)
+            .body(json!({"v": 1, "tz": "UTC", "paused": false, "weekly": {},
+                         "issuedAt": now - 10}))
+            .build(&TestGuardian::from_seed(ROOT));
+        let r = ward
+            .w
+            .ingest_clause(&serde_json::to_string(&newer).unwrap(), now);
+        assert!(!r.accepted, "{}", r.reason);
+        let d = ward.w.tick(Some(&subject), true, now as i64, None);
+        assert!(d.iter().any(|c| c.locked));
     }
 
     #[test]
