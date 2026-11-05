@@ -17,7 +17,11 @@
 //!   and the local link.
 //! - [`release_gate`]: the RELEASE decision both platforms make (seal ==
 //!   author, signer set, more than one root refused, pairing floor).
-//! - Presence: [`GuardianKeys::pending_statements`] to show,
+//! - Views (rule 5, Q2): [`GuardianKeys::ward_view`] for the child-facing
+//!   screen, CLI and world-readable files (roots and rule setters, never a
+//!   pending statement); [`GuardianKeys::privileged_view`] adds the pending
+//!   statements for the privileged confirm-in-person flow.
+//! - Presence: [`GuardianKeys::pending_statements`] to show (privileged),
 //!   [`GuardianKeys::mint_presence_token`] (Linux, after polkit) or
 //!   [`GuardianKeys::mint_presence_token_with_pin`] (Android), and the
 //!   confirmation arrives as a kind-31121 wrap through the broker.
@@ -535,15 +539,77 @@ impl GuardianKeys {
     /// The whole state as the golden vectors project it: roots, signers with
     /// their roots, pending statements, held clauses with who set them
     /// (rule 5), recipients. `None` when unavailable.
+    ///
+    /// **Privileged**: it includes the pending statements, which rule 5
+    /// keeps off the child-facing screen, CLI and every world-readable file
+    /// (Q2). For those, use [`Self::ward_view`].
     pub fn project(&self, now: u64) -> Option<cg::ProjectedState> {
         self.read(|d| cg::project_state(&d.state, secs(now)))
     }
 
-    /// The pending co-guardian, removal and move statements, for the ward's
-    /// screen when a guardian asks to confirm one in person. Each `d` is what
+    /// The pending co-guardian, removal and move statements, for the
+    /// privileged confirm-in-person flow (polkit on Linux, the guardian PIN
+    /// on Android) only: never the child-facing screen, CLI or a
+    /// world-readable file (rule 5, Q2). Each `d` is what
     /// [`Self::mint_presence_token`] binds a token to.
     pub fn pending_statements(&self, now: u64) -> Vec<cg::state::ProjectedPending> {
         self.project(now).map(|p| p.pending).unwrap_or_default()
+    }
+
+    /// What the child-facing screen, CLI and world-readable files (Linux
+    /// `/run/charter/guardians.json`) may show (rule 5): the pinned roots
+    /// with their working keys, who set each rule the ward holds, and
+    /// whether a guardian PIN is set. No pending statement: a pending
+    /// removal is a dispute between the parents, not something enforced on
+    /// the child (Q2). `None` when the state is unavailable.
+    pub fn ward_view(&self, now: u64) -> Option<WardGuardiansView> {
+        let projected = self.project(now)?;
+        Some(self.ward_view_of(&projected))
+    }
+
+    /// [`Self::ward_view`] plus the pending statements, for the privileged
+    /// confirm-in-person flow only (polkit on Linux, the guardian PIN on
+    /// Android), where the administrator picks the statement to confirm.
+    /// `None` when the state is unavailable.
+    pub fn privileged_view(&self, now: u64) -> Option<PrivilegedGuardiansView> {
+        let projected = self.project(now)?;
+        Some(PrivilegedGuardiansView {
+            ward: self.ward_view_of(&projected),
+            pending: projected.pending,
+        })
+    }
+
+    fn ward_view_of(&self, projected: &cg::ProjectedState) -> WardGuardiansView {
+        let label = |k: &PubKey| self.signer_label(k);
+        WardGuardiansView {
+            roots: projected
+                .roots
+                .iter()
+                .filter_map(|r| {
+                    let keys = keys(r.keys.iter().cloned());
+                    Some(WardRootView {
+                        root: PubKey::from_hex(&r.root).ok()?,
+                        key_labels: keys.iter().map(label).collect(),
+                        keys,
+                    })
+                })
+                .collect(),
+            rules: projected
+                .clauses
+                .iter()
+                .filter_map(|c| {
+                    let signer = PubKey::from_hex(&c.signer).ok()?;
+                    Some(RuleSetterView {
+                        subject: c.subject.clone(),
+                        kind: c.kind.clone(),
+                        root: PubKey::from_hex(&c.root).ok(),
+                        label: label(&signer),
+                        signer,
+                    })
+                })
+                .collect(),
+            pin_set: projected.guardian_pin.is_some(),
+        }
     }
 
     /// Every key in the signer set (pinned roots and their approved working
@@ -1048,6 +1114,60 @@ impl Farewell {
         }
         body.to_string()
     }
+}
+
+/// Who the ward trusts and who set its rules, as the child may see it
+/// ([`GuardianKeys::ward_view`]): no pending statements (rule 5, Q2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WardGuardiansView {
+    /// Each pinned root with its active working keys.
+    pub roots: Vec<WardRootView>,
+    /// Who set each held rule (rule 5).
+    pub rules: Vec<RuleSetterView>,
+    /// Whether a guardian PIN is set.
+    pub pin_set: bool,
+}
+
+/// One pinned root in [`WardGuardiansView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WardRootView {
+    pub root: PubKey,
+    /// Its active working keys, sorted.
+    pub keys: Vec<PubKey>,
+    /// Each working key's label, made safe to show ([`clean_label`]), in
+    /// the order of `keys`. Shown only beside the root's short npub.
+    pub key_labels: Vec<Option<String>>,
+}
+
+/// Who set one held rule (rule 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleSetterView {
+    /// The child's subject (64 lowercase hex), or `""` for the machine-wide
+    /// `content` clause of a Linux ward.
+    pub subject: String,
+    /// The clause kind's wire name.
+    pub kind: String,
+    /// The key that signed it.
+    pub signer: PubKey,
+    /// The signer's root when it was accepted; `None` if not recorded.
+    pub root: Option<PubKey>,
+    /// The signer's label, made safe to show; only ever beside the root.
+    pub label: Option<String>,
+}
+
+/// [`WardGuardiansView`] with the pending statements, for the privileged
+/// confirm-in-person flow only ([`GuardianKeys::privileged_view`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivilegedGuardiansView {
+    #[serde(flatten)]
+    pub ward: WardGuardiansView,
+    /// Pending co-guardian, removal and move statements (`statement` is the
+    /// event id a typed presence code names).
+    pub pending: Vec<cg::state::ProjectedPending>,
 }
 
 /// A minted presence token, for the ward to show as a code to scan (and a

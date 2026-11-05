@@ -1080,6 +1080,21 @@ async fn add_coguardian(w: &Ward, b: &B, keys: &GuardianKeys) {
     assert_eq!(g.pending[0].id, cg.id);
     assert_eq!(g.pending[0].signer, pk(ROOT_SEED));
     assert_eq!(g.pending[0].d, d);
+    // Q2: the child-facing view shows the roots, never the pending removal
+    // or co-guardian; the privileged view adds it.
+    let ward = keys.ward_view(NOW).unwrap();
+    assert_eq!(ward.roots.len(), 1);
+    assert_eq!(ward.roots[0].root, pk(ROOT_SEED));
+    assert_eq!(ward.roots[0].keys, vec![pk(WORKING_SEED)]);
+    let shown = serde_json::to_string(&ward).unwrap();
+    assert!(!shown.contains("pending") && !shown.contains(&d), "{shown}");
+    let privileged = keys.privileged_view(NOW).unwrap();
+    assert_eq!(privileged.ward, ward);
+    assert_eq!(privileged.pending.len(), 1);
+    assert_eq!(privileged.pending[0].d, d);
+    assert_eq!(privileged.pending[0].statement, cg.id.to_hex());
+    let shown = serde_json::to_value(&privileged).unwrap();
+    assert!(shown["roots"].is_array() && shown["pending"][0]["d"] == json!(d));
 
     // A token for something not pending is refused.
     assert_eq!(
