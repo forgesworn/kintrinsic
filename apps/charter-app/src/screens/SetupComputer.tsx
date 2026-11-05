@@ -9,6 +9,7 @@ import { DEFAULT_RELAYS } from "../signer/config";
 import { parseDevicePairingCode, parsePairInvite } from "../wire/deviceCode";
 import { QRScanner } from "../components/QRScanner";
 import SetupPhoneQr from "./SetupPhoneQr";
+import { bunkerRoot } from "../keys/state";
 
 
 /**
@@ -58,7 +59,8 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
   // Under a My Signet or Heartwood root this phone's own key can't be turned
   // into the guardian key, so a ward phone is claimed by its device code
   // (docs/guardian-keys-open-questions.md, "Android pairing under a Signet root").
-  const signetRoot = !!guardianKeys.state.root;
+  // A phone-held root (even one that minted a day-to-day key) pairs as before.
+  const signetRoot = !!bunkerRoot(guardianKeys.state);
   // The pairing QR names the family's root (R under My Signet), so it is
   // offered under a Signet root too. The phone then reports only to R until
   // this phone's approval reaches it, so it can't announce itself here: the

@@ -188,12 +188,6 @@ describe("connecting My Signet as root", () => {
     await expect(connectSignetRoot(reporting)).rejects.toThrow(/different guardian identity/);
   });
 
-  it("removing the other parent is refused for a family whose root is this phone's own key", async () => {
-    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
-    await expect(h.gk.removeCoGuardian(R2)).rejects.toThrow(/kept on this phone/);
-    expect(h.published).toHaveLength(0);
-  });
-
   it("a local-only family names its local key as the root", () => {
     const h = harness([], opsOf(wSk));
     expect(h.gk.rootPubkey()).toBe(W);
@@ -505,11 +499,11 @@ describe("presence confirmation", () => {
     ]);
   });
 
-  it("is refused for a family whose root is this phone's own key", async () => {
+  it("this phone's own key can't confirm for devices that pin another identity", async () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
     await expect(
       h.gk.confirmPresence(`charter://presence?m=${PHONE}&t=${token}&d=kintrinsic/unguardian/${R2}&s=${stmt}`),
-    ).rejects.toThrow(/kept on this phone/);
+    ).rejects.toThrow(/use another guardian identity/);
     expect(h.published).toHaveLength(0);
   });
 });
@@ -1065,5 +1059,166 @@ describe("readiness and roster-only devices (batch 3 re-review N-L1)", () => {
     await expect(h.gk.inviteCoGuardian(R2)).rejects.toThrow(
       "Sam's phone hasn't checked in with this phone yet, and Sam's laptop needs a Kintrinsic update. Then invite another parent.",
     );
+  });
+});
+
+describe("a phone-held root mints a working key (decision D5)", () => {
+  const pSk = generateSecretKey();
+  const P = getPublicKey(pSk);
+  const token = "0123456789abcdef0123456789abcdef";
+  const stmt = "ef".repeat(32);
+
+  function phoneHarness(roots: { root: string; keys: string[] }[] = [{ root: P, keys: [] }, { root: R2, keys: [] }]) {
+    let keys = emptyGuardianKeys();
+    let minted: Uint8Array | null = null;
+    let mints = 0;
+    const published: { relays: string[]; wrap: NostrEvent }[] = [];
+    const ward = device(PHONE, "android", {
+      statusSeen: true,
+      appVersionCode: 55,
+      guardians: { roots, pending: [], tombstones: 0, relays: [] },
+    });
+    const children: KeysChild[] = [{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }];
+    const gk = new GuardianKeys({
+      read: () => ({ keys, children }),
+      write: (f) => {
+        keys = f(keys);
+      },
+      workingKey: () => minted ?? pSk,
+      localKey: () => pSk,
+      mintWorkingKey: () => {
+        mints++;
+        minted = generateSecretKey();
+        return minted;
+      },
+      root: () => opsOf(pSk),
+      publish: async (relays, wrap) => {
+        published.push({ relays, wrap });
+      },
+      now: () => T,
+      defaultRelays: ["wss://default.example"],
+    });
+    return {
+      gk,
+      keys: () => keys,
+      published,
+      ward,
+      minted: () => minted!,
+      mints: () => mints,
+      list: (g: KeysDevice["guardians"]) => {
+        ward.guardians = g;
+      },
+    };
+  }
+
+  it("removing the other parent mints W, sends R's approval of it, then the removal", async () => {
+    const h = phoneHarness();
+    const report = await h.gk.removeCoGuardian(R2);
+    const w = getPublicKey(h.minted());
+    expect(w).not.toBe(P);
+    expect(h.keys().root).toMatchObject({ pubkey: P, via: "phone" });
+    const approval = parseStatement(h.keys().root!.approval);
+    expect(approval.ok && approval.statement).toMatchObject({ type: "approval", signer: P, key: w });
+    expect(h.published).toHaveLength(2);
+    // The approval first, sealed by the W it names.
+    const first = open(h.published[0].wrap, phoneSk);
+    expect(first.sealAuthor).toBe(w);
+    expect(first.inner.id).toBe(h.keys().root!.approval.id);
+    // The removal is R's; the ward doesn't hold W yet, so R seals it too.
+    const second = open(h.published[1].wrap, phoneSk);
+    expect(second.inner.id).toBe(report.event.id);
+    expect(second.inner.pubkey).toBe(P);
+    expect(second.sealAuthor).toBe(P);
+    expect(h.gk.rootPubkey()).toBe(P);
+    expect(h.gk.workingPubkey()).toBe(w);
+  });
+
+  it("R keeps signing the rules day to day once W is listed", async () => {
+    const h = phoneHarness();
+    await h.gk.ensureRoot("test");
+    const w = getPublicKey(h.minted());
+    h.list({ roots: [{ root: P, keys: [w] }], pending: [], tombstones: 0, relays: [] });
+    expect(h.gk.keyFor(PHONE)).toBe("root");
+    expect(h.gk.opsFor(PHONE).pubkey).toBe(P);
+  });
+
+  it("confirms the removal in person with W once the device lists it, and not before", async () => {
+    const h = phoneHarness();
+    await h.gk.removeCoGuardian(R2);
+    const d = `kintrinsic/unguardian/${R2}`;
+    const code = `charter://presence?m=${PHONE}&t=${token}&d=${d}&s=${stmt}`;
+    await expect(h.gk.confirmPresence(code)).rejects.toThrow(/hasn't taken this phone's day-to-day key yet/);
+    const w = getPublicKey(h.minted());
+    h.list({ roots: [{ root: P, keys: [w] }, { root: R2, keys: [] }], pending: [], tombstones: 0, relays: [] });
+    const before = h.published.length;
+    await h.gk.confirmPresence(code);
+    const { sealAuthor, inner } = open(h.published[before].wrap, phoneSk);
+    expect(inner.kind).toBe(CHARTER_PRESENCE_CONFIRM);
+    expect(inner.pubkey).toBe(w);
+    expect(sealAuthor).toBe(w);
+  });
+
+  it("seals the statements R signs with W where the device lists W", async () => {
+    const h = phoneHarness();
+    await h.gk.ensureRoot("test");
+    const w = getPublicKey(h.minted());
+    h.list({ roots: [{ root: P, keys: [w] }, { root: R2, keys: [] }], pending: [], tombstones: 0, relays: [] });
+    const before = h.published.length;
+    const r = await h.gk.removeCoGuardian(R2);
+    const { sealAuthor, inner } = open(h.published[before].wrap, phoneSk);
+    expect(inner.id).toBe(r.event.id);
+    expect(inner.pubkey).toBe(P);
+    expect(sealAuthor).toBe(w);
+  });
+
+  it("re-uses W after the root was forgotten, and never approves the root as its own working key", async () => {
+    const h = phoneHarness();
+    await h.gk.ensureRoot("test");
+    h.gk.forgetRoot();
+    await h.gk.ensureRoot("test");
+    expect(h.mints()).toBe(1);
+
+    let keys = emptyGuardianKeys();
+    const self = new GuardianKeys({
+      read: () => ({ keys, children: [] }),
+      write: (f) => {
+        keys = f(keys);
+      },
+      workingKey: () => pSk,
+      localKey: () => pSk,
+      mintWorkingKey: () => pSk,
+      root: () => opsOf(pSk),
+      publish: async () => {},
+      now: () => T,
+      defaultRelays: [],
+    });
+    await expect(self.ensureRoot("test")).rejects.toThrow(/can't approve itself/);
+    expect(keys.root).toBeUndefined();
+  });
+
+  it("objects with W where the device lists it, and with R where it doesn't yet", async () => {
+    const removal = `kintrinsic/unguardian/${P}`;
+    const g = (keys: string[]) => ({
+      roots: [{ root: P, keys }, { root: R2, keys: [] }],
+      pending: [{ d: removal, id: "cd".repeat(32), kind: "removal" as const, expiresAt: T + 100 }],
+      tombstones: 0,
+      relays: [],
+    });
+    const h = phoneHarness();
+    await h.gk.ensureRoot("test");
+    const w = getPublicKey(h.minted());
+    const before = h.published.length;
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 1, guardians: g([]) });
+    expect(open(h.published[before].wrap, phoneSk).inner.pubkey).toBe(P);
+
+    const h2 = phoneHarness();
+    await h2.gk.ensureRoot("test");
+    const w2 = getPublicKey(h2.minted());
+    const before2 = h2.published.length;
+    await h2.gk.noteWardStatus({ machine: PHONE, ts: T + 1, guardians: g([w2]) });
+    const o = open(h2.published[before2].wrap, phoneSk);
+    expect(o.inner.pubkey).toBe(w2);
+    expect(o.sealAuthor).toBe(w2);
+    expect(w).not.toBe(w2);
   });
 });

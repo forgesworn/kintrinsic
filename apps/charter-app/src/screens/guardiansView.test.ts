@@ -77,8 +77,8 @@ describe("guardians view", () => {
     });
   });
 
-  it("refuses removing the other parent and moving for a key kept only on this phone", () => {
-    expect(removeGate(emptyGuardianKeys()).ok).toBe(false);
+  it("offers removing the other parent to a key kept only on this phone, and gates moving", () => {
+    expect(removeGate(emptyGuardianKeys()).ok).toBe(true);
     expect(removeGate({ ...emptyGuardianKeys(), root: signetRoot() }).ok).toBe(true);
     expect(moveGate(emptyGuardianKeys(), true).ok).toBe(false);
     expect(moveGate({ ...emptyGuardianKeys(), root: signetRoot() }, false).ok).toBe(false);

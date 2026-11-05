@@ -14,6 +14,7 @@ import type { GuardianOps } from "../wire/giftwrap";
 import type { Signer } from "../signer/Signer";
 import type { SelectSignerDeps } from "../signer/selectSigner";
 import { loadOrCreateGuardianKey, readGuardianKey } from "../signer/guardianKey";
+import { mintPhoneWorkingKey, readPhoneWorkingKey } from "../signer/phoneWorkingKey";
 import { localRelayAuth } from "../signer/relayAuth";
 import { withLocalRoute, type LocalRouteHooks } from "../signer/routePublish";
 import { connectBunker } from "../signer/signetSigner";
@@ -110,6 +111,28 @@ export function listensWithLocalKey(s: { signer: SignerState; guardianKeys?: Gua
   return s.signer.kind === "local" || !!s.guardianKeys?.root;
 }
 
+/**
+ * This install's working key W: the separate key a phone-held root minted
+ * (decision D5), else the local guardian key. Throws like
+ * `loadOrCreateGuardianKey` when the local key is unreadable.
+ */
+export function installWorkingKey(): Uint8Array {
+  return readPhoneWorkingKey() ?? loadOrCreateGuardianKey();
+}
+
+/**
+ * The keys ward traffic is addressed to, each read with its own secret: the
+ * local guardian key, and a phone-held root's W once minted. A ward encrypts
+ * to every W in its signer set, and to a pinned root only while that root has
+ * none (contract rule 9), so a phone that minted W listens on both until
+ * every ward has taken W.
+ */
+export function listeningKeys(): Uint8Array[] {
+  const local = loadOrCreateGuardianKey();
+  const w = readPhoneWorkingKey();
+  return w && getPublicKey(w) !== getPublicKey(local) ? [local, w] : [local];
+}
+
 export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], keysState: GuardianKeysState | undefined) {
   const depsRef = useRef(deps);
   depsRef.current = deps;
@@ -120,7 +143,8 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   if (gk.current === null) {
     const relayPublish = async (relays: string[], event: NostrEvent): Promise<void> => {
       pool.current ??= new SimplePool();
-      const sk = loadOrCreateGuardianKey();
+      // Any key in a ward's signer set may answer AUTH: W once a root approved it.
+      const sk = keysRef.current.root ? installWorkingKey() : loadOrCreateGuardianKey();
       const results = await Promise.allSettled(pool.current.publish(relays, event, { onauth: localRelayAuth(sk) }));
       if (results.length > 0 && !results.some((r) => r.status === "fulfilled" && !String(r.value).startsWith("connection failure:"))) {
         throw new Error("Couldn't reach any relay — check your connection and try again.");
@@ -133,7 +157,9 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
         keysRef.current = update(keysRef.current);
         depsRef.current.save(keysRef.current);
       },
-      workingKey: loadOrCreateGuardianKey,
+      workingKey: installWorkingKey,
+      localKey: loadOrCreateGuardianKey,
+      mintWorkingKey: mintPhoneWorkingKey,
       root: () => {
         const s = depsRef.current.signer() as (Signer & { rootOps?: () => GuardianOps | null }) | null;
         return s?.status().connected ? (s.rootOps?.() ?? null) : null;
@@ -151,7 +177,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   const signerKeys = useMemo<NonNullable<SelectSignerDeps["keys"]>>(
     () => ({
       knownRoot: () => keysRef.current.root?.pubkey,
-      workingKey: loadOrCreateGuardianKey,
+      workingKey: installWorkingKey,
       pickOps: (machine) => (keys.keyFor(machine) === "working" ? keys.workingOps() : undefined),
     }),
     [keys],
@@ -225,8 +251,10 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
         depsRef.current.stampPinnedKeys(rootKey, { onlyUnheard: true });
         s = depsRef.current.stateRef.current;
       }
-      const w = keys.workingPubkey();
-      const pinned = devicesPinningLocalKey(s.children, w);
+      // The phone's own guardian key, which its devices pin (for a phone-held
+      // root that minted W, that is R, not W).
+      const local = getPublicKey(loadOrCreateGuardianKey());
+      const pinned = devicesPinningLocalKey(s.children, local);
       if (pinned.length > 0) {
         throw new Error(
           `${pinned.join(", ")} already trust the key on this phone. Moving them to My Signet is a guardian identity move, not a new connection.`,
@@ -259,6 +287,8 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   }, [moveRoot]);
 
   const workingPubkey = (() => {
+    const minted = readPhoneWorkingKey();
+    if (minted) return getPublicKey(minted);
     const k = readGuardianKey();
     return k.kind === "ok" ? getPublicKey(k.key) : null;
   })();

@@ -3,20 +3,27 @@
 // family backup carries it with everything else.
 //
 // - W, the working key, is the install's existing local guardian key
-//   (`signer/guardianKey.ts`); it is not stored here.
-// - `root` is set once My Signet (or a Heartwood behind My Signet) is
-//   connected as this install's root R and R has approved W. With no `root`,
-//   the install is a local-only family: the local key IS the pinned root and
-//   signs directly, as before the section.
+//   (`signer/guardianKey.ts`), or, for a family whose root is this phone's own
+//   key, a separate key minted for it (`signer/phoneWorkingKey.ts`, decision
+//   D5). Neither secret is stored here.
+// - `root` is set once R has approved W: My Signet (or a Heartwood behind My
+//   Signet) connected as this install's root, or the phone's own key (`via:
+//   "phone"`) once it has minted W. With no `root`, the install is a
+//   local-only family that hasn't needed W yet: the local key IS the pinned
+//   root and signs directly, as before the section.
 
 import type { GuardianPinRecord, LocalRoster, SignedEvent, StatementType } from "./sdk";
 import type { StatusGuardians } from "./statusGuardians";
 
-/** How the root is held. Both are reached through My Signet's NIP-46 bunker. */
-export type RootVia = "signet" | "heartwood";
+/**
+ * How the root is held: "signet" and "heartwood" are reached through My
+ * Signet's NIP-46 bunker; "phone" is this phone's own guardian key, which
+ * signs without a prompt.
+ */
+export type RootVia = "signet" | "heartwood" | "phone";
 
 export interface InstallRoot {
-  /** R, 64 lowercase hex: the bunker's pubkey. */
+  /** R, 64 lowercase hex: the bunker's pubkey, or the phone's own guardian key. */
   pubkey: string;
   /** R's signed approval of this install's working key (kind 31120). */
   approval: SignedEvent;
@@ -207,4 +214,14 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     presenceConfirmed: rec(o.presenceConfirmed) as Record<string, number>,
     heldRosters: rec(o.heldRosters) as Record<string, HeldRoster>,
   };
+}
+
+/** This install's root when it is reached through My Signet (a bunker that prompts), not the phone's own key. */
+export function bunkerRoot(k: Pick<GuardianKeysState, "root"> | undefined): InstallRoot | undefined {
+  return k?.root && k.root.via !== "phone" ? k.root : undefined;
+}
+
+/** Is this family's guardian identity this phone's own key (with or without a minted working key)? */
+export function phoneHeldRoot(k: Pick<GuardianKeysState, "root"> | undefined): boolean {
+  return !k?.root || k.root.via === "phone";
 }

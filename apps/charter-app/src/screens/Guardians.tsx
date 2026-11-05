@@ -11,12 +11,14 @@ import GuardianCode from "./GuardianCode";
 import RemovalNotice from "./RemovalNotice";
 import { AnchorScanFields } from "./AnchorScan";
 import { familyGateReason } from "../keys/guardianKeys";
+import { phoneHeldRoot } from "../keys/state";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
   androidWardsWithoutPin,
   departedWards,
   durationWords,
   familyWards,
+  MINT_NOTICE,
   myRootOf,
   goGuardians,
   isUnconfirmed,
@@ -197,17 +199,20 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
   const remove = removeGate(keys);
   const progress = guardianKeys.moveProgress();
   const move = moveGate(keys, readiness.ready, progress);
-  const confirmGate: Gate = keys.root
-    ? { ok: true }
-    : {
-        ok: false,
-        reason:
-          "Confirming in person needs your guardian identity in My Signet or a Heartwood: a key kept only on this phone can't confirm.",
-      };
+  // A phone-held identity mints its day-to-day key on first need (D5), so
+  // confirming in person is always offered.
+  const confirmGate: Gate = { ok: true };
+  const phoneKeyFirst = !keys.root && state.signer.kind === "local";
   const otherRoots = roots.filter((r) => !r.you);
   const rosterGate: Gate = keys.root
     ? { ok: true }
-    : { ok: false, reason: "Only a My Signet or Heartwood identity shares the family with another guardian." };
+    : phoneKeyFirst
+      ? {
+          ok: false,
+          reason:
+            "This phone shares the family once it uses a separate day-to-day key. That starts when you invite a parent or confirm in person.",
+        }
+      : { ok: false, reason: "Approve this phone in My Signet first, then share the family." };
 
   return (
     <>
@@ -267,7 +272,7 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
                 </p>
                 {r.keys.length === 0 ? (
                   <p className="card-sub" style={{ margin: 0 }}>
-                    {r.root === guardianKeys.workingPubkey ? "Kept on this phone." : "Signs for itself."}
+                    {r.you && phoneHeldRoot(keys) ? "Kept on this phone." : "Signs for itself."}
                   </p>
                 ) : (
                   r.keys.map((k) => (
@@ -336,6 +341,12 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
       <SectionLabel>Changes</SectionLabel>
       <Card>
         <div className="stack">
+          {phoneKeyFirst && (
+            <p className="card-sub" style={{ margin: 0 }}>
+              Inviting or removing a parent, confirming in person and moving your identity each need a separate
+              day-to-day key on this phone, made the first time you do one of them. {MINT_NOTICE}
+            </p>
+          )}
           <Button block disabled={!inviteGate.ok} onClick={() => goGuardians("invite")}>
             Invite a parent
           </Button>

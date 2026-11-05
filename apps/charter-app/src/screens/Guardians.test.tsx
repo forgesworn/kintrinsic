@@ -108,12 +108,16 @@ describe("Guardians screens", () => {
     expect(s.guardianKeys.cancelPending).toHaveBeenCalledWith(d);
   });
 
-  it("disables removing the other parent for a key kept only on this phone", () => {
-    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]) }));
+  it("offers removing the other parent to a key kept only on this phone, saying it makes a day-to-day key (D5)", () => {
+    render(
+      mockStore({
+        children: family([device("Laptop", LAPTOP, "linux", guardians())]),
+        signer: { connected: true, kind: "local", autoSign: false },
+      }),
+    );
     const remove = [...container.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Remove the other parent"))!;
-    expect(remove.disabled).toBe(true);
-    expect(container.textContent).toContain("a key kept only on this phone can't confirm in person");
-    expect(button(container, "Change my identity")!.disabled).toBe(true);
+    expect(remove.disabled).toBe(false);
+    expect(container.textContent).toContain("This phone will now use a separate day-to-day key, vouched for by your identity");
   });
 
   it("asks for a guardian PIN before inviting while an Android ward says it has none (D4)", () => {
@@ -327,9 +331,9 @@ describe("Guardians screens", () => {
     expect(s.guardianKeys.finishMove).toHaveBeenCalledOnce();
   });
 
-  it("disables confirming in person for a key kept only on this phone", () => {
-    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]) }));
-    expect(button(container, "Confirm in person")!.disabled).toBe(true);
+  it("offers confirming in person to a key kept only on this phone (D5)", () => {
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), signer: { connected: true, kind: "local", autoSign: false } }));
+    expect(button(container, "Confirm in person")!.disabled).toBe(false);
   });
 
   it("refuses a removal route for a key no device reports", () => {

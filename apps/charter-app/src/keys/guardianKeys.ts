@@ -8,6 +8,10 @@
 //   has one, and every inbound wrap is opened with it.
 // - A local-only family has no separate root: the local key IS the pinned
 //   root and signs directly (unchanged). `root()` then returns the local key.
+//   On first need (presence, a removal, an invitation or a move) it mints a
+//   fresh W on the phone and approves it with R (decision D5): `root` is then
+//   `{ R, approval, via: "phone" }`. R keeps signing the rules day to day
+//   until a move; W confirms in person, seals what R signs and objects.
 // - With My Signet connected as root R (or a Heartwood behind My Signet, the
 //   same bunker flow), R approves W once. From then on W signs and seals for
 //   every ward that lists W under R and whose child passes the versioning
@@ -69,7 +73,7 @@ import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } f
 import { keyStanding, type StatusGuardians } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
 import { makeGuardianPinRecord, pinOnlyRelaysTemplate } from "./pin";
-import type { AnchoredRoot, GuardianKeysState, HeldRoster, InstallRoot, NextRoot, PresenceWard, RootVia } from "./state";
+import { phoneHeldRoot, type AnchoredRoot, type GuardianKeysState, type HeldRoster, type InstallRoot, type NextRoot, type PresenceWard, type RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
 export interface KeysDevice {
@@ -102,8 +106,19 @@ export interface GuardianKeysDeps {
   read(): { keys: GuardianKeysState; children: KeysChild[] };
   /** Apply an update to the persisted keys state. */
   write(update: (k: GuardianKeysState) => GuardianKeysState): void;
-  /** W's secret key (the install's local guardian key). */
+  /**
+   * W's secret key: the install's local guardian key, or, for a phone-held
+   * root that has minted one, the separate working key.
+   */
   workingKey(): Uint8Array;
+  /**
+   * The install's local guardian key: W under a My Signet root, R itself for
+   * a phone-held root. Defaults to `workingKey` (the two are one key until a
+   * phone-held root mints W).
+   */
+  localKey?(): Uint8Array;
+  /** Generate and keep a fresh W for a phone-held root; `workingKey` returns it from then on. */
+  mintWorkingKey?(): Uint8Array;
   /**
    * R's operations: the NIP-46 bunker for a My Signet / Heartwood root, the
    * local key for a local-only family; null when no root is connected.
@@ -212,14 +227,27 @@ export class GuardianKeys {
   }
 
   /**
-   * The key a ward pins for this install: R when a Signet root is connected,
-   * otherwise the local key. What a pairing link or SAS must name.
+   * The key a ward pins for this install: R when a root is recorded (My
+   * Signet, or the phone's own key once it minted W), otherwise the local
+   * key. What a pairing link or SAS must name.
    */
   rootPubkey(): string {
-    return this.signetRoot()?.pubkey ?? this.workingPubkey();
+    return this.signetRoot()?.pubkey ?? getPublicKey(this.localSecret());
+  }
+
+  private localSecret(): Uint8Array {
+    return this.deps.localKey ? this.deps.localKey() : this.deps.workingKey();
   }
 
   private rootOps(): GuardianOps {
+    // A phone-held root that minted W is the local key itself: no prompt, and
+    // no need for the signer to be connected.
+    const root = this.signetRoot();
+    if (root?.via === "phone") {
+      const local = opsFromSecret(this.localSecret());
+      if (local.pubkey !== root.pubkey) throw new Error("This phone's guardian key isn't the family's guardian identity any more.");
+      return local;
+    }
     const ops = this.deps.root();
     if (!ops) throw new Error("Connect your approval app first.");
     const want = this.rootPubkey();
@@ -300,6 +328,8 @@ export class GuardianKeys {
     if (standing.as !== "working") return "root";
     if (keys.nextRoot && standing.root === keys.nextRoot.pubkey) return "working";
     if (standing.root !== keys.root.pubkey) return "root";
+    // A phone-held root keeps signing the rules itself until a move (D5).
+    if (keys.root.via === "phone") return "root";
     return this.childReadiness(device.childId).ready ? "working" : "root";
   }
 
@@ -377,14 +407,53 @@ export class GuardianKeys {
       : (next.expiresAt ?? (sentAt !== undefined ? sentAt + PENDING_LIFETIME_SECONDS : undefined));
   }
 
-  /** A family whose root is this phone's own key can't take part in presence or removal (OQ "Moving a phone-held root"). */
-  private requireSignetRoot(what: string): InstallRoot {
+  /**
+   * This install's root with an approved W, minting one first for a family
+   * whose root is this phone's own key (decision D5): presence, a removal, an
+   * invitation and a move all need a working key bound to the root.
+   */
+  async ensureRoot(what: string): Promise<InstallRoot> {
     const root = this.signetRoot();
-    if (!root) {
-      throw new Error(
-        `Your guardian identity is kept on this phone, so you can't ${what} here. Connect My Signet as your guardian identity first.`,
-      );
+    if (root) return root;
+    return this.mintPhoneWorkingKey(what);
+  }
+
+  /**
+   * A phone-held root R mints a fresh working key W on this phone and signs
+   * its approval, then sends the approval to every ward (sealed by W, as any
+   * approval). Never W === R: the reference refuses a key that is its own
+   * root. A W already minted here (the root was forgotten since) is re-used.
+   */
+  private async mintPhoneWorkingKey(what: string): Promise<InstallRoot> {
+    const local = opsFromSecret(this.localSecret());
+    const connected = this.deps.root();
+    if (!connected) throw new Error(`Turn on parent approval on this phone first, then ${what}.`);
+    if (connected.pubkey !== local.pubkey) {
+      throw new Error(`Approve this phone in My Signet first (Settings → Parent approval), then ${what}.`);
     }
+    // A forgotten My Signet root is still what the devices pin: this phone's
+    // own key can't approve anything for them.
+    const reported = this.reportedRoots();
+    const { keys } = this.deps.read();
+    if (reported.length > 0 ? !reported.some((r) => r.root === local.pubkey) : keys.forgottenRoot !== undefined && keys.forgottenRoot !== local.pubkey) {
+      throw new Error(`Your devices use another guardian identity, not this phone's key. Reconnect it first, then ${what}.`);
+    }
+    let w = this.workingPubkey();
+    if (w === local.pubkey) {
+      if (!this.deps.mintWorkingKey) throw new Error(`This phone can't make a separate day-to-day key, so you can't ${what} here.`);
+      w = getPublicKey(this.deps.mintWorkingKey());
+    }
+    if (w === local.pubkey) throw new Error("This phone's own key can't approve itself.");
+    const label = truncateLabel(keys.installLabel ?? "") || "Kintrinsic";
+    const approval = await buildApproval(signerOf(local), w, { issuedAt: this.deps.now(), label });
+    this.requireApproval(approval, local.pubkey, w);
+    const root: InstallRoot = { pubkey: local.pubkey, approval: plain(approval), via: "phone" };
+    this.deps.write((k) => {
+      const { forgottenRoot: _f, ...rest } = k;
+      void _f;
+      return { ...rest, root, installLabel: label, approvalSentAt: {} };
+    });
+    await this.syncApprovals({ force: true }).catch(() => []);
     return root;
   }
 
@@ -655,6 +724,7 @@ export class GuardianKeys {
     }
     this.requireFamilyReady("invite another parent");
     this.requireNoMovedWards("invite another parent");
+    await this.ensureRoot("invite another parent");
     const event = await this.signAsRoot((s) =>
       buildCoGuardian(s, key, {
         issuedAt: this.deps.now(),
@@ -722,10 +792,11 @@ export class GuardianKeys {
     const key = parseGuardianKey(r2);
     if (!key) throw new Error("That isn't a guardian ID (npub).");
     if (key === this.rootPubkey()) throw new Error("To remove yourself, leave the family instead.");
-    // Its presence confirmation must come from a working key bound to this
-    // install's root; a phone-held root has none, so the ward would drop it.
-    this.requireSignetRoot("remove the other parent");
     this.requireNoMovedWards("remove the other parent");
+    // Its presence confirmation must come from a working key bound to this
+    // install's root: a phone-held root mints one now, and its approval goes
+    // out ahead of the removal.
+    await this.ensureRoot("remove the other parent");
     const event = await this.signAsRoot((s) =>
       buildRootRemoval(s, key, {
         issuedAt: this.deps.now(),
@@ -962,9 +1033,9 @@ export class GuardianKeys {
   async confirmPresence(input: string | PresenceCode): Promise<SendReport> {
     const code = typeof input === "string" ? parsePresenceCode(input) : input;
     if (!code) throw new Error("That isn't a Kintrinsic presence code.");
-    // Only a working key bound to a root may confirm; a phone-held root
-    // signs as the root itself, and the ward would drop it.
-    this.requireSignetRoot("confirm in person");
+    // Only a working key bound to a root may confirm: a phone-held root
+    // mints one first (its approval travels inline for an invitation).
+    await this.ensureRoot("confirm in person");
     const { keys } = this.deps.read();
     let approval: SignedEvent | undefined;
     if (code.kind === "coguardian") {
@@ -988,6 +1059,13 @@ export class GuardianKeys {
       }
     }
     const known = this.findDevice(code.machine);
+    // A removal's confirmation carries no approval: the device must already
+    // list this phone's day-to-day key, or it drops the confirmation.
+    if (code.kind === "removal" && known?.guardians && !this.holdsWorkingKey(code.machine, this.rootPubkey())) {
+      throw new Error(
+        `${known.name} hasn't taken this phone's day-to-day key yet. Keep Kintrinsic open on it, connected to the internet, for a minute, then confirm again.`,
+      );
+    }
     // A joining parent trusts the family only through the inviting parent's
     // guardian code: without it, nothing this ward later says, and no roster,
     // can be checked (OQ "Anchoring a joining parent's trust").
@@ -1191,13 +1269,10 @@ export class GuardianKeys {
     const before = keys.objected[m] ?? [];
     const done = before.filter((x) => against.some((p) => (p.id ?? p.d) === x));
     const remover = removerOn(g, me);
-    const w = this.workingPubkey();
-    const standing = keyStanding(g, w);
-    const canSign = keys.root ? standing.as === "working" && standing.root === me : standing.as === "root";
+    const ops = this.objectorOps(g);
     for (const p of against) {
       const mark = p.id ?? p.d;
-      if (done.includes(mark) || !remover || !canSign) continue;
-      const ops = this.workingOps();
+      if (done.includes(mark) || !remover || !ops) continue;
       try {
         const event = await buildObjection(signerOf(ops), p.d, remover, { issuedAt: now });
         const wrap = await giftWrapSigned(event, m, ops, now);
@@ -1222,6 +1297,21 @@ export class GuardianKeys {
     }
   }
 
+  /**
+   * Who may sign and seal an objection unattended at a ward: W where the ward
+   * lists it under this install's root; otherwise, for a phone-held root, R
+   * itself (no prompt), which a ward pins and so accepts. A My Signet root
+   * would prompt, so it is never used here. Null when neither applies.
+   */
+  private objectorOps(g: StatusGuardians): GuardianOps | null {
+    const { keys } = this.deps.read();
+    const me = this.rootPubkey();
+    const standing = keyStanding(g, this.workingPubkey());
+    if (keys.root && standing.as === "working" && standing.root === me) return this.workingOps();
+    if (phoneHeldRoot(keys) && keyStanding(g, me).as === "root") return opsFromSecret(this.localSecret());
+    return null;
+  }
+
   /** Did this install send the pending statement `p` (by its id, or by its `d` and age without one)? */
   private sentByMe(p: { d: string; id?: string; expiresAt: number }, keys: GuardianKeysState): boolean {
     const own = keys.sent[p.d];
@@ -1243,7 +1333,8 @@ export class GuardianKeys {
     this.deps.write((k) => (k.pins[m] ? { ...k, pins: { ...k.pins, [m]: { ...k.pins[m], statusTs: status.ts } } } : k));
     const d = this.findDevice(m);
     if (!cur.record || !d || d.platform !== "android") return;
-    if (this.deps.read().keys.root && this.keyFor(m) !== "working") return;
+    // A My Signet root would prompt; a phone-held root signs unattended.
+    if (!phoneHeldRoot(this.deps.read().keys) && this.keyFor(m) !== "working") return;
     // Strictly after the last one, so the ward's RELAYS replay floor takes it.
     const createdAt = Math.max(this.deps.now(), cur.sentAt + 1);
     try {

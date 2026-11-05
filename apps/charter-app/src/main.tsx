@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { registerSW } from "virtual:pwa-register";
 import { CharterProvider } from "./store/store";
 import { initGuardianKey } from "./signer/guardianKey";
+import { initPhoneWorkingKey } from "./signer/phoneWorkingKey";
 import App from "./App";
 import "./theme.css";
 
@@ -73,7 +74,9 @@ if (!root) throw new Error("Missing #root element");
 // `initGuardianKey` is written never to throw, but render anyway if it somehow
 // does — a family locked out of their own app by a storage quirk is a worse
 // outcome than any it could be protecting against.
-initGuardianKey()
+// A phone-held root's separate working key (signer/phoneWorkingKey) is opened
+// alongside it, for the same reason.
+Promise.all([initGuardianKey(), initPhoneWorkingKey()])
   .catch(() => {})
   .finally(() => {
     createRoot(root).render(

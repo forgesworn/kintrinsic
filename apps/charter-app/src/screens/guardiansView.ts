@@ -58,9 +58,23 @@ export function shortNpub(hex: string): string {
  * creates the local key when there is none, which merely opening Settings
  * must not do. "" on a fresh install (nothing matches it).
  */
-export function myRootOf(keys: { state: GuardianKeysState; workingPubkey: string | null }): string {
-  return keys.state.root?.pubkey ?? keys.workingPubkey ?? "";
+export function myRootOf(keys: { state: GuardianKeysState; workingPubkey: string | null; rootPubkey?: () => string }): string {
+  if (keys.state.root) return keys.state.root.pubkey;
+  // With no root recorded, the phone's own key is the identity (never a W it minted).
+  try {
+    if (keys.rootPubkey) return keys.rootPubkey();
+  } catch {
+    // The local key can't be read: fall through.
+  }
+  return keys.workingPubkey ?? "";
 }
+
+/**
+ * Said before a phone-held root first mints its separate working key
+ * (decision D5): inviting, removing, confirming in person or moving.
+ */
+export const MINT_NOTICE =
+  "This phone will now use a separate day-to-day key, vouched for by your identity; your identity itself is only used to add or remove parents and to move.";
 
 /** The full npub for a hex key. */
 export function npubOf(hex: string): string {
@@ -268,17 +282,11 @@ export function leaveGate(wards: readonly WardRef[], me: string, opts: { waiting
 
 /**
  * Removing the other parent needs this phone to confirm in person with a
- * working key bound to your identity, which a key held only on this phone
- * isn't (the ward refuses it as `confirmer_not_bound`).
+ * working key bound to your identity. A phone-held identity mints one when
+ * the removal starts (decision D5), so it is always offered.
  */
 export function removeGate(keys: GuardianKeysState): Gate {
-  if (!keys.root) {
-    return {
-      ok: false,
-      reason:
-        "Removing the other parent needs your guardian identity in My Signet or a Heartwood: a key kept only on this phone can't confirm in person.",
-    };
-  }
+  void keys;
   return { ok: true };
 }
 
@@ -302,7 +310,7 @@ export function typedPresenceItems(
         (p): p is PendingView & { statement: string } =>
           p.statement !== undefined &&
           (p.kind === "coguardian"
-            ? !!keys.root && p.key === keys.root.pubkey
+            ? p.key === me
             : p.kind === "move"
               ? p.key === keys.nextRoot?.pubkey
               : p.role === "mine"),

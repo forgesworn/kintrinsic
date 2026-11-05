@@ -64,7 +64,6 @@ import { catalogLookup } from "../data/appCatalog";
 import {
   guardianPubkeyHex,
   importGuardianKey,
-  loadOrCreateGuardianKey,
 } from "../signer/guardianKey";
 import { resolveChildTarget } from "../signer/resolveChild";
 import {
@@ -131,8 +130,8 @@ import {
 import { buildUsageSyncForDevice } from "../wire/usageSync";
 import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
 import { isAskExpired } from "../domain/askExpiry";
-import type { GuardianKeysState, RootVia } from "../keys/state";
-import { listensWithLocalKey, useGuardianKeys, type GuardianKeysApi } from "./useGuardianKeys";
+import { bunkerRoot, type GuardianKeysState, type RootVia } from "../keys/state";
+import { listeningKeys, listensWithLocalKey, useGuardianKeys, type GuardianKeysApi } from "./useGuardianKeys";
 import { adoptRoster, applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId, stampPinnedKeys } from "./guardianKeysWiring";
 import type { StatusFarewell } from "../wire/status";
 
@@ -2164,13 +2163,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    *  the foreground and pull-to-refresh callers pass it. */
   const pollRelayOnce = useCallback(async (opts: { sweep?: boolean } = {}) => {
     if (!listensWithLocalKey(stateRef.current)) return;
-    let guardianSk: Uint8Array;
+    let listenKeys: Uint8Array[];
     try {
-      guardianSk = loadOrCreateGuardianKey();
+      listenKeys = listeningKeys();
     } catch {
       return;
     }
-    const guardianPk = getPublicKey(guardianSk);
     const pool = new SimplePool();
     // Stamped BEFORE the read, so anything published while it is in flight is
     // still inside the next window rather than falling down the gap.
@@ -2194,21 +2192,26 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // on its very next poll rather than needing a reload.
     const relays = allPairingRelays(stateRef.current.children, DEFAULT_RELAYS);
     try {
-      // querySync forwards these options to subscribeEose; onauth permits
-      // exactly one authenticated retry after a private relay's CLOSED.
-      const queryOptions = { maxWait: 10_000, onauth: localRelayAuth(guardianSk) };
-      const wraps = await pool.querySync(relays, {
-        kinds: [1059],
-        "#p": [guardianPk],
-        since,
-      }, queryOptions);
-      const ctx = wrapContext(guardianSk);
-      for (const w of wraps) {
-        // The same intake the home-network drain uses (./ingestWrap).
-        // An "unlanded" ask holds the cursor open so the wide window keeps
-        // coming back until it lands or ages out.
-        const kind = ingestWrap(w, ctx).kind;
-        if (kind === "unlanded") unfinished = true;
+      // One read per key the wards write to (the local key, and a phone-held
+      // root's W once minted), each authenticated as itself: a private relay
+      // serves a wrap only to the key it is addressed to.
+      for (const guardianSk of listenKeys) {
+        // querySync forwards these options to subscribeEose; onauth permits
+        // exactly one authenticated retry after a private relay's CLOSED.
+        const queryOptions = { maxWait: 10_000, onauth: localRelayAuth(guardianSk) };
+        const wraps = await pool.querySync(relays, {
+          kinds: [1059],
+          "#p": [getPublicKey(guardianSk)],
+          since,
+        }, queryOptions);
+        const ctx = wrapContext(guardianSk);
+        for (const w of wraps) {
+          // The same intake the home-network drain uses (./ingestWrap).
+          // An "unlanded" ask holds the cursor open so the wide window keeps
+          // coming back until it lands or ages out.
+          const kind = ingestWrap(w, ctx).kind;
+          if (kind === "unlanded") unfinished = true;
+        }
       }
       pollCursor.current = nextCursor(pollCursor.current, startedAt, unfinished);
       // Only a read that completed counts as a sweep: a failed one covered
@@ -2256,15 +2259,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     if (!listensWithLocalKey(stateRef.current)) return;
     // Feature-detect before doing any work: a browser or older shell has no inbox.
     if (typeof window.CharterCarrier?.localInbox !== "function") return;
-    let guardianSk: Uint8Array;
+    let listenKeys: Uint8Array[];
     try {
-      guardianSk = loadOrCreateGuardianKey();
+      listenKeys = listeningKeys();
     } catch {
       return;
     }
+    // Each wrap is opened with the key it is addressed to (its `p`).
+    const byPubkey = new Map(listenKeys.map((sk) => [getPublicKey(sk), sk]));
     drainLocalInbox({
       inbox: localInbox,
-      ingest: (w) => ingestWrap(w, wrapContext(guardianSk)),
+      ingest: (w) => {
+        const to = w.tags.find((t) => t[0] === "p")?.[1];
+        return ingestWrap(w, wrapContext((to !== undefined ? byPubkey.get(to) : undefined) ?? listenKeys[0]));
+      },
       queue: consumeQueue,
     });
     trimHandled(handledWraps.current);
@@ -3117,7 +3125,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // A family whose wards pin My Signet (or a Heartwood) as root would refuse
   // everything this phone's own key signed as root; switching is a root move.
   const refuseWhileSignetRoot = useCallback(() => {
-    if (guardianKeysRef.current.root) {
+    if (bunkerRoot(guardianKeysRef.current)) {
       throw new Error(
         "Your guardian identity is on My Signet, so this phone's own key can't take over from it. Disconnect My Signet first.",
       );
@@ -3176,7 +3184,16 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         // After My Signet was disconnected, devices paired under it (and
         // not since) still pin that root, not this phone's key: record the
         // forgotten root for them, or they would block approval for good.
-        const w = guardianKeysRef.current.forgottenRoot ?? guardianKeys.api.workingPubkey;
+        // The key they pin is this phone's own key (R for a phone-held root,
+        // never the W it minted).
+        let w: string | null = guardianKeysRef.current.forgottenRoot ?? null;
+        if (!w) {
+          try {
+            w = guardianKeys.api.rootPubkey();
+          } catch {
+            w = null;
+          }
+        }
         if (w) {
           const stamped = stampPinnedKeys(stateRef.current.children, w);
           if (stamped !== stateRef.current.children) {
