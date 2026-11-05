@@ -2852,6 +2852,11 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
   effective time. Without one, it expires 7 days after its effective time.
 - A cancel drops pending statements with its `d` whose effective time is at or
   below the cancel's. A later statement with that `d` is unaffected.
+- If a cancel arrives before the statement it cancels and the statement's
+  effective time then exceeds the cancel's (a guardian clock ahead of the
+  ward's), the statement pends; a guardian install that sees in STATUS a
+  pending statement it has already cancelled signs and sends a fresh cancel
+  (a re-sent copy of the first would be ignored as a duplicate).
 
 **Presence confirmation.**
 - **The token is only minted on a privileged request at the ward:** an
@@ -2962,9 +2967,10 @@ STATUS that shows its departure.
   "pinned root with no W"). Once it needs presence confirmation, a root move
   or a second parent, the phone mints a **fresh working key** W of its own,
   and R approves it. W is not R and not pinned, so rule 1 binds it to R. The
-  phone then signs day to day with W, and keeps R for approvals, withdrawals,
-  moves and relay-list changes. This is the same shape as a phone whose root
-  is in My Signet or on a Heartwood.
+  phone may then sign day to day with W, or keep signing clauses with R until
+  a move completes; either way R alone signs approvals, withdrawals, moves and
+  relay-list changes. This is the same shape as a phone whose root is in My
+  Signet or on a Heartwood.
 - Moving such a root to My Signet or a Heartwood follows rule 8: R2 approves
   the phone's W (inline in the presence confirmation), R signs the move, and
   the parent confirms at each ward with the phone. W is re-bound to R2; no
