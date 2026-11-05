@@ -74,7 +74,7 @@ export function myRootOf(keys: { state: GuardianKeysState; workingPubkey: string
  * (decision D5): inviting, removing, confirming in person or moving.
  */
 export const MINT_NOTICE =
-  "This phone will now use a separate day-to-day key, vouched for by your identity; your identity itself is only used to add or remove parents and to move.";
+  "This phone will now use a separate day-to-day key, vouched for by your identity. Your identity keeps setting the rules for now. The new key confirms things in person, carries the PIN, and speaks for you if the other parent asks to remove you.";
 
 /** The full npub for a hex key. */
 export function npubOf(hex: string): string {
