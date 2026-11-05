@@ -48,6 +48,7 @@ import {
   buildCancel,
   buildCoGuardian,
   buildFamilyRoster,
+  familyRosterTemplate,
   buildObjection,
   buildPresenceConfirm,
   buildRootMove,
@@ -155,8 +156,17 @@ export const PENDING_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
  */
 export const PRESENCE_WARD_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
 
-/** At most this many senders' rosters are held for a self-vouched ward's report. */
-export const MAX_HELD_ROSTERS = 4;
+/**
+ * At most this many rosters (one per sender and child) are held for a
+ * self-vouched ward's report: four senders of four children each.
+ */
+export const MAX_HELD_ROSTERS = 16;
+
+/**
+ * A child's roster event, serialised before it is wrapped, is kept at or
+ * under this many bytes (decision 2): rules are left out to fit.
+ */
+export const MAX_ROSTER_BYTES = 48 * 1024;
 
 /** A held roster is dropped this long after it arrived. */
 export const HELD_ROSTER_LIFETIME_SECONDS = PENDING_LIFETIME_SECONDS;
@@ -1562,13 +1572,16 @@ export class GuardianKeys {
   /**
    * Send the family roster to every other working key that a ward this
    * install vouches for itself (`vouchedRoots`) lists under a trusted root
-   * (this root's other installs, and anchored parents' installs), signed and sealed by W and carrying W's approval. An
-   * install with no Signet root has no approval to carry and sends none (OQ
-   * "A phone-held root has no approval for the roster").
+   * (this root's other installs, and anchored parents' installs), signed and
+   * sealed by W and carrying W's approval: one roster event per child
+   * (receivers merge per child), each kept under `MAX_ROSTER_BYTES` by
+   * leaving rules out (`fitRoster`), never by failing. An install with no
+   * Signet root has no approval to carry and sends none (OQ "A phone-held
+   * root has no approval for the roster").
    */
-  async sendRoster(): Promise<Omit<SendReport, "event"> & { event?: SignedEvent }> {
+  async sendRoster(): Promise<RosterSendReport> {
     const root = this.signetRoot();
-    if (!root) return { sent: [], held: [], failed: [] };
+    if (!root) return { events: [], sent: [], held: [], failed: [], dropped: [] };
     const me = this.workingPubkey();
     const trusted = new Set(this.trustedRoots());
     const recipients = [
@@ -1586,39 +1599,40 @@ export class GuardianKeys {
       const kept = k.roster.children.filter((x) => !children.some((c) => c.subject === x.subject));
       return { ...k, roster: { children: [...kept, ...children] } };
     });
-    if (recipients.length === 0 || children.length === 0) return { sent: [], held: [], failed: [] };
+    const report: RosterSendReport = { events: [], sent: [], held: [], failed: [], dropped: [] };
+    if (recipients.length === 0 || children.length === 0) return report;
     const w = this.workingOps();
-    const event = await buildFamilyRoster(signerOf(w), {
-      // Each child also carries the rules in force (Q3), outside the record's
-      // own `issuedAt`: rules merge per (kind, device), records per child.
-      children: children.map(({ subject, issuedAt, name, colour, devices }) => {
-        const held = this.rulesFor(subject);
-        const rules = held.filter((r) => !r.machine).map((r) => r.event);
-        const deviceRules = held.flatMap((r) => (r.machine ? [{ machine: r.machine, rule: r.event }] : []));
-        return {
-          subject,
-          issuedAt,
-          name,
-          colour,
-          devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })),
-          ...(rules.length > 0 ? { rules } : {}),
-          ...(deviceRules.length > 0 ? { deviceRules } : {}),
-        } as Parameters<typeof buildFamilyRoster>[1]["children"][number];
-      }),
-      approval: root.approval,
-      createdAt: this.deps.now(),
-    });
     const relays = [...new Set(this.allDevices().flatMap((d) => this.relaysFor(d)).concat(this.deps.defaultRelays))];
-    const report = { event, sent: [] as string[], held: [] as string[], failed: [] as { to: string; error: string }[] };
-    for (const to of recipients) {
-      try {
-        const wrap = await giftWrapSigned(event, to, w, this.deps.now());
-        await this.deps.publish(relays, wrap);
-        report.sent.push(to);
-      } catch (e) {
-        report.failed.push({ to, error: e instanceof Error ? e.message : String(e) });
+    const sent = new Set<string>();
+    for (const { subject, issuedAt, name, colour, devices } of children) {
+      const createdAt = this.deps.now();
+      // The child also carries the rules in force (Q3), outside the record's
+      // own `issuedAt`: rules merge per (kind, device), records per child.
+      const fitted = fitRoster(
+        { subject, issuedAt, name, colour, devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })) },
+        this.rulesFor(subject),
+        { approval: root.approval, createdAt, pubkey: me },
+      );
+      if (fitted.dropped.length > 0) report.dropped.push({ subject, keys: fitted.dropped });
+      const event = await buildFamilyRoster(signerOf(w), {
+        children: [fitted.child as Parameters<typeof buildFamilyRoster>[1]["children"][number] & typeof fitted.child],
+        approval: root.approval,
+        createdAt,
+      });
+      report.events.push(event);
+      for (const to of recipients) {
+        try {
+          const wrap = await giftWrapSigned(event, to, w, this.deps.now());
+          await this.deps.publish(relays, wrap);
+          sent.add(to);
+        } catch (e) {
+          if (!report.failed.some((f) => f.to === to)) report.failed.push({ to, error: e instanceof Error ? e.message : String(e) });
+        }
       }
     }
+    report.event = report.events[0];
+    // Sent means every child's roster went; a key one of them failed for is listed as failed.
+    report.sent = [...sent].filter((to) => !report.failed.some((f) => f.to === to));
     return report;
   }
 
@@ -1707,15 +1721,21 @@ export class GuardianKeys {
     return { ok: true, updated: merged.updated };
   }
 
-  /** Keep the newest roster per sender, a few senders at most (the oldest go first). */
+  /**
+   * Keep the newest roster per sender and child (a roster carries one child;
+   * an older sender's carries the family and is kept per sender), a few at
+   * most (the oldest go first).
+   */
   private hold(inbound: { sealAuthor: string; inner: SignedEvent }): void {
     const now = this.deps.now();
     this.deps.write((k) => {
       const held: Record<string, HeldRoster> = { ...(k.heldRosters ?? {}) };
       const sender = inbound.inner.pubkey;
-      const cur = held[sender];
+      const only = rosterSubjects(inbound.inner);
+      const slot = only.length === 1 ? `${sender}:${only[0]}` : sender;
+      const cur = held[slot];
       if (cur && cur.inner.created_at > inbound.inner.created_at) return k;
-      held[sender] = { sealAuthor: inbound.sealAuthor, inner: inbound.inner, heldAt: now };
+      held[slot] = { sealAuthor: inbound.sealAuthor, inner: inbound.inner, heldAt: now };
       const order = Object.entries(held).sort((a, b) => b[1].heldAt - a[1].heldAt);
       return { ...k, heldRosters: Object.fromEntries(order.slice(0, MAX_HELD_ROSTERS)) };
     });
@@ -1823,6 +1843,69 @@ export function machineOfRuleKey(key: string): string | undefined {
 export function kindOfRuleKey(key: string): string {
   const at = key.indexOf("@");
   return at < 0 ? key : key.slice(0, at);
+}
+
+/** What `sendRoster` did: one roster event per child, and the rules left out to fit, per child (`ruleKey`s). */
+export interface RosterSendReport extends Omit<SendReport, "event"> {
+  /** The first child's roster event (the only one, for a one-child family). */
+  event?: SignedEvent;
+  events: SignedEvent[];
+  dropped: { subject: string; keys: string[] }[];
+}
+
+/** The subjects a roster event's content names (none when it can't be read). */
+function rosterSubjects(inner: SignedEvent): string[] {
+  try {
+    const children = (JSON.parse(inner.content) as { children?: unknown }).children;
+    if (!Array.isArray(children)) return [];
+    return children.flatMap((c) => {
+      const subject = (c as { subject?: unknown } | null)?.subject;
+      return typeof subject === "string" ? [subject] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * One child's roster record with the rules it can carry within
+ * `MAX_ROSTER_BYTES`, measured as the signed event would serialise before
+ * wrapping. Over the bound, device rules go first, then family-wide rules,
+ * the oldest `issuedAt` first within each. Returns the keys it left out.
+ */
+export function fitRoster<C extends { subject: string; issuedAt: number; name: string; colour: string; devices: unknown[] }>(
+  base: C,
+  held: readonly RuleEntry[],
+  meta: { approval: SignedEvent; createdAt: number; pubkey: string },
+  maxBytes = MAX_ROSTER_BYTES,
+): { child: C & { rules?: SignedEvent[]; deviceRules?: { machine: string; rule: SignedEvent }[] }; dropped: string[] } {
+  const issuedAtOf = (r: RuleEntry) => clauseOf(r.event)?.issuedAt ?? 0;
+  const keyOf = (r: RuleEntry) => ruleKey(clauseOf(r.event)?.kind ?? "", r.machine);
+  // Drop order: device rules, oldest first, then family-wide rules, oldest first.
+  const order = [...held].sort(
+    (a, b) => Number(!a.machine) - Number(!b.machine) || issuedAtOf(a) - issuedAtOf(b) || (keyOf(a) < keyOf(b) ? -1 : 1),
+  );
+  const build = (kept: readonly RuleEntry[]) => {
+    const rules = kept.filter((r) => !r.machine).map((r) => r.event);
+    const deviceRules = kept.flatMap((r) => (r.machine ? [{ machine: r.machine, rule: r.event }] : []));
+    return { ...base, ...(rules.length > 0 ? { rules } : {}), ...(deviceRules.length > 0 ? { deviceRules } : {}) };
+  };
+  const size = (child: C) => {
+    const t = familyRosterTemplate({ children: [child as never], approval: meta.approval, createdAt: meta.createdAt });
+    const json = JSON.stringify({ ...t, id: "0".repeat(64), pubkey: meta.pubkey, sig: "0".repeat(128) });
+    return new TextEncoder().encode(json).length;
+  };
+  // Keep the held order (by key) on the wire; drop from `order`.
+  let kept = [...held];
+  const dropped: string[] = [];
+  let child = build(kept);
+  for (const r of order) {
+    if (size(child) <= maxBytes) break;
+    kept = kept.filter((x) => x !== r);
+    dropped.push(keyOf(r));
+    child = build(kept);
+  }
+  return { child, dropped };
 }
 
 /** A CLAUSE payload's kind and `issuedAt`, from a signed inner event; null when it isn't one. */

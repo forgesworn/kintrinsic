@@ -1093,11 +1093,13 @@ describe("RealSigner keeps a rule change's signed clauses for the family roster 
     };
     await signer.signClause("child_sam", split);
     const view = kept.map((r) => [JSON.parse(r.inner.content).kind, r.machine ?? null]).sort();
-    expect(view).toEqual([
-      ["budget", DPK1],
-      ["budget", DPK2],
-      ["schedule", null],
-    ]);
+    expect(view).toEqual(
+      [
+        ["budget", DPK1],
+        ["budget", DPK2],
+        ["schedule", null],
+      ].sort(),
+    );
 
     kept.length = 0;
     await signer.signDebuggingClause("child_sam", DPK2, { allow: true });

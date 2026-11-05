@@ -6,10 +6,10 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19, nip44, verifyEvent, type NostrEvent } from "nostr-tools";
-import { GuardianKeys, unwrapToWorkingKey, type KeysChild, type KeysDevice } from "./guardianKeys";
+import { fitRoster, GuardianKeys, MAX_ROSTER_BYTES, unwrapToWorkingKey, type KeysChild, type KeysDevice } from "./guardianKeys";
 import { emptyGuardianKeys, type GuardianKeysState } from "./state";
 import { guardianPinHash } from "./pin";
-import { parseStatement, CHARTER_PRESENCE_CONFIRM, CHARTER_FAMILY_ROSTER, type SignedEvent } from "./sdk";
+import { familyRosterTemplate, parseStatement, CHARTER_PRESENCE_CONFIRM, CHARTER_FAMILY_ROSTER, type SignedEvent } from "./sdk";
 import type { GuardianOps } from "../wire/giftwrap";
 
 const T = 1_800_000_000;
@@ -941,7 +941,7 @@ describe("family roster", () => {
 
   it("a local-only install has no approval to carry and sends none", async () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", rosterId: "aa".repeat(32), devices: [readyWard(PHONE, "android")] }], opsOf(wSk));
-    expect(await h.gk.sendRoster()).toEqual({ sent: [], held: [], failed: [] });
+    expect(await h.gk.sendRoster()).toEqual({ events: [], sent: [], held: [], failed: [], dropped: [] });
     expect(h.published).toHaveLength(0);
   });
 });
@@ -1441,6 +1441,64 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     const shared = clause(wSk, "schedule", T);
     expect(h.gk.recordRules(subject, [{ event: shared }])).toEqual(["schedule", `schedule@${LAPTOP}`, `schedule@${PHONE}`].sort());
     expect(h.gk.rulesFor(subject).map((r) => [r.event.id, r.machine])).toEqual([[shared.id, undefined]]);
+  });
+
+  it("sends one roster per child, and a joining install holds each until a ward of its own reports", async () => {
+    const W2sk = generateSecretKey();
+    const W2 = getPublicKey(W2sk);
+    const guardians = { roots: [{ root: R, keys: [W] }, { root: R2, keys: [W2] }], pending: [], tombstones: 0, relays: [] };
+    const sam = "aa".repeat(32);
+    const ali = "bb".repeat(32);
+    const h = harness([
+      { id: "c1", name: "Sam", colour: "#000", rosterId: sam, devices: [{ ...readyWard(PHONE, "android"), guardians }] },
+      { id: "c2", name: "Ali", colour: "#111", rosterId: ali, devices: [] },
+    ]);
+    await connectSignetRoot(h);
+    h.gk.anchorRoot(R2);
+    h.published.length = 0;
+    const report = await h.gk.sendRoster();
+    expect(report.events).toHaveLength(2);
+    expect(report.sent).toEqual([W2]);
+    const opened = h.published.map((p) => unwrapToWorkingKey(p.wrap, W2sk)!);
+    expect(opened.map((o) => JSON.parse(o.inner.content).children.map((c: { subject: string }) => c.subject))).toEqual([[sam], [ali]]);
+
+    // A joining install whose own ward hasn't reported holds both, not just the last.
+    let keys2 = emptyGuardianKeys();
+    const other = new GuardianKeys({
+      read: () => ({ keys: keys2, children: [] }),
+      write: (f) => {
+        keys2 = f(keys2);
+      },
+      workingKey: () => W2sk,
+      root: () => opsOf(r2Sk),
+      publish: async () => {},
+      now: () => T,
+      defaultRelays: [],
+    });
+    other.anchorRoot(R);
+    for (const o of opened) expect(other.receiveRoster({ sealAuthor: W, inner: o.inner })).toEqual({ ok: false, reason: "held" });
+    expect(Object.keys(keys2.heldRosters).sort()).toEqual([`${W}:${ali}`, `${W}:${sam}`].sort());
+  });
+
+  it("keeps a child's roster under 48 KB: device rules go first, then the oldest family-wide rules", () => {
+    const approval = clause(wSk, "approval", T);
+    const base = { subject: "aa".repeat(32), issuedAt: T, name: "Sam", colour: "#000", devices: [] };
+    const pad = "x".repeat(12_000);
+    const fam = [0, 1, 2, 3].map((i) => ({ event: clause(wSk, `k${"abcd"[i]}`, T - 100 + i, { pad }) }));
+    const dev = [{ event: clause(wSk, "schedule", T, { pad }), machine: PHONE }, { event: clause(wSk, "schedule", T, { pad }), machine: LAPTOP }];
+    const all = [...fam, ...dev];
+    const small = fitRoster(base, all, { approval, createdAt: T, pubkey: W }, 1_000_000);
+    expect(small.dropped).toEqual([]);
+    const fitted = fitRoster(base, all, { approval, createdAt: T, pubkey: W });
+    // Six rules of ~12 KB don't fit in 48 KB; four still don't, three do.
+    expect(fitted.dropped.slice(0, 2).sort()).toEqual([`schedule@${LAPTOP}`, `schedule@${PHONE}`].sort());
+    expect(fitted.dropped.slice(2)).toEqual(["ka"]);
+    expect(fitted.child.deviceRules).toBeUndefined();
+    const size = new TextEncoder().encode(
+      JSON.stringify({ ...familyRosterTemplate({ children: [fitted.child], approval, createdAt: T }), id: "0".repeat(64), pubkey: W, sig: "0".repeat(128) }),
+    ).length;
+    expect(size).toBeLessThanOrEqual(MAX_ROSTER_BYTES);
+    expect(fitted.child.rules!.length).toBeGreaterThan(0);
   });
 
   it("holds no rules for a child it was never told about", async () => {
