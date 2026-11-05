@@ -218,6 +218,108 @@ cd ../linux && cargo run -q -p xtask -- deb
 3. Restart the ward. **Expect:** the withdrawal holds (the key never comes
    back).
 
+## Gate 4: the guardian PIN reaches a phone that was asleep
+
+**Devices:** guardian phone A (any identity), Android ward freshly provisioned with no PIN set (gate 1 step 1).
+
+1. Ward: switch to airplane mode, or power it off.
+2. Wait **at least 15 minutes** (longer than the old 10-minute limit).
+3. Phone A: Settings → **Guardians** → **Set the guardian PIN**: **123456**, twice → **Set guardian PIN**.
+   **Expect:** "Setting the guardian PIN on <ward name>…", and it stays that way.
+4. Ward: turn airplane mode off, or power on. Wait up to 5 minutes. Do not touch phone A.
+   **Expect:** phone A stops saying "Setting the guardian PIN…" and shows the PIN as set.
+5. Ward: About this device → Guardians → **Guardian presence** → **Show a code for this** → **123456**.
+   **Expect:** the screen asks for the PIN (it does not say that none is
+   set); after 123456, a QR and short code appear.
+6. Check that nothing else changed: the ward's relay list and rules are as before step 3.
+
+**Fail if:** the PIN is refused as too old, phone A keeps saying "sending" after the ward has been online 10 minutes, or the ward's relays change.
+
+## Gate 5: a phone-held identity moves to My Signet, wards already paired
+
+**Devices:** phone A with **no** My Signet (a fresh test-build origin; the phone's own key is the identity), Android ward, Linux ward, phone B with My Signet holding a spare identity **A2**. For the Heartwood variant, A2 is on a Heartwood.
+
+1. Phone A: pair the Android ward and the Linux ward the ordinary way. Set the guardian PIN **123456**. Set one rule (a screen-time limit).
+2. Phone A: Settings → **Guardians** → **Move my identity to My Signet**. Paste A2's connection link.
+   **Expect:** a message that this phone will use a separate day-to-day key; then My Signet (or the Heartwood) is asked to sign. With a Heartwood, count the button presses and note them.
+3. Phone A: **Confirm in person** at the Android ward (presence code, PIN **123456**) and at the Linux ward (administrator password).
+   **Expect:** each ward switches as you confirm. `charter status` on Linux, and About this device on Android, list A2 as the guardian. The rule from step 1 is still enforced throughout. **No device is paired again.**
+4. Phone A, after both wards have switched: **Delete the old key** → confirm.
+   **Expect:** the app still works; a new rule from phone A reaches both wards.
+5. Settings → Key backup: make a new backup. **Expect:** the app tells you older backups no longer bring your family back.
+
+**Variant:** do step 3 for the Android ward only and wait out a week (or expire the move). **Expect:** the app shows "Finish your identity move" and refuses invite, remove and leave until it is finished.
+
+## Gate 6: removal with automatic objection
+
+**Devices:** phones A and B (the end state of gate 2 step 7: both guardians on the Android ward), Android ward. Keep phone B's Kintrinsic open and online.
+
+1. Phone A: Guardians → **Remove the other parent (npub1…)** → **Start removing them**. Confirm in person at the Android ward.
+   **Expect:** "Removal started" on A; the 72 hours run.
+2. Phone B: do **not** touch anything. Wait up to 5 minutes.
+   **Expect:** phone B shows "<A> asked to remove you from <child>'s devices. We've objected on your behalf, so you stay a guardian." and a **Leave the family instead** button.
+3. Ward: after the next check-in, About this device → Guardians lists A and B. In the guardian-only presence list, the removal is gone.
+4. Phone A: **Remove the other parent** again. **Expect:** it is dropped again (an objection blocks re-issue for 7 days), or A is told so.
+5. Phone B: close the app for the whole of a fresh removal, then reopen it within 72 hours. **Expect:** the objection goes out on reopening and the removal is dropped.
+6. Phone B: **Leave the family instead** → **Leave the family** again. **Expect:** B disappears from the ward at once.
+
+**Limit:** letting a removal run its full 72 hours against a parent with no working app takes three days; record it as not run.
+
+## Gate 7: a second parent joins with only a phone
+
+**Devices:** phone A (My Signet, identity A), phone B with **no** My Signet (a fresh test-build origin), Android ward, Linux ward.
+
+1. Phone B: Settings → **Join a family** → **Join with this phone only**.
+   **Expect:** a guardian ID shown as a QR and as text.
+2. Phone A: Guardians → **Invite a parent** → **Scan their QR code** → name them → **Send the invitation**.
+3. Phone B: scan A's guardian code. **Expect:** "Now confirm in person".
+4. Phone B: confirm in person at the Android ward (PIN **123456**) and at the Linux ward (administrator password).
+   **Expect:** both wards list roots A and B, with B having its own day-to-day key.
+5. Phone B changes a rule. **Expect:** the ward enforces it and names B as the setter.
+6. Phone B: the join note says to back up the guardian identity. Settings → Key backup → make a backup.
+7. Phone B: **Lost a phone?** **Expect:** it says the key is kept on this phone and to restore a backup if the phone is lost.
+
+## Gate 8: a phone clock 10 minutes ahead
+
+**Devices:** guardian phone B and guardian phone A (both guardians on the Android ward), Android ward on correct time.
+
+1. Phone B: switch off automatic date and time; set the clock **10 minutes ahead**.
+2. Phone B: change a rule (today's screen-time limit).
+   **Expect:** the ward enforces it within a minute. It is not refused.
+3. Phone B: within a few minutes, the child's page shows the clock notice ("…'s clock is behind this phone's; rules still apply, in the order they arrive.") or the notice of the same meaning for this device. The notice stays for about 3 days.
+4. Phone A (correct clock): change the **same** kind of rule afterwards.
+   **Expect:** the ward enforces A's change. B's future date does not hold it back.
+5. Phone B: turn automatic time back on; change the rule again.
+   **Expect:** it is enforced.
+
+**Fail if** any change in steps 2 to 5 is refused, or A's change in step 4 is ignored.
+
+## Gate 9: pending changes are hidden from the child but listed to the confirmer
+
+**Devices:** phones A and B, Android ward, Linux ward.
+
+1. Phone A: Invite phone B's identity (gate 2 step 1). **Do not confirm** anything.
+2. Android ward: About this device → Guardians. **Expect:** the guardians are listed with short IDs; no invitation, no "change waiting" line.
+3. Linux ward, as an ordinary user: `charter status`, the tray menu, and `cat /run/charter/guardians.json`. **Expect:** no pending entry in any.
+4. Android ward: Guardians → **Guardian presence** → enter **123456**. **Expect:** the invitation is listed, as "Add … as a guardian".
+5. Linux ward: Kintrinsic → **Connect a phone** → **Show the code to confirm** (administrator password), and `sudo charter-presence --list`. **Expect:** the invitation is listed.
+6. Repeat 1 to 5 with a pending removal (gate 6 step 1, before phone B's app reacts: keep B offline).
+
+## Gate 10: restore from a backup with a My Signet identity
+
+**Devices:** phone A with My Signet identity A (the state after gate 1), a second phone or browser profile, Android ward.
+
+1. Phone A: Settings → Key backup. **Expect:** it says the identity is in My Signet, so the backup carries the family only. Make a backup with a passphrase and save it.
+2. Second phone, fresh test-build origin: Settings → Key backup → **Restore from backup**, using the passphrase.
+   **Expect:** the child and devices return. A notice says your family was restored and that this phone has a new day-to-day key for My Signet to approve.
+3. **Approve this phone.** My Signet signs once.
+4. **Expect:** the notice now says your devices still trust the lost phone's key, with **Withdraw "…"**. Tap it and confirm.
+   **Expect:** within a minute the ward lists one day-to-day key under A, and phone A shows "This phone no longer has access to …".
+5. Second phone: change a rule. **Expect:** the ward enforces it. The ward was never touched.
+6. Restart the ward. **Expect:** the withdrawal holds.
+
+**Variant:** repeat with a phone-held identity. **Expect:** the restore brings back the identity and family, makes a new day-to-day key, and the backup contains no PIN.
+
 ## Known limits for these gates
 
 - The 72-hour removal can only be tested as far as the pending state and the
