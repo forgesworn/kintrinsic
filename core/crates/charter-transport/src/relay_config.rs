@@ -594,6 +594,53 @@ mod tests {
         assert_eq!(q, original);
     }
 
+    /// The battery settings are part of the signed relay change (contract,
+    /// *Android battery scheduling*), so they follow its author check: any
+    /// signer, pasted or gift-wrapped, under the same replay floor, and an
+    /// invalid value refuses the whole change.
+    #[test]
+    fn battery_settings_come_with_a_relay_change_from_any_signer() {
+        let working = PubKey::from_bytes(charter_crypto::xonly_pubkey(&[5; 32]).unwrap());
+        let set = charter_primitives::SinglePinned(working);
+        let battery = serde_json::json!({"screenOffSecs":600,"ordinarySecs":120,"requestBoost":true,"openingBoost":false,"boostSecs":60});
+        let with_battery = |p: &Pairing, seed: [u8; 32], at: u64, battery: &serde_json::Value| {
+            event_with(
+                p,
+                seed,
+                at,
+                serde_json::json!({"machine": p.machine, "relays": default_relays(), "battery": battery}),
+            )
+        };
+
+        // Pasted, from a working key.
+        let mut pasted = pairing();
+        let signed = serde_json::to_string(&with_battery(&pasted, [5; 32], 200, &battery)).unwrap();
+        assert!(apply_signed_config(&mut pasted.clone(), &signed, 200).is_err());
+        apply_signed_config_from(&mut pasted, &signed, &set, 200).unwrap();
+        assert_eq!(pasted.battery.as_ref().unwrap().screen_off_secs, 600);
+        // The same code is not taken twice.
+        assert!(apply_signed_config_from(&mut pasted, &signed, &set, 201).is_err());
+
+        // Gift-wrapped, from a working key.
+        let mut wrapped = pairing();
+        let ev = with_battery(&wrapped, [5; 32], 200, &battery);
+        apply_signed_relays(&mut wrapped, &ev, &set, 200).unwrap();
+        assert_eq!(wrapped.battery, pasted.battery);
+
+        // A stranger's, or an invalid value from a signer, changes nothing.
+        let original = pairing();
+        let mut q = original.clone();
+        let stranger = with_battery(&q, [9; 32], 200, &battery);
+        assert!(apply_signed_relays(&mut q, &stranger, &set, 200).is_err());
+        let mut invalid = battery.clone();
+        invalid["ordinarySecs"] = serde_json::json!(1);
+        let bad = with_battery(&q, [5; 32], 200, &invalid);
+        assert!(apply_signed_relays(&mut q, &bad, &set, 200).is_err());
+        let bad = serde_json::to_string(&bad).unwrap();
+        assert!(apply_signed_config_from(&mut q, &bad, &set, 200).is_err());
+        assert_eq!(q, original);
+    }
+
     #[test]
     fn relay_validation_requires_distinct_secure_endpoints() {
         for relays in [

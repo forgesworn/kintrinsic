@@ -1387,6 +1387,94 @@ mod tests {
         assert!(v.get("code").is_none());
     }
 
+    /// Main's Wi-Fi and Bluetooth tiers under guardian keys: a working key's
+    /// `connections` clause drives the posture, and stays enforced after that
+    /// key is withdrawn until a current signer replaces it (rule 4).
+    #[test]
+    fn a_working_keys_connections_clause_applies_and_outlives_its_key() {
+        use charter_schedule::{BluetoothAccess, ConnectionsPosture, WifiAccess};
+        let ward = Ward::new("connections");
+        ward.approve_w1();
+        let clause = |seed: u8, issued_at: u64, wifi: &str| {
+            ClauseBuilder {
+                kind: ClauseKind::Connections,
+                issued_at,
+                body: json!({}),
+                created_at: issued_at,
+                subject: None,
+            }
+            .subject(ward.subject())
+            .body(json!({"v": 1, "issuedAt": issued_at, "wifi": wifi, "bluetooth": "paired"}))
+            .build(&TestGuardian::from_seed(seed))
+        };
+        assert_eq!(
+            ward.deliver(&clause(W1, ward.now - 20, "secured"), W1, 2),
+            AckResult::Applied
+        );
+        let secured = ConnectionsPosture {
+            wifi: WifiAccess::Secured,
+            bluetooth: BluetoothAccess::Paired,
+        };
+        assert_eq!(ward.w.connections_posture(), Ok(secured));
+        revoke(&ward, W1, 3);
+        assert_eq!(ward.w.connections_posture(), Ok(secured));
+        assert_eq!(
+            ward.deliver(&clause(W1, ward.now - 5, "any"), W1, 4),
+            AckResult::Refused
+        );
+        assert_eq!(ward.w.connections_posture(), Ok(secured));
+        assert_eq!(
+            ward.deliver(&clause(ROOT, ward.now - 1, "saved"), ROOT, 5),
+            AckResult::Applied
+        );
+        assert_eq!(
+            ward.w.connections_posture().unwrap().wifi,
+            WifiAccess::Saved
+        );
+    }
+
+    /// Battery settings ride in a relay change, so a working key's pasted
+    /// code sets them, and a gift-wrapped one is taken up by the next reload.
+    #[test]
+    fn battery_settings_follow_a_relay_change_from_a_working_key() {
+        let mut ward = Ward::new("battery");
+        ward.approve_w1();
+        let relays_event = |ward: &Ward, at: u64, screen_off: u64| {
+            sign_event(
+                &TestGuardian::from_seed(W1).signer,
+                kinds::CHARTER_DEVICE_RELAYS,
+                at,
+                vec![
+                    kinds::marker_tag(),
+                    vec!["p".into(), ward.machine().to_hex()],
+                ],
+                json!({
+                    "machine": ward.machine().to_hex(),
+                    "relays": ["wss://relay.example", "wss://relay2.example"],
+                    "battery": {
+                        "screenOffSecs": screen_off,
+                        "ordinarySecs": 120,
+                        "requestBoost": true,
+                        "openingBoost": false,
+                        "boostSecs": 60,
+                    },
+                })
+                .to_string(),
+            )
+        };
+        let pasted = relays_event(&ward, ward.now - 5, 600);
+        let state = ward
+            .w
+            .update_relays(&serde_json::to_string(&pasted).unwrap(), ward.now)
+            .unwrap();
+        assert_eq!(state.battery.unwrap().screen_off_secs, 600);
+
+        let wrapped = relays_event(&ward, ward.now - 2, 120);
+        assert_eq!(ward.deliver(&wrapped, W1, 2), AckResult::Applied);
+        ward.w.reload_relays();
+        assert_eq!(ward.w.pairing_state().battery.unwrap().screen_off_secs, 120);
+    }
+
     #[test]
     fn a_pasted_relay_code_may_not_carry_a_pin_but_any_signer_may_sign_one() {
         let mut ward = Ward::new("pasted");

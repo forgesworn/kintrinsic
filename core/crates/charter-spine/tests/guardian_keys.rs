@@ -449,6 +449,87 @@ async fn a_departed_keys_clause_stays_until_a_current_signer_replaces_it_above_t
     assert_eq!(out.result, AckResult::Unchanged);
 }
 
+/// The `connections` and `times` clauses take the one acceptance path every
+/// per-child clause takes: a working key may set them, its record names it,
+/// and a departure leaves them enforced under the same floor (rules 4 and 5).
+#[tokio::test]
+async fn connections_and_times_clauses_take_the_one_acceptance_path() {
+    for (kind, body) in [
+        (
+            ClauseKind::Connections,
+            json!({"v": 1, "wifi": "secured", "bluetooth": "paired"}),
+        ),
+        (ClauseKind::Times, json!({"v": 1, "times": []})),
+    ] {
+        let w = Ward::new();
+        let (b, keys) = w.broker();
+        approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+        let held = |b: &B| {
+            b.sys()
+                .child_clauses()
+                .slot_state(&SUBJECT.to_hex(), kind.store_key())
+                .unwrap()
+                .signer
+        };
+        let event = |seed: u8, issued_at: u64| {
+            let mut body = body.clone();
+            body["issuedAt"] = json!(issued_at);
+            ClauseBuilder {
+                kind,
+                issued_at,
+                body: json!({}),
+                created_at: issued_at,
+                subject: None,
+            }
+            .subject(SUBJECT)
+            .body(body)
+            .build(&TestGuardian::from_seed(seed))
+        };
+
+        // The working key sets it, dated as far ahead as the ward allows.
+        let out = b
+            .ingest_local(
+                &w.sealed(&event(WORKING_SEED, NOW + 300), WORKING_SEED, 2),
+                LOCAL,
+            )
+            .await;
+        assert_eq!(out.result, AckResult::Applied, "{kind:?}");
+        assert_eq!(held(&b), HeldSigner::Key(pk(WORKING_SEED)), "{kind:?}");
+
+        // While that key is current, an older one from the root is refused.
+        let older = event(ROOT_SEED, NOW + 10);
+        let out = b.ingest_local(&w.sealed(&older, ROOT_SEED, 3), LOCAL).await;
+        assert_eq!(out.result, AckResult::Superseded, "{kind:?}");
+
+        // The root withdraws the key: its clause stays, its new ones don't.
+        let out = b
+            .ingest_local(
+                &w.sealed(&withdrawal(ROOT_SEED, WORKING_SEED, NOW), ROOT_SEED, 4),
+                LOCAL,
+            )
+            .await;
+        assert_eq!(out.result, AckResult::Applied, "{kind:?}");
+        assert!(keys.signers().is_departed(&pk(WORKING_SEED)));
+        assert_eq!(held(&b), HeldSigner::Key(pk(WORKING_SEED)), "{kind:?}");
+        let out = b
+            .ingest_local(
+                &w.sealed(&event(WORKING_SEED, NOW + 300), WORKING_SEED, 5),
+                LOCAL,
+            )
+            .await;
+        assert_eq!(out.result, AckResult::Refused, "{kind:?}");
+
+        // At the departure floor is refused; above it, the root replaces it.
+        let out = b
+            .ingest_local(&w.sealed(&event(ROOT_SEED, NOW), ROOT_SEED, 6), LOCAL)
+            .await;
+        assert_eq!(out.result, AckResult::Superseded, "{kind:?}");
+        let out = b.ingest_local(&w.sealed(&older, ROOT_SEED, 7), LOCAL).await;
+        assert_eq!(out.result, AckResult::Applied, "{kind:?}");
+        assert_eq!(held(&b), HeldSigner::Key(pk(ROOT_SEED)), "{kind:?}");
+    }
+}
+
 /// Review 2a M1: the departure floor used to live in a separate file that a
 /// failed write (or a crash) left stale, so a relay could roll a rule back.
 /// It now lives in the guardian-keys state, persisted with the departure.
