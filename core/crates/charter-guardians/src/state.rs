@@ -1532,7 +1532,7 @@ pub enum RelaysChannel<'a> {
     Pasted,
 }
 
-/// A RELAYS change, already validated as a relay list (2–10 distinct secure
+/// A RELAYS, its relay list (if any) already validated (2–10 distinct secure
 /// endpoints) by the ward's existing check.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelaysInput<'a> {
@@ -1540,16 +1540,36 @@ pub struct RelaysInput<'a> {
     pub channel: RelaysChannel<'a>,
     /// The event's `created_at`.
     pub ts: i64,
-    pub relays: &'a [String],
+    /// The body's relay list, or `None` when it has none (a RELAYS carrying
+    /// only the guardian PIN or battery settings).
+    pub relays: Option<&'a [String]>,
     /// The body's `guardianPin` member: `None` when absent, the raw JSON
     /// (`null` included) when present.
     pub guardian_pin: Option<&'a Value>,
 }
 
-/// A RELAYS change from any signer (rule 11), with the existing RELAYS
-/// freshness checks: not in the future, at most 600 s old, not before
-/// pairing, newer than the last applied. A `guardianPin` is accepted only
-/// over the wrapped channel. OQ: How a guardian PIN reaches an Android ward.
+/// The same relay set, whatever the order.
+fn same_relays(a: &[String], b: &[String]) -> bool {
+    let mut x: Vec<&String> = a.iter().collect();
+    let mut y: Vec<&String> = b.iter().collect();
+    x.sort_by(|p, q| cmp_str(p, q));
+    y.sort_by(|p, q| cmp_str(p, q));
+    x == y
+}
+
+/// A RELAYS from the signer set (rule 11).
+///
+/// - The existing RELAYS freshness checks: not in the future, at most 600 s
+///   old, not before pairing, newer than the last applied.
+/// - A **PIN-only RELAYS** (gift-wrapped, a `guardianPin` and no relay list)
+///   is exempt from the 600 s age rule, so a ward asleep past it still takes
+///   the PIN; it keeps the replay floor.
+/// - Only a pinned root may change the relay list (`relays_root_only`). A
+///   working key's RELAYS must leave it as it is (no list, or the same set):
+///   it may carry the PIN and battery settings.
+/// - A `guardianPin` is accepted only over the wrapped channel.
+///
+/// The battery settings are the ward's own, not modelled here.
 pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> Step {
     step(state, now, |s| {
         if let RelaysChannel::Wrapped { seal_author } = ev.channel {
@@ -1560,10 +1580,13 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
         if !is_signer(s, ev.author) {
             return drop(Reason::NotSigner);
         }
+        let pin_only = matches!(ev.channel, RelaysChannel::Wrapped { .. })
+            && ev.relays.is_none()
+            && ev.guardian_pin.is_some();
         if ev.ts > now {
             return drop(Reason::Future);
         }
-        if now - ev.ts > RELAYS_TTL_SECONDS {
+        if !pin_only && now - ev.ts > RELAYS_TTL_SECONDS {
             return drop(Reason::Stale);
         }
         if ev.ts < s.paired_at {
@@ -1571,6 +1594,10 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
         }
         if ev.ts <= s.relays_updated_at {
             return drop(Reason::NotNewer);
+        }
+        let change = ev.relays.filter(|r| !same_relays(r, &s.relays));
+        if change.is_some() && !is_pinned(s, ev.author) {
+            return drop(Reason::RelaysRootOnly);
         }
         let mut pin = None;
         if let Some(raw) = ev.guardian_pin {
@@ -1582,14 +1609,16 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
                 None => return drop(Reason::BadPinRecord),
             }
         }
-        let old = std::mem::replace(&mut s.relays, ev.relays.to_vec());
-        s.previous_relays.push(PreviousRelays {
-            relays: old,
-            until: now + PREVIOUS_RELAYS_SECONDS,
-        });
-        if s.previous_relays.len() > MAX_PREVIOUS_RELAYS {
-            let excess = s.previous_relays.len() - MAX_PREVIOUS_RELAYS;
-            s.previous_relays.drain(..excess);
+        if let Some(relays) = change {
+            let old = std::mem::replace(&mut s.relays, relays.to_vec());
+            s.previous_relays.push(PreviousRelays {
+                relays: old,
+                until: now + PREVIOUS_RELAYS_SECONDS,
+            });
+            if s.previous_relays.len() > MAX_PREVIOUS_RELAYS {
+                let excess = s.previous_relays.len() - MAX_PREVIOUS_RELAYS;
+                s.previous_relays.drain(..excess);
+            }
         }
         s.relays_updated_at = ev.ts;
         if pin.is_some() {
@@ -1790,8 +1819,13 @@ pub struct RootKeys {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusPending {
+    /// The pending statement's event id (a typed presence code names it).
+    pub id: String,
     pub d: String,
     pub kind: PendingType,
+    /// The key that signed the pending statement (an objection's `p` is a
+    /// removal's signer).
+    pub signer: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub takes_effect_at: Option<i64>,
     pub expires_at: i64,
@@ -1805,6 +1839,8 @@ pub struct StatusGuardians {
     pub pending: Vec<StatusPending>,
     pub tombstones: usize,
     pub relays: Vec<String>,
+    /// A guardian PIN is set (Android presence confirmation needs one).
+    pub pin_set: bool,
     /// Accepted clauses and statements whose claimed time was clamped to the
     /// ward clock, since pairing.
     pub clamped: u64,
@@ -1837,14 +1873,17 @@ pub fn status_guardians(s: &GuardianState) -> StatusGuardians {
             .pending
             .iter()
             .map(|p| StatusPending {
+                id: p.id.clone(),
                 d: p.d.clone(),
                 kind: p.kind,
+                signer: p.signer.clone(),
                 takes_effect_at: p.takes_effect_at,
                 expires_at: p.expires_at,
             })
             .collect(),
         tombstones: s.tombstones.len(),
         relays: s.relays.clone(),
+        pin_set: s.guardian_pin.is_some(),
         clamped: s.clamped,
     }
 }

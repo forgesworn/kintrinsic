@@ -761,12 +761,13 @@ async fn a_gift_wrapped_relays_change_keeps_its_pin_out_of_the_pairing_record() 
     let w = Ward::new();
     let (b, keys) = w.broker();
     approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+    // A relay-list change: only a root may make one (rule 11).
     let ev = relays_event(
-        WORKING_SEED,
+        ROOT_SEED,
         NOW,
         json!({"machine": machine_pk(), "relays": default_relays(), "guardianPin": pin_record()}),
     );
-    let out = b.ingest_local(&w.sealed(&ev, WORKING_SEED, 2), LOCAL).await;
+    let out = b.ingest_local(&w.sealed(&ev, ROOT_SEED, 2), LOCAL).await;
     assert_eq!(out.result, AckResult::Applied);
     assert!(out.relays_changed);
     let raw = b.sys().pairing().load().unwrap().unwrap();
@@ -782,7 +783,7 @@ async fn a_gift_wrapped_relays_change_keeps_its_pin_out_of_the_pairing_record() 
     assert!(w.store.raw().unwrap().contains(&"5a".repeat(16)));
 
     // The same change again is unchanged; a stranger's is refused.
-    let out = b.ingest_local(&w.sealed(&ev, WORKING_SEED, 3), LOCAL).await;
+    let out = b.ingest_local(&w.sealed(&ev, ROOT_SEED, 3), LOCAL).await;
     assert_eq!(out.result, AckResult::Unchanged);
     let stranger = relays_event(
         STRANGER_SEED,

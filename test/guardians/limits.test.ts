@@ -74,12 +74,12 @@ describe('N3: previous relay lists are capped', () => {
   test('a 9th previous list drops the oldest', () => {
     let s = twoRoots()
     // 8 changes: 8 previous lists (the pairing list, 2 URLs, + 7 changes); all kept.
-    for (let n = 1; n <= 8; n++) s = rel(s, W1, T0 + 100 + n)
+    for (let n = 1; n <= 8; n++) s = rel(s, R1, T0 + 100 + n)
     let sr = projectState(s, T0 + 108).statusRelays
     expect(sr).toHaveLength(1 + 8 + 1)
     expect(sr).toContain('wss://a.example')
     // A 9th change adds a 9th previous list: the pairing list is dropped.
-    s = rel(s, W1, T0 + 109)
+    s = rel(s, R1, T0 + 109)
     sr = projectState(s, T0 + 109).statusRelays
     expect(sr).toHaveLength(1 + 8)
     expect(sr).not.toContain('wss://a.example')
@@ -87,7 +87,7 @@ describe('N3: previous relay lists are capped', () => {
     expect(sr[0]).toBe('wss://n9.example')
     expect(sr).toContain('wss://n1.example')
     // And a 10th drops the next oldest (the list the first change set).
-    s = rel(s, W1, T0 + 110)
+    s = rel(s, R1, T0 + 110)
     sr = projectState(s, T0 + 110).statusRelays
     expect(sr).toHaveLength(1 + 8)
     expect(sr).not.toContain('wss://n1.example')
@@ -95,7 +95,7 @@ describe('N3: previous relay lists are capped', () => {
   })
   test('the cap applies per change, not per day: expiry still applies to what is kept', () => {
     let s = twoRoots()
-    for (let n = 1; n <= 10; n++) s = rel(s, W1, T0 + 100 + n)
+    for (let n = 1; n <= 10; n++) s = rel(s, R1, T0 + 100 + n)
     expect(projectState(s, T0 + 110 + 7 * DAY).statusRelays).toEqual(['wss://n10.example'])
   })
 })

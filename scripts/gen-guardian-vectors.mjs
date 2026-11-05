@@ -285,8 +285,10 @@ function scenario(name, rules, description, build) {
       const input = { type: "signed", now, author: author.pk, sealAuthor: seal.pk, ts };
       return run("signed", input, () => G.acceptSignedEvent(state, { author: author.pk, sealAuthor: seal.pk, ts }, now), want);
     },
+    // `relays` null: the body has no relay list (a PIN-only or battery-only RELAYS).
     relays(author, ts, relays, now, want, { channel = "wrapped", seal = author, guardianPin } = {}) {
-      const ev = { author: author.pk, channel, sealAuthor: channel === "wrapped" ? seal.pk : null, ts, relays };
+      const ev = { author: author.pk, channel, sealAuthor: channel === "wrapped" ? seal.pk : null, ts };
+      if (relays !== null) ev.relays = relays;
       if (guardianPin !== undefined) ev.guardianPin = guardianPin;
       const input = { type: "relays", now, ...ev };
       return run("relays", input, () => G.applyRelays(state, ev, now), want);
@@ -722,22 +724,27 @@ scenario("rule9_recipients", ["9"], "A root with no W in the set receives direct
   c.statusSent(T0 + 15);
 });
 
-scenario("rule11_relays", ["11"], "A RELAYS change from any signer applies; a multi-root ward also sends STATUS on every list replaced within the last 7 days.", (c) => {
+scenario("rule11_relays", ["11"], "Only a root may change the relay list; a working key's RELAYS must leave it unchanged (it may carry the PIN or battery settings). A multi-root ward also sends STATUS on every list replaced within the last 7 days.", (c) => {
   twoRoots(c);
-  c.relays(W2, T0 + 100, ["wss://relay.three.example", "wss://relay.four.example"], T0 + 100, A("relays_applied"));
+  const L34 = ["wss://relay.three.example", "wss://relay.four.example"];
+  c.relays(R2, T0 + 100, L34, T0 + 100, A("relays_applied"));
   c.relays(W1, T0 + 100, ["wss://relay.five.example", "wss://relay.six.example"], T0 + 101, D("not_newer"));
   c.relays(X, T0 + 200, ["wss://relay.five.example", "wss://relay.six.example"], T0 + 201, D("not_signer"));
-  c.relays(W1, T0 + 300, ["wss://relay.five.example", "wss://relay.one.example"], T0 + 300, A("relays_applied"));
+  c.relays(W1, T0 + 300, ["wss://relay.five.example", "wss://relay.one.example"], T0 + 300, D("relays_root_only"));
+  c.relays(W2, T0 + 300, ["wss://relay.five.example", "wss://relay.one.example"], T0 + 300, D("relays_root_only"), { channel: "pasted" });
+  c.relays(W1, T0 + 301, [...L34].reverse(), T0 + 301, A("relays_applied"));
+  c.relays(W2, T0 + 302, null, T0 + 302, A("relays_applied"));
+  c.relays(R1, T0 + 303, ["wss://relay.five.example", "wss://relay.one.example"], T0 + 303, A("relays_applied"));
   c.tick(T0 + 100 + 7 * DAY - 1);
   c.tick(T0 + 100 + 7 * DAY);
-  c.tick(T0 + 300 + 7 * DAY);
+  c.tick(T0 + 303 + 7 * DAY);
 });
 
 scenario("relays_previous_cap", ["11"], "Only the 8 most recent previous relay lists are kept; a 9th change drops the oldest.", (c) => {
   twoRoots(c);
   // Ten changes: the list from pairing and the first change fall out of statusRelays.
   for (let n = 1; n <= 10; n++) {
-    c.relays(W1, T0 + 100 + n, [`wss://relay.n${n}.example`, `wss://relay.m${n}.example`], T0 + 100 + n, A("relays_applied"));
+    c.relays(R1, T0 + 100 + n, [`wss://relay.n${n}.example`, `wss://relay.m${n}.example`], T0 + 100 + n, A("relays_applied"));
   }
   c.tick(T0 + 110 + 7 * DAY);
 });
@@ -748,16 +755,23 @@ scenario("relays_existing_checks", ["11", "offline relay recovery"], "The existi
   c.relays(W1, T0 + 100, RELAYS, T0 + 701, D("stale"));
   c.relays(W1, T0 - 1, RELAYS, T0 + 10, D("pairing_floor"));
   c.relays(W1, T0 + 100, RELAYS, T0 + 100, D("seal_mismatch"), { seal: X });
-  c.relays(W1, T0 + 100, ["wss://relay.three.example", "wss://relay.four.example"], T0 + 100, A("relays_applied"), { channel: "pasted" });
+  c.relays(R1, T0 + 100, ["wss://relay.three.example", "wss://relay.four.example"], T0 + 100, A("relays_applied"), { channel: "pasted" });
   c.relays(R1, T0 + 100, RELAYS, T0 + 110, D("not_newer"));
 });
 
-scenario("relays_guardian_pin", ["presence confirmation", "11"], "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole.", (c) => {
+scenario("relays_guardian_pin", ["presence confirmation", "11"], "guardianPin is accepted only from a gift-wrapped RELAYS; a pasted relay code carrying one is refused whole. A PIN-only RELAYS (no relay list) from any signer is not refused for its age, but keeps the replay floor.", (c) => {
   pairW1(c);
   const pin = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.0").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash")) };
+  const pin2 = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.1").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash2")) };
   c.relays(W1, T0 + 100, RELAYS, T0 + 100, D("pin_not_wrapped"), { channel: "pasted", guardianPin: pin });
   c.relays(W1, T0 + 100, RELAYS, T0 + 100, D("bad_pin_record"), { guardianPin: { ...pin, v: 2 } });
   c.relays(W1, T0 + 100, RELAYS, T0 + 100, A("relays_applied"), { guardianPin: pin });
+  c.relays(W1, T0 + 200, null, T0 + 200 + DAY, A("relays_applied"), { guardianPin: pin2 });
+  c.relays(W1, T0 + 200, null, T0 + 200 + DAY, D("not_newer"), { guardianPin: pin2 });
+  c.relays(W1, T0 + DAY + 300, null, T0 + DAY + 300, D("pin_not_wrapped"), { channel: "pasted", guardianPin: pin });
+  c.relays(W1, T0 + DAY + 401, null, T0 + DAY + 400, D("future"), { guardianPin: pin });
+  c.relays(W1, T0 + DAY + 300, RELAYS, T0 + DAY + 901, D("stale"), { guardianPin: pin });
+  c.relays(R1, T0 + DAY + 500, null, T0 + DAY + 500, A("relays_applied"), { guardianPin: pin });
 });
 
 

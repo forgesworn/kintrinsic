@@ -1186,7 +1186,7 @@ impl GuardianStatements for GuardianKeys {
             author: &author,
             channel: cg::RelaysChannel::Wrapped { seal_author: &seal },
             ts: secs(change.ts),
-            relays: change.relays,
+            relays: Some(change.relays),
             guardian_pin: pin.as_ref(),
         };
         let recorded = self.commit(|d| {

@@ -2791,10 +2791,23 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
     - Pinning a different root in place of a current one happens only through
       a confirmed root move, or a local unpair by an administrator. No signer,
       root or working key can re-pair the ward any other way.
-    - A RELAYS change from any signer applies as usual. STATUS `guardians`
-      carries the relay list. For 7 days after a change, a ward with more than
-      one root also sends STATUS on its previous relays, so the other parent
-      sees the change wherever they are listening.
+    - A RELAYS signed by a **pinned root** may change anything. A RELAYS
+      signed by a **working key** must leave the relay list unchanged: its
+      `relays` field absent, or the same set as the ward's current list. It
+      may carry `guardianPin` and the battery settings. Otherwise it is
+      refused whole. A stolen phone whose working key is still active could
+      otherwise point a ward at relays of the thief's choice, where the
+      withdrawal published to the old relays would never be read; the worst
+      it can do with the battery settings is slow polling.
+    - A **PIN-only RELAYS** is a gift-wrapped RELAYS with `guardianPin` and no
+      `relays` field. It is accepted from any signer under the standard
+      gift-wrap handling and the RELAYS replay floor (newer than the last
+      applied, not in the future, not before pairing); the 600-second age
+      rule does not apply to it, so a ward that was asleep still takes the
+      PIN. A pasted relay code carrying `guardianPin` is refused.
+    - STATUS `guardians` carries the relay list. For 7 days after a change, a
+      ward with more than one root also sends STATUS on its previous relays,
+      so the other parent sees the change wherever they are listening.
 
 **Pending statements.**
 - A co-guardian, removal or move is pending until it takes effect, is
@@ -2814,6 +2827,13 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
     p=1, 32-byte output, hex) inside a `guardianPin` field of the RELAYS event
     body. It is signed by any key in the signer set and stored in the Device
     Owner's private storage.
+  - It travels in a gift-wrapped **PIN-only RELAYS** (rule 11): no relay list,
+    so it can't revert another signer's relay change, and no 600-second age
+    limit, so it reaches a ward that was asleep. A pasted relay code never
+    carries it.
+  - STATUS `guardians.pinSet` says whether a PIN is set. The guardian app
+    keeps a PIN marked as sending until a STATUS shows `pinSet`, and sends it
+    again on each STATUS without it.
   - A ward with no PIN set can't mint a token. The guardian app sets one
     before it offers anything that needs presence.
   - Wrong entries back off: after 5 failures the next try waits 1 minute,
@@ -2863,9 +2883,15 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 
 **STATUS.** A ward implementing this section adds `guardians` to STATUS:
 - `roots`: a list of `{ root, keys: [working-key hex] }`;
-- `pending`: a list of `{ d, kind: 'coguardian' | 'removal' | 'move', takesEffectAt?, expiresAt }`;
+- `pending`: a list of `{ id, d, kind: 'coguardian' | 'removal' | 'move',
+  signer, takesEffectAt?, expiresAt }`. `id` is the pending statement's event
+  id, so a typed presence code can name any pending statement, not only one
+  this install sent; `signer` is the key that signed it, which an objection
+  names as its `p`;
 - `tombstones`: a count, so a dropped withdrawal shows up as a mismatch;
 - `relays`: the ward's current relay list;
+- `pinSet`: `true` when a guardian PIN is set (rule 11, *Presence
+  confirmation*), else `false`;
 - `clamped`: a count, since pairing, of accepted clauses and statements whose
   `issuedAt` was ahead of the ward's clock (*Who may sign what*).
 

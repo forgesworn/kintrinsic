@@ -118,7 +118,9 @@ pub fn apply_step(state: Option<&GuardianState>, input: &Value) -> (Option<Guard
             now,
         ),
         "relays" => {
-            let relays: Vec<String> = serde_json::from_value(input["relays"].clone()).unwrap();
+            let relays: Option<Vec<String>> = input
+                .get("relays")
+                .map(|r| serde_json::from_value(r.clone()).unwrap());
             let channel = match s(input, "channel") {
                 "wrapped" => RelaysChannel::Wrapped {
                     seal_author: s(input, "sealAuthor"),
@@ -132,7 +134,7 @@ pub fn apply_step(state: Option<&GuardianState>, input: &Value) -> (Option<Guard
                     author: s(input, "author"),
                     channel,
                     ts: i(input, "ts"),
-                    relays: &relays,
+                    relays: relays.as_deref(),
                     guardian_pin: input.get("guardianPin"),
                 },
                 now,

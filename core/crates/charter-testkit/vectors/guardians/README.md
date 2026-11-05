@@ -145,7 +145,7 @@ Every input has `type` and `now`.
 | `presence_confirm` | `sealAuthor`, `inner` (kind 31121 signed event) | A presence confirmation, already unwrapped |
 | `clause` | `id` (64 hex, the CLAUSE event id), `author`, `sealAuthor`, `subject`, `kind` (opaque strings), `issuedAt` | A CLAUSE's id, signer, seal and identity; the clause body is out of scope |
 | `signed` | `author`, `sealAuthor`, `ts` | The signer-set gate for a GRANT or USAGE_SYNC |
-| `relays` | `author`, `channel` (`"wrapped"` or `"pasted"`), `sealAuthor` (hex for `wrapped`, `null` for `pasted`), `ts` (the event's `created_at`), `relays` (string list), optional `guardianPin` (any JSON value: the body's `guardianPin` field) | A RELAYS change, gift-wrapped or pasted as an offline relay code |
+| `relays` | `author`, `channel` (`"wrapped"` or `"pasted"`), `sealAuthor` (hex for `wrapped`, `null` for `pasted`), `ts` (the event's `created_at`), optional `relays` (string list; absent when the body has no relay list), optional `guardianPin` (any JSON value: the body's `guardianPin` field) | A RELAYS, gift-wrapped or pasted as an offline relay code |
 | `status_sent` | — | The ward has sent a STATUS (departed keys have had their last one) |
 
 ### Expect
@@ -202,8 +202,9 @@ that.
   `receivedAt`). `expiresAt` = min(`expiresAt`, effective + 604800), or
   effective + 604800 without one. `takesEffectAt` is set only on a confirmed
   removal: max(confirmation `now`, `receivedAt` + 259200). STATUS
-  `guardians.pending` is `{ id, d, kind, takesEffectAt?, expiresAt }` from
-  this (`id` is `statement`).
+  `guardians.pending` is `{ id, d, kind, signer, takesEffectAt?, expiresAt }`
+  from this (`id` is `statement`). STATUS `guardians` also carries `pinSet`
+  (`guardianPin` is not null) and `clamped`.
 - `tombstones`: applied withdrawals plus applied removals, for the life of the
   pairing (STATUS `guardians.tombstones`).
 - `held`: held early withdrawals plus held cancels and objections (stored
@@ -386,12 +387,18 @@ judged: a GRANT keeps its own skew rule outside this gate, and USAGE_SYNC has
 none.
 
 **`relays`:** `seal_mismatch` (`wrapped` only: seal author ≠ author) →
-`not_signer` → `future` (`ts` > `now`) → `stale` (`now` − `ts` > 600) →
-`pairing_floor` (`ts` < the pairing time) → `not_newer` (`ts` ≤ the last
-applied `ts`, initially 0) → with a `guardianPin`: `pin_not_wrapped`
-(channel `pasted`) → `bad_pin_record` (not a valid record, see `pin.json`) →
-`relays_applied`. Relay-list validation (2–10 distinct secure endpoints) is
-an existing check outside these vectors and runs first in a ward.
+`not_signer` → `future` (`ts` > `now`) → `stale` (`now` − `ts` > 600; not
+checked for a **PIN-only RELAYS**: `wrapped`, a `guardianPin` and no
+`relays`) → `pairing_floor` (`ts` < the pairing time) → `not_newer` (`ts` ≤
+the last applied `ts`, initially 0) → `relays_root_only` (`relays` present,
+not the same set as the current list, and the author is not a pinned root) →
+with a `guardianPin`: `pin_not_wrapped` (channel `pasted`) →
+`bad_pin_record` (not a valid record, see `pin.json`) → `relays_applied`.
+An accepted RELAYS sets the last applied `ts`; only one whose `relays` is a
+different set replaces the list (and records the old one for
+`statusRelays`); a valid `guardianPin` replaces the PIN. Relay-list
+validation (2–10 distinct secure endpoints) and battery settings are
+existing checks outside these vectors; validation runs first in a ward.
 
 **`tick`:** always `ticked`. **`status_sent`:** always `status_sent`.
 
@@ -539,4 +546,5 @@ subjects, sorted. A device is unconfirmed while both flags are false.
 - `waitSeconds` is the wait before the next try after `failures` consecutive
   wrong entries: 0 below 5, then 60 × 2^(failures − 5), capped at 3600.
 - A ward accepts a `guardianPin` record only from a gift-wrapped RELAYS (see
-  `relays` above).
+  `relays` above), from any signer. A PIN-only RELAYS (no relay list) is not
+  refused for its age.

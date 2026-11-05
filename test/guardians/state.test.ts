@@ -15,6 +15,7 @@ import {
   recipients,
   statusRecipients,
   statusGuardians,
+  rootOf,
   projectState,
   heldClause,
   pendingExpiry,
@@ -289,8 +290,9 @@ describe('rule 6: co-guardian', () => {
     expect(heldClause(c, 'k', 'x')?.root).toBe(R2.pk)
   })
   test('pending is reported in STATUS', () => {
-    const s = ok(inb(pairedR1W1(), W1, coGuardian(R1, R2, { issuedAt: T0 })))
-    expect(statusGuardians(s).pending).toEqual([{ d: dG(R2), kind: 'coguardian', expiresAt: T0 + 7 * DAY }])
+    const cg = coGuardian(R1, R2, { issuedAt: T0 })
+    const s = ok(inb(pairedR1W1(), W1, cg))
+    expect(statusGuardians(s).pending).toEqual([{ id: cg.id, d: dG(R2), kind: 'coguardian', signer: R1.pk, expiresAt: T0 + 7 * DAY }])
   })
   test('confirmation needs the inline approval, the token, and a W R2 approved', () => {
     const cg = coGuardian(R1, R2, { issuedAt: T0 })
@@ -346,7 +348,7 @@ describe('rule 7: root removal', () => {
     s = ok(registerPresenceToken(s, TOKEN, dU(R2), T0 + 120))
     dropped(applyPresenceConfirm(s, { sealAuthor: W2.pk, inner: confirm(W2, rm.id, TOKEN, T0 + 130) }, T0 + 130), 'confirmer_not_bound')
     s = ok(applyPresenceConfirm(s, { sealAuthor: W1.pk, inner: confirm(W1, rm.id, TOKEN, T0 + 130) }, T0 + 130), 'removal_confirmed')
-    expect(statusGuardians(s).pending).toEqual([{ d: dU(R2), kind: 'removal', takesEffectAt: T0 + 110 + H72, expiresAt: T0 + 100 + 7 * DAY }])
+    expect(statusGuardians(s).pending).toEqual([{ id: rm.id, d: dU(R2), kind: 'removal', signer: R1.pk, takesEffectAt: T0 + 110 + H72, expiresAt: T0 + 100 + 7 * DAY }])
     s = tick(s, T0 + 110 + H72 - 1).state
     expect(isSigner(s, R2.pk)).toBe(true)
     const r = tick(s, T0 + 110 + H72)
@@ -524,12 +526,13 @@ describe('rule 9 recipients and STATUS', () => {
       pending: [],
       tombstones: 0,
       relays: ['wss://a.example', 'wss://b.example'],
+      pinSet: false,
       clamped: 0,
     })
   })
   test('rule 11: RELAYS from any signer; a multi-root ward also uses the previous relays for 7 days', () => {
     let s = twoRoots()
-    s = ok(applyRelays(s, { author: W2.pk, sealAuthor: W2.pk, ts: T0 + 100, relays: ['wss://c.example', 'wss://d.example'] }, T0 + 100), 'relays_applied')
+    s = ok(applyRelays(s, { author: R2.pk, sealAuthor: R2.pk, channel: 'wrapped', ts: T0 + 100, relays: ['wss://c.example', 'wss://d.example'] }, T0 + 100), 'relays_applied')
     expect(projectState(s, T0 + 100).statusRelays).toEqual(['wss://c.example', 'wss://d.example', 'wss://a.example', 'wss://b.example'])
     expect(projectState(tick(s, T0 + 100 + 7 * DAY).state, T0 + 100 + 7 * DAY).statusRelays).toEqual(['wss://c.example', 'wss://d.example'])
     dropped(applyRelays(s, { author: W1.pk, sealAuthor: W1.pk, ts: T0 + 100, relays: [] }, T0 + 101), 'not_newer')
@@ -544,5 +547,56 @@ describe('state is pure JSON', () => {
     inb(s, W1, removal(R1, R2, { issuedAt: T0 + 100 }), T0 + 110)
     expect(JSON.stringify(s)).toBe(before)
     expect(JSON.parse(before)).toEqual(s)
+  })
+})
+
+describe('rule 11: relay lists, the guardian PIN', () => {
+  const pin = { v: 1, salt: '00'.repeat(16), hash: 'ab'.repeat(32) }
+  const AB = ['wss://a.example', 'wss://b.example']
+  const wrapped = (a: Key, ts: number, extra: { relays?: string[]; guardianPin?: unknown } = {}) =>
+    ({ author: a.pk, sealAuthor: a.pk, channel: 'wrapped' as const, ts, ...extra })
+  test('only a root may change the relay list; a working key may resend it unchanged', () => {
+    const s = twoRoots()
+    dropped(applyRelays(s, wrapped(W1, T0 + 100, { relays: ['wss://c.example', 'wss://d.example'] }), T0 + 100), 'relays_root_only')
+    dropped(applyRelays(s, { author: W1.pk, sealAuthor: null, channel: 'pasted', ts: T0 + 100, relays: ['wss://c.example', 'wss://d.example'] }, T0 + 100), 'relays_root_only')
+    let t = ok(applyRelays(s, wrapped(W1, T0 + 100, { relays: [...AB].reverse(), guardianPin: pin }), T0 + 100), 'relays_applied')
+    expect(t.relays).toEqual(AB)
+    expect(t.previousRelays).toEqual([])
+    expect(statusGuardians(t).pinSet).toBe(true)
+    t = ok(applyRelays(t, wrapped(W2, T0 + 101), T0 + 101), 'relays_applied') // battery settings only
+    t = ok(applyRelays(t, wrapped(R2, T0 + 102, { relays: ['wss://c.example', 'wss://d.example'] }), T0 + 102), 'relays_applied')
+    expect(t.relays).toEqual(['wss://c.example', 'wss://d.example'])
+  })
+  test('a PIN-only RELAYS is not refused for its age, but keeps the replay floor and the wrap', () => {
+    const s = pairedR1W1()
+    expect(statusGuardians(s).pinSet).toBe(false)
+    const t = ok(applyRelays(s, wrapped(W1, T0 + 100, { guardianPin: pin }), T0 + 100 + DAY), 'relays_applied')
+    expect(statusGuardians(t).pinSet).toBe(true)
+    expect(t.relaysUpdatedAt).toBe(T0 + 100)
+    dropped(applyRelays(t, wrapped(W1, T0 + 100, { guardianPin: pin }), T0 + 100 + DAY), 'not_newer')
+    dropped(applyRelays(s, { author: W1.pk, sealAuthor: null, channel: 'pasted', ts: T0 + 100, guardianPin: pin }, T0 + 100), 'pin_not_wrapped')
+    dropped(applyRelays(s, wrapped(W1, T0 + 101, { guardianPin: pin }), T0 + 100), 'future')
+    // A RELAYS with a list is still held to 600 s.
+    dropped(applyRelays(s, wrapped(W1, T0 + 100, { relays: AB, guardianPin: pin }), T0 + 701), 'stale')
+  })
+})
+
+describe('D5: a phone-held root mints a fresh working key', () => {
+  test('R approves a fresh W (W ≠ R, not pinned); W then confirms presence for R\'s own removal of R2', () => {
+    // R1 paired directly (the phone holds the root), R2 added with W2.
+    let s = pairedR1()
+    const cg = coGuardian(R1, R2, { issuedAt: T0 + 5 })
+    s = ok(inb(s, R1, cg, T0 + 10), 'coguardian_pending')
+    s = ok(registerPresenceToken(s, TOKEN2, dG(R2), T0 + 20))
+    s = ok(applyPresenceConfirm(s, { sealAuthor: W2.pk, inner: confirm(W2, cg.id, TOKEN2, T0 + 30, approval(R2, W2, { issuedAt: T0 + 15 })) }, T0 + 30), 'coguardian_applied')
+    const rm = removal(R1, R2, { issuedAt: T0 + 40 })
+    s = ok(inb(s, R1, rm, T0 + 40), 'removal_pending')
+    s = ok(registerPresenceToken(s, TOKEN, dU(R2), T0 + 50))
+    // The root itself can't confirm: presence needs a working key bound to it.
+    dropped(applyPresenceConfirm(s, { sealAuthor: R1.pk, inner: confirm(R1, rm.id, TOKEN, T0 + 60) }, T0 + 60), 'confirmer_not_bound')
+    // The phone mints W1 and R1 approves it: allowed, and W1 binds to R1.
+    s = ok(inb(s, W1, approval(R1, W1, { issuedAt: T0 + 61 }), T0 + 61), 'approval_applied')
+    expect(rootOf(s, W1.pk)).toBe(R1.pk)
+    s = ok(applyPresenceConfirm(s, { sealAuthor: W1.pk, inner: confirm(W1, rm.id, TOKEN, T0 + 62) }, T0 + 62), 'removal_confirmed')
   })
 })

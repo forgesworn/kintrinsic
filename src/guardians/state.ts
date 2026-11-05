@@ -1075,26 +1075,50 @@ export interface RelaysInput {
   sealAuthor: string | null
   /** The event's `created_at`. */
   ts: number
-  relays: string[]
+  /**
+   * The body's relay list, or undefined when the body has none (a RELAYS
+   * carrying only the guardian PIN or battery settings).
+   */
+  relays?: string[]
   /** The optional `guardianPin` field of the RELAYS body. */
   guardianPin?: unknown
 }
 
+/** The same relay set, whatever the order. */
+function sameRelays(a: readonly string[], b: readonly string[]): boolean {
+  const x = [...a].sort(cmp)
+  const y = [...b].sort(cmp)
+  return x.length === y.length && x.every((r, i) => r === y[i])
+}
+
 /**
- * A RELAYS change from any signer (rule 11), with the existing RELAYS
- * freshness checks: not in the future, at most 600 s old, not before pairing,
- * newer than the last applied. A `guardianPin` is accepted only over the
- * wrapped channel. OQ: How a guardian PIN reaches an Android ward.
- * Relay-list validation (2–10 distinct secure endpoints) is not modelled.
+ * A RELAYS from the signer set (rule 11).
+ *
+ * - The existing RELAYS freshness checks: not in the future, at most 600 s
+ *   old, not before pairing, newer than the last applied.
+ * - A **PIN-only RELAYS** (gift-wrapped, a `guardianPin` and no relay list)
+ *   is exempt from the 600 s age rule, so a ward asleep past it still takes
+ *   the PIN; it keeps the replay floor.
+ * - Only a pinned root may change the relay list. A working key's RELAYS must
+ *   leave it as it is (no list, or the same set): it may carry the PIN and
+ *   battery settings. A stolen phone can't steer a ward away from the relays
+ *   its withdrawal is published on.
+ * - A `guardianPin` is accepted only over the wrapped channel.
+ *
+ * Relay-list validation (2–10 distinct secure endpoints) and the battery
+ * settings are the ward's existing checks, not modelled here.
  */
 export function applyRelays(state: GuardianState, ev: RelaysInput, now: number): StepResult {
   return step(state, now, (s) => {
     if (ev.channel === 'wrapped' && ev.sealAuthor !== ev.author) return drop('seal_mismatch')
     if (!isSigner(s, ev.author)) return drop('not_signer')
+    const pinOnly = ev.channel === 'wrapped' && ev.relays === undefined && ev.guardianPin !== undefined
     if (ev.ts > now) return drop('future')
-    if (now - ev.ts > RELAYS_TTL_SECONDS) return drop('stale')
+    if (!pinOnly && now - ev.ts > RELAYS_TTL_SECONDS) return drop('stale')
     if (ev.ts < s.pairedAt) return drop('pairing_floor')
     if (ev.ts <= s.relaysUpdatedAt) return drop('not_newer')
+    const changes = ev.relays !== undefined && !sameRelays(ev.relays, s.relays)
+    if (changes && !isPinned(s, ev.author)) return drop('relays_root_only')
     let pin: GuardianPinRecord | null = null
     if (ev.guardianPin !== undefined) {
       if (ev.channel !== 'wrapped') return drop('pin_not_wrapped')
@@ -1102,9 +1126,11 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
       if (!v.ok) return drop('bad_pin_record')
       pin = v.record
     }
-    s.previousRelays.push({ relays: s.relays, until: now + PREVIOUS_RELAYS_SECONDS })
-    while (s.previousRelays.length > PREVIOUS_RELAYS_MAX) s.previousRelays.shift()
-    s.relays = [...ev.relays]
+    if (changes && ev.relays) {
+      s.previousRelays.push({ relays: s.relays, until: now + PREVIOUS_RELAYS_SECONDS })
+      while (s.previousRelays.length > PREVIOUS_RELAYS_MAX) s.previousRelays.shift()
+      s.relays = [...ev.relays]
+    }
     s.relaysUpdatedAt = ev.ts
     if (pin) s.guardianPin = pin
     return accept('relays_applied')
@@ -1211,9 +1237,16 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
 
 export interface StatusGuardians {
   roots: { root: string; keys: string[] }[]
-  pending: { d: string; kind: PendingType; takesEffectAt?: number; expiresAt: number }[]
+  /**
+   * `id` is the pending statement's event id (a typed presence code names
+   * it); `signer` is the key that signed it (an objection's `p` is a
+   * removal's signer).
+   */
+  pending: { id: string; d: string; kind: PendingType; signer: string; takesEffectAt?: number; expiresAt: number }[]
   tombstones: number
   relays: string[]
+  /** A guardian PIN is set (Android presence confirmation needs one). */
+  pinSet: boolean
   /** Accepted clauses and statements whose claimed time was clamped to the ward clock, since pairing. */
   clamped: number
 }
@@ -1229,13 +1262,16 @@ export function statusGuardians(state: GuardianState): StatusGuardians {
         .sort(cmp),
     })),
     pending: state.pending.map((p) => ({
+      id: p.id,
       d: p.d,
       kind: p.type,
+      signer: p.signer,
       ...(p.takesEffectAt !== null ? { takesEffectAt: p.takesEffectAt } : {}),
       expiresAt: p.expiresAt,
     })),
     tombstones: state.tombstones.length,
     relays: [...state.relays],
+    pinSet: state.guardianPin !== null,
     clamped: state.clamped,
   }
 }
