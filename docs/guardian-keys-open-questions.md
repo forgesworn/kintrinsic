@@ -1580,40 +1580,45 @@ is accepted by the ward but not yet produced by the app.
 
 ## A future-dated statement dropped on arrival is not remembered
 
-**Where:** *Who may sign what* (a clamped statement's `id` is remembered for
-its slot); *Pending statements*; `StoredStatement.remembered`,
-`MAX_REMEMBERED_PER_STATEMENT_SLOT`.
+**Where:** *Who may sign what* (each seal author's replay floor per slot);
+*Pending statements*; `GuardianState.statementFloors`, `orderAgainst`,
+`putStatement`.
 
-**Question:** a statement whose `issuedAt` was clamped is remembered only
+**Question:** a statement raises its seal author's floor for its slot only
 once it is stored. One dropped on arrival is never stored: objected by a held
 objection, already expired, or cancelled by a held cancel received in the
-same second. Its `id` is not remembered, so a relay that re-delivers it later
-gives it a fresh effective time, and it may pend again.
+same second. It leaves no floor, so a relay that re-delivers it later gives
+it a fresh effective time, and it may pend again.
 
 **Build's interim reading:** accepted, documented. It is bounded: every
 pending co-guardian, removal or move still needs presence confirmation at the
 ward before it takes effect, and an objection blocks a re-delivered removal
 for 7 days (rule 7). A guardian install that sees in STATUS a statement it
-cancelled signs and sends a fresh cancel (*Pending statements*).
+cancelled signs and sends a fresh cancel (*Pending statements*). Once any
+later statement from the same install is stored in that slot, its floor
+covers the dropped one too, since an install's `issuedAt` only rises.
 
 **Raised by:** build 2026-11-05.
 
 ## A clause seeded from a pre-upgrade store has no event id
 
-**Where:** *Who may sign what* (a clamped clause's `id` is remembered for its
-`(subject, kind)`); `charter-spine` `SlotSeed::Held`, which seeds a slot from
-the clause store the first time a clause for it arrives.
+**Where:** *Who may sign what* (each signer's replay floor per
+`(subject, kind)`); rule 10 (the upgrade limit); `charter-spine`
+`SlotSeed::Held`, which seeds a slot from the clause store the first time a
+clause for it arrives.
 
 **Question:** a slot seeded from a clause stored before the upgrade has the
 held clause's signer and `issuedAt`, but no event id. If that clause was far
-in the future, its `id` cannot be remembered, so once a newer clause replaces
-it, a relay re-delivering the old one cannot be refused by `id`.
+in the future and a newer clause replaces it, can a relay re-deliver the old
+one?
 
-**Build's interim reading:** accepted, documented. It is bounded by the
-2-day gift-wrap window on wards from before the section: a wrap whose
-timestamp is more than 2 days from the ward's clock is refused (*Wrap
-freshness jitter*), so a relay can re-deliver such a clause only while its
-wrap is inside that window. Every clause that arrives after the upgrade is
-remembered as usual.
+**Build's interim reading:** no. Replays are refused by floor, not by id: the
+seeded clause counts as its signer's floor at its real `issuedAt`, and the
+clause that replaces it keeps that floor, so a re-delivery is a `replay`. The
+machine-wide `content` slot records no signer, so its seeded clause is read
+as the pinned root's. The one edge left is recorded in rule 10: a far-future
+machine-wide clause from before the upgrade holds its slot for the pinned
+root until the ward's clock passes it; any other current signer can still
+replace it.
 
 **Raised by:** build 2026-11-05.
