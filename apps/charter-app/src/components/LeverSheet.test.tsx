@@ -101,22 +101,39 @@ describe("LeverSheet", () => {
 
     it("the stepper moves in fives from 30, and its button gives what it shows", async () => {
       mount(<LeverSheet mode="give" child={CHILD} onClose={onClose} />);
-      await click(button("+")); // aria-label "5 minutes more"
-      await click(button("+"));
+      await click(button("+5")); // aria-label "5 minutes more"
+      await click(button("+5"));
       expect(container.textContent).toContain("40 min");
       await click(button("Give 40 min"));
       expect(ctx.giveTime).toHaveBeenCalledTimes(1);
       expect(ctx.giveTime).toHaveBeenCalledWith("c1", 40, undefined);
     });
 
+    it("the outer buttons jump by twenty, and clamp at the ends like the fives", async () => {
+      mount(<LeverSheet mode="give" child={CHILD} onClose={onClose} />);
+      await click(button("+20"));
+      expect(container.textContent).toContain("50 min");
+      await click(button("−20"));
+      await click(button("−20"));
+      expect(container.textContent).toContain("10 min");
+      // −20 from 10 lands on the floor, not below it, and both minus buttons
+      // then disable together.
+      await click(button("−20"));
+      expect(container.textContent).toContain("5 min");
+      expect(button("−20").disabled).toBe(true);
+      expect(button("−5").disabled).toBe(true);
+      expect(button("+20").disabled).toBe(false);
+    });
+
     it("never goes below 5 or above 240", async () => {
       mount(<LeverSheet mode="give" child={CHILD} onClose={onClose} />);
-      for (let i = 0; i < 10; i++) await click(button("−"));
+      for (let i = 0; i < 10; i++) await click(button("−5"));
       expect(container.textContent).toContain("5 min");
-      expect(button("−").disabled).toBe(true);
-      for (let i = 0; i < 60; i++) await click(button("+"));
+      expect(button("−5").disabled).toBe(true);
+      for (let i = 0; i < 60; i++) await click(button("+5"));
       expect(container.textContent).toContain("240 min");
-      expect(button("+").disabled).toBe(true);
+      expect(button("+5").disabled).toBe(true);
+      expect(button("+20").disabled).toBe(true);
     });
 
     it("says to turn on parent approval, and stays open, when nothing was signed", async () => {
@@ -189,11 +206,51 @@ describe("LeverSheet", () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it("steps the persisted chosen amount down in fives, never above what was asked", async () => {
+    it("steps the persisted chosen amount in fives, below AND above what was asked", async () => {
       mount(<LeverSheet mode="approve" child={CHILD} request={ASK} onClose={onClose} />);
-      expect(button("+").disabled).toBe(true); // already at the ask
-      await click(button("−"));
+      // The ask is an opening bid, not a ceiling: the device enacts any grant
+      // up to 1440, so "+" is live at the asked amount.
+      expect(button("+5").disabled).toBe(false);
+      await click(button("−5"));
       expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 25);
+      await click(button("+5"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 35);
+      await click(button("+20"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 50);
+      await click(button("−20"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 10);
+    });
+
+    it("stops at the gift ceiling, or at the ask itself when that is larger", async () => {
+      mount(
+        <LeverSheet mode="approve" child={CHILD} request={{ ...ASK, chosenMinutes: 240 }} onClose={onClose} />,
+      );
+      expect(button("+5").disabled).toBe(true);
+      expect(button("+20").disabled).toBe(true);
+      mount(
+        <LeverSheet
+          mode="approve"
+          child={CHILD}
+          request={{ ...ASK, minutesRequested: 300, chosenMinutes: 300 }}
+          onClose={onClose}
+        />,
+      );
+      expect(button("Approve 300 min")).toBeDefined();
+      expect(button("+5").disabled).toBe(true);
+    });
+
+    it("a preset sets the amount outright, above the ask included, and says what was asked", async () => {
+      mount(<LeverSheet mode="approve" child={CHILD} request={ASK} onClose={onClose} />);
+      await click(button("1 hour"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 60);
+      await click(button("10 min"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 10);
+      // The note names the ask whenever the amount differs from it, either way.
+      mount(
+        <LeverSheet mode="approve" child={CHILD} request={{ ...ASK, chosenMinutes: 60 }} onClose={onClose} />,
+      );
+      expect(container.textContent).toContain("They asked for 30 min.");
+      expect(button("Approve 60 min")).toBeDefined();
     });
 
     it("reads a previously chosen amount, so a retry doesn't snap back to the ask", async () => {

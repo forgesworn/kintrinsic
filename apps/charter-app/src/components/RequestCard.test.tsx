@@ -211,7 +211,7 @@ describe("RequestCard", () => {
 
     await click(button("Change amount"));
     expect(container.querySelector(".sheet-backdrop")).not.toBeNull();
-    await click(button("−"));
+    await click(button("−5"));
     expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 10);
   });
 

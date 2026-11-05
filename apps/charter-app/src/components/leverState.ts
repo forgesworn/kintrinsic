@@ -22,6 +22,8 @@ import type { Child, Device } from "../domain/types";
 /** Where the give stepper opens: the same opening ask a locked ward sends. */
 export const DEFAULT_GIFT_MINUTES = 30;
 export const GIFT_STEP = 5;
+/** The stepper's outer buttons: a bigger jump for "make it an hour" moments. */
+export const GIFT_STEP_BIG = 20;
 export const GIFT_MIN = 5;
 export const GIFT_MAX = 240;
 
