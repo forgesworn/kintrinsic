@@ -43,9 +43,14 @@ static PRESENCE: std::sync::Mutex<Option<(Value, std::time::Instant)>> =
 /// only and never written anywhere: a pending statement is a dispute between
 /// the parents, which the child must not see (contract rule 5), so the
 /// world-readable guardians view no longer carries it. Dropped once a code is
-/// shown for one of them, or after the same ten minutes as a code.
+/// shown for one of them, or after [`PRESENCE_LIST_TTL_SECS`].
 static PRESENCE_LIST: std::sync::Mutex<Option<(Vec<Value>, std::time::Instant)>> =
     std::sync::Mutex::new(None);
+
+/// How long the pending list stays on screen: two minutes, matching the page.
+/// What is waiting is a dispute between the parents, so it is shown no longer
+/// than it takes to pick one.
+const PRESENCE_LIST_TTL_SECS: u64 = 120;
 
 /// Who the ward trusts and who set each rule, as charterd publishes it
 /// (world-readable, no secrets, never a pending statement).
@@ -900,10 +905,10 @@ fn collect_status() -> String {
         })
     });
     drop(guard);
-    // The list to choose from, dropped after the same ten minutes.
+    // The list to choose from, dropped after two minutes.
     let mut guard = PRESENCE_LIST.lock().expect("presence list lock");
     if let Some((_, listed)) = guard.as_ref() {
-        if listed.elapsed().as_secs() >= TOKEN_TTL_SECS {
+        if listed.elapsed().as_secs() >= PRESENCE_LIST_TTL_SECS {
             *guard = None;
         }
     }
