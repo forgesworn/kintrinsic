@@ -89,6 +89,17 @@ export interface EventTemplate {
 }
 
 /**
+ * A roster rule that went to one device only (*Family roster*): the signed
+ * inner CLAUSE event and the ward machine it went to. The CLAUSE itself names
+ * no machine, so the roster, signed by the sending W, carries it.
+ */
+export interface DeviceRule {
+  /** The ward machine (64 lowercase hex). */
+  machine: string
+  rule: SignedEvent
+}
+
+/**
  * What a ward has after opening a NIP-59 gift wrap: the seal's authenticated
  * author and the signed inner event.
  */

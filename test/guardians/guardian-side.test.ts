@@ -87,7 +87,7 @@ describe('family roster merge', () => {
   })
   test('an older or same-second record does not replace the local one', () => {
     const r = mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0, [dev('44')]) }, REP, T0)
-    expect(r.ok && r.roster).toEqual({ children: [{ ...local.children[0], rules: [] }] })
+    expect(r.ok && r.roster).toEqual({ children: [{ ...local.children[0], rules: [], deviceRules: [] }] })
   })
   test('rules merge per (subject, kind), newest issuedAt, from current signers only', () => {
     const rule = (by: typeof W2, kind: string, issuedAt: number, subject: string | undefined = kid) =>
@@ -116,6 +116,42 @@ describe('family roster merge', () => {
     const r2 = mergeRoster(base, { sealAuthor: W2.pk, inner: withRules(T0, [newer]) }, REP2, T0)
     expect(r2.ok && r2.roster.children[0]!.rules?.map((e) => e.id)).toEqual([newer.id])
     expect(mergeRoster(base, { sealAuthor: W2.pk, inner: withRules(T0, 'x' as never) }, REP2, T0)).toEqual({ ok: false, reason: 'bad_rules' })
+  })
+  test('rules merge per (subject, kind, device); a family-wide rule replaces older device rules of its kind', () => {
+    const rule = (by: typeof W2, kind: string, issuedAt: number) =>
+      sign(by, { kind: CHARTER_CLAUSE, created_at: issuedAt, tags: [['t', 'charter-device']], content: JSON.stringify({ kind, subject: kid, issuedAt, body: {} }) })
+    const REP2 = [{ root: R1.pk, keys: [W1.pk] }, { root: R2.pk, keys: [W2.pk] }]
+    const mA = '11'.repeat(32)
+    const mB = '22'.repeat(32)
+    const send = (base: LocalRoster, rules: unknown[], deviceRules: unknown) =>
+      mergeRoster(base, { sealAuthor: W2.pk, inner: sign(W2, familyRosterTemplate({ children: [{ subject: kid, issuedAt: T0, name: 'Robin', colour: '#123456', devices: [], rules: rules as never, deviceRules: deviceRules as never }], approval: approval(R2, W2, { issuedAt: T0 }), createdAt: T0 })) }, REP2, T0)
+    const fam = rule(W1, 'debugging', T0 + 100)
+    const onA = rule(W2, 'debugging', T0 + 200)
+    const onB = rule(W2, 'debugging', T0 + 150)
+    const stale = rule(W2, 'debugging', T0 + 50)
+    const r = send(local, [fam], [{ machine: mA, rule: onA }, { machine: mB, rule: onB }, { machine: mB, rule: stale }, { machine: 'XY', rule: onA }])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const ch = r.roster.children[0]!
+    // One rule per (kind, device): both devices keep theirs beside the family-wide rule; a bad machine is ignored.
+    expect(ch.rules?.map((e) => e.id)).toEqual([fam.id])
+    expect(ch.deviceRules?.map((d) => [d.machine, d.rule.id])).toEqual([[mA, onA.id], [mB, onB.id]])
+    expect(r.ignoredRules).toBe(1)
+    // A roster that leaves a rule out never clears it.
+    const empty = send(r.roster, [], [])
+    expect(empty.ok && empty.roster.children[0]!.deviceRules).toEqual(ch.deviceRules)
+    expect(empty.ok && empty.updated).toEqual([])
+    // A newer family-wide rule replaces the device rules it is newer than, and an older device rule is then dropped.
+    const fam2 = rule(W1, 'debugging', T0 + 175)
+    const r2 = send(r.roster, [fam2], [{ machine: mB, rule: onB }])
+    expect(r2.ok && r2.roster.children[0]!.rules?.map((e) => e.id)).toEqual([fam2.id])
+    expect(r2.ok && r2.roster.children[0]!.deviceRules?.map((d) => d.machine)).toEqual([mA])
+    // The order rules arrive in doesn't matter.
+    const r3 = send(local, [], [{ machine: mB, rule: onB }, { machine: mA, rule: onA }])
+    const r4 = r3.ok ? send(r3.roster, [fam2], []) : r3
+    expect(r4.ok && r2.ok && r4.roster.children[0]!.deviceRules).toEqual(r2.roster.children[0]!.deviceRules)
+    expect(send(local, [], 'x')).toEqual({ ok: false, reason: 'bad_rules' })
+    expect(send(local, [], ['x'])).toEqual({ ok: false, reason: 'bad_rules' })
   })
   test('only from a W approved by a root the wards report, sealed by that W', () => {
     expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, []) }, [{ root: R1.pk, keys: [W2.pk] }], T0)).toEqual({ ok: false, reason: 'root_not_reported' })

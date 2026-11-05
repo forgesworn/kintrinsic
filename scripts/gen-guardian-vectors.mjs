@@ -1052,6 +1052,7 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
           { machine: m("old"), platform: "android", name: "old phone", pairedHere: false, statusSeen: false },
         ],
         rules: [localRule],
+        deviceRules: [{ machine: m("laptop"), rule: rule(W1, "update", T0 + 150) }],
       },
     ],
   };
@@ -1109,6 +1110,26 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
     withRules(T0, [rule(W2, "schedule", T0 + 600)]), reported, "ok");
   add("bad_rules", "A child's rules must be a list of objects.", W2,
     withRules(T0, "not a list"), reported, "bad_rules");
+  const withDeviceRules = (rules, deviceRules) => rosterEv(W2, R2, [{ ...child(kid, T0, []), rules, deviceRules }]);
+  add("device_rules_per_device", "Rules merge per (subject, kind, device): the same kind on two devices is kept for each, beside the family-wide rule of that kind, which is older. A device rule not newer than the family-wide rule is dropped; one without a 64-hex machine is ignored. The local rule the roster leaves out is kept: not carried is not cleared.", W2,
+    withDeviceRules([rule(W1, "debugging", T0 + 100)], [
+      { machine: m("tablet"), rule: rule(W2, "debugging", T0 + 200) },
+      { machine: m("laptop"), rule: rule(W2, "debugging", T0 + 150) },
+      { machine: m("phone"), rule: rule(W2, "debugging", T0 + 50) },
+      { machine: "XY", rule: rule(W2, "debugging", T0 + 300) },
+    ]), reported, "ok");
+  add("device_rule_newer_same_device", "A newer device rule replaces the same device's rule of that kind only.", W2,
+    withDeviceRules([], [
+      { machine: m("tablet"), rule: rule(W2, "maintenance", T0 + 200) },
+      { machine: m("tablet"), rule: rule(W1, "maintenance", T0 + 250) },
+      { machine: m("laptop"), rule: rule(W2, "maintenance", T0 + 100) },
+    ]), reported, "ok");
+  add("family_rule_replaces_older_device_rules", "A ward holds one clause per kind, so a family-wide rule replaces the held device rules of its kind that it is newer than (the laptop's); a newer device rule (the tablet's) is taken beside it.", W2,
+    withDeviceRules([rule(W1, "update", T0 + 175)], [
+      { machine: m("tablet"), rule: rule(W2, "update", T0 + 200) },
+    ]), reported, "ok");
+  add("bad_device_rules", "A child's deviceRules must be a list of objects.", W2,
+    withDeviceRules([], ["not an object"]), reported, "bad_rules");
   write("roster.json", { version: 1, keys: keysJson(), local, vectors });
 }
 

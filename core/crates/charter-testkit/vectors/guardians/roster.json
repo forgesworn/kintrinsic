@@ -419,6 +419,25 @@
             "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
             "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
           }
+        ],
+        "deviceRules": [
+          {
+            "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+            "rule": {
+              "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+              "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+              "created_at": 1700000150,
+              "kind": 31113,
+              "tags": [
+                [
+                  "t",
+                  "charter-device"
+                ]
+              ],
+              "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+              "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+            }
+          }
         ]
       }
     ]
@@ -506,6 +525,25 @@
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
                   "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
                 }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
               ]
             },
             {
@@ -522,7 +560,8 @@
                   "statusSeen": false
                 }
               ],
-              "rules": []
+              "rules": [],
+              "deviceRules": []
             }
           ]
         },
@@ -615,6 +654,25 @@
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
                   "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
                 }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
               ]
             }
           ]
@@ -705,6 +763,25 @@
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
                   "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
                 }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
               ]
             }
           ]
@@ -787,6 +864,25 @@
                   ],
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
                   "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
                 }
               ]
             }
@@ -1346,6 +1442,25 @@
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
                   "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
                 }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
               ]
             }
           ]
@@ -1438,6 +1553,25 @@
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000601,\"body\":{}}",
                   "sig": "3559ebd68cd260ad63e4760b277563d44e7727e0f604acb1d8e15870d660bc011d04227a85e788552688b90296579fc760775fdfe7e436e64b8c6ab9ca92409b"
                 }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
               ]
             },
             {
@@ -1461,7 +1595,8 @@
                   "content": "{\"kind\":\"apps\",\"subject\":\"a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d\",\"issuedAt\":1700000005,\"body\":{}}",
                   "sig": "7b8b26f5f89664cffc7a37d4fbfb613992df486490911ba43ab33015dac50fcba730e134e7ead5b2d87d1adea6031decc99388eaf7dd085242ad0d2ebbf509b3"
                 }
-              ]
+              ],
+              "deviceRules": []
             }
           ]
         },
@@ -1554,6 +1689,25 @@
                   "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
                   "sig": "c83a8acce3c6c2e6fadde8f20b5623dae9825d11e0e2491e5d318c9fa738179044f067049f119b3825ea4f111ecf78aab3ad06689e0653102cfcc4fd3e541755"
                 }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
               ]
             }
           ]
@@ -1582,6 +1736,475 @@
           ],
           "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":\"not a list\"}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
           "sig": "09e16c3e7bfa65d9144c8e90898d370790956e19b1084f52da0630f8e93441cd58dd09b5b51bb5418cd41cc6ad009b3a6885693366b701bebf6e9c113560f759"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": false,
+        "reason": "bad_rules"
+      }
+    },
+    {
+      "name": "device_rules_per_device",
+      "description": "Rules merge per (subject, kind, device): the same kind on two devices is kept for each, beside the family-wide rule of that kind, which is older. A device rule not newer than the family-wide rule is dropped; one without a 64-hex machine is ignored. The local rule the roster leaves out is kept: not carried is not cleared.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "f143b55c12049c493f1e5fd51c3b5592ff9b4d1b15763a0580d36bfceeef89fc",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[{\"id\":\"f82eb0e8259e84803b007e00007176e347aa26c420717f564d08cf4c387de588\",\"pubkey\":\"2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\",\"created_at\":1700000100,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"debugging\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000100,\\\"body\\\":{}}\",\"sig\":\"d8c5b0b0d50e29aa4f121309280d2e2307b8d06e962cd01bc2a092fb587463e24c4b02b54fd3a513c3f54775bd959bdbdb20907999afa426bb7f26e53ef16ab2\"}],\"deviceRules\":[{\"machine\":\"67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7\",\"rule\":{\"id\":\"b51aea8fd2b286f46399244bf2ddc2754cd5bc2682473b15cac50fd84fbdd80b\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000200,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"debugging\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000200,\\\"body\\\":{}}\",\"sig\":\"2a63c8dc02baf38eea39ecbfcaa2a8c5938e17f5bc647a2aefab713f34cbdde21415554ab7983743a8461e1216f510c894f7091a5d9d5456571eacf95eb1ad77\"}},{\"machine\":\"e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a\",\"rule\":{\"id\":\"89bb4eef01854b0337591327d2eecd531a5190b3c2ef29599b465bdf8cf5b6a2\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000150,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"debugging\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000150,\\\"body\\\":{}}\",\"sig\":\"5312d57d6b832688b1694a5d8333f1109a715b9937ee8a4332dfb6aa4c9cc3ea2f8ad6b4ea6899d83821a4cab250c5e0a65f89f11a2ec30b2cff9a3510b35fa6\"}},{\"machine\":\"fbe8e4bf69e472d20c14c6697501eebd8113280baab647d29f6baa71c8d0a0b8\",\"rule\":{\"id\":\"e7751aa553599535b1430b11537cc042c4c2dcba9468ab012d4532f3e3458f7f\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000050,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"debugging\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000050,\\\"body\\\":{}}\",\"sig\":\"1a4c51f4ac038f8cd6e1617e8460af8d5ffa9e18f7aeffeb0ed2bf63c750f195fc74e8ed42f796c506055251a31bdc78fd1c6d5a7376e657f50ec51ed2461dc5\"}},{\"machine\":\"XY\",\"rule\":{\"id\":\"7aea4ad0af7bfc3b9f4299963ed04bc36853743254ddc2c5affec84cb54f717a\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000300,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"debugging\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000300,\\\"body\\\":{}}\",\"sig\":\"937349a1b9ba32156e70239caffae505fa4106b16b3a463b34f0d12a1582e3e4729289bd15e902944fb7d6f7e343672e63eeacc5d1a63b3ce64771fddd3f7180\"}}]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "7ee08c7953583d7b2423335315e2924e1631dca8a183715c92cfd045fd739fc77070558773500cfd1731dde2e38866a482151855d3e1b8946bd1c2bad9783516"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": true,
+        "roster": {
+          "children": [
+            {
+              "subject": "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+              "issuedAt": 1700000000,
+              "name": "Rob",
+              "colour": "#000000",
+              "devices": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "platform": "linux",
+                  "name": "laptop",
+                  "pairedHere": true,
+                  "statusSeen": false
+                },
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "platform": "android",
+                  "name": "tablet",
+                  "pairedHere": false,
+                  "statusSeen": true
+                },
+                {
+                  "machine": "ccfdaea731f95fcb9b64e684c038688bdd50834cebde32042612cc197a285dfa",
+                  "platform": "android",
+                  "name": "old phone",
+                  "pairedHere": false,
+                  "statusSeen": false
+                }
+              ],
+              "rules": [
+                {
+                  "id": "f82eb0e8259e84803b007e00007176e347aa26c420717f564d08cf4c387de588",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000100,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"debugging\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000100,\"body\":{}}",
+                  "sig": "d8c5b0b0d50e29aa4f121309280d2e2307b8d06e962cd01bc2a092fb587463e24c4b02b54fd3a513c3f54775bd959bdbdb20907999afa426bb7f26e53ef16ab2"
+                },
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "rule": {
+                    "id": "b51aea8fd2b286f46399244bf2ddc2754cd5bc2682473b15cac50fd84fbdd80b",
+                    "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                    "created_at": 1700000200,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"debugging\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000200,\"body\":{}}",
+                    "sig": "2a63c8dc02baf38eea39ecbfcaa2a8c5938e17f5bc647a2aefab713f34cbdde21415554ab7983743a8461e1216f510c894f7091a5d9d5456571eacf95eb1ad77"
+                  }
+                },
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "89bb4eef01854b0337591327d2eecd531a5190b3c2ef29599b465bdf8cf5b6a2",
+                    "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"debugging\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "5312d57d6b832688b1694a5d8333f1109a715b9937ee8a4332dfb6aa4c9cc3ea2f8ad6b4ea6899d83821a4cab250c5e0a65f89f11a2ec30b2cff9a3510b35fa6"
+                  }
+                },
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "updated": [
+          "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3"
+        ],
+        "ignoredRules": 1
+      }
+    },
+    {
+      "name": "device_rule_newer_same_device",
+      "description": "A newer device rule replaces the same device's rule of that kind only.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "a044846b37439611d497f5c4d88496cf47a54d7ed1beb0bdb25a4a1895088f0b",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[],\"deviceRules\":[{\"machine\":\"67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7\",\"rule\":{\"id\":\"4bf5d4ed8a78e25550d34d4fee05f7279fc6c0fb26c813d8f56851629d0effae\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000200,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"maintenance\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000200,\\\"body\\\":{}}\",\"sig\":\"c4b24ec61a98d2381eb56b4640791c6744610904fddccc5753f6cdd354bdf30871d51c24f722326f6a9d011ec26fde0d00bba4c4ff2463f01b4583a844910ec6\"}},{\"machine\":\"67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7\",\"rule\":{\"id\":\"b7d4178603f0b76edfe802b61039039e95bcd17cf15b141cfff897fb963d1fac\",\"pubkey\":\"2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\",\"created_at\":1700000250,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"maintenance\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000250,\\\"body\\\":{}}\",\"sig\":\"1b2c93579aa6eb17c8a1700c5c4067803fe3da7e22350dcb5f23690fd56baa47d326619856324cfe5e09ccba393b79a508e4fd24781430861dcf67b1b63110d2\"}},{\"machine\":\"e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a\",\"rule\":{\"id\":\"3ef3106dc3d4e515dc145f518cc2f4b943b8d60c37c661b020ca6452a6ef8acc\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000100,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"maintenance\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000100,\\\"body\\\":{}}\",\"sig\":\"4777dc85874fb9e4146ac383c855edb1f0e996481a69f4abe9b101942a86f94b0ea4306717387bacb96b8c3b313086f05c58c7fc972f13da6b4caeddbd9e529d\"}}]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "10a9c176c40b130172e87df89c800184cd0751ef289fc3bfde8da01c8b72519b0c93b517aad0c98881015f82494f8c77639e262bbdeb11b6eab9eae7c2faddff"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": true,
+        "roster": {
+          "children": [
+            {
+              "subject": "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+              "issuedAt": 1700000000,
+              "name": "Rob",
+              "colour": "#000000",
+              "devices": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "platform": "linux",
+                  "name": "laptop",
+                  "pairedHere": true,
+                  "statusSeen": false
+                },
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "platform": "android",
+                  "name": "tablet",
+                  "pairedHere": false,
+                  "statusSeen": true
+                },
+                {
+                  "machine": "ccfdaea731f95fcb9b64e684c038688bdd50834cebde32042612cc197a285dfa",
+                  "platform": "android",
+                  "name": "old phone",
+                  "pairedHere": false,
+                  "statusSeen": false
+                }
+              ],
+              "rules": [
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "rule": {
+                    "id": "b7d4178603f0b76edfe802b61039039e95bcd17cf15b141cfff897fb963d1fac",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000250,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"maintenance\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000250,\"body\":{}}",
+                    "sig": "1b2c93579aa6eb17c8a1700c5c4067803fe3da7e22350dcb5f23690fd56baa47d326619856324cfe5e09ccba393b79a508e4fd24781430861dcf67b1b63110d2"
+                  }
+                },
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "3ef3106dc3d4e515dc145f518cc2f4b943b8d60c37c661b020ca6452a6ef8acc",
+                    "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                    "created_at": 1700000100,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"maintenance\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000100,\"body\":{}}",
+                    "sig": "4777dc85874fb9e4146ac383c855edb1f0e996481a69f4abe9b101942a86f94b0ea4306717387bacb96b8c3b313086f05c58c7fc972f13da6b4caeddbd9e529d"
+                  }
+                },
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "rule": {
+                    "id": "060481f1c01bbe5ae62466d0f7e0cc76b12c1ffb431a8fabbd7fc2d73f7cf63e",
+                    "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                    "created_at": 1700000150,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000150,\"body\":{}}",
+                    "sig": "1543a07f6f1091b52d5bb8a5aa3425c468458718a1e4d48aa091a7d8cf1f7fe7763f72b741995358c9070b1b23e3e13433821d66464e0b4de9265a7a5148641f"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "updated": [
+          "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3"
+        ],
+        "ignoredRules": 0
+      }
+    },
+    {
+      "name": "family_rule_replaces_older_device_rules",
+      "description": "A ward holds one clause per kind, so a family-wide rule replaces the held device rules of its kind that it is newer than (the laptop's); a newer device rule (the tablet's) is taken beside it.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "76716f641f2a9ec0728583ab52d3cf027fced962d0d6acd024cb161e15d1609d",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[{\"id\":\"3e2fb52d0c34532d29238f22837b53d13c18f81e57c0346067eca466a133d783\",\"pubkey\":\"2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\",\"created_at\":1700000175,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"update\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000175,\\\"body\\\":{}}\",\"sig\":\"755a77218a8b2fcd560bb660311a4225074127509c451561331b37f102c361721555764e7f74102493e3307e35acf781b4c70341b4dd3c64607cc38ea5b5291c\"}],\"deviceRules\":[{\"machine\":\"67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7\",\"rule\":{\"id\":\"0f0be8f7c1295421086998c677f115db658a2705cb8447f130826255362fd12d\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000200,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"update\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000200,\\\"body\\\":{}}\",\"sig\":\"8ca3519fec73b0b2af1e1cbd295020c4d3b9ae81faac3e9c5f690867397e9718d368c110ae32b44663eb800131a52583fb2c323051ee1d32b57268136c907505\"}}]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "e30efa5d58dd73911ab6cc0606c88f5cbef64e93e649163af6db88ba766d74909b17be87c9685b1a3d156f41b899180b96fadd4cae64f85b9666e1e3cfb38b6c"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": true,
+        "roster": {
+          "children": [
+            {
+              "subject": "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+              "issuedAt": 1700000000,
+              "name": "Rob",
+              "colour": "#000000",
+              "devices": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "platform": "linux",
+                  "name": "laptop",
+                  "pairedHere": true,
+                  "statusSeen": false
+                },
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "platform": "android",
+                  "name": "tablet",
+                  "pairedHere": false,
+                  "statusSeen": true
+                },
+                {
+                  "machine": "ccfdaea731f95fcb9b64e684c038688bdd50834cebde32042612cc197a285dfa",
+                  "platform": "android",
+                  "name": "old phone",
+                  "pairedHere": false,
+                  "statusSeen": false
+                }
+              ],
+              "rules": [
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                },
+                {
+                  "id": "3e2fb52d0c34532d29238f22837b53d13c18f81e57c0346067eca466a133d783",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000175,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000175,\"body\":{}}",
+                  "sig": "755a77218a8b2fcd560bb660311a4225074127509c451561331b37f102c361721555764e7f74102493e3307e35acf781b4c70341b4dd3c64607cc38ea5b5291c"
+                }
+              ],
+              "deviceRules": [
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "rule": {
+                    "id": "0f0be8f7c1295421086998c677f115db658a2705cb8447f130826255362fd12d",
+                    "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                    "created_at": 1700000200,
+                    "kind": 31113,
+                    "tags": [
+                      [
+                        "t",
+                        "charter-device"
+                      ]
+                    ],
+                    "content": "{\"kind\":\"update\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000200,\"body\":{}}",
+                    "sig": "8ca3519fec73b0b2af1e1cbd295020c4d3b9ae81faac3e9c5f690867397e9718d368c110ae32b44663eb800131a52583fb2c323051ee1d32b57268136c907505"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "updated": [
+          "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3"
+        ],
+        "ignoredRules": 0
+      }
+    },
+    {
+      "name": "bad_device_rules",
+      "description": "A child's deviceRules must be a list of objects.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "d44ceb18c64d5ee553c2c5b1d4840a712de92d00c9d54c6861d3e699cae893c1",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[],\"deviceRules\":[\"not an object\"]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "eb279520d12b1f46889e1a8183cadd56c0398e31027c1b4453b8b60ea8b5749844c9ea0d00ae8597264171b6a0c496c68cdd4105f59920c3a72b69a9bbd5980d"
         }
       },
       "reported": [

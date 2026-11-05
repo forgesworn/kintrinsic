@@ -2912,17 +2912,46 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
   The inner event is signed by a W and gift-wrapped to each other W, and
   carries the sender's approval.
 - Content: `{ v: 1, children: [{ subject, issuedAt, name, colour, devices:
-  [{ machine, platform, name }], rules: [<signed inner CLAUSE event>] }] }`.
+  [{ machine, platform, name }], rules: [<signed inner CLAUSE event>],
+  deviceRules: [{ machine, rule: <signed inner CLAUSE event> }] }] }`.
 - Records merge per child: the newest `issuedAt` per `subject` wins.
-- **The roster carries the rules.** `rules` is the sender's view of what is
-  in force for the child: one signed inner CLAUSE event (kind 31113) per
-  `(subject, kind)`. Rules merge on their own: the newest `issuedAt` per
-  `(subject, kind)` wins (a tie: the lower event id), whatever the child
-  record does. So a joining parent's app starts from the family's rules, and
-  both parents' apps converge on one screen. A receiving install takes a rule
-  only if it verifies and its author is a key the family's wards report as a
-  current signer (the roster's own trust rule); any other rule is skipped,
-  not the roster. `rules` may be absent, from an older sender.
+- **The roster carries the rules.** `rules` and `deviceRules` are the
+  sender's view of what is in force for the child: one signed inner CLAUSE
+  event (kind 31113) per `(subject, kind, device)`.
+  - `device` is the machine a device-specific clause went to: an install
+    window, an update, debugging, or any rule the guardian set for one device
+    and not the others. Those travel in `deviceRules`, each with its
+    `machine` (64 lowercase hex). A family-wide clause, the same for every
+    device of the child, has no device and travels in `rules`.
+  - Why the device is part of the key: a child's devices may carry different
+    rules of one kind (debugging open on the tablet only, an update staged on
+    one phone). Keyed by `(subject, kind)` alone, a roster could carry only
+    one device's rule and the others would be lost. A CLAUSE names no machine
+    itself (it is gift-wrapped to the device), so the roster, signed by the
+    sending W, carries the machine beside it.
+  - Rules merge on their own, whatever the child record does: the newest
+    `issuedAt` per `(subject, kind, device)` wins (a tie: the lower event id).
+    A ward holds one clause per kind, so a family-wide rule replaces the
+    device rules of its kind that it is newer than, and a device rule is
+    taken only if it is newer than the family-wide rule of its kind.
+  - So a joining parent's app starts from the family's rules, and both
+    parents' apps converge on one screen.
+  - A receiving install takes a rule only if it verifies and its author is a
+    key the family's wards report as a current signer (the roster's own trust
+    rule); any other rule, or a device rule without a valid `machine`, is
+    skipped, not the roster. `rules` and `deviceRules` may be absent, from an
+    older sender.
+- **One roster per child, bounded.**
+  - A sender may split the family across several roster events, one per
+    child. Receivers already merge per child, so nothing changes for them.
+  - A sender keeps each roster under its own size bound, below the relays'
+    event-size limits (a long `apps` list can be large). A roster that would
+    exceed it leaves rules out: device rules first, then the oldest
+    family-wide rules.
+  - **A rule missing from a roster is not carried, never cleared.** A roster
+    only adds rules or replaces them with newer ones; it never removes one by
+    leaving it out. A receiving install keeps every rule a roster doesn't
+    carry.
 - A receiving install never deletes a device it paired itself or has had a
   STATUS from.
 - A device known only from a roster is shown as unconfirmed until a STATUS

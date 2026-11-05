@@ -517,20 +517,24 @@ Guardian-side family roster merge (kind 31119). Wards never read rosters.
 ```
 
 A local child is `{ subject, issuedAt, name, colour, devices: [{ machine,
-platform, name, pairedHere, statusSeen }], rules: [<signed CLAUSE>] }`
-(`rules` may be absent in `local`; every child in `expect.roster` has it). A
-roster's content is `{ v: 1, children: [{ subject, issuedAt, name, colour,
-devices: [{ machine, platform, name }], rules?: [<signed CLAUSE>] }],
-approval: <the sender's approval, signed by its root> }`. A rule is the
-signed inner CLAUSE event (kind 31113) whose content is a strict-JSON object
-with `kind` (a non-empty string), `issuedAt` and an optional `subject`.
+platform, name, pairedHere, statusSeen }], rules: [<signed CLAUSE>],
+deviceRules: [{ machine, rule: <signed CLAUSE> }] }` (`rules` and
+`deviceRules` may be absent in `local`; every child in `expect.roster` has
+both). A roster's content is `{ v: 1, children: [{ subject, issuedAt, name,
+colour, devices: [{ machine, platform, name }], rules?: [<signed CLAUSE>],
+deviceRules?: [{ machine, rule: <signed CLAUSE> }] }], approval: <the
+sender's approval, signed by its root> }`. A rule is the signed inner CLAUSE
+event (kind 31113) whose content is a strict-JSON object with `kind` (a
+non-empty string), `issuedAt` and an optional `subject`. `rules` holds the
+family-wide rules; `deviceRules` the rules that went to one device, with that
+device's `machine`.
 
 Checks, in order: `bad_event` → `bad_signature` → `wrong_kind` (≠ 31119) →
 `seal_mismatch` (seal author ≠ inner author) → `content_not_json` (not a
 strict-JSON object) → `bad_version` → `bad_children` (`children` not a list
 of records with `subject` and every `machine` 64 lowercase hex, `issuedAt` a
 non-negative integer, `name`/`colour`/`platform` strings) → `bad_rules` (a
-child's `rules` present and not a list of objects) → `future` (any
+child's `rules` or `deviceRules` present and not a list of objects) → `future` (any
 child `issuedAt` > `now` + 300) → `bad_approval` (missing, not a valid
 approval statement, not naming the sender, or carrying `expiresAt`) →
 `root_not_reported` (its signer is not a reported root) → `key_not_reported`
@@ -549,11 +553,19 @@ Rules merge child by child before the record, whatever the record does. A
 rule is taken only if it is a signed event that verifies, of kind 31113 with
 the marker tag and the content above, whose `subject` (if present) is the
 child's, and whose author is a reported root or a key listed under one; any
-other is counted in `ignoredRules` and skipped. A taken rule replaces the
-child's rule of the same clause `kind` if its `issuedAt` is greater, or equal
-with a lower event id; else it is dropped. A child known only from its rules
-is added as the incoming record. Rules are sorted by clause `kind`; a
-subject whose rules changed is in `updated`.
+other is counted in `ignoredRules` and skipped, as is a device rule whose
+`machine` is not 64 lowercase hex. `rules` are taken before `deviceRules`,
+each in list order. Rules are keyed by `(kind, device)`, device absent for
+a family-wide rule. "Newer" means a greater `issuedAt`, or equal with a lower
+event id. A taken family-wide rule replaces the child's family-wide rule of
+the same `kind` if newer, else it is dropped; when taken, it also removes
+every device rule of that `kind` it is newer than. A taken device rule is
+dropped unless it is newer than the family-wide rule of its `kind` (if any)
+and than the device rule of the same `(kind, machine)` (if any), which it
+then replaces. A rule the roster does not carry is left as it is. A child
+known only from its rules is added as the incoming record. `rules` are
+sorted by `kind`, `deviceRules` by `kind` then `machine`; a subject whose
+rules changed is in `updated`.
 
 ## pin.json
 

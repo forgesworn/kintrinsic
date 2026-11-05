@@ -22,6 +22,7 @@ import {
   isHex64,
   isUnixSeconds,
   utf8Length,
+  type DeviceRule,
   type EventTemplate,
   type SignedEvent,
 } from './types.js'
@@ -162,11 +163,16 @@ export interface RosterChild {
   colour: string
   devices: RosterDevice[]
   /**
-   * The sender's view of the rules in force for this child: the signed inner
-   * CLAUSE event (kind 31113) per `(subject, kind)`. Optional, for older
-   * senders.
+   * The sender's view of the family-wide rules in force for this child: the
+   * signed inner CLAUSE event (kind 31113) per `(subject, kind)`. Optional,
+   * for older senders.
    */
   rules?: SignedEvent[]
+  /**
+   * The rules that went to one device only, one per `(subject, kind,
+   * machine)`. Optional, for older senders.
+   */
+  deviceRules?: DeviceRule[]
 }
 
 export interface FamilyRosterOptions {

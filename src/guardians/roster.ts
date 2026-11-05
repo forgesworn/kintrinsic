@@ -4,11 +4,17 @@
  *
  * - Records merge per child: the newest `issuedAt` per `subject` wins.
  * - Each child carries the sender's view of the rules in force, one signed
- *   CLAUSE per `(subject, kind)`. Rules merge on their own, newest
- *   `issuedAt` per `(subject, kind)` (a tie: the lower event id), whatever
- *   the child record did. A rule is taken only if it verifies and its author
- *   is a current signer by the wards' STATUS (a reported root, or a key
- *   listed under one); any other rule is ignored, not the roster.
+ *   CLAUSE per `(subject, kind, device)`: family-wide rules in `rules`
+ *   (device absent), rules that went to one device in `deviceRules` with that
+ *   device's machine. Rules merge on their own, newest `issuedAt` per key (a
+ *   tie: the lower event id), whatever the child record did. A ward holds one
+ *   clause per kind, so a family-wide rule replaces that kind's older device
+ *   rules, and a device rule not newer than the family-wide one is dropped.
+ *   A rule is taken only if it verifies and its author is a current signer by
+ *   the wards' STATUS (a reported root, or a key listed under one); any other
+ *   rule is ignored, not the roster.
+ * - A rule the roster doesn't carry is left alone: a roster only adds or
+ *   replaces rules, never removes one by leaving it out.
  * - A receiving install never deletes a device it paired itself or has had a
  *   STATUS from.
  * - A device known only from a roster is unconfirmed until a STATUS from it
@@ -24,6 +30,7 @@ import {
   FUTURE_SKEW_SECONDS,
   isHex64,
   isUnixSeconds,
+  type DeviceRule,
   type Inbound,
   type SignedEvent,
 } from './types.js'
@@ -45,11 +52,17 @@ export interface LocalRosterChild {
   colour: string
   devices: LocalRosterDevice[]
   /**
-   * The rules in force as this install knows them: one signed CLAUSE per
-   * clause kind, sorted by kind. Absent in a roster stored before rules
-   * travelled; the merge always writes it.
+   * The family-wide rules in force as this install knows them: one signed
+   * CLAUSE per clause kind, sorted by kind. Absent in a roster stored before
+   * rules travelled; the merge always writes it.
    */
   rules?: SignedEvent[]
+  /**
+   * The rules that went to one device only: one per `(kind, machine)`, sorted
+   * by kind then machine. Absent in a roster stored before device rules
+   * travelled; the merge always writes it.
+   */
+  deviceRules?: DeviceRule[]
 }
 
 export interface LocalRoster {
@@ -121,6 +134,65 @@ function ruleNewer(a: { issuedAt: number; id: string }, b: { issuedAt: number; i
   return a.issuedAt > b.issuedAt || (a.issuedAt === b.issuedAt && a.id < b.id)
 }
 
+/** A held rule's place in the order `ruleNewer` compares: its `issuedAt` and event id. */
+function heldOrder(ev: SignedEvent, subject: string): { issuedAt: number; id: string } | null {
+  const k = ruleKey(ev, subject)
+  return k ? { issuedAt: k.issuedAt, id: ev.id } : null
+}
+
+/** An accepted incoming rule, keyed by `(kind, device)`; `device` absent for a family-wide rule. */
+interface AcceptedRule {
+  ev: SignedEvent
+  kind: string
+  issuedAt: number
+  device?: string
+}
+
+/**
+ * Merge accepted rules into one child's held rules, keyed by `(kind, device)`.
+ * Returns whether anything changed. A ward holds one clause per kind, so a
+ * family-wide rule replaces that kind's device rules it is newer than, and a
+ * device rule is taken only if it is newer than that kind's family-wide rule.
+ * The result does not depend on the order the rules arrive in.
+ */
+function mergeRules(holder: LocalRosterChild, accepted: readonly AcceptedRule[]): boolean {
+  const subject = holder.subject
+  const family = holder.rules ?? []
+  let device = holder.deviceRules ?? []
+  let changed = false
+  const familyOf = (kind: string) => family.findIndex((x) => ruleKey(x, subject)?.kind === kind)
+  for (const a of accepted) {
+    const mine = { issuedAt: a.issuedAt, id: a.ev.id }
+    const fi = familyOf(a.kind)
+    const fHeld = fi >= 0 ? heldOrder(family[fi]!, subject) : null
+    if (a.device === undefined) {
+      if (fHeld && !ruleNewer(mine, fHeld)) continue
+      if (fi >= 0) family.splice(fi, 1)
+      family.push(a.ev)
+      // Device rules of this kind that the family-wide rule is newer than are replaced on every ward.
+      device = device.filter((d) => {
+        const h = ruleKey(d.rule, subject)?.kind === a.kind ? heldOrder(d.rule, subject) : null
+        return !(h && ruleNewer(mine, h))
+      })
+      changed = true
+      continue
+    }
+    if (fHeld && !ruleNewer(mine, fHeld)) continue
+    const di = device.findIndex((d) => d.machine === a.device && ruleKey(d.rule, subject)?.kind === a.kind)
+    const dHeld = di >= 0 ? heldOrder(device[di]!.rule, subject) : null
+    if (dHeld && !ruleNewer(mine, dHeld)) continue
+    if (di >= 0) device.splice(di, 1)
+    device.push({ machine: a.device, rule: a.ev })
+    changed = true
+  }
+  const kindOf = (ev: SignedEvent) => ruleKey(ev, subject)?.kind ?? ''
+  family.sort((x, y) => cmp(kindOf(x), kindOf(y)))
+  device.sort((x, y) => cmp(kindOf(x.rule), kindOf(y.rule)) || cmp(x.machine, y.machine))
+  holder.rules = family
+  holder.deviceRules = device
+  return changed
+}
+
 /**
  * Merge an incoming roster into the local one.
  *
@@ -148,10 +220,10 @@ export function mergeRoster(
   const o = c as Record<string, unknown>
   if (o.v !== 1) return { ok: false, reason: 'bad_version' }
   if (!Array.isArray(o.children) || !o.children.every(validChild)) return { ok: false, reason: 'bad_children' }
+  const listOfObjects = (x: unknown) => Array.isArray(x) && x.every((r) => typeof r === 'object' && r !== null && !Array.isArray(r))
   for (const ch of o.children as unknown as Record<string, unknown>[]) {
-    if (ch.rules !== undefined && (!Array.isArray(ch.rules) || !ch.rules.every((r) => typeof r === 'object' && r !== null && !Array.isArray(r)))) {
-      return { ok: false, reason: 'bad_rules' }
-    }
+    if (ch.rules !== undefined && !listOfObjects(ch.rules)) return { ok: false, reason: 'bad_rules' }
+    if (ch.deviceRules !== undefined && !listOfObjects(ch.deviceRules)) return { ok: false, reason: 'bad_rules' }
   }
   if ((o.children as LocalRosterChild[]).some((ch) => ch.issuedAt > now + FUTURE_SKEW_SECONDS)) {
     return { ok: false, reason: 'future' }
@@ -172,35 +244,33 @@ export function mergeRoster(
   }
 
   const out: LocalRoster = JSON.parse(JSON.stringify(local)) as LocalRoster
-  for (const ch of out.children) ch.rules = ch.rules ?? []
+  for (const ch of out.children) {
+    ch.rules = ch.rules ?? []
+    ch.deviceRules = ch.deviceRules ?? []
+  }
   const updated = new Set<string>()
   let ignoredRules = 0
   for (const inc of o.children as LocalRosterChild[]) {
     // Rules first: they merge whatever the child record does below.
-    const accepted: { ev: SignedEvent; kind: string; issuedAt: number }[] = []
-    for (const r of (inc.rules ?? []) as unknown[]) {
+    const accepted: AcceptedRule[] = []
+    const take = (r: unknown, device?: string) => {
       const key = isEventShape(r) && verifySignedEvent(r) && signers.has(r.pubkey) ? ruleKey(r, inc.subject) : null
       if (!key) ignoredRules++
-      else accepted.push({ ev: r as SignedEvent, ...key })
+      else accepted.push({ ev: r as SignedEvent, ...key, ...(device !== undefined ? { device } : {}) })
+    }
+    for (const r of (inc.rules ?? []) as unknown[]) take(r)
+    for (const d of (inc.deviceRules ?? []) as unknown as Record<string, unknown>[]) {
+      // A device rule must name its machine; one that doesn't is ignored, not the roster.
+      if (isHex64(d.machine)) take(d.rule, d.machine)
+      else ignoredRules++
     }
     if (accepted.length > 0) {
       let holder = out.children.find((ch) => ch.subject === inc.subject)
       if (!holder) {
-        holder = { subject: inc.subject, issuedAt: -1, name: '', colour: '', devices: [], rules: [] }
+        holder = { subject: inc.subject, issuedAt: -1, name: '', colour: '', devices: [], rules: [], deviceRules: [] }
         out.children.push(holder)
       }
-      const rules = holder.rules ?? []
-      for (const a of accepted) {
-        const i = rules.findIndex((x) => ruleKey(x, inc.subject)?.kind === a.kind)
-        const held = i >= 0 ? rules[i] : undefined
-        const cur = held ? ruleKey(held, inc.subject) : null
-        if (held && cur && !ruleNewer({ issuedAt: a.issuedAt, id: a.ev.id }, { issuedAt: cur.issuedAt, id: held.id })) continue
-        if (i >= 0) rules.splice(i, 1)
-        rules.push(a.ev)
-        updated.add(inc.subject)
-      }
-      rules.sort((x, y) => cmp(ruleKey(x, inc.subject)?.kind ?? '', ruleKey(y, inc.subject)?.kind ?? ''))
-      holder.rules = rules
+      if (mergeRules(holder, accepted)) updated.add(inc.subject)
     }
     const mine = out.children.find((ch) => ch.subject === inc.subject)
     // Newest issuedAt per subject wins; a tie keeps the local record.
@@ -227,6 +297,7 @@ export function mergeRoster(
       colour: inc.colour,
       devices,
       rules: mine?.rules ?? [],
+      deviceRules: mine?.deviceRules ?? [],
     }
     out.children = out.children.filter((ch) => ch.subject !== inc.subject)
     out.children.push(child)
