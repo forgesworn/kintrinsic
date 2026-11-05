@@ -17,6 +17,34 @@ class RelayFramingTest {
         assertEquals(1000L, filter.getLong("since"))
     }
 
+    /** D5: one subscription for the root and its working key. */
+    @Test fun reqMessageNamesEveryKeyOnce() {
+        val root = "c".repeat(64)
+        val working = "d".repeat(64)
+        val msg = JSONArray(RelayFraming.reqMessage("carrier", listOf(root, working, root), 1000L))
+        val filter = msg.getJSONObject(2)
+        val p = filter.getJSONArray("#p")
+        assertEquals(2, p.length())
+        assertEquals(root, p.getString(0))
+        assertEquals(working, p.getString(1))
+        assertEquals(1059, filter.getJSONArray("kinds").getInt(0))
+        assertEquals(1, filter.getJSONArray("kinds").length())
+        assertEquals(1000L, filter.getLong("since"))
+        // The single-key form is the list of one.
+        assertEquals(
+            RelayFraming.reqMessage("carrier", listOf(root), 5L),
+            RelayFraming.reqMessage("carrier", root, 5L),
+        )
+    }
+
+    @Test fun recipientReadsTheWrapsPTag() {
+        val k = "d".repeat(64)
+        assertEquals(k, RelayFraming.recipient("""{"kind":1059,"tags":[["x","y"],["p","$k"]]}"""))
+        assertNull(RelayFraming.recipient("""{"kind":1059,"tags":[["p","short"]]}"""))
+        assertNull(RelayFraming.recipient("""{"kind":1059}"""))
+        assertNull(RelayFraming.recipient("not json"))
+    }
+
     @Test fun parseEventExtractsTheEventJson() {
         val raw = """["EVENT","carrier",{"id":"ff","kind":1059,"content":"x"}]"""
         val ev = RelayFraming.parseEvent(raw)!!

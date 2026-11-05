@@ -31,6 +31,7 @@ class CarrierStore(context: Context) {
             .putString(K_SK, p.guardianSkHex)
             .putString(K_PK, p.guardianPubkeyHex)
             .putString(K_RELAYS, JSONArray(p.relays).toString())
+            .putString(K_EXTRA_KEYS, extraKeysJson(p.extraKeys))
             .apply()
     }
 
@@ -41,7 +42,17 @@ class CarrierStore(context: Context) {
         val arr = try { JSONArray(relaysJson) } catch (_: Exception) { return null }
         val relays = (0 until arr.length()).map { arr.optString(it, "") }.filter { it.isNotEmpty() }
         if (relays.isEmpty()) return null
-        return ProvisionPayload(sk, pk, relays)
+        // A store written before the key list holds the primary alone.
+        val extra = prefs.getString(K_EXTRA_KEYS, null)
+            ?.let { runCatching { ProvisionPayload.parseKeys(JSONArray(it)) }.getOrNull() }
+            .orEmpty()
+        return ProvisionPayload.of(sk, pk, relays, extra) ?: ProvisionPayload(sk, pk, relays)
+    }
+
+    private fun extraKeysJson(keys: List<CarrierKey>): String {
+        val arr = JSONArray()
+        keys.forEach { arr.put(JSONObject().put("skHex", it.skHex).put("pubkeyHex", it.pubkeyHex)) }
+        return arr.toString()
     }
 
     /** Persisted beside the provision so a roster pushed before a restart is
@@ -110,6 +121,7 @@ class CarrierStore(context: Context) {
         const val K_SK = "guardianSkHex"
         const val K_PK = "guardianPubkeyHex"
         const val K_RELAYS = "relays"
+        const val K_EXTRA_KEYS = "extraKeys"
         const val K_ROSTER = "roster"
         const val K_SEEN = "seenReqIds"
         const val K_LINK_NAME = "linkInstanceName"

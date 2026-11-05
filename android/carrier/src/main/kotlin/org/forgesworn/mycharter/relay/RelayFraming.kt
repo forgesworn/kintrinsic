@@ -17,16 +17,36 @@ object RelayFraming {
     const val SINCE_WINDOW_SECS = 172_800L
 
     fun reqMessage(subId: String, guardianPubkeyHex: String, sinceUnix: Long): String =
+        reqMessage(subId, listOf(guardianPubkeyHex), sinceUnix)
+
+    /**
+     * One subscription for gift-wraps p-tagged to ANY of [pubkeysHex]: a
+     * phone-held root and its working key (D5), since wards write to the
+     * working key once they list it and to the root before then. Repeats are
+     * dropped; the order is kept (primary first).
+     */
+    fun reqMessage(subId: String, pubkeysHex: List<String>, sinceUnix: Long): String =
         JSONArray()
             .put("REQ")
             .put(subId)
             .put(
                 JSONObject()
                     .put("kinds", JSONArray().put(1059))
-                    .put("#p", JSONArray().put(guardianPubkeyHex))
+                    .put("#p", JSONArray(pubkeysHex.distinct()))
                     .put("since", sinceUnix),
             )
             .toString()
+
+    /** The 64-hex key a gift-wrap's first `p` tag names, or null: which of
+     *  the carrier's keys the wrap is encrypted to. */
+    fun recipient(eventJson: String): String? {
+        val tags = try { JSONObject(eventJson).optJSONArray("tags") } catch (_: Exception) { return null } ?: return null
+        for (i in 0 until tags.length()) {
+            val t = tags.optJSONArray(i) ?: continue
+            if (t.optString(0) == "p") return t.optString(1).takeIf { it.length == 64 }
+        }
+        return null
+    }
 
     fun parseEvent(frame: String): String? {
         val arr = try { JSONArray(frame) } catch (_: Exception) { return null }

@@ -42,7 +42,8 @@ class CarrierService : Service() {
     /** The home-network listener (local link v1); runs while provisioned. */
     private lateinit var localLink: LocalLink
     private val sockets = mutableMapOf<String, WebSocket>()
-    private var connectedGuardian: String? = null
+    /** The keys the open sockets subscribed for; a change resubscribes. */
+    private var connectedKeys: List<String>? = null
     private val backoffs = mutableMapOf<String, Long>()
     /** When each socket opened (monotonic) — how [scheduleReconnect] judges it. */
     private val openedAt = mutableMapOf<String, Long>()
@@ -113,8 +114,8 @@ class CarrierService : Service() {
         // Idempotent: same key + directory keeps the running listener; a new
         // guardian key restarts it.
         localLink.start()
-        val keyChanged = connectedGuardian != p.guardianPubkeyHex
-        connectedGuardian = p.guardianPubkeyHex
+        val keyChanged = connectedKeys != p.pubkeys
+        connectedKeys = p.pubkeys
         sockets.keys.filter { keyChanged || it !in p.relays }.forEach { relay ->
             sockets.remove(relay)?.close(1000, "relay configuration changed")
             openedAt.remove(relay)
@@ -143,7 +144,7 @@ class CarrierService : Service() {
                     // Note when it opened, but do NOT call it a success yet:
                     // see scheduleReconnect.
                     handler.post { openedAt[relay] = SystemClock.elapsedRealtime() }
-                    webSocket.send(RelayFraming.reqMessage("carrier", p.guardianPubkeyHex, since))
+                    webSocket.send(RelayFraming.reqMessage("carrier", p.pubkeys, since))
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -165,7 +166,7 @@ class CarrierService : Service() {
                             "OK" -> if (!authenticated && authId != null && frame.optString(1) == authId) {
                                 if (frame.optBoolean(2)) {
                                     authenticated = true
-                                    webSocket.send(RelayFraming.reqMessage("carrier", p.guardianPubkeyHex, since))
+                                    webSocket.send(RelayFraming.reqMessage("carrier", p.pubkeys, since))
                                 } else {
                                     webSocket.cancel()
                                     scheduleReconnect(relay, webSocket)
@@ -235,7 +236,9 @@ class CarrierService : Service() {
         // to go across as the stored hex String — immutable, interned, one
         // fresh uncollectable copy of the guardian's root key per delivered
         // wrap. The array below lives for the length of one classify call.
-        val sk = hexToKeyBytes(p.guardianSkHex) ?: return
+        // The wrap is encrypted to the key its `p` tag names: a working key's
+        // secret for a wrap to the working key, the root's for one to the root.
+        val sk = hexToKeyBytes(p.secretFor(RelayFraming.recipient(eventJson))) ?: return
         val verdict = try {
             JSONObject(GuardianNative.guardianClassifyWrap(eventJson, sk, now))
         } catch (t: Throwable) {
