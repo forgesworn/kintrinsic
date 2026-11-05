@@ -2339,6 +2339,14 @@ other configured relays continue independently. NIP-59 gift wraps retain
 their ephemeral outer authors, so relay allowlists must authorise authenticated
 connections rather than require the gift-wrap author to equal the stable key.
 The carrier subscribes to the union of paired-device relays and public defaults.
+With guardian keys (*Guardian roots and working keys*), a guardian install
+receives ward traffic on every key it holds: a phone-held root and that
+phone's working key. The guardian app hands the carrier each such key's
+secret (never a root held in My Signet or on a Heartwood, which it does not
+have). The carrier opens one connection per relay for each key, and each
+connection answers `AUTH` with its own key, because a relay may hold one
+authenticated key per connection and deliver only gift wraps addressed to it.
+The local link still uses one key (the install's primary key).
 
 ### Multi-device usage consolidation — `CHARTER_DEVICE_USAGE_SYNC = 31115` (reserved; contract-complete)
 
