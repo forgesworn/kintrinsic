@@ -2737,17 +2737,29 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      departed key's own `issuedAt` is never the bar. So a far-future clause
      from a departed key can't pin a rule for ever, and a relay can't restore
      an older rule from a current signer.
-   - A guardian app re-signs the current clause set with a live key before it
-     sends a departure.
+   - Nothing need be re-signed before a departure: the departed keys' clauses
+     stay enforced until a current signer replaces them, and the replacement
+     is never measured against the departed key's `issuedAt`. A guardian app
+     does not re-sign its own copy of the rules when it withdraws, removes,
+     leaves or moves: that copy may be older than the other parent's, and
+     would overwrite it. Until someone replaces a rule, the ward may name a
+     departed key as its setter.
 5. **Stored clauses record their signer.** The ward screen and STATUS then say
    who set a rule. Each label is shown next to the signer's root identity (a
    short npub), because a label alone can be spoofed.
+   - Roots are always visible on the ward. **Pending statements are not
+     shown on the child-facing screen, CLI or any world-readable file** (such
+     as `/run/charter/guardians.json`). A pending removal is a dispute between
+     the parents, not something enforced on the child. They are shown only
+     inside the privileged confirm-in-person flow (*Presence confirmation*:
+     polkit on Linux, the guardian PIN on Android), where the administrator
+     must pick the statement to confirm.
 6. **Co-guardian.**
    - A co-guardian statement for R2, from a pinned root, takes effect only
      after **presence confirmation by an install bound to R2**: the new parent
      at the child's device.
    - Until then it is pending, and is reported in STATUS to every root's
-     working keys.
+     working keys (not on the child-facing view; rule 5).
    - Both roots then have equal authority. Among clauses of one kind from
      current signers, the newest wins by effective time, whoever signed it.
 7. **Root removal.**
@@ -2757,7 +2769,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      install bound to R1**, and it has a **72-hour notice period**.
      - It takes effect at the later of the confirmation and 72 hours after
        the ward received it.
-     - Throughout, it is reported in STATUS to R2's working keys.
+     - Throughout, it is reported in STATUS to R2's working keys. The ward
+       shows it only in the confirm-in-person flow (rule 5).
      - R2 can **object** with a statement whose `d` is
        `kintrinsic/object/<d of the removal>` and whose `p` is R1. That drops
        the removal. R2 itself, or any active W bound to R2, may sign it, so a
@@ -2785,6 +2798,11 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      ends when R cancels it.
    - Once confirmed, R is replaced by R2. A W bound to R stays only if R2
      approves it; that approval re-binds it to R2.
+   - A move is confirmed ward by ward. If it is confirmed on some of a
+     child's wards and lapses or is cancelled on others, the only way to
+     finish is to restart it to the **same R2** on the rest. Nothing moves a
+     ward back to R: R has departed there (rule 4), and a second live signer
+     for the moved wards is not part of this section.
 9. **Recipients.**
    - A ward encrypts REQUEST, STATUS, USAGE, AUDIT and break-glass events to
      every W in its signer set, plus each pinned root with no W in the set (a
