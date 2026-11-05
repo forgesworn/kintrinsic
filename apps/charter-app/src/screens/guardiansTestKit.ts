@@ -38,7 +38,7 @@ export function device(label: string, machine: string, platform: Device["platfor
     pairing: "paired",
     devicePubkey: machine,
     keysViewAt: 100,
-    appVersionCode: platform === "android" ? 54 : 803,
+    appVersionCode: platform === "android" ? 55 : 804,
     ...(g ? { guardians: g } : {}),
   };
 }

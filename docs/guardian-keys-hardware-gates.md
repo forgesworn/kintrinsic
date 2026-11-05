@@ -19,23 +19,23 @@ Android: `adb logcat -d | grep -i charter`).
 
 ## Gate 0: build, install, no regressions
 
-The branch carries main's version numbers (ward 0.7.4 (53), Linux 0.8.2) and
+The branch carries main's version numbers (ward 0.7.5 (54), Linux 0.8.3) and
 takes no bump until release. The guardian app's versioning gate wants ward code
-54 and Linux code 803 or above (`docs/guardian-keys-open-questions.md`, "The
+55 and Linux code 804 or above (`docs/guardian-keys-open-questions.md`, "The
 versioning gate's thresholds before release"), and treats anything lower as a
 ward without this section. So build the wards from a throwaway branch that
 differs only in those numbers. Never merge it.
 
 ```
 git switch -c test/guardian-keys-gates feat/guardian-keys-rebased
-# android/app/build.gradle.kts: versionCode = 54, versionName = "0.7.5"
-# linux/Cargo.toml:             version = "0.8.3"
+# android/app/build.gradle.kts: versionCode = 55, versionName = "0.7.6"
+# linux/Cargo.toml:             version = "0.8.4"
 (cd linux && cargo update --workspace)
 git commit -am "test: gate build numbers for guardian keys"
 ```
 
 Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
-0.7.5 (54), Linux `.deb` 0.8.3, `SHA256SUMS`):
+0.7.6 (55), Linux `.deb` 0.8.4, `SHA256SUMS`):
 
 ```
 source ~/Android/env.sh
@@ -59,7 +59,7 @@ cd ../linux && cargo run -q -p xtask -- deb
    debug-signed, and fielded wards carry the release certificate with its
    rotation lineage, so it installs only on a fresh or reset ward (gates 1–3).
    The in-place upgrade needs the CI-signed build: push the throwaway branch,
-   tag it (`ward-v0.7.5`, which must match its `versionName`), let
+   tag it (`ward-v0.7.6`, which must match its `versionName`), let
    `release-artifacts.yml` produce the draft release (it waits for the sysadmin
    on the `release` environment, and is never published), then send the draft's
    APK with `adb install -r`. A paired release build blocks local installs, so
@@ -70,14 +70,14 @@ cd ../linux && cargo run -q -p xtask -- deb
    enforced. About this device → Guardians lists one guardian. The production guardian
    app still sees the ward's STATUS and can still change a rule (the ward
    treats the single pinned guardian exactly as before).
-3. Upgrade a paired Linux ward: `sudo apt install ./kintrinsic_0.8.3_*.deb`
+3. Upgrade a paired Linux ward: `sudo apt install ./kintrinsic_0.8.4_*.deb`
    (the apt source the package installs offers nothing newer than this).
    **Expect:** as step 2. `charter status` shows the guardian list, and
    `/var/lib/charter/guardian-state.json` exists with mode 0600.
 
 ## Gate 1: a Heartwood-first family from scratch
 
-1. Factory-reset the Android ward and provision the 0.7.5 test APK as Device
+1. Factory-reset the Android ward and provision the 0.7.6 test APK as Device
    Owner with `android/scripts/charter-provision.sh <apk>`. QR provisioning
    pins the published release APK by checksum, so it can't install a test
    build.
@@ -126,7 +126,7 @@ cd ../linux && cargo run -q -p xtask -- deb
      third-party app can serve them. Accounts, app controls (force
      stop, disable, clear) and default apps are restricted, and lifted again on
      unlock. The default dialer still works past the lock, and a call from the
-     lock screen connects, exactly as on ward 0.7.4.
+     lock screen connects, exactly as on ward 0.7.5.
 
 ## Gate 2: a second parent joins, then leaves
 

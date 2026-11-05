@@ -1028,7 +1028,7 @@ R until the approval lands, so the app can't tell which is which first.
 paired ward that doesn't list W under R: at once on connecting the root, and
 again at most every 6 hours while the ward doesn't list it. W signs a ward's
 events only once that ward's STATUS lists W under R and every ward of the
-child passes the versioning gate (thresholds Android 54, Linux 803, keyed on
+child passes the versioning gate (thresholds Android 55, Linux 804, keyed on
 the platform the device was paired as); until then R signs, so W never signs
 before its approval has landed.
 
@@ -1496,20 +1496,21 @@ to scan an attacker's code in person.
 **Where:** *Versioning*; guardian app `keys/versionGate.ts`
 `GUARDIAN_KEYS_MIN_VERSION`.
 
-**Question:** this work now sits on main's version numbers (ward 0.7.4, code
-53; Linux 0.8.2, code 802) and takes no version bump until release. The earlier
+**Question:** this work now sits on main's version numbers (ward 0.7.5, code
+54; Linux 0.8.3, code 803) and takes no version bump until release. The earlier
 thresholds, Android 49 and Linux 713, were "the build's own numbers", but main
-has since released ward codes 49 to 53 and Linux 0.8.0 to 0.8.2 without this
+has since released ward codes 49 to 54 and Linux 0.8.0 to 0.8.3 without this
 section. Those wards would pass the gate, the app would sign for them with a
 working key, and they would refuse it. What are the thresholds until the
 release numbers are known?
 
-**Build's interim reading:** Android 54, Linux 803: one above the last build
+**Build's interim reading:** Android 55, Linux 804: one above the last build
 released without the section, so no released ward counts as ready. A build at
 main's numbers doesn't pass either, so the hardware gates build with those
 numbers on a throwaway branch (`docs/guardian-keys-hardware-gates.md`, Gate 0).
 Any further release from main before this ships moves the thresholds up with
-it. The real numbers go in the contract's *Versioning* paragraph at release.
+it, as ward 0.7.5 and Linux 0.8.3 already did once while this was being
+integrated. The real numbers go in the contract's *Versioning* paragraph at release.
 
 **Raised by:** bringing the branch up to main.
 

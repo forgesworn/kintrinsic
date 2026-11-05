@@ -16,18 +16,18 @@ const TOKEN = "0123456789abcdef0123456789abcdef";
 
 describe("versioning gate", () => {
   it("holds the per-platform thresholds", () => {
-    expect(GUARDIAN_KEYS_MIN_VERSION).toEqual({ android: 54, linux: 803 });
+    expect(GUARDIAN_KEYS_MIN_VERSION).toEqual({ android: 55, linux: 804 });
   });
 
   it("is ready at and above the threshold, per platform", () => {
-    expect(wardReadiness("android", 54, true)).toEqual({ ready: true });
-    expect(wardReadiness("linux", 803, true)).toEqual({ ready: true });
+    expect(wardReadiness("android", 55, true)).toEqual({ ready: true });
+    expect(wardReadiness("linux", 804, true)).toEqual({ ready: true });
     expect(wardReadiness("linux", 900, true)).toEqual({ ready: true });
     // The last released builds, which predate the section, are not ready.
-    expect(wardReadiness("android", 53, true)).toMatchObject({ ready: false, reason: "too-old", needs: 54 });
-    expect(wardReadiness("linux", 802, true)).toMatchObject({ ready: false, reason: "too-old" });
-    // Numbering is per platform: an Android 802 would be far above.
-    expect(wardReadiness("android", 802, true)).toEqual({ ready: true });
+    expect(wardReadiness("android", 54, true)).toMatchObject({ ready: false, reason: "too-old", needs: 55 });
+    expect(wardReadiness("linux", 803, true)).toMatchObject({ ready: false, reason: "too-old" });
+    // Numbering is per platform: an Android 803 would be far above.
+    expect(wardReadiness("android", 803, true)).toEqual({ ready: true });
   });
 
   it("counts a ward that has never sent STATUS as not ready", () => {
@@ -44,7 +44,7 @@ describe("versioning gate", () => {
 
   it("needs every ward of a child, and at least one", () => {
     expect(childReadiness([]).ready).toBe(false);
-    const ok = { machine: M, platform: "android", appVersionCode: 54, statusSeen: true };
+    const ok = { machine: M, platform: "android", appVersionCode: 55, statusSeen: true };
     expect(childReadiness([ok]).ready).toBe(true);
     const silent = { machine: S, platform: "linux", statusSeen: false };
     const r = childReadiness([ok, silent]);
@@ -136,11 +136,11 @@ describe("STATUS guardians", () => {
       effectiveSecs: 0,
       locked: false,
       source: "guardian",
-      appVersionCode: 803,
+      appVersionCode: 804,
     };
     const st = parseStatus(JSON.stringify({ ...base, guardians: g }));
     expect(st?.guardians).toEqual(g);
-    expect(st?.appVersionCode).toBe(803);
+    expect(st?.appVersionCode).toBe(804);
     // An older ward: no guardians, the STATUS is still good.
     expect(parseStatus(JSON.stringify(base))?.guardians).toBeUndefined();
     // A malformed guardians block degrades to absent, never drops the STATUS.

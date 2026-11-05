@@ -106,13 +106,13 @@ function ward(machine: string, platform: Device["platform"], label: string, guar
     devicePubkey: machine,
     pinnedKey: pinned,
     keysViewAt: T - 100,
-    appVersionCode: platform === "android" ? 54 : 803,
+    appVersionCode: platform === "android" ? 55 : 804,
     guardians,
   };
 }
 
 const status = (machine: string, ts: number, guardians: StatusGuardians): DeviceStatus =>
-  ({ v: 1, machine, ts, appVersionCode: 54, guardians }) as unknown as DeviceStatus;
+  ({ v: 1, machine, ts, appVersionCode: 55, guardians }) as unknown as DeviceStatus;
 
 const code = (machine: string, d: string, s: string) =>
   `charter://presence?m=${machine}&t=${"0".repeat(32)}&d=${encodeURIComponent(d)}&s=${s}`;
