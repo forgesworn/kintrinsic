@@ -36,8 +36,8 @@ export function GuardianCodeCard({ intro }: { intro?: string } = {}) {
   if (!npub) {
     return (
       <p className="card-sub" style={{ margin: 0 }}>
-        Your guardian identity is kept on this phone, so there's no guardian code to share. Connect My Signet as your
-        guardian identity first.
+        Your guardian identity is kept on this phone and has no guardian code yet. It gets one when you first invite a
+        parent: invite them, then show them this code.
       </p>
     );
   }
