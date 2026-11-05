@@ -170,8 +170,10 @@ describe("approving this phone on a My Signet family with devices it has never h
     await act(async () => {
       result = await ctx!.pairSignet("bunker://x?relay=wss://bunker.example");
     });
-    expect(result).toMatchObject({ approved: false });
-    expect(result && !result.approved && result.error).toMatch(/already trust the key on this phone/);
+    // Not connected at all: the move of this phone's identity is offered instead (D5).
+    expect(result).toMatchObject({ approved: false, moveOffer: true, devices: [ctx!.state.children[0].devices[0].label] });
+    expect(result && !result.approved && result.error).toMatch(/trusts the guardian key on this phone/);
+    expect(ctx!.state.signer.kind).toBe("local");
     expect(ctx!.guardianKeys.state.root).toBeUndefined();
     expect(ctx!.state.children[0].devices[0].pinnedKey).toBe(W);
   });

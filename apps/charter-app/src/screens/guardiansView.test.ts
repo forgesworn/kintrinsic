@@ -83,7 +83,7 @@ describe("guardians view", () => {
   it("offers removing the other parent to a key kept only on this phone, and gates moving", () => {
     expect(removeGate(emptyGuardianKeys()).ok).toBe(true);
     expect(removeGate({ ...emptyGuardianKeys(), root: signetRoot() }).ok).toBe(true);
-    expect(moveGate(emptyGuardianKeys(), true).ok).toBe(false);
+    expect(moveGate(emptyGuardianKeys(), true).ok).toBe(true);
     expect(moveGate({ ...emptyGuardianKeys(), root: signetRoot() }, false).ok).toBe(false);
     expect(moveGate({ ...emptyGuardianKeys(), root: signetRoot() }, true).ok).toBe(true);
   });

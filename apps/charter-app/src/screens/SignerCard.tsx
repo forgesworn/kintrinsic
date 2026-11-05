@@ -7,6 +7,7 @@ import { DEFAULT_RELAYS } from "../signer/config";
 import ApprovalSetupChoices from "./ApprovalSetupChoices";
 import { KEY_BACKUP_ANCHOR } from "./KeyBackupNudge";
 import KeyBackupSection from "./KeyBackupSection";
+import { offerMove } from "./guardiansView";
 
 // The Parent approval card on Settings: whether this phone signs for the
 // guardian (the built-in key, or My Signet / Heartwood), the pairing link, the
@@ -23,6 +24,8 @@ export default function SignerCard() {
   const [uri, setUri] = useState("");
   const [pairError, setPairError] = useState<string | null>(null);
   const [approvalNote, setApprovalNote] = useState<string | null>(null);
+  /** Connecting was refused because devices trust this phone's key: the move is offered instead (D5). */
+  const [moveOffer, setMoveOffer] = useState<{ uri: string; via: "signet" | "heartwood"; text: string } | null>(null);
   const viaName = pairingVia === "heartwood" ? "your Heartwood" : "My Signet";
 
   // Anything a step throws is shown: turning on parent approval is refused
@@ -66,8 +69,13 @@ export default function SignerCard() {
 
   async function doPair() {
     setPairError(null);
+    setMoveOffer(null);
     try {
       const result = await pairSignet(uri.trim(), { via: pairingVia ?? "signet" });
+      if (!result.approved && "moveOffer" in result) {
+        setMoveOffer({ uri: uri.trim(), via: pairingVia ?? "signet", text: result.error });
+        return;
+      }
       setApprovalNote(
         result.approved
           ? null
@@ -114,6 +122,17 @@ export default function SignerCard() {
               <p className="card-sub" style={{ margin: 0, color: "var(--danger, #B23B30)" }}>
                 {pairError}
               </p>
+            )}
+            {moveOffer && (
+              <div className="banner banner-warn">
+                <p style={{ margin: "0 0 8px" }}>
+                  {moveOffer.text} Move your guardian identity to {viaName} instead: your devices switch to it as you
+                  confirm in person at each one, and nothing is re-paired.
+                </p>
+                <Button block onClick={() => offerMove(moveOffer.uri, moveOffer.via)}>
+                  Move my identity to {viaName}
+                </Button>
+              </div>
             )}
             <Button block disabled={busy || !uri.trim().startsWith("bunker://")} onClick={() => run(doPair)}>
               Connect

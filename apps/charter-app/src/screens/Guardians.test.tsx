@@ -192,9 +192,26 @@ describe("Guardians screens", () => {
     expect(s.guardianKeys.withdrawInstall).toHaveBeenCalledWith("5".repeat(64));
   });
 
-  it("explains why a local-only family can't change identity", () => {
-    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]) }), "move");
-    expect(container.textContent).toContain("Moving it to another identity isn't available yet.");
+  it("offers a local-only family the move to My Signet (D5)", () => {
+    render(
+      mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), signer: { connected: true, kind: "local", autoSign: false } }),
+      "move",
+    );
+    expect(container.textContent).toContain("Moves your guardian identity from this phone's own key to My Signet or a Heartwood");
+    expect(container.textContent).toContain("This phone will now use a separate day-to-day key");
+  });
+
+  it("offers deleting the old key once a phone-held identity's move has landed, only after a warning", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.phoneKeyRetirable = vi.fn(() => true);
+    render(s, "move");
+    await act(async () => button(container, "Delete the old key from this phone")!.click());
+    expect(container.textContent).toContain("Backups made before the move hold that old key");
+    expect(container.textContent).toContain("This can't be undone.");
+    expect(s.guardianKeys.retirePhoneKey).not.toHaveBeenCalled();
+    await act(async () => button(container, "Delete the old key")!.click());
+    expect(s.guardianKeys.retirePhoneKey).toHaveBeenCalled();
+    expect(container.textContent).toContain("Old key deleted");
   });
 
   it("refuses joining on a phone that keeps its own key", () => {

@@ -132,7 +132,7 @@ import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
 import { isAskExpired } from "../domain/askExpiry";
 import { bunkerRoot, type GuardianKeysState, type RootVia } from "../keys/state";
 import { listeningKeys, listensWithLocalKey, useGuardianKeys, type GuardianKeysApi } from "./useGuardianKeys";
-import { adoptRoster, applyDeviceKeysView, applyFarewell, ensureRosterIds, newRosterId, stampPinnedKeys } from "./guardianKeysWiring";
+import { adoptRoster, applyDeviceKeysView, applyFarewell, devicesPinningLocalKey, ensureRosterIds, newRosterId, stampPinnedKeys } from "./guardianKeysWiring";
 import type { StatusFarewell } from "../wire/status";
 
 export { isSetUp, statusFor } from "./statusFor";
@@ -584,7 +584,15 @@ type DecisionSent =
   | { status: "queued"; devices: string[] };
 
 /** What connecting a root reports: whether it approved this phone's working key. */
-export type RootConnectResult = { approved: true } | { approved: false; error: string };
+export type RootConnectResult =
+  | { approved: true }
+  | { approved: false; error: string }
+  /**
+   * Not connected: this phone's own key is the identity its devices trust, so
+   * connecting My Signet is a move of that identity (decision D5). Nothing
+   * was changed; the screen offers the move instead.
+   */
+  | { approved: false; error: string; moveOffer: true; devices: string[] };
 
 export interface CharterContextValue {
   state: CharterState;
@@ -951,7 +959,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   // Guardian roots and working keys (./useGuardianKeys).
-  const onRootMovedRef = useRef<(bunkerUri: string) => void>(() => {});
+  const onRootMovedRef = useRef<(bunkerUri: string, via: RootVia) => void>(() => {});
   const guardianKeys = useGuardianKeys(
     {
       stateRef,
@@ -964,7 +972,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         stateRef.current = { ...stateRef.current, children };
         dispatch({ type: "STAMP_PINNED_KEYS", key, ...(opts?.onlyUnheard ? { onlyUnheard: true } : {}) });
       },
-      onRootMoved: (uri) => onRootMovedRef.current(uri),
+      onRootMoved: (uri, via) => onRootMovedRef.current(uri, via),
       reconnect: async () => {
         const cur = stateRef.current.signer;
         if (!cur.bunkerUri || !signer.current) throw new Error("Connect My Signet first.");
@@ -3201,6 +3209,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
             dispatch({ type: "STAMP_PINNED_KEYS", key: w });
           }
         }
+        // Devices that trust this phone's own key: connecting My Signet in its
+        // place would leave them signed for by a key they don't know. That is
+        // a move of the identity, offered instead (not when joining a family).
+        if (!opts.expectRoot && w && !guardianKeysRef.current.forgottenRoot) {
+          const pinned = devicesPinningLocalKey(stateRef.current.children, w);
+          if (pinned.length > 0) {
+            return {
+              approved: false,
+              moveOffer: true,
+              devices: pinned,
+              error: `${pinned.join(", ")} already ${pinned.length === 1 ? "trusts" : "trust"} the guardian key on this phone, so My Signet wasn't connected in its place.`,
+            };
+          }
+        }
       }
       const next: SignerState = { ...stateRef.current.signer, kind, bunkerUri };
       try {
@@ -3239,12 +3261,15 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
 
   // A root move landed on every ward: the new identity's bunker becomes the signer.
-  onRootMovedRef.current = (bunkerUri: string) => {
+  onRootMovedRef.current = (bunkerUri: string, via: RootVia) => {
     const cur = stateRef.current.signer;
-    const next: SignerState = { ...cur, bunkerUri, connected: false };
+    // The new identity is in My Signet or a Heartwood, whatever signed before
+    // (a phone-held identity's own key moved there too, decision D5).
+    const kind: SignerKind = via === "heartwood" ? "heartwood" : "signet";
+    const next: SignerState = { ...cur, kind, bunkerUri, connected: false };
     signer.current = buildSigner(next);
     void signer.current
-      .connect(cur.kind)
+      .connect(kind)
       .then(() => dispatch({ type: "SET_SIGNER", signer: { ...signer.current!.status(), bunkerUri } }))
       .catch(() => dispatch({ type: "SET_SIGNER", signer: next }));
   };

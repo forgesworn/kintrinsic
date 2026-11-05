@@ -537,10 +537,8 @@ describe("root move", () => {
     expect(h.keys().nextRoot).toBeUndefined();
   });
 
-  it("is refused for a local-only family and while a ward isn't ready", async () => {
+  it("is refused while a ward isn't ready", async () => {
     const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", devices: [device(PHONE, "android")] };
-    const local = harness([child], opsOf(wSk));
-    await expect(local.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "x", via: "signet" })).rejects.toThrow(/isn't available/);
     const h = harness([child]);
     await connectSignetRoot(h);
     // The device has never reported: it hasn't checked in, rather than needing an update (N-L1).
@@ -1281,5 +1279,59 @@ describe("after a restore from backup (decision D5)", () => {
     expect(h.gk.restoreFollowUp()!.lost).toEqual([]);
     h.gk.forgetRestore();
     expect(h.gk.restoreFollowUp()).toBeNull();
+  });
+});
+
+describe("moving a phone-held root to My Signet (decision D5)", () => {
+  it("R signs the move, R2 approves the minted W (never R), and the old key may go once every device follows R2", async () => {
+    const pSk = generateSecretKey();
+    const P = getPublicKey(pSk);
+    let keys = emptyGuardianKeys();
+    let minted: Uint8Array | null = null;
+    const published: { relays: string[]; wrap: NostrEvent }[] = [];
+    const ward = device(PHONE, "android", {
+      statusSeen: true,
+      appVersionCode: 55,
+      guardians: { roots: [{ root: P, keys: [] }], pending: [], tombstones: 0, relays: [] },
+    });
+    const gk = new GuardianKeys({
+      read: () => ({ keys, children: [{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }] }),
+      write: (f) => {
+        keys = f(keys);
+      },
+      workingKey: () => minted ?? pSk,
+      localKey: () => pSk,
+      mintWorkingKey: () => (minted = generateSecretKey()),
+      root: () => opsOf(pSk),
+      publish: async (relays, wrap) => {
+        published.push({ relays, wrap });
+      },
+      now: () => T,
+      defaultRelays: [],
+    });
+    const report = await gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "bunker://new", via: "signet" });
+    const w = getPublicKey(minted!);
+    const move = parseStatement(report.event);
+    expect(move.ok && move.statement).toMatchObject({ type: "move", signer: P, key: R2 });
+    const r2Approval = parseStatement(keys.nextRoot!.approval);
+    expect(r2Approval.ok && r2Approval.statement).toMatchObject({ type: "approval", signer: R2, key: w });
+
+    // The confirmation at the device carries R2's approval of W.
+    const before = published.length;
+    await gk.confirmPresence(`charter://presence?m=${PHONE}&t=${"0".repeat(32)}&d=${keys.nextRoot!.moveD}&s=${report.event.id}`);
+    const conf = open(published[before].wrap, phoneSk);
+    expect(conf.inner.pubkey).toBe(w);
+    expect(JSON.parse(conf.inner.content).approval.id).toBe(keys.nextRoot!.approval.id);
+
+    // Half-way: the moved device takes the rules from W, not the old key.
+    ward.guardians = { roots: [{ root: R2, keys: [w] }], pending: [], tombstones: 0, relays: [] };
+    expect(gk.keyFor(PHONE)).toBe("working");
+    expect(gk.phoneKeyRetirable()).toBe(false); // the move isn't settled yet
+    expect(gk.settleRootMove()).toBe("bunker://new");
+    expect(keys.root).toMatchObject({ pubkey: R2, via: "signet" });
+    expect(gk.phoneKeyRetirable()).toBe(true);
+    // A device still pinning the old key keeps it.
+    ward.guardians = { roots: [{ root: R2, keys: [w] }, { root: P, keys: [] }], pending: [], tombstones: 0, relays: [] };
+    expect(gk.phoneKeyRetirable()).toBe(false);
   });
 });

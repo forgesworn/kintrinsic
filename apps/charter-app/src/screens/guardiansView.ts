@@ -358,17 +358,11 @@ export function moveNeedsFinishing(progress: MoveProgress | null | undefined): b
 }
 
 /**
- * Mirrors `moveRoot`: only a My Signet or Heartwood identity can move, one
- * move at a time. A lapsed move is offered again: to finish, when some
- * devices switched, or to start afresh.
+ * Mirrors `moveRoot`: one move at a time, to My Signet or a Heartwood, from
+ * either one or this phone's own key (decision D5). A lapsed move is offered
+ * again: to finish, when some devices switched, or to start afresh.
  */
 export function moveGate(keys: GuardianKeysState, familyReady: boolean, progress?: MoveProgress | null): Gate {
-  if (!keys.root) {
-    return {
-      ok: false,
-      reason: "Your guardian identity is kept on this phone. Moving it to another identity isn't available yet.",
-    };
-  }
   // A lapsed move is either finished (some devices switched) or started
   // afresh (none did): `moveRoot` allows both.
   if (keys.nextRoot && !progress?.lapsed) {
@@ -483,4 +477,33 @@ export function clockBehindWards(wards: readonly WardRef[], keys: GuardianKeysSt
     const at = keys.clamped?.[w.device.devicePubkey]?.roseAt;
     return at !== undefined && now - at < CLOCK_NOTICE_SECONDS;
   });
+}
+
+const OFFER_KEY = "charter.guardian.moveOffer";
+
+/**
+ * Open the move screen with a connection link already given (connecting My
+ * Signet was refused because devices trust this phone's key, decision D5).
+ * The link stays in this tab only.
+ */
+export function offerMove(uri: string, via: "signet" | "heartwood"): void {
+  try {
+    sessionStorage.setItem(OFFER_KEY, JSON.stringify({ uri, via }));
+  } catch {
+    // No session storage: the guardian pastes the link again.
+  }
+  goGuardians("move");
+}
+
+/** The connection link `offerMove` left for the move screen, once. */
+export function takeMoveOffer(): { uri: string; via: "signet" | "heartwood" } | null {
+  try {
+    const raw = sessionStorage.getItem(OFFER_KEY);
+    sessionStorage.removeItem(OFFER_KEY);
+    const o = raw ? (JSON.parse(raw) as { uri?: unknown; via?: unknown }) : null;
+    if (o && typeof o.uri === "string" && (o.via === "signet" || o.via === "heartwood")) return { uri: o.uri, via: o.via };
+  } catch {
+    // Nothing usable.
+  }
+  return null;
 }

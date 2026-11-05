@@ -426,6 +426,9 @@ export class GuardianKeys {
    */
   private async mintPhoneWorkingKey(what: string): Promise<InstallRoot> {
     const local = opsFromSecret(this.localSecret());
+    // Only while this phone's own key is the connected signer: a My Signet
+    // that hasn't approved this phone yet (or isn't reachable) is the
+    // identity, and this phone's own key mustn't act for it.
     const connected = this.deps.root();
     if (!connected) throw new Error(`Turn on parent approval on this phone first, then ${what}.`);
     if (connected.pubkey !== local.pubkey) {
@@ -887,14 +890,16 @@ export class GuardianKeys {
    * Move this install's root to a new identity R2 (`next`, the newly
    * connected bunker): R signs the move to every ward, then R2 approves W.
    * Each ward replaces R with R2 once this install confirms in person there
-   * (`confirmPresence` carries R2's approval). Refused for a local-only
-   * family, whose local key is the root and can't become a working key
-   * (docs/guardian-keys-open-questions.md, "Moving a phone-held root").
+   * (`confirmPresence` carries R2's approval, contract rule 8). A phone-held
+   * root first mints its W (decision D5): R2 approves that W, never R, and R
+   * stays on the phone until the guardian chooses to delete it
+   * (`phoneKeyRetirable`).
    */
   async moveRoot(next: { ops: GuardianOps; bunkerUri: string; via: RootVia }): Promise<SendReport> {
-    const root = this.signetRoot();
-    if (!root) throw new Error("Moving a guardian identity held on this phone isn't available yet.");
-    if (next.ops.pubkey === root.pubkey) throw new Error("That's already your guardian identity.");
+    if (next.via === "phone") throw new Error("A move goes to My Signet or a Heartwood.");
+    const current = this.signetRoot();
+    if (current && next.ops.pubkey === current.pubkey) throw new Error("That's already your guardian identity.");
+    if (next.ops.pubkey === this.rootPubkey()) throw new Error("That's already your guardian identity.");
     if (next.ops.pubkey === this.workingPubkey()) throw new Error("This phone's own key can't be the new identity.");
     const pending = this.deps.read().keys.nextRoot;
     if (pending && pending.pubkey !== next.ops.pubkey && this.movedWards().length > 0) {
@@ -904,6 +909,8 @@ export class GuardianKeys {
       throw new Error("Some of your devices already use the guardian identity you were moving to. Finish that move first.");
     }
     this.requireFamilyReady("move your guardian identity");
+    await this.ensureRoot("move your guardian identity");
+    if (next.ops.pubkey === this.workingPubkey()) throw new Error("This phone's own key can't be the new identity.");
     const issuedAt = this.deps.now();
     const event = await this.signAsRoot((s) => buildRootMove(s, next.ops.pubkey, { issuedAt }));
     const w = this.workingPubkey();
@@ -958,6 +965,32 @@ export class GuardianKeys {
       return { ...rest, root: { pubkey: next.pubkey, approval: next.approval, via: next.via }, approvalSentAt: {} };
     });
     return next.bunkerUri;
+  }
+
+  /**
+   * After a phone-held root moved to My Signet or a Heartwood (decision D5):
+   * the old key R is still on this phone, beside the W the new identity
+   * approved. It may be deleted once every ward this install looks after
+   * reports the new root with W under it and none still pins R. False while
+   * anything still needs R, or when there is no separate W to keep.
+   */
+  phoneKeyRetirable(): boolean {
+    const { keys } = this.deps.read();
+    const root = keys.root;
+    if (!root || root.via === "phone" || keys.nextRoot) return false;
+    const old = getPublicKey(this.localSecret());
+    const w = this.workingPubkey();
+    if (old === w || old === root.pubkey) return false;
+    const wards = this.ownWards();
+    return (
+      wards.length > 0 &&
+      wards.every(
+        (d) =>
+          !!d.guardians &&
+          d.guardians.roots.some((r) => r.root === root.pubkey && r.keys.includes(w)) &&
+          !d.guardians.roots.some((r) => r.root === old),
+      )
+    );
   }
 
   /**

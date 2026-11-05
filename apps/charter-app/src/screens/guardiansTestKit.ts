@@ -86,6 +86,8 @@ export function mockStore(opts: {
       approveInstall: vi.fn(),
       restoreFollowUp: vi.fn(() => null),
       forgetRestore: vi.fn(),
+      phoneKeyRetirable: vi.fn(() => false),
+      retirePhoneKey: vi.fn(),
       reportedRoots: vi.fn(() => []),
       inviteCoGuardian: vi.fn(async () => report),
       confirmPresence: vi.fn(async () => report),

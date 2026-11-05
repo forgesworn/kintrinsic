@@ -13,8 +13,8 @@ import type { ChildReadiness } from "../keys/versionGate";
 import type { GuardianOps } from "../wire/giftwrap";
 import type { Signer } from "../signer/Signer";
 import type { SelectSignerDeps } from "../signer/selectSigner";
-import { loadOrCreateGuardianKey, readGuardianKey } from "../signer/guardianKey";
-import { mintPhoneWorkingKey, readPhoneWorkingKey } from "../signer/phoneWorkingKey";
+import { importGuardianKey, loadOrCreateGuardianKey, readGuardianKey } from "../signer/guardianKey";
+import { clearPhoneWorkingKey, mintPhoneWorkingKey, readPhoneWorkingKey } from "../signer/phoneWorkingKey";
 import { localRelayAuth } from "../signer/relayAuth";
 import { withLocalRoute, type LocalRouteHooks } from "../signer/routePublish";
 import { connectBunker } from "../signer/signetSigner";
@@ -90,6 +90,16 @@ export interface GuardianKeysApi {
   restoreFollowUp(): ReturnType<GuardianKeys["restoreFollowUp"]>;
   /** Done with the restore notice. */
   forgetRestore(): void;
+  /**
+   * After a phone-held identity moved to My Signet or a Heartwood and every
+   * device follows the new one: may the old key be deleted from this phone?
+   */
+  phoneKeyRetirable(): boolean;
+  /**
+   * Delete the old guardian key from this phone (only once `phoneKeyRetirable`).
+   * The day-to-day key the new identity approved takes its place. Can't be undone.
+   */
+  retirePhoneKey(): void;
   /** The roots (and their working keys) the family's devices report, merged. */
   reportedRoots(): { root: string; keys: string[] }[];
 }
@@ -103,8 +113,8 @@ export interface UseGuardianKeysDeps {
   localRoute: LocalRouteHooks;
   /** Record `key` as the pinned key of every paired device with none yet (see guardianKeysWiring). */
   stampPinnedKeys: (key: string, opts?: { onlyUnheard?: boolean }) => void;
-  /** A root move landed on every ward: switch the signer to the new bunker. */
-  onRootMoved: (bunkerUri: string) => void;
+  /** A root move landed on every ward: switch the signer to the new bunker (held in My Signet or a Heartwood). */
+  onRootMoved: (bunkerUri: string, via: RootVia) => void;
   /**
    * Re-open the paired bunker when the signer isn't connected (a family
    * paired with My Signet before this version, after a reload).
@@ -200,7 +210,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
     void (async () => {
       try {
         const moved = keys.settleRootMove();
-        if (moved) depsRef.current.onRootMoved(moved);
+        if (moved) depsRef.current.onRootMoved(moved, keysRef.current.root?.via ?? "signet");
         await keys.syncApprovals();
       } catch {
         // Offline, or no relay took it: the next change retries.
@@ -263,7 +273,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       const pinned = devicesPinningLocalKey(s.children, local);
       if (pinned.length > 0) {
         throw new Error(
-          `${pinned.join(", ")} already trust the key on this phone. Moving them to My Signet is a guardian identity move, not a new connection.`,
+          `${pinned.join(", ")} already trust the key on this phone. Move your guardian identity to My Signet instead (Guardians → Change my identity): nothing is re-paired.`,
         );
       }
       const root = await keys.approveThisInstall({
@@ -325,6 +335,19 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       waitingPresenceWards: () => keys.waitingPresenceWards(),
       movedAwayRoots: () => keys.movedAwayRoots(),
       restoreFollowUp: () => keys.restoreFollowUp(),
+      phoneKeyRetirable: () => keys.phoneKeyRetirable(),
+      retirePhoneKey: () => {
+        if (!keys.phoneKeyRetirable()) throw new Error("Your devices still need the old key on this phone.");
+        const w = readPhoneWorkingKey();
+        if (!w) throw new Error("This phone has no separate day-to-day key to keep.");
+        // Promote W into the guardian key slot, then forget its own slot: the
+        // phone is from now on exactly an install with a My Signet identity.
+        importGuardianKey(w);
+        clearPhoneWorkingKey();
+        // Re-render with the promoted key.
+        keysRef.current = { ...keysRef.current };
+        depsRef.current.save(keysRef.current);
+      },
       forgetRestore: () => keys.forgetRestore(),
       reportedRoots: () => keys.reportedRoots(),
     }),

@@ -42,6 +42,7 @@ export function selectSigner(signerState: SignerState, deps: SelectSignerDeps): 
       localRoute: deps.localRoute,
       // Start disconnected (mount effect reconnects), but carry autoSign forward.
       initial: { connected: false, kind: "local", autoSign: signerState.autoSign },
+      ...(deps.keys ? { pickOps: deps.keys.pickOps } : {}),
     });
   }
   if (signerState.bunkerUri) {
