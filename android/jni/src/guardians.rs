@@ -125,10 +125,13 @@ impl Warden {
     }
 
     /// A pasted relay code (About → Change relays). Any key in the signer
-    /// set may sign one (contract, *Other places that name the guardian*);
-    /// a code that carries a `guardianPin` is refused whole, since a pasted
-    /// code passes through whoever pastes it (open question "How a guardian
-    /// PIN reaches an Android ward").
+    /// set may sign one (contract, *Other places that name the guardian*),
+    /// but only a root may change the relay list: a working key's code must
+    /// carry no `relays` or the same set (rule 11, D3), so a stolen phone
+    /// cannot move the ward off the relays its withdrawal is sent to. The
+    /// 600-second rule always applies, and a code that carries a
+    /// `guardianPin` is refused whole, since a pasted code passes through
+    /// whoever pastes it (D4: the PIN arrives only gift-wrapped).
     pub(super) fn apply_pasted_relays(
         &self,
         pairing: &mut Pairing,
@@ -728,12 +731,21 @@ mod tests {
         }
 
         fn relays_event(&self, seed: u8, at: u64, pin: bool) -> NostrEvent {
-            let mut body = json!({
-                "machine": self.machine().to_hex(),
-                "relays": ["wss://relay.example", "wss://relay2.example"],
-            });
+            let mut body = json!({"relays": ["wss://relay.example", "wss://relay2.example"]});
             if pin {
                 body["guardianPin"] = pin_record();
+            }
+            self.relays_with(seed, at, body)
+        }
+
+        /// A RELAYS signed by `seed` at `at` whose body is `fields` plus this
+        /// machine: any of `relays`, `battery`, `guardianPin`.
+        fn relays_with(&self, seed: u8, at: u64, fields: Value) -> NostrEvent {
+            let mut body = json!({"machine": self.machine().to_hex()});
+            if let (Some(b), Some(f)) = (body.as_object_mut(), fields.as_object()) {
+                for (k, v) in f {
+                    b.insert(k.clone(), v.clone());
+                }
             }
             sign_event(
                 &TestGuardian::from_seed(seed).signer,
@@ -1434,66 +1446,82 @@ mod tests {
         );
     }
 
-    /// Battery settings ride in a relay change, so a working key's pasted
-    /// code sets them, and a gift-wrapped one is taken up by the next reload.
+    fn battery(screen_off: u64) -> Value {
+        json!({
+            "screenOffSecs": screen_off,
+            "ordinarySecs": 120,
+            "requestBoost": true,
+            "openingBoost": false,
+            "boostSecs": 60,
+        })
+    }
+
+    const ONE: &str = "wss://relay.example";
+    const TWO: &str = "wss://relay2.example";
+
+    /// Battery settings ride in a RELAYS, so a working key's code with no
+    /// relay list sets them, pasted or gift-wrapped, and the list stays as
+    /// it is (rule 11, D3).
     #[test]
-    fn battery_settings_follow_a_relay_change_from_a_working_key() {
+    fn battery_settings_from_a_working_key_leave_the_relay_list_alone() {
         let mut ward = Ward::new("battery");
         ward.approve_w1();
-        let relays_event = |ward: &Ward, at: u64, screen_off: u64| {
-            sign_event(
-                &TestGuardian::from_seed(W1).signer,
-                kinds::CHARTER_DEVICE_RELAYS,
-                at,
-                vec![
-                    kinds::marker_tag(),
-                    vec!["p".into(), ward.machine().to_hex()],
-                ],
-                json!({
-                    "machine": ward.machine().to_hex(),
-                    "relays": ["wss://relay.example", "wss://relay2.example"],
-                    "battery": {
-                        "screenOffSecs": screen_off,
-                        "ordinarySecs": 120,
-                        "requestBoost": true,
-                        "openingBoost": false,
-                        "boostSecs": 60,
-                    },
-                })
-                .to_string(),
-            )
-        };
-        let pasted = relays_event(&ward, ward.now - 5, 600);
+        let pasted = ward.relays_with(W1, ward.now - 5, json!({"battery": battery(600)}));
         let state = ward
             .w
             .update_relays(&serde_json::to_string(&pasted).unwrap(), ward.now)
             .unwrap();
         assert_eq!(state.battery.unwrap().screen_off_secs, 600);
+        assert_eq!(state.relays, vec![ONE.to_string()]);
 
-        let wrapped = relays_event(&ward, ward.now - 2, 120);
+        let wrapped = ward.relays_with(W1, ward.now - 2, json!({"battery": battery(120)}));
         assert_eq!(ward.deliver(&wrapped, W1, 2), AckResult::Applied);
         ward.w.reload_relays();
-        assert_eq!(ward.w.pairing_state().battery.unwrap().screen_off_secs, 120);
+        let state = ward.w.pairing_state();
+        assert_eq!(state.battery.unwrap().screen_off_secs, 120);
+        assert_eq!(state.relays, vec![ONE.to_string()]);
     }
 
+    /// Every shape of pasted code (About → Change relays): the 600-second
+    /// rule always, a `guardianPin` never, and only a root may change the
+    /// relay list (rule 11, D3).
     #[test]
-    fn a_pasted_relay_code_may_not_carry_a_pin_but_any_signer_may_sign_one() {
+    fn a_pasted_relay_code_follows_the_root_only_rule_and_never_carries_a_pin() {
         let mut ward = Ward::new("pasted");
-        let with_pin = ward.relays_event(ROOT, ward.now - 5, true);
-        let err = ward
-            .w
-            .update_relays(&serde_json::to_string(&with_pin).unwrap(), ward.now)
-            .unwrap_err();
+        let paste = |ward: &mut Ward, ev: &NostrEvent| {
+            ward.w
+                .update_relays(&serde_json::to_string(ev).unwrap(), ward.now)
+        };
+        // A PIN, with a list or alone, from the root: refused whole.
+        let with_pin = ward.relays_event(ROOT, ward.now - 100, true);
+        let err = paste(&mut ward, &with_pin).unwrap_err();
+        assert!(err.contains("PIN"), "{err}");
+        let pin_only = ward.relays_with(ROOT, ward.now - 99, json!({"guardianPin": pin_record()}));
+        let err = paste(&mut ward, &pin_only).unwrap_err();
         assert!(err.contains("PIN"), "{err}");
         assert!(!ward.w.has_guardian_pin());
-        assert_eq!(ward.w.relays, vec!["wss://relay.example".to_string()]);
-        // A stranger's code is refused; an approved working key's applies.
-        let stranger = ward.relays_event(STRANGER, ward.now - 4, false);
-        assert!(ward
-            .w
-            .update_relays(&serde_json::to_string(&stranger).unwrap(), ward.now)
-            .is_err());
+        assert_eq!(ward.w.relays, vec![ONE.to_string()]);
+        // A stranger's code is refused.
+        let stranger = ward.relays_event(STRANGER, ward.now - 98, false);
+        assert!(paste(&mut ward, &stranger).is_err());
+
         ward.approve_w1();
+        // A working key may not change the list.
+        let w1_list = ward.relays_event(W1, ward.now - 97, false);
+        assert_eq!(
+            paste(&mut ward, &w1_list).unwrap_err(),
+            charter_transport::relay_config::RELAYS_ROOT_ONLY
+        );
+        assert_eq!(ward.w.relays, vec![ONE.to_string()]);
+        // A battery-only code older than 600 seconds is refused, even from
+        // a working key that may send one.
+        let stale = ward.relays_with(W1, ward.now - 700, json!({"battery": battery(600)}));
+        let err = paste(&mut ward, &stale).unwrap_err();
+        assert!(err.contains("expired"), "{err}");
+        // A fresh one applies.
+        let fresh = ward.relays_with(W1, ward.now - 90, json!({"battery": battery(600)}));
+        assert!(paste(&mut ward, &fresh).is_ok());
+
         // A poll in flight holds a clone of the live instance; clones share
         // one state, so the pasted change must reach it (no second instance).
         let (in_flight, _) = ward.handle();
@@ -1501,12 +1529,10 @@ mod tests {
             in_flight.status_guardians(ward.now).unwrap().relays.len(),
             1
         );
-        let by_w1 = ward.relays_event(W1, ward.now - 3, false);
-        let state = ward
-            .w
-            .update_relays(&serde_json::to_string(&by_w1).unwrap(), ward.now)
-            .unwrap();
-        assert_eq!(state.relays.len(), 2);
+        // The root changes the list.
+        let by_root = ward.relays_event(ROOT, ward.now - 70, false);
+        let state = paste(&mut ward, &by_root).unwrap();
+        assert_eq!(state.relays, vec![ONE.to_string(), TWO.to_string()]);
         // The guardian-keys state followed the pairing's list.
         let g = ward.w.guardian_keys.as_ref().unwrap();
         assert_eq!(g.status_guardians(ward.now).unwrap().relays.len(), 2);
@@ -1514,6 +1540,66 @@ mod tests {
             in_flight.status_guardians(ward.now).unwrap().relays.len(),
             2
         );
+        // A working key's code naming the same set, in another order,
+        // applies and keeps the stored order.
+        let same = ward.relays_with(W1, ward.now - 60, json!({"relays": [TWO, ONE]}));
+        assert_eq!(
+            paste(&mut ward, &same).unwrap().relays,
+            vec![ONE.to_string(), TWO.to_string()]
+        );
+    }
+
+    /// Every shape of gift-wrapped RELAYS: a PIN-only one from any signer,
+    /// however old (D4); a working key's list change refused, its same set
+    /// or battery accepted; a root's list change accepted; anything else
+    /// older than 600 seconds refused (rule 11, D3).
+    #[test]
+    fn a_wrapped_relays_follows_the_root_only_and_pin_only_rules() {
+        let mut ward = Ward::new("wrapped");
+        ward.approve_w1();
+        // Older than 600 s and carrying a list: refused.
+        let stale = ward.relays_with(
+            ROOT,
+            ward.now - 900,
+            json!({"relays": [ONE, TWO], "guardianPin": pin_record()}),
+        );
+        assert_eq!(ward.deliver(&stale, ROOT, 2), AckResult::Refused);
+        assert!(!ward.w.has_guardian_pin());
+        // So is a battery-only one: only a PIN-only RELAYS skips the rule.
+        let old_batt = ward.relays_with(W1, ward.now - 700, json!({"battery": battery(600)}));
+        assert_eq!(ward.deliver(&old_batt, W1, 8), AckResult::Refused);
+        // PIN-only from a working key, as old: taken (a ward that slept
+        // through the send still gets the PIN).
+        let pin_only = ward.relays_with(W1, ward.now - 900, json!({"guardianPin": pin_record()}));
+        assert_eq!(ward.deliver(&pin_only, W1, 3), AckResult::Applied);
+        assert!(ward.w.has_guardian_pin());
+        let summary = parse(&ward.w.guardians_summary_json(ward.now));
+        assert_eq!(summary["pin"]["set"], true);
+        // The same event again is a replay, not a second change.
+        assert_eq!(ward.deliver(&pin_only, W1, 4), AckResult::Unchanged);
+        // A working key's list change: refused, the list unchanged.
+        let w1_list = ward.relays_event(W1, ward.now - 50, false);
+        assert_eq!(ward.deliver(&w1_list, W1, 5), AckResult::Refused);
+        ward.w.reload_relays();
+        assert_eq!(ward.w.relays, vec![ONE.to_string()]);
+        // Its battery settings: taken.
+        let batt = ward.relays_with(W1, ward.now - 40, json!({"battery": battery(300)}));
+        assert_eq!(ward.deliver(&batt, W1, 6), AckResult::Applied);
+        ward.w.reload_relays();
+        assert_eq!(ward.w.relays, vec![ONE.to_string()]);
+        assert_eq!(ward.w.pairing_state().battery.unwrap().screen_off_secs, 300);
+        // The root changes the list.
+        let by_root = ward.relays_event(ROOT, ward.now - 30, false);
+        assert_eq!(ward.deliver(&by_root, ROOT, 7), AckResult::Applied);
+        ward.w.reload_relays();
+        assert_eq!(ward.w.relays, vec![ONE.to_string(), TWO.to_string()]);
+        assert!(ward.w.has_guardian_pin(), "the PIN outlives a list change");
+        // A working key naming the same set, in another order: taken, and
+        // the stored order kept.
+        let same = ward.relays_with(W1, ward.now - 20, json!({"relays": [TWO, ONE]}));
+        assert_eq!(ward.deliver(&same, W1, 9), AckResult::Applied);
+        ward.w.reload_relays();
+        assert_eq!(ward.w.relays, vec![ONE.to_string(), TWO.to_string()]);
     }
 
     #[test]
