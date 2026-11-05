@@ -390,6 +390,64 @@ async fn an_unreadable_state_fails_closed_and_is_left_on_disk() {
     assert!(keys.signers().is_signer(&pk(ROOT_SEED)));
 }
 
+/// D7: the state is kept twice. A primary that is missing, unreadable or
+/// corrupt is read from the secondary (and restored from it); only when
+/// both fail is the state unavailable.
+#[tokio::test]
+async fn the_state_is_read_from_its_second_copy_when_the_first_fails() {
+    // Every write updates both copies.
+    let w = Ward::new();
+    let (b, _keys) = w.broker();
+    approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+    let good = w.store.raw().unwrap();
+    assert_eq!(w.store.raw_secondary().as_deref(), Some(good.as_str()));
+    let trusts_w = |k: &GuardianKeys| k.is_available() && k.signers().is_signer(&pk(WORKING_SEED));
+
+    // A corrupt primary: read from the secondary, and the primary restored.
+    w.store.set_raw_primary(Some("{not json".into()));
+    assert!(trusts_w(&w.keys()));
+    assert_eq!(w.store.raw().as_deref(), Some(good.as_str()));
+
+    // An unreadable primary: read from the secondary.
+    w.store.break_primary_reads(true);
+    assert!(trusts_w(&w.keys()));
+    w.store.break_primary_reads(false);
+
+    // A missing primary: restored from the secondary, not migrated afresh
+    // (which would forget W).
+    w.store.set_raw_primary(None);
+    assert!(trusts_w(&w.keys()));
+    assert_eq!(w.store.raw().as_deref(), Some(good.as_str()));
+
+    // Both corrupt: unavailable, and left on disk.
+    w.store.set_raw(Some("junk".into()));
+    assert!(!w.keys().is_available());
+    assert_eq!(w.store.raw().as_deref(), Some("junk"));
+
+    // A missing primary beside a corrupt secondary: the ward had a state, so
+    // it fails closed rather than migrating afresh.
+    w.store.set_raw_primary(None);
+    w.store.set_raw_secondary(Some("junk".into()));
+    assert!(!w.keys().is_available());
+    assert_eq!(w.store.raw(), None);
+
+    // A corrupt primary beside a missing secondary: unavailable.
+    w.store.set_raw_primary(Some("junk".into()));
+    w.store.set_raw_secondary(None);
+    assert!(!w.keys().is_available());
+
+    // An unreadable primary heals from the secondary at the next advance
+    // once the secondary reads again.
+    w.store.set_raw(Some(good.clone()));
+    w.store.break_reads(true);
+    let keys = w.keys();
+    assert!(!keys.is_available());
+    w.store.break_reads(false);
+    w.store.break_primary_reads(true);
+    keys.advance(NOW);
+    assert!(trusts_w(&keys));
+}
+
 // ---------------------------------------------------------------------------
 // Clauses: one source of truth (review 2a M1, L6)
 // ---------------------------------------------------------------------------

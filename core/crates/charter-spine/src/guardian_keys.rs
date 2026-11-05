@@ -65,8 +65,12 @@
 //!
 //! # Fail closed
 //!
-//! A state document that exists but cannot be read or parsed is NOT replaced
-//! by a migration: the adapter is then unavailable. Its signer set is empty
+//! The store keeps the document twice (D7): the primary is read, and the
+//! secondary when the primary is missing, unreadable or does not parse; a
+//! good secondary restores the primary. Only when neither copy can be read
+//! and parsed (or the primary is missing and the secondary unusable) is the
+//! state unavailable. A state document that exists but cannot be read or
+//! parsed is NOT replaced by a migration: the adapter is then unavailable. Its signer set is empty
 //! (no CLAUSE, GRANT, RELAYS, USAGE_SYNC, RELEASE or statement is accepted,
 //! no local-link handshake completes), it has no recipients (nothing is
 //! encrypted to a key that may have departed), and every port call fails.
@@ -211,6 +215,76 @@ fn ack(outcome: &cg::Outcome) -> AckResult {
     }
 }
 
+/// What the store holds, read from both copies (D7).
+// Short-lived, built once per read: the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+enum Loaded {
+    /// Neither copy exists: a ward never given a state document.
+    Missing,
+    /// A document that parses. `repair`: it came from the secondary copy
+    /// (the primary missing, unreadable or corrupt), so the primary should
+    /// be rewritten from it.
+    Doc { doc: Doc, repair: bool },
+    /// Fail closed (module docs): `"unreadable"` (a read error, which a
+    /// timer advance retries) or `"corrupt"`.
+    Unavailable(&'static str),
+}
+
+/// Read the state: the primary, and the secondary only when the primary is
+/// missing, unreadable or does not parse.
+///
+/// - A primary that parses is used as it is (its version and pairing are
+///   judged by the caller, never by falling back).
+/// - Otherwise a secondary that parses is used, and the primary restored
+///   from it.
+/// - Both missing: [`Loaded::Missing`]. A missing primary beside a secondary
+///   that exists but cannot be read or parsed is NOT missing: the ward had a
+///   state, and migrating afresh could re-admit a removed root, so it fails
+///   closed.
+fn read_doc(store: &dyn GuardianStateStore) -> Loaded {
+    let primary_fault = match store.load() {
+        Ok(None) => None,
+        Ok(Some(text)) => match serde_json::from_str::<Doc>(&text) {
+            Ok(doc) => return Loaded::Doc { doc, repair: false },
+            Err(e) => {
+                eprintln!("charter: guardian-keys state corrupt ({e}); reading its second copy");
+                Some("corrupt")
+            }
+        },
+        Err(e) => {
+            eprintln!("charter: guardian-keys state unreadable ({e}); reading its second copy");
+            Some("unreadable")
+        }
+    };
+    match store.load_fallback() {
+        Ok(Some(text)) => match serde_json::from_str::<Doc>(&text) {
+            Ok(doc) => {
+                eprintln!("charter: guardian-keys state restored from its second copy");
+                Loaded::Doc { doc, repair: true }
+            }
+            Err(e) => {
+                eprintln!(
+                    "charter: guardian-keys state's second copy corrupt ({e}): failing closed"
+                );
+                Loaded::Unavailable(primary_fault.unwrap_or("corrupt"))
+            }
+        },
+        Ok(None) => match primary_fault {
+            None => Loaded::Missing,
+            Some(why) => {
+                eprintln!("charter: guardian-keys state has no second copy: failing closed");
+                Loaded::Unavailable(why)
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "charter: guardian-keys state's second copy unreadable ({e}): failing closed"
+            );
+            Loaded::Unavailable("unreadable")
+        }
+    }
+}
+
 /// The document a ward paired before the section starts from.
 fn migrated_doc(pairing: &Pairing) -> Doc {
     Doc {
@@ -303,51 +377,43 @@ impl GuardianKeys {
     ) -> Self {
         let paired_at = secs(pairing.paired_at);
         let guardian = hex(&pairing.guardian_pubkey);
-        let held = match store.load() {
-            Err(e) => {
-                eprintln!("charter: guardian-keys state unreadable ({e}): failing closed");
-                Held::Unavailable("unreadable")
+        let held = match read_doc(&*store) {
+            Loaded::Missing => Held::Ready(Self::migrate(&*store, pairing, persist)),
+            Loaded::Unavailable(why) => Held::Unavailable(why),
+            Loaded::Doc { doc, .. } if doc.v != DOC_VERSION => {
+                eprintln!(
+                    "charter: guardian-keys state version {} unknown: failing closed",
+                    doc.v
+                );
+                Held::Unavailable("unknown version")
             }
-            Ok(None) => Held::Ready(Self::migrate(&*store, pairing, persist)),
-            Ok(Some(text)) => match serde_json::from_str::<Doc>(&text) {
-                Err(e) => {
-                    eprintln!("charter: guardian-keys state corrupt ({e}): failing closed");
-                    Held::Unavailable("corrupt")
-                }
-                Ok(doc) if doc.v != DOC_VERSION => {
-                    eprintln!(
-                        "charter: guardian-keys state version {} unknown: failing closed",
-                        doc.v
-                    );
-                    Held::Unavailable("unknown version")
-                }
-                Ok(mut doc) => match doc_pairing(&doc, paired_at, &guardian) {
-                    DocPairing::Same => {
-                        if follow_pairing_relays(&mut doc.state, pairing, now) && persist {
-                            if let Err(e) = store.save(&to_json(&doc)) {
-                                eprintln!(
-                                    "charter: could not record a relay change in the \
-                                     guardian-keys state ({e}); retrying on the next write"
-                                );
-                            }
+            Loaded::Doc { mut doc, repair } => match doc_pairing(&doc, paired_at, &guardian) {
+                DocPairing::Same => {
+                    let followed = follow_pairing_relays(&mut doc.state, pairing, now);
+                    if (followed || repair) && persist {
+                        if let Err(e) = store.save(&to_json(&doc)) {
+                            eprintln!(
+                                "charter: could not rewrite the guardian-keys state ({e}); \
+                                 retrying on the next write"
+                            );
                         }
-                        Held::Ready(doc)
                     }
-                    DocPairing::Earlier => {
-                        eprintln!(
-                            "charter: guardian-keys state belongs to an earlier pairing; \
-                             starting afresh from the pairing record"
-                        );
-                        Held::Ready(Self::migrate(&*store, pairing, persist))
-                    }
-                    DocPairing::Other => {
-                        eprintln!(
-                            "charter: guardian-keys state belongs to another pairing \
-                             than the record's: failing closed"
-                        );
-                        Held::Unavailable("another pairing")
-                    }
-                },
+                    Held::Ready(doc)
+                }
+                DocPairing::Earlier => {
+                    eprintln!(
+                        "charter: guardian-keys state belongs to an earlier pairing; \
+                         starting afresh from the pairing record"
+                    );
+                    Held::Ready(Self::migrate(&*store, pairing, persist))
+                }
+                DocPairing::Other => {
+                    eprintln!(
+                        "charter: guardian-keys state belongs to another pairing \
+                         than the record's: failing closed"
+                    );
+                    Held::Unavailable("another pairing")
+                }
             },
         };
         Self::new(store, paired_at, guardian, held)
@@ -757,6 +823,9 @@ impl GuardianStateStore for ReadOnly {
     fn load(&self) -> SysResult<Option<String>> {
         self.0.load()
     }
+    fn load_fallback(&self) -> SysResult<Option<String>> {
+        self.0.load_fallback()
+    }
     fn save(&self, _json: &str) -> SysResult<()> {
         Err(SysError::Io("guardian-keys state opened read-only".into()))
     }
@@ -1081,15 +1150,18 @@ impl GuardianStatements for GuardianKeys {
         let mut held = self.held();
         if let Held::Unavailable("unreadable") = *held {
             // A transient read error heals here.
-            if let Ok(Some(text)) = self.inner.store.load() {
-                if let Ok(doc) = serde_json::from_str::<Doc>(&text) {
-                    if doc.v == DOC_VERSION
-                        && doc_pairing(&doc, self.inner.paired_at, &self.inner.paired_guardian)
-                            == DocPairing::Same
-                    {
-                        eprintln!("charter: guardian-keys state readable again");
-                        *held = Held::Ready(doc);
+            if let Loaded::Doc { doc, repair } = read_doc(&*self.inner.store) {
+                if doc.v == DOC_VERSION
+                    && doc_pairing(&doc, self.inner.paired_at, &self.inner.paired_guardian)
+                        == DocPairing::Same
+                {
+                    eprintln!("charter: guardian-keys state readable again");
+                    if repair {
+                        if let Err(e) = self.inner.store.save(&to_json(&doc)) {
+                            eprintln!("charter: could not rewrite the guardian-keys state ({e})");
+                        }
                     }
+                    *held = Held::Ready(doc);
                 }
             }
         }
