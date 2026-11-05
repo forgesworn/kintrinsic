@@ -183,7 +183,7 @@ that.
   "clauses": [ {
       "subject": "<s>", "kind": "<s>", "signer": "<hex>", "root": "<hex>",
       "id": "<hex>", "issuedAt": <int>, "floor": <int>,
-      "remembered": [ { "id": "<hex>", "issuedAt": <int> } ]
+      "signerFloors": [ { "signer": "<hex>", "issuedAt": <int> } ]
   } ],
   "relays": ["<url>", ...],
   "statusRelays": ["<url>", ...],
@@ -220,9 +220,14 @@ that.
   signer's root when the clause was accepted; `id` and `issuedAt` are the
   clause's own. `floor` is the slot's bar: the clause's effective time,
   min(`issuedAt`, the ward's `now` when it was accepted), and when its signer
-  departs, min(that, the time of the departure). `remembered` lists, sorted by
-  `id`, the clamped clauses of this `(subject, kind)` (accepted with
-  `issuedAt` > `now`) whose `issuedAt` is still above the bar.
+  departs, min(that, the time of the departure). `signerFloors` lists,
+  sorted by `signer`, each signer's replay floor for this `(subject, kind)`:
+  the highest `issuedAt` accepted from it here. A signer's floor is the
+  larger of its entry and, for the held clause's own signer, the held
+  clause's `issuedAt`. When a key departs and can never sign again (a
+  withdrawn working key, or a working key departed by a removal), its
+  entries are dropped from every slot; a departed root's and a working key
+  departed by a move keep theirs.
 - `relays`: the current relay list as given. `statusRelays`: `relays`, then,
   while the ward has more than one root, each relay list replaced within the
   last 604800 s (a list replaced at time t counts while `now` < t + 604800),
@@ -291,16 +296,14 @@ time min(`issuedAt`, `now`) with the stored one's: the same event id is
 `duplicate`; a lower effective time is `stale`; the same effective time with
 a higher event id (compared as lowercase hex) is `tie_not_newer`, and with a
 lower event id it wins and replaces the stored one. Each stored statement keeps the ward time it
-was accepted. Each slot also remembers the ids of clamped statements
-(`issuedAt` > `now` when accepted), each with its `issuedAt`, while that
-`issuedAt` is above the slot's newest effective time: an accepted statement
-keeps the previous entries whose `issuedAt` > its own effective time, plus
-`{ id, issuedAt }` when its `issuedAt` > `now`. So **slot order** is: the
-stored event id, or a remembered one, is `duplicate` → `stale` →
-`tie_not_newer` → `clamp_quota` (`issuedAt` > `now`, and the slot already
-remembers 64 ids with `issuedAt` > min(`issuedAt`, `now`)). This memory is
-not in the projected state; the 64 cap is not exercised here, and the
-references test it directly. A cancel or objection stored without acting is "held" and counts
+was accepted. Each signer also has a replay floor per slot: the highest
+`issuedAt` accepted from it for that slot, or the stored statement's
+`issuedAt` if it is the signer's and higher (the same rule as for clauses,
+and the same dropping on departure). So **slot order** is: the stored event
+id is `duplicate` → `stale` → `tie_not_newer` → `replay` (`issuedAt` below
+the signer's floor, or equal to it unless the stored statement is the same
+signer's with the same `issuedAt`, which the tie rule has already ordered).
+The floors are not in the projected state. A cancel or objection stored without acting is "held" and counts
 toward a root's 64: a cancel toward its signer, an objection toward the
 objecting root (the root its removal `d` names), whichever key signed it.
 
@@ -385,15 +388,14 @@ is bound to another `d`) → then:
 A token is spent only by an accepted confirmation (`removal_confirmed`,
 `removal_applied`, `coguardian_applied`, `move_applied`).
 
-**`clause`:** `seal_mismatch` → `not_signer` → `replay` (the held clause of
-the same `(subject, kind)` lists this `id` in `remembered`) → `not_newer` (a
-held clause exists and `issuedAt` ≤ its `floor`) → `clamp_quota` (`issuedAt`
-> `now`, and `remembered` already holds 256 entries with `issuedAt` >
-min(`issuedAt`, `now`)) → `clause_accepted`. An accepted clause replaces the
-held one with `floor` = min(`issuedAt`, `now`); `remembered` keeps the held
-one's entries whose `issuedAt` > that floor, plus `{ id, issuedAt }` when
-`issuedAt` > `now`. There is no pairing floor for clauses. The 256 cap is not
-exercised here (it would bloat this file); the references test it directly.
+**`clause`:** `seal_mismatch` → `not_signer` → `not_newer` (a held clause
+exists and `issuedAt` ≤ its `floor`) → `replay` (`issuedAt` ≤ the author's
+floor in the held clause's `signerFloors`, or the held clause's `issuedAt`
+if the author signed it) → `clause_accepted`. An accepted clause replaces
+the held one with `floor` = min(`issuedAt`, `now`); `signerFloors` keeps the
+held one's entries, raises the held clause's own signer to its `issuedAt`
+(unless that signer can never sign again), and raises the author's to this
+`issuedAt`. There is no pairing floor for clauses, and no quota.
 
 **`signed`:** `seal_mismatch` → `not_signer` → `signed_accepted`. No time is
 judged: a GRANT keeps its own skew rule outside this gate, and USAGE_SYNC has
@@ -454,7 +456,7 @@ Dropped: `future`, `seal_mismatch`, `signer_not_pinned`, `not_signer`,
 `cancel_signer_mismatch`, `objection_mismatch`, `not_pending`,
 `bad_confirm`, `token_invalid`, `confirmer_not_bound`, `approval_required`,
 `bad_approval`, `pairing_floor`, `not_newer`, `bad_offer`,
-`pin_not_wrapped`, `bad_pin_record`, `replay`, `clamp_quota`,
+`pin_not_wrapped`, `bad_pin_record`, `replay`,
 `relays_root_only`.
 
 The meanings are as in the check orders above. The same lists are exported

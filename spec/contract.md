@@ -2649,22 +2649,32 @@ A root is never asked to decrypt ward traffic.
     departures), it uses effective times.
   - A held clause's effective time is its slot's bar: a CLAUSE of the same
     `(subject, kind)` replaces it only if its `issuedAt` is above the bar.
-  - A CLAUSE whose `issuedAt` was clamped has its event `id` remembered for
-    its `(subject, kind)` until that slot's bar reaches its `issuedAt`. A
-    CLAUSE with a remembered `id` is refused as a replay. Without this, a
-    relay could re-deliver a superseded far-future clause, whose real
-    `issuedAt` beats the clamped bar. A ward remembers at most **256** ids per
-    `(subject, kind)`; past that, a CLAUSE that would need remembering is
-    refused until the ward's clock catches up with some of them.
-  - Statements get the same memory. A statement whose `issuedAt` was clamped
-    has its event `id` remembered for its slot (its `d`, as rule 2 defines
-    the slot) until the slot's newest effective time reaches its `issuedAt`.
-    A statement with a remembered `id`, or the `id` the slot holds, is
-    ignored as a duplicate. Without this, a relay could re-deliver a
-    superseded far-future co-guardian, removal or move and make it pending
-    again. A ward remembers at most **64** ids per slot; past that, a
-    statement that would need remembering is ignored until the ward's clock
-    catches up with some of them.
+  - **Each signer has a replay floor per slot:** the highest `issuedAt` the
+    ward has accepted from that signer for that `(subject, kind)`, or for
+    that statement slot (its `d`, as rule 2 defines the slot). A CLAUSE or
+    statement whose `issuedAt` is at or below its signer's floor is refused
+    as a replay. One exception keeps rule 2's tie: a statement from the same
+    signer, with the same `issuedAt` as the statement the slot holds, is
+    ordered by event id. A statement whose `id` the slot holds is ignored as
+    a duplicate. Without the floor, a relay could re-deliver a superseded
+    far-future clause or statement, whose real `issuedAt` beats the clamped
+    bar.
+  - The floor rests on one assumption: **a signer's `issuedAt` only ever
+    rises.** A guardian install persists the last `issuedAt` it signed with
+    and dates each new event at least a second after it, whatever its clock
+    says, and a working key is one install. A signer that breaks this (two
+    installs sharing a key, or a root asked to sign by installs whose clocks
+    differ) has its lower-dated events refused in that slot until its
+    `issuedAt` passes the floor.
+  - Why a floor per signer: there is no quota to exhaust. The floors grow
+    with the signers, not with the edits, so a flood of far-future events
+    from a stolen key fills nothing. A signer that can never sign again (a
+    withdrawn working key, or a working key of a removed root) has its
+    floors dropped when it departs. A departed root, which a co-guardian may
+    pin again, and a working key departed by a move, which the new root may
+    re-bind, keep theirs.
+  - A ward upgrading from a state without floors takes each held clause and
+    each stored statement as its signer's floor, at its real `issuedAt`.
   - STATUS `guardians.clamped` counts the accepted events whose time was
     clamped, so a parent can see that a clock is adrift.
   - Why: a far-future rule from one signer must not pin a slot against the
@@ -2734,6 +2744,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    still counts.
    - Among statements with the same `d`, the newest effective time wins.
    - A withdrawal, removal or cancel wins a same-second tie.
+   - A statement at or below its signer's replay floor for its slot is
+     refused as a replay (*Who may sign what*).
 3. **Withdrawal is permanent and checked against the binding root.**
    - A withdrawal counts only if signed by W's binding root.
    - A withdrawal received before W is bound is kept, but only if a pinned

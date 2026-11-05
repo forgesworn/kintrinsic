@@ -15,8 +15,9 @@ use crate::event::{event_id, signature_is_valid};
 // legitimately-signed guardian clauses and silently block tightening/revocation.
 // A clause dated AHEAD of the ward's clock is not refused either (contract, *Who
 // may sign what*, D1): a guardian-keys ward clamps it to its own clock — the
-// slot's bar becomes min(issuedAt, now at acceptance), and the clause's id is
-// remembered until the bar passes its issuedAt — in `charter-guardians`'
+// slot's bar becomes min(issuedAt, now at acceptance), never below the bar it
+// had, and each signer's highest accepted issuedAt for the slot is its replay
+// floor — in `charter-guardians`'
 // `accept_clause`, which the spine's clause store defers to. A far-future
 // clause therefore pins nothing, and a guardian whose phone runs fast is never
 // locked out. Rollback is covered by the durable per-kind monotonic `issuedAt`

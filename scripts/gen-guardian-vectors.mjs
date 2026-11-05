@@ -445,7 +445,7 @@ scenario("rule4_departure_clauses", ["4", "5", "who may sign what"], "Departed k
   c.clause(W1, T0 - 1, T0 + 42, A("clause_accepted"), { subject: "subject-b" });
 });
 
-scenario("clause_clamp", ["who may sign what", "4", "6"], "A clause dated ahead of the ward clock is accepted at its effective time, min(issuedAt, now): the other parent's next rule replaces it. Its id is remembered until the bar passes its issuedAt, so a relay can't replay it.", (c) => {
+scenario("clause_clamp", ["who may sign what", "4", "6"], "A clause dated ahead of the ward clock is accepted at its effective time, min(issuedAt, now): the other parent's next rule replaces it. Each signer's floor for the slot is the highest issuedAt accepted from it, so a relay can't replay a superseded clause, and a signer whose issuedAt goes backwards is refused as a replay.", (c) => {
   twoRoots(c);
   const o = { kind: "apps" };
   c.clause(W1, T0 + DAY, T0 + 100, A("clause_accepted"), o);
@@ -459,7 +459,33 @@ scenario("clause_clamp", ["who may sign what", "4", "6"], "A clause dated ahead 
   c.clause(W1, T0 + DAY + 1000, T0 + DAY + 20, A("clause_accepted"), o);
   c.clause(W2, T0 + DAY + 500, T0 + DAY + 20, A("clause_accepted"), o);
   c.clause(W1, T0 + DAY + 1000, T0 + DAY + 30, D("replay"), o);
-  c.clause(W1, T0 + DAY + 21, T0 + DAY + 30, A("clause_accepted"), o);
+  c.clause(W1, T0 + DAY + 21, T0 + DAY + 30, D("replay"), o);
+  c.clause(W1, T0 + DAY + 1001, T0 + DAY + 30, A("clause_accepted"), o);
+});
+
+scenario("clause_flood_then_withdrawn", ["who may sign what", "4", "3"], "300 far-future clauses for one slot from a working key, each accepted (one floor per signer, no quota to fill); the key is withdrawn and its floors go. The other parent's clause, dated ahead of the ward clock, then replaces the departed key's rule.", (c) => {
+  twoRoots(c);
+  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 35 }), T0 + 35, A("approval_applied"));
+  const o = { kind: "apps" };
+  const FAR = T0 + 76 * 365 * DAY;
+  for (let i = 0; i < 300; i++) c.clause(W1b, FAR + i, T0 + 100 + i, A("clause_accepted"), o);
+  c.clause(W1b, FAR + 299, T0 + 400, D("replay"), o);
+  c.inbound(W1, st.withdrawal(R1, W1b, { issuedAt: T0 + 500 }), T0 + 500, A("withdrawal_applied"));
+  c.clause(W1b, FAR + 300, T0 + 510, D("not_signer"), o);
+  c.clause(W2, T0 + 660, T0 + 600, A("clause_accepted"), o);
+  c.clause(W1, T0 + 700, T0 + 700, A("clause_accepted"), o);
+});
+
+scenario("clause_replay_superseded_far_future", ["who may sign what", "4"], "A relay re-delivers a superseded far-future clause. Its issuedAt beats the bar (the newer clause's effective time) but not its signer's floor, so it is refused, from whichever slot holder it would displace.", (c) => {
+  twoRoots(c);
+  const o = { kind: "content" };
+  c.clause(W1, T0 + 2 * DAY, T0 + 100, A("clause_accepted"), o);
+  c.clause(W1, T0 + 2 * DAY + 1, T0 + 200, A("clause_accepted"), o);
+  c.clause(W2, T0 + 300, T0 + 300, A("clause_accepted"), o);
+  c.clause(W1, T0 + 2 * DAY, T0 + 400, D("replay"), o);
+  c.clause(W1, T0 + 2 * DAY + 1, T0 + 400, D("replay"), o);
+  c.clause(W2, T0 + 300, T0 + 500, D("not_newer"), o);
+  c.clause(W1, T0 + 2 * DAY + 2, T0 + 600, A("clause_accepted"), o);
 });
 
 scenario("statement_clamp", ["who may sign what", "pending", "7"], "A statement dated ahead of the ward clock is accepted; ordering, expiry, cancels, objections and departures use its effective time, min(issuedAt, now at receipt), so another device's correct clock is never refused.", (c) => {
@@ -467,9 +493,10 @@ scenario("statement_clamp", ["who may sign what", "pending", "7"], "A statement 
   c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + DAY }), T0 + 110, A("approval_applied"));
   c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY }), T0 + 120, A("coguardian_pending"));
   c.inbound(W1b, st.cancel(R1, dG(R3), { issuedAt: T0 + 130 }), T0 + 130, A("cancel_applied"));
-  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 115 }), T0 + 140, D("stale"));
-  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 125 }), T0 + 140, D("cancelled"));
-  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 135 }), T0 + 140, A("coguardian_pending"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 115 }), T0 + 130, D("stale"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 125 }), T0 + 130, D("replay"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY + 1 }), T0 + 130, D("cancelled"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY + 2 }), T0 + 140, A("coguardian_pending"));
   c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + DAY }), T0 + 140, A("removal_pending"));
   c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 150 }), T0 + 150, A("objection_applied"));
   c.inbound(W2, st.removal(R2, R2, { issuedAt: T0 + 2 * DAY }), T0 + 160, A("removal_applied"));
@@ -479,25 +506,25 @@ scenario("statement_clamp", ["who may sign what", "pending", "7"], "A statement 
   c.confirm(W3, confirmEv(W3, cg.id, tokenHex("clamp"), T0 + 190, st.approval(R2, W3, { issuedAt: T0 + 3 * DAY })), T0 + 190, A("coguardian_applied"));
 });
 
-scenario("statement_replay_after_supersede", ["who may sign what", "2", "pending"], "A clamped statement's id is remembered for its slot until the slot's newest effective time reaches its issuedAt: a relay can't replay a superseded far-future co-guardian over the newer one. Once the slot passes its issuedAt, the replay is merely stale.", (c) => {
+scenario("statement_replay_after_supersede", ["who may sign what", "2", "pending"], "Each signer's floor per statement slot is the highest issuedAt accepted from it: a relay can't replay a superseded far-future co-guardian over the newer one, though its effective time beats the slot's. Once the slot's effective time passes it, the replay is merely stale.", (c) => {
   twoRoots(c);
   const far = st.coguardian(R1, R3, { issuedAt: T0 + DAY });
   c.inbound(W1, far, T0 + 100, A("coguardian_pending"));
-  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 200 }), T0 + 200, A("coguardian_pending"));
-  c.inbound(W1, far, T0 + 300, D("duplicate"));
-  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY + 1 }), T0 + DAY + 10, A("coguardian_pending"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY + 1 }), T0 + 200, A("coguardian_pending"));
+  c.inbound(W1, far, T0 + 300, D("replay"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY + 5 }), T0 + DAY + 10, A("coguardian_pending"));
   c.inbound(W1, far, T0 + DAY + 20, D("stale"));
 });
 
-scenario("statement_replay_after_cancel", ["who may sign what", "2", "pending"], "A cancelled far-future move keeps its slot, so its replay is a duplicate; once a newer move with the same d displaces it and is cancelled in turn, the remembered id still stops the replay from pending again.", (c) => {
+scenario("statement_replay_after_cancel", ["who may sign what", "2", "pending"], "A cancelled far-future move keeps its slot, so its replay is a duplicate; once a newer move with the same d displaces it and is cancelled in turn, its signer's floor still stops the replay from pending again.", (c) => {
   twoRoots(c);
   const far = st.move(R1, R3, { issuedAt: T0 + DAY });
   c.inbound(W1, far, T0 + 100, A("move_pending"));
   c.inbound(W1, st.cancel(R1, dM(R3), { issuedAt: T0 + 110 }), T0 + 110, A("cancel_applied"));
   c.inbound(W1, far, T0 + 120, D("duplicate"));
-  c.inbound(W1, st.move(R1, R3, { issuedAt: T0 + 130 }), T0 + 130, A("move_pending"));
+  c.inbound(W1, st.move(R1, R3, { issuedAt: T0 + DAY + 1 }), T0 + 130, A("move_pending"));
   c.inbound(W1, st.cancel(R1, dM(R3), { issuedAt: T0 + 140 }), T0 + 140, A("cancel_applied"));
-  c.inbound(W1, far, T0 + 150, D("duplicate"));
+  c.inbound(W1, far, T0 + 150, D("replay"));
 });
 
 scenario("pair_approval_clamped",["scan-to-pair", "who may sign what"], "A pair offer's approval dated ahead of the ward clock still pairs; it counts as clamped.", (c) => {
@@ -887,7 +914,8 @@ scenario("clause_replay_after_departure", ["4"], "A relay can't restore an older
   c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 240 }), T0 + 240, A("approval_applied"));
   c.clause(W1b, T0 + 520, T0 + 240, A("clause_accepted"), { kind: "schedule" });
   c.inbound(W1, st.withdrawal(R1, W1b, { issuedAt: T0 + 250 }), T0 + 250, A("withdrawal_applied"));
-  c.clause(W1, T0 + 251, T0 + 260, A("clause_accepted"), { kind: "schedule" });
+  c.clause(W1, T0 + 251, T0 + 260, D("replay"), { kind: "schedule" });
+  c.clause(R1, T0 + 251, T0 + 260, A("clause_accepted"), { kind: "schedule" });
 });
 
 scenario("departed_root_as_working_key", ["4", "7"], "A removed root can't come back as another root's working key.", (c) => {

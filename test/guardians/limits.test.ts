@@ -14,8 +14,6 @@ import {
   CHARTER_GUARDIAN_STATEMENT,
   MAX_JSON_DEPTH,
   PREVIOUS_RELAYS_MAX,
-  MAX_REMEMBERED_PER_SLOT,
-  MAX_REMEMBERED_PER_STATEMENT_SLOT,
   type GuardianState,
   type StepResult,
 } from '../../src/guardians/index.js'
@@ -101,74 +99,57 @@ describe('N3: previous relay lists are capped', () => {
   })
 })
 
-describe('D1: the clamped-clause id quota', () => {
+describe('D1: one replay floor per signer and slot, no quota', () => {
   const cl = (issuedAt: number) => clauseInput({ author: W1.pk, sealAuthor: W1.pk, subject: 'kid', kind: 'apps', issuedAt })
-  test('256 clamped ids per slot; the 257th is clamp_quota until the bar passes some', () => {
-    expect(MAX_REMEMBERED_PER_SLOT).toBe(256)
+  test('300 clamped clauses are each accepted; every superseded one is a replay', () => {
     let s = pairedR1W1()
     const now = T0 + 100
-    // Each clause is newer than the last (issuedAt strictly rising, all ahead
-    // of the clock), so each is accepted and remembered.
-    for (let i = 1; i <= 256; i++) {
-      const r = acceptClause(s, cl(T0 + DAY + i), now)
+    for (let i = 1; i <= 300; i++) {
+      const r = acceptClause(s, cl(T0 + DAY + i), now + i)
       expect(r.outcome.reason).toBe('clause_accepted')
       s = r.state
     }
-    expect(heldClause(s, 'kid', 'apps')?.remembered).toHaveLength(256)
-    expect(acceptClause(s, cl(T0 + DAY + 257), now).outcome).toMatchObject({ result: 'dropped', reason: 'clamp_quota' })
-    // A remembered id is a replay whatever the clock.
-    expect(acceptClause(s, cl(T0 + DAY + 10), T0 + DAY + 10).outcome.reason).toBe('replay')
-    // Once the clock reaches some of them, a new clamped clause's bar (its
-    // effective time) prunes those, freeing room.
-    const later = acceptClause(s, cl(T0 + DAY + 1000), T0 + DAY + 128)
-    expect(later.outcome.reason).toBe('clause_accepted')
-    expect(heldClause(later.state, 'kid', 'apps')?.remembered).toHaveLength(129)
-    expect(heldClause(later.state, 'kid', 'apps')?.floor).toBe(T0 + DAY + 128)
-    // A clause that needs no memory prunes every id its bar reaches.
-    const settled = acceptClause(later.state, cl(T0 + DAY + 2000), T0 + DAY + 3000)
-    expect(heldClause(settled.state, 'kid', 'apps')?.remembered).toEqual([])
-    expect(acceptClause(settled.state, cl(T0 + DAY + 1000), T0 + DAY + 3001).outcome.reason).toBe('not_newer')
+    expect(heldClause(s, 'kid', 'apps')?.signerFloors).toEqual([{ signer: W1.pk, issuedAt: T0 + DAY + 300 }])
+    expect(heldClause(s, 'kid', 'apps')?.floor).toBe(now + 300)
+    for (const i of [1, 150, 300]) {
+      expect(acceptClause(s, cl(T0 + DAY + i), T0 + DAY + 500).outcome.reason).toBe('replay')
+    }
+    // A signer whose issuedAt goes backwards is refused as a replay too.
+    expect(acceptClause(s, cl(now + 1000), now + 1000).outcome.reason).toBe('replay')
+    expect(acceptClause(s, cl(T0 + DAY + 301), now + 400).outcome.reason).toBe('clause_accepted')
   })
 })
 
-describe('Clamped statement ids are remembered per slot', () => {
+describe('Statement replay floors per slot', () => {
   const d = `kintrinsic/guardian/${R2.pk}`
   const cg = (issuedAt: number) => coGuardian(R1, R2, { issuedAt })
   const send = (s: GuardianState, ev: ReturnType<typeof cg>, now: number) => applyInbound(s, { sealAuthor: W1.pk, inner: ev }, now)
-  const slot = (s: GuardianState) => s.statements.find((x) => x.slot === d)
 
   test('a superseded far-future statement is not pending again when replayed', () => {
     let s = pairedR1W1()
     const far = cg(T0 + DAY)
     s = send(s, far, T0 + 100).state
-    s = send(s, cg(T0 + 200), T0 + 200).state
-    expect(slot(s)?.remembered.map((r) => r.id)).toEqual([far.id])
+    s = send(s, cg(T0 + DAY + 1), T0 + 200).state
+    expect(s.statementFloors.filter((f) => f.slot === d)).toEqual([{ slot: d, signer: R1.pk, issuedAt: T0 + DAY + 1 }])
     const replay = send(s, far, T0 + 300)
-    expect(replay.outcome).toMatchObject({ result: 'dropped', reason: 'duplicate' })
-    expect(replay.state.pending.map((p) => p.issuedAt)).toEqual([T0 + 200])
+    expect(replay.outcome).toMatchObject({ result: 'dropped', reason: 'replay' })
+    expect(replay.state.pending.map((p) => p.issuedAt)).toEqual([T0 + DAY + 1])
   })
 
-  test('64 clamped ids per slot; the 65th is clamp_quota until the slot passes some', () => {
-    expect(MAX_REMEMBERED_PER_STATEMENT_SLOT).toBe(64)
+  test('100 clamped statements in one slot need no quota', () => {
     let s = pairedR1W1()
     // Each arrives a second later than the last, so each effective time is
     // newer and each statement supersedes the one before.
-    for (let i = 1; i <= 64; i++) {
+    for (let i = 1; i <= 100; i++) {
       const r = send(s, cg(T0 + DAY + i), T0 + 100 + i)
       expect(r.outcome.reason).toBe('coguardian_pending')
       s = r.state
     }
-    expect(slot(s)?.remembered).toHaveLength(64)
-    expect(send(s, cg(T0 + DAY + 65), T0 + 165).outcome).toMatchObject({ result: 'dropped', reason: 'clamp_quota' })
-    // A remembered id is a duplicate whatever the clock.
-    expect(send(s, cg(T0 + DAY + 10), T0 + 170).outcome.reason).toBe('duplicate')
-    // Once the slot's newest effective time reaches some of them, they go.
-    const later = send(s, cg(T0 + DAY + 1000), T0 + DAY + 32)
-    expect(later.outcome.reason).toBe('coguardian_pending')
-    expect(slot(later.state)?.remembered).toHaveLength(33)
-    // A statement that needs no memory prunes every id it reaches.
-    const settled = send(later.state, cg(T0 + DAY + 2000), T0 + DAY + 3000)
-    expect(slot(settled.state)?.remembered).toEqual([])
-    expect(send(settled.state, cg(T0 + DAY + 1000), T0 + DAY + 3001).outcome.reason).toBe('stale')
+    expect(s.statementFloors.filter((f) => f.slot === d)).toHaveLength(1)
+    expect(send(s, cg(T0 + DAY + 100), T0 + 300).outcome.reason).toBe('duplicate')
+    expect(send(s, cg(T0 + DAY + 10), T0 + 300).outcome.reason).toBe('replay')
+    // Once the slot's effective time passes it, a replay is merely stale.
+    const settled = send(s, cg(T0 + DAY + 2000), T0 + DAY + 3000).state
+    expect(send(settled, cg(T0 + DAY + 1000), T0 + DAY + 2500).outcome.reason).toBe('stale')
   })
 })

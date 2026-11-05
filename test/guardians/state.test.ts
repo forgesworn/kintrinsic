@@ -140,10 +140,12 @@ describe('signer set, approvals and the seal exceptions', () => {
     s = ok(inb(pairedR1W1(), W1b, approval(R1, W1b, { issuedAt: now + 301 }), now))
     expect(s.clamped).toBe(1)
     expect(statusGuardians(s).clamped).toBe(1)
-    // Ordering uses the effective time: a correctly dated update a second
-    // later replaces it.
-    s = ok(inb(s, W1b, approval(R1, W1b, { issuedAt: now + 1, label: 'two' }), now + 1), 'approval_updated')
-    expect(s.clamped).toBe(1)
+    // The signer's issuedAt going backwards is a replay.
+    dropped(inb(s, W1b, approval(R1, W1b, { issuedAt: now + 1, label: 'back' }), now + 1), 'replay')
+    // Ordering uses the effective time: the signer's next update, a second
+    // later by the ward clock, replaces it.
+    s = ok(inb(s, W1b, approval(R1, W1b, { issuedAt: now + 302, label: 'two' }), now + 1), 'approval_updated')
+    expect(s.clamped).toBe(2)
   })
   test('statements from a non-signer are dropped, not buffered', () => {
     const s = dropped(inb(pairedR1W1(), X, coGuardian(X, R2, { issuedAt: T0 })), 'signer_not_pinned')
@@ -236,7 +238,7 @@ describe('rule 4 and 5: departures fail closed; clauses record their signer', ()
     const s = ok(acceptClause(pairedR1W1(), cl(W1, T0 + 1), T0 + 10), 'clause_accepted')
     expect(heldClause(s, 'kid', 'schedule')).toEqual({
       subject: 'kid', kind: 'schedule', signer: W1.pk, root: R1.pk,
-      id: cl(W1, T0 + 1).id, issuedAt: T0 + 1, floor: T0 + 1, remembered: [],
+      id: cl(W1, T0 + 1).id, issuedAt: T0 + 1, floor: T0 + 1, signerFloors: [{ signer: W1.pk, issuedAt: T0 + 1 }],
     })
   })
   test('a non-signer and a wrong seal are refused; no pairing floor and no future refusal', () => {
@@ -244,17 +246,17 @@ describe('rule 4 and 5: departures fail closed; clauses record their signer', ()
     dropped(acceptClause(pairedR1W1(), cl(W1, T0 + 1, R1), T0 + 10), 'seal_mismatch')
     ok(acceptClause(pairedR1W1(), cl(W1, T0 - 1), T0 + 10), 'clause_accepted')
     const s = ok(acceptClause(pairedR1W1(), cl(W1, T0 + 311), T0 + 10), 'clause_accepted')
-    expect(heldClause(s, 'kid', 'schedule')).toMatchObject({ issuedAt: T0 + 311, floor: T0 + 10, remembered: [{ id: cl(W1, T0 + 311).id, issuedAt: T0 + 311 }] })
+    expect(heldClause(s, 'kid', 'schedule')).toMatchObject({ issuedAt: T0 + 311, floor: T0 + 10, signerFloors: [{ signer: W1.pk, issuedAt: T0 + 311 }] })
     expect(s.clamped).toBe(1)
   })
-  test('a clamped clause pins nothing, and its id blocks a replay until the bar passes it', () => {
+  test('a clamped clause pins nothing, and its signer\'s floor blocks a replay', () => {
     let s = twoRoots()
     s = ok(acceptClause(s, cl(W1, T0 + DAY), T0 + 100))
     s = ok(acceptClause(s, cl(W2, T0 + 200), T0 + 200))
-    expect(heldClause(s, 'kid', 'schedule')?.remembered).toEqual([{ id: cl(W1, T0 + DAY).id, issuedAt: T0 + DAY }])
+    const sorted = [{ signer: W1.pk, issuedAt: T0 + DAY }, { signer: W2.pk, issuedAt: T0 + 200 }].sort((a, b) => (a.signer < b.signer ? -1 : 1))
+    expect(heldClause(s, 'kid', 'schedule')?.signerFloors).toEqual(sorted)
     dropped(acceptClause(s, cl(W1, T0 + DAY), T0 + 300), 'replay')
     s = ok(acceptClause(s, cl(W2, T0 + DAY), T0 + DAY + 1))
-    expect(heldClause(s, 'kid', 'schedule')?.remembered).toEqual([])
     dropped(acceptClause(s, cl(W1, T0 + DAY), T0 + DAY + 2), 'not_newer')
   })
   test('a clause must be newer than the held clause from a current signer', () => {

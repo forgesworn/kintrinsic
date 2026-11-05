@@ -1,5 +1,6 @@
-//! The clock clamp's per-slot id quota, which the golden vectors leave out
-//! (256 projected steps would bloat scenarios.json). Mirrors the TS test in
+//! The per-signer replay floors of the clock clamp, beyond what the golden
+//! vectors cover: far more clamped events than any old quota, and states
+//! persisted before the floors. Mirrors the TS test in
 //! `test/guardians/limits.test.ts`.
 mod common;
 
@@ -44,79 +45,80 @@ fn id(n: i64) -> String {
 }
 
 #[test]
-fn clamped_id_quota_is_256_per_slot() {
-    assert_eq!(MAX_REMEMBERED_PER_SLOT, 256);
+fn clamped_clauses_need_no_quota_one_floor_per_signer() {
     let (mut s, w1) = paired();
     let now = T0 + 100;
-    for i in 1..=256 {
-        let step = clause(&s, &w1, &id(DAY + i), T0 + DAY + i, now);
+    for i in 1..=300 {
+        let step = clause(&s, &w1, &id(DAY + i), T0 + DAY + i, now + i);
         assert_eq!(step.outcome.reason, Reason::ClauseAccepted, "clause {i}");
         s = step.state;
     }
     let held = held_clause(&s, "kid", "apps").unwrap();
-    assert_eq!(held.remembered.len(), 256);
-    assert_eq!(s.clamped, 256);
-    let full = clause(&s, &w1, &id(DAY + 257), T0 + DAY + 257, now);
-    assert_eq!(full.outcome.reason, Reason::ClampQuota);
-    assert!(!full.outcome.accepted());
+    assert_eq!(held.signer_floors.len(), 1);
+    assert_eq!(held.signer_floors[0].issued_at, T0 + DAY + 300);
+    assert_eq!(held.bar(), now + 300);
+    assert_eq!(s.clamped, 300);
 
-    // A remembered id is a replay whatever the clock.
-    let again = clause(&s, &w1, &id(DAY + 10), T0 + DAY + 10, T0 + DAY + 10);
-    assert_eq!(again.outcome.reason, Reason::Replay);
-
-    // A new clamped clause's bar (its effective time) prunes the ids it
-    // reaches, freeing room.
-    let later = clause(&s, &w1, &id(DAY + 1000), T0 + DAY + 1000, T0 + DAY + 128);
-    assert_eq!(later.outcome.reason, Reason::ClauseAccepted);
-    let held = held_clause(&later.state, "kid", "apps").unwrap();
-    assert_eq!(held.remembered.len(), 129);
-    assert_eq!(held.floor, Some(T0 + DAY + 128));
-
-    // A clause that needs no memory prunes every id its bar reaches.
-    let settled = clause(
-        &later.state,
-        &w1,
-        &id(DAY + 2000),
-        T0 + DAY + 2000,
-        T0 + DAY + 3000,
+    // Every superseded one is a replay, whatever the clock; so is a clause
+    // whose issuedAt goes backwards.
+    for i in [1, 150, 300] {
+        let again = clause(&s, &w1, &id(DAY + i), T0 + DAY + i, T0 + DAY + 500);
+        assert_eq!(again.outcome.reason, Reason::Replay, "replay {i}");
+    }
+    assert_eq!(
+        clause(&s, &w1, &id(1), now + 1000, now + 1000)
+            .outcome
+            .reason,
+        Reason::Replay
     );
-    let held = held_clause(&settled.state, "kid", "apps").unwrap();
-    assert!(held.remembered.is_empty());
-    let stale = clause(
-        &settled.state,
-        &w1,
-        &id(DAY + 1000),
-        T0 + DAY + 1000,
-        T0 + DAY + 3001,
+    assert_eq!(
+        clause(&s, &w1, &id(DAY + 301), T0 + DAY + 301, now + 400)
+            .outcome
+            .reason,
+        Reason::ClauseAccepted
     );
-    assert_eq!(stale.outcome.reason, Reason::NotNewer);
 }
 
 #[test]
 fn legacy_state_without_the_clamp_fields_still_reads() {
     let (s, w1) = paired();
-    let s = clause(&s, &w1, &id(1), T0 + 5, T0 + 10).state;
+    let s = clause(&s, &w1, &id(1), T0 + DAY, T0 + 10).state;
     let mut v = serde_json::to_value(&s).unwrap();
-    // A state persisted before the clamp: no `clamped`, a clause with no id,
-    // no `remembered` and a null floor (its bar is then its issuedAt).
+    // A state persisted before the clamp and the floors: no `clamped`, a
+    // clause with no id, no `signerFloors`, a null floor (its bar is then its
+    // issuedAt), and an old `remembered` list, which is ignored.
     v.as_object_mut().unwrap().remove("clamped");
+    v.as_object_mut().unwrap().remove("statementFloors");
     let c = &mut v["clauses"][0];
     let c = c.as_object_mut().unwrap();
     c.remove("id");
-    c.remove("remembered");
+    c.remove("signerFloors");
     c.insert("floor".into(), serde_json::Value::Null);
+    c.insert(
+        "remembered".into(),
+        serde_json::json!([{ "id": id(9), "issuedAt": T0 + 2 * DAY }]),
+    );
     let old: GuardianState = serde_json::from_value(v).unwrap();
     assert_eq!(old.clamped, 0);
     let held = held_clause(&old, "kid", "apps").unwrap();
-    assert_eq!(held.bar(), T0 + 5);
+    assert_eq!(held.bar(), T0 + DAY);
+    assert!(held.signer_floors.is_empty());
+    // The held clause is its signer's floor at its real issuedAt.
+    assert_eq!(held.floor_of(&w1), Some(T0 + DAY));
+    let mut floored = old.clone();
+    floored.clauses[0].floor = Some(T0 + 10);
     assert_eq!(
-        clause(&old, &w1, &id(2), T0 + 5, T0 + 20).outcome.reason,
-        Reason::NotNewer
+        clause(&floored, &w1, &id(2), T0 + DAY, T0 + 20)
+            .outcome
+            .reason,
+        Reason::Replay
     );
-    assert_eq!(
-        clause(&old, &w1, &id(3), T0 + 6, T0 + 20).outcome.reason,
-        Reason::ClauseAccepted
-    );
+    let next = clause(&floored, &w1, &id(3), T0 + DAY + 1, T0 + 20);
+    assert_eq!(next.outcome.reason, Reason::ClauseAccepted);
+    // Replaced, it keeps its signer's floor.
+    let held = held_clause(&next.state, "kid", "apps").unwrap();
+    assert_eq!(held.signer_floors.len(), 1);
+    assert_eq!(held.floor_of(&w1), Some(T0 + DAY + 1));
 }
 
 /// R1's co-guardian statement naming R2, dated `issued_at`, signed with the
@@ -152,8 +154,7 @@ fn coguardian(v: &serde_json::Value, issued_at: i64) -> serde_json::Value {
 }
 
 #[test]
-fn clamped_statement_id_quota_is_64_per_slot() {
-    assert_eq!(MAX_REMEMBERED_PER_STATEMENT_SLOT, 64);
+fn clamped_statements_need_no_quota_one_floor_per_signer() {
     let v = common::load("scenarios.json");
     let (mut s, w1) = paired();
     let d = format!(
@@ -163,24 +164,9 @@ fn clamped_statement_id_quota_is_64_per_slot() {
     let send = |s: &GuardianState, issued_at: i64, now: i64| {
         apply_inbound(s, &w1, &coguardian(&v, issued_at), now)
     };
-    let remembered = |s: &GuardianState| {
-        s.statements
-            .iter()
-            .find(|x| x.slot == d)
-            .unwrap()
-            .remembered
-            .len()
-    };
-
-    // A superseded far-future statement can't be replayed into pending.
-    let first = send(&s, T0 + DAY, T0 + 100).state;
-    let newer = send(&first, T0 + 200, T0 + 200).state;
-    let replay = send(&newer, T0 + DAY, T0 + 300);
-    assert_eq!(replay.outcome.reason, Reason::Duplicate);
-    assert_eq!(replay.state.pending[0].issued_at, T0 + 200);
 
     // Each arrives a second after the last, so each is newer and supersedes.
-    for i in 1..=64 {
+    for i in 1..=100 {
         let step = send(&s, T0 + DAY + i, T0 + 100 + i);
         assert_eq!(
             step.outcome.reason,
@@ -189,27 +175,23 @@ fn clamped_statement_id_quota_is_64_per_slot() {
         );
         s = step.state;
     }
-    assert_eq!(remembered(&s), 64);
-    let full = send(&s, T0 + DAY + 65, T0 + 165);
-    assert_eq!(full.outcome.reason, Reason::ClampQuota);
-    assert!(!full.outcome.accepted());
+    let floors: Vec<_> = s.statement_floors.iter().filter(|f| f.slot == d).collect();
+    assert_eq!(floors.len(), 1);
+    assert_eq!(floors[0].issued_at, T0 + DAY + 100);
 
-    // A remembered id is a duplicate whatever the clock.
+    // The stored one is a duplicate; a superseded far-future one, whose
+    // effective time now beats the slot's, is a replay.
     assert_eq!(
-        send(&s, T0 + DAY + 10, T0 + 170).outcome.reason,
+        send(&s, T0 + DAY + 100, T0 + 300).outcome.reason,
         Reason::Duplicate
     );
-
-    // Once the slot's newest effective time reaches some, they go.
-    let later = send(&s, T0 + DAY + 1000, T0 + DAY + 32);
-    assert_eq!(later.outcome.reason, Reason::CoguardianPending);
-    assert_eq!(remembered(&later.state), 33);
-
-    // A statement that needs no memory prunes every id it reaches.
-    let settled = send(&later.state, T0 + DAY + 2000, T0 + DAY + 3000);
-    assert_eq!(remembered(&settled.state), 0);
+    let replay = send(&s, T0 + DAY + 10, T0 + 300);
+    assert_eq!(replay.outcome.reason, Reason::Replay);
+    assert_eq!(replay.state.pending[0].issued_at, T0 + DAY + 100);
+    // Once the slot's effective time passes it, a replay is merely stale.
+    let settled = send(&s, T0 + DAY + 2000, T0 + DAY + 3000).state;
     assert_eq!(
-        send(&settled.state, T0 + DAY + 1000, T0 + DAY + 3001)
+        send(&settled, T0 + DAY + 1000, T0 + DAY + 2500)
             .outcome
             .reason,
         Reason::Stale
@@ -217,16 +199,26 @@ fn clamped_statement_id_quota_is_64_per_slot() {
 }
 
 #[test]
-fn legacy_statement_without_remembered_still_reads() {
+fn legacy_statement_without_floors_still_reads() {
     let v = common::load("scenarios.json");
     let (s, w1) = paired();
-    let s = apply_inbound(&s, &w1, &coguardian(&v, T0 + 5), T0 + 10).state;
+    let s = apply_inbound(&s, &w1, &coguardian(&v, T0 + DAY), T0 + 10).state;
     let mut j = serde_json::to_value(&s).unwrap();
+    j.as_object_mut().unwrap().remove("statementFloors");
     for st in j["statements"].as_array_mut().unwrap() {
-        st.as_object_mut().unwrap().remove("remembered");
+        st.as_object_mut()
+            .unwrap()
+            .insert("remembered".into(), serde_json::json!([]));
     }
     let old: GuardianState = serde_json::from_value(j).unwrap();
-    assert!(old.statements.iter().all(|x| x.remembered.is_empty()));
-    let next = apply_inbound(&old, &w1, &coguardian(&v, T0 + 6), T0 + 20);
+    assert!(old.statement_floors.is_empty());
+    // The stored statement is its signer's floor at its real issuedAt.
+    assert_eq!(
+        apply_inbound(&old, &w1, &coguardian(&v, T0 + 20), T0 + 20)
+            .outcome
+            .reason,
+        Reason::Replay
+    );
+    let next = apply_inbound(&old, &w1, &coguardian(&v, T0 + DAY + 1), T0 + 20);
     assert_eq!(next.outcome.reason, Reason::CoguardianPending);
 }

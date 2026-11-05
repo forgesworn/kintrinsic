@@ -1206,8 +1206,9 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
     /// signature, kind, the signer set). The port then judges it against the
     /// clause its state holds for `(subject, kind)` (seeded from the store
     /// for a slot it has never seen): the bar is the held clause's effective
-    /// time, min(`issuedAt`, the ward clock at acceptance), and a clamped
-    /// clause's id is remembered against replay. Accepting it, the port
+    /// time, min(`issuedAt`, the ward clock at acceptance), and each
+    /// signer's highest accepted `issuedAt` is its replay floor for the slot.
+    /// Accepting it, the port
     /// persists that BEFORE the body is written, and the store writes the
     /// body with no floor of its own (its floor sits at the real `issuedAt`,
     /// which a clamped bar can be below). A crash or write failure between

@@ -214,7 +214,9 @@ fn ack(outcome: &cg::Outcome) -> AckResult {
     match (outcome.result, outcome.reason) {
         (Verdict::Accepted, _) => AckResult::Applied,
         (Verdict::Dropped, Reason::Duplicate) => AckResult::Unchanged,
-        (Verdict::Dropped, Reason::NotNewer | Reason::TieNotNewer) => AckResult::Superseded,
+        (Verdict::Dropped, Reason::NotNewer | Reason::TieNotNewer | Reason::Replay) => {
+            AckResult::Superseded
+        }
         (Verdict::Dropped, _) => AckResult::Refused,
     }
 }
@@ -222,25 +224,15 @@ fn ack(outcome: &cg::Outcome) -> AckResult {
 /// A held clause persisted before the clamp (D1) has no effective time
 /// (`floor: None`, read by the reference as its `issuedAt`). Give it one,
 /// min(`issuedAt`, now), so a far-future clause from before the upgrade pins
-/// nothing; and if it was ahead of now and its id is known, remember the id
-/// (as `accept_clause` would have), so a relay can't replay it over a newer
-/// rule. Returns whether anything changed.
+/// nothing. Its signer's replay floor needs no migration: the held clause
+/// counts for its own signer at its real `issuedAt` (`HeldClause::floor_of`).
+/// A state saved with remembered clause ids loads with them ignored: they
+/// name no signer. Returns whether anything changed.
 fn normalise_legacy_floors(state: &mut GuardianState, now: u64) -> bool {
     let now = secs(now);
     let mut changed = false;
     for held in state.clauses.iter_mut().filter(|c| c.floor.is_none()) {
         held.floor = Some(held.issued_at.min(now));
-        let ahead = held.issued_at > now && !held.id.is_empty();
-        if ahead
-            && !held.remembered.iter().any(|r| r.id == held.id)
-            && held.remembered.len() < cg::MAX_REMEMBERED_PER_SLOT
-        {
-            held.remembered.push(cg::RememberedClause {
-                id: held.id.clone(),
-                issued_at: held.issued_at,
-            });
-            held.remembered.sort_by(|a, b| a.id.cmp(&b.id));
-        }
         changed = true;
     }
     changed
@@ -1355,9 +1347,8 @@ impl GuardianStatements for GuardianKeys {
                         // departed before the slot was seeded, so no
                         // departure clamped it: its floor is also at most the
                         // departure, as rule 4 has it (review batch 2, core
-                        // L1). The store keeps no event id, so a seeded
-                        // far-future clause can't be remembered against a
-                        // replay; see `normalise_legacy_floors`.
+                        // L1). The seeded clause counts as its signer's replay
+                        // floor at its real issuedAt, as any held clause does.
                         let signer = hex(&signer);
                         let root = cg::root_of(&base, &signer).unwrap_or_else(|| signer.clone());
                         let issued_at = secs(bound);
@@ -1373,7 +1364,7 @@ impl GuardianStatements for GuardianKeys {
                             id: String::new(),
                             issued_at,
                             floor: Some(floor),
-                            remembered: Vec::new(),
+                            signer_floors: Vec::new(),
                         });
                     }
                 }

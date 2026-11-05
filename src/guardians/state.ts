@@ -32,8 +32,6 @@ import {
   HEX32,
   MAX_ACTIVE_KEYS_PER_ROOT,
   MAX_HELD_PER_ROOT,
-  MAX_REMEMBERED_PER_SLOT,
-  MAX_REMEMBERED_PER_STATEMENT_SLOT,
   MAX_ROOTS,
   MAX_TOMBSTONES_PER_ROOT,
   OBJECTION_BLOCK_SECONDS,
@@ -94,13 +92,6 @@ export interface StoredStatement {
   receivedAt: number
   /** A cancel or objection that had nothing to act on when it arrived. */
   held: boolean
-  /**
-   * Ids of clamped statements (dated ahead of the ward clock when accepted)
-   * for this slot, kept while their `issuedAt` is above the slot's newest
-   * effective time, so a relay can't replay a superseded one. Sorted by `id`.
-   * The stored statement's own id is among them if it was clamped.
-   */
-  remembered: RememberedStatement[]
 }
 
 export interface PendingRecord {
@@ -149,14 +140,22 @@ export interface PresenceToken {
   mintedAt: number
 }
 
-/** A clamped clause's id, remembered for its slot until the bar passes it. */
-export interface RememberedClause {
-  id: string
+/**
+ * The highest real `issuedAt` a ward has accepted from one signer in one
+ * slot. A signer's `issuedAt` only ever rises (*Who may sign what*), so an
+ * event at or below it is a replay.
+ */
+export interface SignerFloor {
+  signer: string
   issuedAt: number
 }
 
-/** A clamped statement's id, remembered for its slot: the same shape. */
-export type RememberedStatement = RememberedClause
+/** A statement slot's floor for one signer (the slot as rule 2 defines it). */
+export interface StatementFloor {
+  slot: string
+  signer: string
+  issuedAt: number
+}
 
 /** A held clause: the minimal model of rules 4 and 5. */
 export interface HeldClause {
@@ -177,11 +176,12 @@ export interface HeldClause {
    */
   floor: number
   /**
-   * Ids of clamped clauses (dated ahead of the ward clock when accepted) for
-   * this `(subject, kind)`, kept while their `issuedAt` is above the bar, so a
-   * relay can't replay one over a newer rule. Sorted by `id`.
+   * Each signer's floor for this `(subject, kind)`: the highest `issuedAt`
+   * accepted from it here. Sorted by signer. A signer that can never sign
+   * again (a withdrawn key, or a working key of a removed root) is dropped.
+   * The held clause also counts for its own signer (`clauseFloor`).
    */
-  remembered: RememberedClause[]
+  signerFloors: SignerFloor[]
 }
 
 export interface GuardianState {
@@ -190,6 +190,11 @@ export interface GuardianState {
   roots: PinnedRoot[]
   keys: WorkingKeyRecord[]
   statements: StoredStatement[]
+  /**
+   * Each signer's floor per statement slot, sorted by slot then signer. The
+   * stored statement also counts for its own signer (`statementFloor`).
+   */
+  statementFloors: StatementFloor[]
   pending: PendingRecord[]
   heldWithdrawals: HeldWithdrawal[]
   tombstones: Tombstone[]
@@ -247,6 +252,7 @@ function clone(s: GuardianState): GuardianState {
 function normalise(s: GuardianState): GuardianState {
   s.keys.sort((a, b) => cmp(a.key, b.key))
   s.statements.sort((a, b) => cmp(a.slot, b.slot))
+  s.statementFloors.sort((a, b) => cmp(a.slot, b.slot) || cmp(a.signer, b.signer))
   s.pending.sort((a, b) => cmp(a.d, b.d))
   s.heldWithdrawals.sort((a, b) => cmp(a.d, b.d) || cmp(a.signer, b.signer))
   s.departedRoots.sort((a, b) => cmp(a.root, b.root))
@@ -396,19 +402,61 @@ function storedFor(s: GuardianState, slot: string): StoredStatement | undefined 
 }
 
 /**
- * The slot's remembered ids that outlive `effective` as the slot's newest
- * effective time: those whose `issuedAt` is still above it.
+ * A key that can never sign again: a withdrawn working key, or one departed
+ * with its removed root. Its floors are dropped. A root that departed may be
+ * pinned again by a co-guardian, and a working key departed by a move may be
+ * re-bound by the new root, so theirs are kept.
  */
-function keptRemembered(stored: StoredStatement | undefined, effective: number): RememberedStatement[] {
-  return (stored?.remembered ?? []).filter((r) => r.issuedAt > effective).map((r) => ({ ...r }))
+function goneForGood(s: GuardianState, key: string): boolean {
+  const k = keyRecord(s, key)
+  return !!k && (k.status === 'withdrawn' || (k.status === 'departed' && k.departedBy === 'removal'))
+}
+
+/** `list` with `signer`'s floor raised to `issuedAt`. Sorted by signer. */
+function raiseFloor(list: SignerFloor[], signer: string, issuedAt: number): SignerFloor[] {
+  const prev = list.find((f) => f.signer === signer)
+  const out = list.filter((f) => f.signer !== signer).map((f) => ({ ...f }))
+  out.push({ signer, issuedAt: prev ? Math.max(prev.issuedAt, issuedAt) : issuedAt })
+  return out.sort((a, b) => cmp(a.signer, b.signer))
+}
+
+/** `signer`'s floor in a clause slot, or null if it has none. */
+function clauseFloor(held: HeldClause, signer: string): number | null {
+  const own = held.signer === signer ? held.issuedAt : null
+  const f = held.signerFloors.find((x) => x.signer === signer)?.issuedAt ?? null
+  return f === null ? own : own === null ? f : Math.max(f, own)
+}
+
+/** `signer`'s floor in a statement slot, or null if it has none. */
+function statementFloor(s: GuardianState, slot: string, signer: string): number | null {
+  const stored = storedFor(s, slot)
+  const own = stored && stored.signer === signer ? stored.issuedAt : null
+  const f = s.statementFloors.find((x) => x.slot === slot && x.signer === signer)?.issuedAt ?? null
+  return f === null ? own : own === null ? f : Math.max(f, own)
+}
+
+function raiseStatementFloor(s: GuardianState, slot: string, signer: string, issuedAt: number): void {
+  const prev = s.statementFloors.find((x) => x.slot === slot && x.signer === signer)
+  s.statementFloors = s.statementFloors.filter((x) => !(x.slot === slot && x.signer === signer))
+  s.statementFloors.push({ slot, signer, issuedAt: prev ? Math.max(prev.issuedAt, issuedAt) : issuedAt })
+}
+
+/** Rule 4: drop the floors of departing keys that can never sign again. */
+function forgetFloors(s: GuardianState, keys: string[]): void {
+  const gone = new Set(keys.filter((k) => goneForGood(s, k)))
+  if (gone.size === 0) return
+  for (const c of s.clauses) c.signerFloors = c.signerFloors.filter((f) => !gone.has(f.signer))
+  s.statementFloors = s.statementFloors.filter((f) => !gone.has(f.signer))
 }
 
 function putStatement(s: GuardianState, st: Statement, now: number, held = false): void {
   if (st.type === 'withdrawal') return
   const slot = statementSlot(st)
-  const remembered = keptRemembered(storedFor(s, slot), effectiveTime(st.issuedAt, now))
-  if (st.issuedAt > now) remembered.push({ id: st.id, issuedAt: st.issuedAt })
-  remembered.sort((a, b) => cmp(a.id, b.id))
+  // The statement it replaces keeps its signer's floor (it may have been
+  // stored before floors were kept).
+  const prev = storedFor(s, slot)
+  if (prev && !goneForGood(s, prev.signer)) raiseStatementFloor(s, slot, prev.signer, prev.issuedAt)
+  raiseStatementFloor(s, slot, st.signer, st.issuedAt)
   s.statements = s.statements.filter((x) => x.slot !== slot)
   s.statements.push({
     slot,
@@ -422,28 +470,35 @@ function putStatement(s: GuardianState, st: Statement, now: number, held = false
     expiresAt: st.expiresAt,
     receivedAt: now,
     held,
-    remembered,
   })
 }
 
 /**
  * Rule 2 within one slot: the newest effective time wins. Re-delivery of the
- * stored event, or of a clamped one the slot remembers, is `duplicate`; an
- * older one is `stale`. At the same effective time the lower event id wins,
- * so every ward converges whatever the arrival order; the loser is
- * `tie_not_newer`. A clamped newcomer that would be the slot's 65th
- * remembered id is `clamp_quota`. Run before any change to the state, so a
- * statement that fails here leaves no trace.
+ * stored event is `duplicate`; an older one is `stale`. At the same effective
+ * time the lower event id wins, so every ward converges whatever the arrival
+ * order; the loser is `tie_not_newer`. Otherwise a statement whose
+ * `issuedAt` is at or below its signer's floor for the slot is `replay`: without it, a relay
+ * could re-deliver a superseded far-future statement, whose effective time
+ * would beat the slot's. Run before any change to the state, so a statement
+ * that fails here leaves no trace.
  * OQ: Same d, same issuedAt, different content.
  */
-function orderAgainst(stored: StoredStatement | undefined, st: Statement, now: number): ReasonCode | null {
-  if (!stored) return null
-  if (stored.id === st.id || (stored.remembered ?? []).some((r) => r.id === st.id)) return 'duplicate'
-  const mine = effectiveTime(st.issuedAt, now)
-  const theirs = effectiveTime(stored.issuedAt, stored.receivedAt)
-  if (mine < theirs) return 'stale'
-  if (mine === theirs && cmp(st.id, stored.id) > 0) return 'tie_not_newer'
-  if (st.issuedAt > now && keptRemembered(stored, mine).length >= MAX_REMEMBERED_PER_STATEMENT_SLOT) return 'clamp_quota'
+function orderAgainst(s: GuardianState, st: Statement, now: number): ReasonCode | null {
+  const slot = statementSlot(st)
+  const stored = storedFor(s, slot)
+  if (stored) {
+    if (stored.id === st.id) return 'duplicate'
+    const mine = effectiveTime(st.issuedAt, now)
+    const theirs = effectiveTime(stored.issuedAt, stored.receivedAt)
+    if (mine < theirs) return 'stale'
+    if (mine === theirs && cmp(st.id, stored.id) > 0) return 'tie_not_newer'
+  }
+  // A same-second sibling of the stored statement from the same signer is
+  // left to the tie rule above, so every ward converges on the lower id.
+  const sibling = !!stored && stored.signer === st.signer && stored.issuedAt === st.issuedAt
+  const floor = statementFloor(s, slot, st.signer)
+  if (floor !== null && (st.issuedAt < floor || (st.issuedAt === floor && !sibling))) return 'replay'
   return null
 }
 
@@ -478,6 +533,7 @@ function withdraw(
   s.tombstones.push({ type: 'withdrawal', d: w.d, id: w.id, key: rec.key, signer: w.signer, issuedAt: w.issuedAt })
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.key !== rec.key)
   clampClauses(s, [rec.key], at)
+  forgetFloors(s, [rec.key])
 }
 
 /**
@@ -506,6 +562,7 @@ function applyRemoval(
     }
   }
   clampClauses(s, gone, at)
+  forgetFloors(s, gone)
   // "Once a removal applies, every pending statement signed by R2 is dropped."
   dropPending(s, (p) => p.signer === R2 || p.key === R2)
   s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.signer !== R2)
@@ -668,7 +725,7 @@ function processApproval(s: GuardianState, st: Statement, now: number) {
       mode = 'update'
     }
   }
-  const order = orderAgainst(storedFor(s, st.d), st, now)
+  const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   if (mode !== 'update') {
     if (rootAtQuota(s, R)) return drop('root_at_quota')
@@ -753,7 +810,7 @@ function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
   if (isPinned(s, R2)) return drop('already_pinned')
   if (keyRecord(s, R2)) return drop('key_role_conflict')
   if (departedAtOrAfter(s, R2, effective)) return drop('not_newer_than_departure')
-  const order = orderAgainst(storedFor(s, st.d), st, now)
+  const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   const expiresAt = pendingExpiry(effective, st.expiresAt)
   if (now >= expiresAt) return drop('expired')
@@ -767,7 +824,7 @@ function processRemoval(s: GuardianState, st: Statement, now: number) {
   const R2 = st.key
   const effective = effectiveTime(st.issuedAt, now)
   if (!isPinned(s, R2)) return drop('target_not_pinned')
-  const order = orderAgainst(storedFor(s, st.d), st, now)
+  const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   if (st.signer === R2) {
     if (s.roots.filter((x) => x.root !== R2).length < 1) return drop('last_root')
@@ -793,7 +850,7 @@ function holdOrDrop(s: GuardianState, st: Statement, now: number, reason: 'cance
 }
 
 function processCancel(s: GuardianState, st: Statement, now: number) {
-  const order = orderAgainst(storedFor(s, statementSlot(st)), st, now)
+  const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
@@ -811,7 +868,7 @@ function processCancel(s: GuardianState, st: Statement, now: number) {
 function processObjection(s: GuardianState, st: Statement, now: number) {
   // Rule 7: the removed root, or an active W bound to it, may object.
   if (rootOf(s, st.signer) !== st.key) return drop('objection_mismatch')
-  const order = orderAgainst(storedFor(s, statementSlot(st)), st, now)
+  const order = orderAgainst(s, st, now)
   if (order) return drop(order)
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
@@ -976,7 +1033,7 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
       if (rec.status !== 'active') return drop('key_departed')
       if (pend.type === 'coguardian' || rec.root !== pend.signer) return drop('bound_elsewhere')
     }
-    const order = orderAgainst(storedFor(s, ap.d), ap, now)
+    const order = orderAgainst(s, ap, now)
     if (order) return drop(order)
     if (rootAtQuota(s, R2)) return drop('root_at_quota')
     if (pend.type === 'coguardian' && s.roots.length >= MAX_ROOTS) return drop('root_quota')
@@ -1008,6 +1065,7 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
       }
     }
     clampClauses(s, gone, now)
+    forgetFloors(s, gone)
     bindKey(s, ap, now)
     dropPending(s, (p) => p.signer === R || p.key === R)
     s.heldWithdrawals = s.heldWithdrawals.filter((h) => h.signer !== R)
@@ -1031,18 +1089,20 @@ export interface ClauseInput {
 
 /**
  * Rules 4 and 5 with the clock clamp: accept a CLAUSE if its author is in the
- * signer set and its `issuedAt` is above the bar of the held clause of the
- * same `(subject, kind)`.
+ * signer set, its `issuedAt` is above the bar of the held clause of the same
+ * `(subject, kind)`, and above its author's own floor for that slot.
  *
  * - The bar is the held clause's effective time, min(`issuedAt`, the ward
  *   clock when it was accepted), lowered to the departure time if its signer
  *   departs. A far-future clause therefore pins nothing: any later clause
  *   from a current signer replaces it.
- * - A clause dated ahead of the ward clock has its id remembered for the slot
- *   until the bar reaches its `issuedAt`, so a relay can't replay it over a
- *   newer rule (`replay`). At most 256 per slot (`clamp_quota`).
+ * - Each signer's floor is the highest `issuedAt` accepted from it for the
+ *   slot. A signer's `issuedAt` only ever rises, so a clause at or below it
+ *   is a re-delivery (`replay`): a relay can't replay a superseded far-future
+ *   clause, whose real `issuedAt` beats the clamped bar. One floor per
+ *   signer, so there is no quota to exhaust.
  *
- * Checks run: seal, signer, replay, newer, clamp quota.
+ * Checks run: seal, signer, newer, replay.
  */
 export function acceptClause(state: GuardianState, clause: ClauseInput, now: number): StepResult {
   return step(state, now, (s) => {
@@ -1050,16 +1110,16 @@ export function acceptClause(state: GuardianState, clause: ClauseInput, now: num
     if (!isSigner(s, clause.author)) return drop('not_signer')
     const same = (c: HeldClause) => c.subject === clause.subject && c.kind === clause.kind
     const held = s.clauses.find(same)
-    const remembered = held?.remembered ?? []
-    if (remembered.some((r) => r.id === clause.id)) return drop('replay')
     if (held && clause.issuedAt <= held.floor) return drop('not_newer')
+    const mine = held ? clauseFloor(held, clause.author) : null
+    if (mine !== null && clause.issuedAt <= mine) return drop('replay')
     const effective = effectiveTime(clause.issuedAt, now)
     const clamped = clause.issuedAt > now
-    // The new bar is `effective`: an id whose issuedAt it reaches needs no memory.
-    const kept = remembered.filter((r) => r.issuedAt > effective).map((r) => ({ ...r }))
-    if (clamped && kept.length >= MAX_REMEMBERED_PER_SLOT) return drop('clamp_quota')
-    if (clamped) kept.push({ id: clause.id, issuedAt: clause.issuedAt })
-    kept.sort((a, b) => cmp(a.id, b.id))
+    // The clause it replaces keeps its signer's floor (it may have been held
+    // before floors were kept).
+    let signerFloors = held?.signerFloors.map((f) => ({ ...f })) ?? []
+    if (held && !goneForGood(s, held.signer)) signerFloors = raiseFloor(signerFloors, held.signer, held.issuedAt)
+    signerFloors = raiseFloor(signerFloors, clause.author, clause.issuedAt)
     s.clauses = s.clauses.filter((c) => !same(c))
     s.clauses.push({
       subject: clause.subject,
@@ -1069,7 +1129,7 @@ export function acceptClause(state: GuardianState, clause: ClauseInput, now: num
       id: clause.id,
       issuedAt: clause.issuedAt,
       floor: effective,
-      remembered: kept,
+      signerFloors,
     })
     if (clamped) s.clamped += 1
     return accept('clause_accepted')
@@ -1238,6 +1298,7 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
     roots: [],
     keys: [],
     statements: [],
+    statementFloors: [],
     pending: [],
     heldWithdrawals: [],
     tombstones: [],
@@ -1363,7 +1424,7 @@ export function projectState(state: GuardianState, now: number): ProjectedState 
     departed: [...departed].sort(cmp),
     recipients: recipients(state),
     farewell: [...state.farewell],
-    clauses: state.clauses.map((c) => ({ ...c, remembered: c.remembered.map((r) => ({ ...r })) })),
+    clauses: state.clauses.map((c) => ({ ...c, signerFloors: c.signerFloors.map((f) => ({ ...f })) })),
     relays: [...state.relays],
     statusRelays: statusRelays(state, now),
     guardianPin: state.guardianPin ? { ...state.guardianPin } : null,

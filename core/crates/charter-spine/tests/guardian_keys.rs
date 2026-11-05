@@ -269,7 +269,7 @@ async fn without_a_port_a_far_ahead_clause_is_judged_by_the_replay_floor_alone()
 /// D1: a guardian-keys ward clamps a clause dated ahead of its clock: the
 /// slot's bar is the effective time, min(issuedAt, now), so the other
 /// parent's correctly dated rule replaces it at once; a relay replaying the
-/// far-future clause over it is refused (its id is remembered); STATUS
+/// far-future clause over it is refused (its signer's floor); STATUS
 /// counts the clamp.
 #[tokio::test]
 async fn a_far_ahead_clause_is_clamped_not_refused_and_cannot_be_replayed() {
@@ -302,12 +302,12 @@ async fn a_far_ahead_clause_is_clamped_not_refused_and_cannot_be_replayed() {
     assert_eq!(keys.status_guardians(NOW).unwrap().clamped, 2);
 
     // The superseded far-future clause, replayed: its issuedAt beats the
-    // bar, but its id is remembered.
+    // bar, but not its signer's floor.
     let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 6), LOCAL).await;
     assert_eq!(out.result, AckResult::Superseded);
     assert_eq!(held_minutes(&b), Some(20));
 
-    // After a restart too: the memory is in the persisted state.
+    // After a restart too: the floor is in the persisted state.
     let (b, _keys) = w.broker();
     let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 7), LOCAL).await;
     assert_eq!(out.result, AckResult::Superseded);
@@ -338,7 +338,13 @@ async fn the_machine_wide_content_slot_is_clamped_too() {
     let out = b.ingest_local(&w.sealed(&ahead, ROOT_SEED, 1), LOCAL).await;
     assert_eq!(out.result, AckResult::Applied);
     assert_eq!(held_tag(&b), Some(1));
-    let next = content(ROOT_SEED, NOW + 1, 2);
+    // The same signer going backwards is a replay: its floor is the real
+    // issuedAt of its far-future clause.
+    let back = content(ROOT_SEED, NOW + 1, 3);
+    let out = b.ingest_local(&w.sealed(&back, ROOT_SEED, 2), LOCAL).await;
+    assert_eq!(out.result, AckResult::Superseded);
+    assert_eq!(held_tag(&b), Some(1));
+    let next = content(ROOT_SEED, NOW + 86_401, 2);
     let out = b.ingest_local(&w.sealed(&next, ROOT_SEED, 2), LOCAL).await;
     assert_eq!(out.result, AckResult::Applied);
     assert_eq!(held_tag(&b), Some(2));
@@ -355,7 +361,8 @@ async fn the_machine_wide_content_slot_is_clamped_too() {
 
 /// D1 at the upgrade: a store slot holding a far-future clause from before
 /// the section (or the content slot from before it came to the port) seeds
-/// the state at its effective time, so it pins nothing.
+/// the state at its effective time, so it pins nothing against another
+/// signer; its own signer's replay floor is its real issuedAt.
 #[tokio::test]
 async fn a_far_future_slot_from_before_the_upgrade_is_seeded_at_now() {
     let w = Ward::new();
@@ -373,9 +380,22 @@ async fn a_far_future_slot_from_before_the_upgrade_is_seeded_at_now() {
         .ingest_local(&w.sealed(&clause(ROOT_SEED, NOW, 30), ROOT_SEED, 1), LOCAL)
         .await;
     assert_eq!(out.result, AckResult::Superseded, "at the seeded bar, NOW");
+    // Above the bar, but not above its signer's floor: the seeded clause's
+    // real issuedAt.
     let out = b
         .ingest_local(
             &w.sealed(&clause(ROOT_SEED, NOW + 1, 30), ROOT_SEED, 2),
+            LOCAL,
+        )
+        .await;
+    assert_eq!(
+        out.result,
+        AckResult::Superseded,
+        "below the signer's floor"
+    );
+    let out = b
+        .ingest_local(
+            &w.sealed(&clause(ROOT_SEED, NOW + 86_401, 30), ROOT_SEED, 3),
             LOCAL,
         )
         .await;
@@ -384,8 +404,8 @@ async fn a_far_future_slot_from_before_the_upgrade_is_seeded_at_now() {
 }
 
 /// D1 at the upgrade of the state itself: a held clause persisted before the
-/// clamp (no `floor`) is given its effective time on load, and its id is
-/// remembered if it was ahead.
+/// clamp (no `floor`, no signer floors) is given its effective time on load,
+/// and still counts as its signer's replay floor at its real issuedAt.
 #[tokio::test]
 async fn a_held_clause_from_before_the_clamp_gets_an_effective_time_on_load() {
     let w = Ward::new();
@@ -397,17 +417,20 @@ async fn a_held_clause_from_before_the_clamp_gets_an_effective_time_on_load() {
     let mut doc: serde_json::Value = serde_json::from_str(&w.store.raw().unwrap()).unwrap();
     let held = &mut doc["state"]["clauses"][0];
     held["floor"] = serde_json::Value::Null;
-    held.as_object_mut().unwrap().remove("remembered");
+    held.as_object_mut().unwrap().remove("signerFloors");
     w.store.set_raw(Some(doc.to_string()));
 
     let (b, keys) = w.broker();
     let held = keys.project(NOW).unwrap().clauses;
     assert_eq!(held[0].floor, Some(NOW as i64));
-    assert_eq!(held[0].remembered.len(), 1);
-    assert_eq!(held[0].remembered[0].id, ahead.id.to_hex());
+    assert!(held[0].signer_floors.is_empty());
+    assert_eq!(
+        held[0].floor_of(&pk(ROOT_SEED).to_hex()),
+        Some((NOW + 86_400) as i64)
+    );
     let out = b
         .ingest_local(
-            &w.sealed(&clause(ROOT_SEED, NOW + 1, 5), ROOT_SEED, 2),
+            &w.sealed(&clause(ROOT_SEED, NOW + 86_401, 5), ROOT_SEED, 2),
             LOCAL,
         )
         .await;

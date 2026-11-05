@@ -104,13 +104,6 @@ pub struct StoredStatement {
     pub received_at: i64,
     /// A cancel or objection that had nothing to act on when it arrived.
     pub held: bool,
-    /// Ids of clamped statements (dated ahead of the ward clock when
-    /// accepted) for this slot, kept while their `issuedAt` is above the
-    /// slot's newest effective time, so a relay can't replay a superseded
-    /// one. Sorted by `id`. The stored statement's own id is among them if it
-    /// was clamped. Absent in a state persisted before this rule: empty.
-    #[serde(default)]
-    pub remembered: Vec<RememberedStatement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,16 +172,24 @@ pub struct PresenceToken {
     pub minted_at: i64,
 }
 
-/// A clamped clause's id, remembered for its slot until the bar passes it.
+/// The highest real `issuedAt` a ward has accepted from one signer in one
+/// slot. A signer's `issuedAt` only ever rises (*Who may sign what*), so an
+/// event at or below it is a replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RememberedClause {
-    pub id: String,
+pub struct SignerFloor {
+    pub signer: String,
     pub issued_at: i64,
 }
 
-/// A clamped statement's id, remembered for its slot: the same shape.
-pub type RememberedStatement = RememberedClause;
+/// A statement slot's floor for one signer (the slot as rule 2 defines it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatementFloor {
+    pub slot: String,
+    pub signer: String,
+    pub issued_at: i64,
+}
 
 /// A held clause: the minimal model of rules 4 and 5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,17 +211,32 @@ pub struct HeldClause {
     /// The reference always sets it; `None` (a state persisted before the
     /// clamp) reads as `issued_at`. OQ: Clause floor after a departure.
     pub floor: Option<i64>,
-    /// Ids of clamped clauses (dated ahead of the ward clock when accepted)
-    /// for this `(subject, kind)`, kept while their `issuedAt` is above the
-    /// bar, so a relay can't replay one over a newer rule. Sorted by `id`.
+    /// Each signer's floor for this `(subject, kind)`: the highest `issuedAt`
+    /// accepted from it here. Sorted by signer. A signer that can never sign
+    /// again (a withdrawn key, or a working key of a removed root) is
+    /// dropped. The held clause also counts for its own signer
+    /// ([`HeldClause::floor_of`]). Absent in a state persisted before this
+    /// rule: empty.
     #[serde(default)]
-    pub remembered: Vec<RememberedClause>,
+    pub signer_floors: Vec<SignerFloor>,
 }
 
 impl HeldClause {
     /// The bar a replacement's `issuedAt` must be above.
     pub fn bar(&self) -> i64 {
         self.floor.unwrap_or(self.issued_at)
+    }
+
+    /// `signer`'s floor for this slot, if it has one: its highest accepted
+    /// `issuedAt` here, the held clause counting for its own signer.
+    pub fn floor_of(&self, signer: &str) -> Option<i64> {
+        let own = (self.signer == signer).then_some(self.issued_at);
+        let listed = self
+            .signer_floors
+            .iter()
+            .find(|f| f.signer == signer)
+            .map(|f| f.issued_at);
+        own.max(listed)
     }
 }
 
@@ -241,6 +257,11 @@ pub struct GuardianState {
     pub roots: Vec<PinnedRoot>,
     pub keys: Vec<WorkingKeyRecord>,
     pub statements: Vec<StoredStatement>,
+    /// Each signer's floor per statement slot, sorted by slot then signer.
+    /// The stored statement also counts for its own signer. Absent in a
+    /// state persisted before this rule: empty.
+    #[serde(default)]
+    pub statement_floors: Vec<StatementFloor>,
     pub pending: Vec<PendingRecord>,
     pub held_withdrawals: Vec<HeldWithdrawal>,
     pub tombstones: Vec<Tombstone>,
@@ -320,6 +341,8 @@ fn sorted_unique(v: impl IntoIterator<Item = String>) -> Vec<String> {
 fn normalise(s: &mut GuardianState) {
     s.keys.sort_by(|a, b| cmp_str(&a.key, &b.key));
     s.statements.sort_by(|a, b| cmp_str(&a.slot, &b.slot));
+    s.statement_floors
+        .sort_by(|a, b| cmp_str(&a.slot, &b.slot).then_with(|| cmp_str(&a.signer, &b.signer)));
     s.pending.sort_by(|a, b| cmp_str(&a.d, &b.d));
     s.held_withdrawals
         .sort_by(|a, b| cmp_str(&a.d, &b.d).then_with(|| cmp_str(&a.signer, &b.signer)));
@@ -503,16 +526,68 @@ fn stored_for<'a>(s: &'a GuardianState, slot: &str) -> Option<&'a StoredStatemen
     s.statements.iter().find(|st| st.slot == slot)
 }
 
-/// The slot's remembered ids that outlive `effective` as the slot's newest
-/// effective time: those whose `issuedAt` is still above it.
-fn kept_remembered(stored: Option<&StoredStatement>, effective: i64) -> Vec<RememberedStatement> {
-    stored.map_or_else(Vec::new, |st| {
-        st.remembered
-            .iter()
-            .filter(|r| r.issued_at > effective)
-            .cloned()
-            .collect()
+/// A key that can never sign again: a withdrawn working key, or one departed
+/// with its removed root. Its floors are dropped. A root that departed may be
+/// pinned again by a co-guardian, and a working key departed by a move may be
+/// re-bound by the new root, so theirs are kept.
+fn gone_for_good(s: &GuardianState, key: &str) -> bool {
+    key_record(s, key).is_some_and(|k| {
+        k.status == KeyStatus::Withdrawn
+            || (k.status == KeyStatus::Departed && k.departed_by == Some(DepartedBy::Removal))
     })
+}
+
+/// Raise `signer`'s floor in `list` to `issued_at`. Sorted by signer.
+fn raise_floor(list: &mut Vec<SignerFloor>, signer: &str, issued_at: i64) {
+    match list.iter_mut().find(|f| f.signer == signer) {
+        Some(f) => f.issued_at = f.issued_at.max(issued_at),
+        None => list.push(SignerFloor {
+            signer: signer.to_owned(),
+            issued_at,
+        }),
+    }
+    list.sort_by(|a, b| cmp_str(&a.signer, &b.signer));
+}
+
+/// `signer`'s floor in a statement slot, if it has one: its highest accepted
+/// `issuedAt` there, the stored statement counting for its own signer.
+fn statement_floor(s: &GuardianState, slot: &str, signer: &str) -> Option<i64> {
+    let own = stored_for(s, slot)
+        .filter(|st| st.signer == signer)
+        .map(|st| st.issued_at);
+    let listed = s
+        .statement_floors
+        .iter()
+        .find(|f| f.slot == slot && f.signer == signer)
+        .map(|f| f.issued_at);
+    own.max(listed)
+}
+
+fn raise_statement_floor(s: &mut GuardianState, slot: &str, signer: &str, issued_at: i64) {
+    match s
+        .statement_floors
+        .iter_mut()
+        .find(|f| f.slot == slot && f.signer == signer)
+    {
+        Some(f) => f.issued_at = f.issued_at.max(issued_at),
+        None => s.statement_floors.push(StatementFloor {
+            slot: slot.to_owned(),
+            signer: signer.to_owned(),
+            issued_at,
+        }),
+    }
+}
+
+/// Rule 4: drop the floors of departing keys that can never sign again.
+fn forget_floors(s: &mut GuardianState, keys: &[String]) {
+    let gone: HashSet<&String> = keys.iter().filter(|k| gone_for_good(s, k)).collect();
+    if gone.is_empty() {
+        return;
+    }
+    for c in &mut s.clauses {
+        c.signer_floors.retain(|f| !gone.contains(&f.signer));
+    }
+    s.statement_floors.retain(|f| !gone.contains(&f.signer));
 }
 
 fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
@@ -520,14 +595,15 @@ fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
         return;
     }
     let slot = slot_of(st);
-    let mut remembered = kept_remembered(stored_for(s, &slot), effective_time(st.issued_at, now));
-    if st.issued_at > now {
-        remembered.push(RememberedStatement {
-            id: st.id.clone(),
-            issued_at: st.issued_at,
-        });
+    // The statement it replaces keeps its signer's floor (it may have been
+    // stored before floors were kept).
+    if let Some((signer, issued_at)) = stored_for(s, &slot).map(|p| (p.signer.clone(), p.issued_at))
+    {
+        if !gone_for_good(s, &signer) {
+            raise_statement_floor(s, &slot, &signer, issued_at);
+        }
     }
-    remembered.sort_by(|a, b| cmp_str(&a.id, &b.id));
+    raise_statement_floor(s, &slot, &st.signer, st.issued_at);
     s.statements.retain(|x| x.slot != slot);
     s.statements.push(StoredStatement {
         slot,
@@ -541,36 +617,40 @@ fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
         expires_at: st.expires_at,
         received_at: now,
         held,
-        remembered,
     });
 }
 
 /// Rule 2 within one slot: the newest effective time wins. Re-delivery of
-/// the stored event, or of a clamped one the slot remembers, is `duplicate`;
-/// an older one `stale`; at the same effective time the lower event id wins
-/// (`tie_not_newer`). A clamped newcomer that would be the slot's 65th
-/// remembered id is `clamp_quota`. Run before any change to the state, so a
-/// statement that fails here leaves no trace.
+/// the stored event is `duplicate`; an older one `stale`; at the same
+/// effective time the lower event id wins (`tie_not_newer`). Otherwise a
+/// statement whose `issuedAt` is at or below its signer's floor for the slot
+/// is `replay`: without it, a relay could re-deliver a superseded far-future
+/// statement, whose effective time would beat the slot's. Run before any
+/// change to the state, so a statement that fails here leaves no trace.
 /// OQ: Same d, same issuedAt, different content.
-fn order_against(stored: Option<&StoredStatement>, st: &Statement, now: i64) -> Option<Reason> {
-    let stored = stored?;
-    if stored.id == st.id || stored.remembered.iter().any(|r| r.id == st.id) {
-        return Some(Reason::Duplicate);
+fn order_against(s: &GuardianState, st: &Statement, now: i64) -> Option<Reason> {
+    let slot = slot_of(st);
+    let stored = stored_for(s, &slot);
+    if let Some(stored) = stored {
+        if stored.id == st.id {
+            return Some(Reason::Duplicate);
+        }
+        let mine = effective_time(st.issued_at, now);
+        let theirs = effective_time(stored.issued_at, stored.received_at);
+        if mine < theirs {
+            return Some(Reason::Stale);
+        }
+        if mine == theirs && cmp_str(&st.id, &stored.id) == Ordering::Greater {
+            return Some(Reason::TieNotNewer);
+        }
     }
-    let mine = effective_time(st.issued_at, now);
-    let theirs = effective_time(stored.issued_at, stored.received_at);
-    if mine < theirs {
-        return Some(Reason::Stale);
+    // A same-second sibling of the stored statement from the same signer is
+    // left to the tie rule above, so every ward converges on the lower id.
+    let sibling = stored.is_some_and(|x| x.signer == st.signer && x.issued_at == st.issued_at);
+    match statement_floor(s, &slot, &st.signer) {
+        Some(f) if st.issued_at < f || (st.issued_at == f && !sibling) => Some(Reason::Replay),
+        _ => None,
     }
-    if mine == theirs && cmp_str(&st.id, &stored.id) == Ordering::Greater {
-        return Some(Reason::TieNotNewer);
-    }
-    if st.issued_at > now
-        && kept_remembered(Some(stored), mine).len() >= MAX_REMEMBERED_PER_STATEMENT_SLOT
-    {
-        return Some(Reason::ClampQuota);
-    }
-    None
 }
 
 /// Drop every pending statement matching `pred`, and every presence token
@@ -638,7 +718,8 @@ fn withdraw(s: &mut GuardianState, idx: usize, w: &WithdrawalRef, at: i64) {
         issued_at: w.issued_at,
     });
     s.held_withdrawals.retain(|h| h.key != key);
-    clamp_clauses(s, &[key], at);
+    clamp_clauses(s, std::slice::from_ref(&key), at);
+    forget_floors(s, &[key]);
 }
 
 /// The parts of a removal needed to apply it.
@@ -692,6 +773,7 @@ fn apply_removal(s: &mut GuardianState, r: &RemovalRef, at: i64) -> bool {
         }
     }
     clamp_clauses(s, &gone, at);
+    forget_floors(s, &gone);
     // "Once a removal applies, every pending statement signed by R2 is dropped."
     drop_pending(s, |p| p.signer == r2 || p.key == r2);
     s.held_withdrawals.retain(|h| h.signer != r2);
@@ -917,7 +999,7 @@ fn process_approval(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
             KeyStatus::Active => mode = Mode::Update,
         }
     }
-    if let Some(reason) = order_against(stored_for(s, &st.d), st, now) {
+    if let Some(reason) = order_against(s, st, now) {
         return drop(reason);
     }
     if mode != Mode::Update {
@@ -1063,7 +1145,7 @@ fn process_coguardian_or_move(s: &mut GuardianState, st: &Statement, now: i64) -
     if departed_at_or_after(s, r2, effective) {
         return drop(Reason::NotNewerThanDeparture);
     }
-    if let Some(reason) = order_against(stored_for(s, &st.d), st, now) {
+    if let Some(reason) = order_against(s, st, now) {
         return drop(reason);
     }
     let expires_at = pending_expiry(effective, st.expires_at);
@@ -1096,7 +1178,7 @@ fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
     if !is_pinned(s, r2) {
         return drop(Reason::TargetNotPinned);
     }
-    if let Some(reason) = order_against(stored_for(s, &st.d), st, now) {
+    if let Some(reason) = order_against(s, st, now) {
         return drop(reason);
     }
     if st.signer == r2 {
@@ -1142,7 +1224,7 @@ fn hold_or_drop(s: &mut GuardianState, st: &Statement, now: i64, reason: Reason)
 }
 
 fn process_cancel(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
-    if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st, now) {
+    if let Some(reason) = order_against(s, st, now) {
         return drop(reason);
     }
     let target = st.target.as_deref().unwrap_or_default();
@@ -1166,7 +1248,7 @@ fn process_objection(s: &mut GuardianState, st: &Statement, now: i64) -> Judged 
     if root_of(s, &st.signer).as_deref() != Some(st.key.as_str()) {
         return drop(Reason::ObjectionMismatch);
     }
-    if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st, now) {
+    if let Some(reason) = order_against(s, st, now) {
         return drop(reason);
     }
     let target = st.target.as_deref().unwrap_or_default();
@@ -1397,7 +1479,7 @@ pub fn apply_presence_confirm(
                 return drop(Reason::BoundElsewhere);
             }
         }
-        if let Some(reason) = order_against(stored_for(s, &ap.d), &ap, now) {
+        if let Some(reason) = order_against(s, &ap, now) {
             return drop(reason);
         }
         if root_at_quota(s, r2) {
@@ -1451,6 +1533,7 @@ pub fn apply_presence_confirm(
             }
         }
         clamp_clauses(s, &gone, now);
+        forget_floors(s, &gone);
         bind_key(s, &ap, now);
         drop_pending(s, |p| p.signer == r || p.key == r);
         s.held_withdrawals.retain(|h| h.signer != r);
@@ -1476,19 +1559,20 @@ pub struct ClauseInput<'a> {
 }
 
 /// Rules 4 and 5 with the clock clamp: accept a CLAUSE if its author is in
-/// the signer set and its `issuedAt` is above the bar of the held clause of
-/// the same `(subject, kind)`.
+/// the signer set, its `issuedAt` is above the bar of the held clause of the
+/// same `(subject, kind)`, and above its author's own floor for that slot.
 ///
 /// - The bar is the held clause's effective time, min(`issuedAt`, the ward
 ///   clock when it was accepted), lowered to the departure time if its
 ///   signer departs. A far-future clause therefore pins nothing: any later
 ///   clause from a current signer replaces it.
-/// - A clause dated ahead of the ward clock has its id remembered for the
-///   slot until the bar reaches its `issuedAt`, so a relay can't replay it
-///   over a newer rule (`replay`). At most [`MAX_REMEMBERED_PER_SLOT`] per
-///   slot (`clamp_quota`).
+/// - Each signer's floor is the highest `issuedAt` accepted from it for the
+///   slot. A signer's `issuedAt` only ever rises, so a clause at or below it
+///   is a re-delivery (`replay`): a relay can't replay a superseded
+///   far-future clause, whose real `issuedAt` beats the clamped bar. One
+///   floor per signer, so there is no quota to exhaust.
 ///
-/// Checks: seal, signer, replay, newer, clamp quota.
+/// Checks: seal, signer, newer, replay.
 pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) -> Step {
     step(state, now, |s| {
         if clause.seal_author != clause.author {
@@ -1499,32 +1583,26 @@ pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) 
         }
         let same = |c: &HeldClause| c.subject == clause.subject && c.kind == clause.kind;
         let held = s.clauses.iter().find(|c| same(c));
-        let remembered: &[RememberedClause] = held.map_or(&[], |h| &h.remembered);
-        if remembered.iter().any(|r| r.id == clause.id) {
-            return drop(Reason::Replay);
-        }
         if held.is_some_and(|h| clause.issued_at <= h.bar()) {
             return drop(Reason::NotNewer);
         }
+        if held
+            .and_then(|h| h.floor_of(clause.author))
+            .is_some_and(|f| clause.issued_at <= f)
+        {
+            return drop(Reason::Replay);
+        }
         let effective = effective_time(clause.issued_at, now);
         let clamped = clause.issued_at > now;
-        // The new bar is `effective`: an id whose issuedAt it reaches needs no
-        // memory.
-        let mut kept: Vec<RememberedClause> = remembered
-            .iter()
-            .filter(|r| r.issued_at > effective)
-            .cloned()
-            .collect();
-        if clamped && kept.len() >= MAX_REMEMBERED_PER_SLOT {
-            return drop(Reason::ClampQuota);
+        // The clause it replaces keeps its signer's floor (it may have been
+        // held before floors were kept).
+        let mut signer_floors = held.map_or_else(Vec::new, |h| h.signer_floors.clone());
+        if let Some(h) = held {
+            if !gone_for_good(s, &h.signer) {
+                raise_floor(&mut signer_floors, &h.signer, h.issued_at);
+            }
         }
-        if clamped {
-            kept.push(RememberedClause {
-                id: clause.id.to_owned(),
-                issued_at: clause.issued_at,
-            });
-        }
-        kept.sort_by(|a, b| cmp_str(&a.id, &b.id));
+        raise_floor(&mut signer_floors, clause.author, clause.issued_at);
         let root = root_of(s, clause.author).unwrap_or_default();
         s.clauses.retain(|c| !same(c));
         s.clauses.push(HeldClause {
@@ -1535,7 +1613,7 @@ pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) 
             id: clause.id.to_owned(),
             issued_at: clause.issued_at,
             floor: Some(effective),
-            remembered: kept,
+            signer_floors,
         });
         if clamped {
             s.clamped += 1;
@@ -1804,6 +1882,7 @@ pub fn pair_from_seal(
         roots: Vec::new(),
         keys: Vec::new(),
         statements: Vec::new(),
+        statement_floors: Vec::new(),
         pending: Vec::new(),
         held_withdrawals: Vec::new(),
         tombstones: Vec::new(),

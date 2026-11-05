@@ -124,8 +124,7 @@ pub const MACHINE_SUBJECT: &str = "";
 /// slot, or the machine-wide one under [`MACHINE_SUBJECT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClauseCandidate<'a> {
-    /// The CLAUSE event's id: a clause dated ahead of the ward clock is
-    /// remembered by it, so a replay is refused.
+    /// The CLAUSE event's id, recorded with the held clause.
     pub id: EventId,
     pub author: PubKey,
     pub seal_author: PubKey,
@@ -161,7 +160,7 @@ pub enum ClauseGate {
     /// the slot is this one (same signer, same `issuedAt`), so a store that
     /// does not have it yet (its write failed after the port's) takes it.
     NotNewer { held_is_this: bool },
-    /// Refused (not a signer, seal mismatch, the slot's clamp quota full).
+    /// Refused (not a signer, seal mismatch).
     Refused,
     /// The port holds nothing for the slot and the store's slot is
     /// unreadable: no floor is known, so the broker's unreadable-floor rule
