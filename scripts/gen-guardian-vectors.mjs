@@ -488,6 +488,19 @@ scenario("clause_replay_superseded_far_future", ["who may sign what", "4"], "A r
   c.clause(W1, T0 + 2 * DAY + 2, T0 + 600, A("clause_accepted"), o);
 });
 
+scenario("clock_steps_back", ["who may sign what", "4", "2"], "The ward clock steps back (a dead RTC before NTP). A clause accepted then keeps the slot's bar where it was, max(bar, min(issuedAt, now)), so an older clause from another signer that a relay held back can't slip in under it. A statement slot's newest effective time never falls either: a statement whose effective time is below it is stale.", (c) => {
+  twoRoots(c);
+  const o = { kind: "apps" };
+  c.clause(W1, T0 + 1000, T0 + 1000, A("clause_accepted"), o);
+  c.clause(W2, T0 + 1001, T0 + 500, A("clause_accepted"), o);
+  c.clause(R1, T0 + 800, T0 + 510, D("not_newer"), o);
+  c.clause(W1, T0 + 1002, T0 + 520, A("clause_accepted"), o);
+  c.clause(W2, T0 + 1003, T0 + 1100, A("clause_accepted"), o);
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 1100 }), T0 + 1100, A("coguardian_pending"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 1101 }), T0 + 600, D("stale"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 1102 }), T0 + 1102, A("coguardian_pending"));
+});
+
 scenario("statement_clamp", ["who may sign what", "pending", "7"], "A statement dated ahead of the ward clock is accepted; ordering, expiry, cancels, objections and departures use its effective time, min(issuedAt, now at receipt), so another device's correct clock is never refused.", (c) => {
   twoRoots(c);
   c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + DAY }), T0 + 110, A("approval_applied"));

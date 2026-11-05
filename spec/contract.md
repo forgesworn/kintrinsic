@@ -2649,6 +2649,13 @@ A root is never asked to decrypt ward traffic.
     departures), it uses effective times.
   - A held clause's effective time is its slot's bar: a CLAUSE of the same
     `(subject, kind)` replaces it only if its `issuedAt` is above the bar.
+  - **A bar never falls.** A CLAUSE that replaces a held one takes, as its
+    effective time, `max(the old bar, min(issuedAt, the ward's clock))`. So
+    when the ward's clock steps back (a dead RTC before NTP, a clock set by
+    hand), a relay can't slip a held-back older clause in under the bar.
+    Only a departure lowers a bar (rule 4). A statement slot's newest
+    effective time never falls either: a statement whose effective time is
+    below it is stale (rule 2).
   - **Each signer has a replay floor per slot:** the highest `issuedAt` the
     ward has accepted from that signer for that `(subject, kind)`, or for
     that statement slot (its `d`, as rule 2 defines the slot). A CLAUSE or

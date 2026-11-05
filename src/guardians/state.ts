@@ -170,8 +170,9 @@ export interface HeldClause {
   issuedAt: number
   /**
    * The slot's bar: a replacement must have `issuedAt` above it. The clause's
-   * effective time, min(`issuedAt`, the ward clock at acceptance); when the
-   * signer departs, min(that, the departure time).
+   * effective time, min(`issuedAt`, the ward clock at acceptance), never
+   * below the bar it replaced; when the signer departs, min(that, the
+   * departure time).
    * OQ: Clause floor after a departure.
    */
   floor: number
@@ -1093,8 +1094,8 @@ export interface ClauseInput {
  * `(subject, kind)`, and above its author's own floor for that slot.
  *
  * - The bar is the held clause's effective time, min(`issuedAt`, the ward
- *   clock when it was accepted), lowered to the departure time if its signer
- *   departs. A far-future clause therefore pins nothing: any later clause
+ *   clock when it was accepted), never below the bar it replaced, and lowered
+ *   to the departure time if its signer departs. A far-future clause therefore pins nothing: any later clause
  *   from a current signer replaces it.
  * - Each signer's floor is the highest `issuedAt` accepted from it for the
  *   slot. A signer's `issuedAt` only ever rises, so a clause at or below it
@@ -1113,7 +1114,10 @@ export function acceptClause(state: GuardianState, clause: ClauseInput, now: num
     if (held && clause.issuedAt <= held.floor) return drop('not_newer')
     const mine = held ? clauseFloor(held, clause.author) : null
     if (mine !== null && clause.issuedAt <= mine) return drop('replay')
+    // The new bar never falls below the old one, so a ward clock stepped back
+    // can't reopen what the old bar closed.
     const effective = effectiveTime(clause.issuedAt, now)
+    const bar = held ? Math.max(held.floor, effective) : effective
     const clamped = clause.issuedAt > now
     // The clause it replaces keeps its signer's floor (it may have been held
     // before floors were kept).
@@ -1128,7 +1132,7 @@ export function acceptClause(state: GuardianState, clause: ClauseInput, now: num
       root: rootOf(s, clause.author) as string,
       id: clause.id,
       issuedAt: clause.issuedAt,
-      floor: effective,
+      floor: bar,
       signerFloors,
     })
     if (clamped) s.clamped += 1

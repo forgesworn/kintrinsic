@@ -219,7 +219,8 @@ that.
 - `clauses`: held clauses, sorted by `subject` then `kind`. `root` is the
   signer's root when the clause was accepted; `id` and `issuedAt` are the
   clause's own. `floor` is the slot's bar: the clause's effective time,
-  min(`issuedAt`, the ward's `now` when it was accepted), and when its signer
+  min(`issuedAt`, the ward's `now` when it was accepted), never below the
+  bar it replaced, and when its signer
   departs, min(that, the time of the departure). `signerFloors` lists,
   sorted by `signer`, each signer's replay floor for this `(subject, kind)`:
   the highest `issuedAt` accepted from it here. A signer's floor is the
@@ -392,7 +393,9 @@ A token is spent only by an accepted confirmation (`removal_confirmed`,
 exists and `issuedAt` ≤ its `floor`) → `replay` (`issuedAt` ≤ the author's
 floor in the held clause's `signerFloors`, or the held clause's `issuedAt`
 if the author signed it) → `clause_accepted`. An accepted clause replaces
-the held one with `floor` = min(`issuedAt`, `now`); `signerFloors` keeps the
+the held one with `floor` = max(the held one's `floor`, min(`issuedAt`,
+`now`)), so a ward clock stepped back never lowers it (scenario
+`clock_steps_back`); `signerFloors` keeps the
 held one's entries, raises the held clause's own signer to its `issuedAt`
 (unless that signer can never sign again), and raises the author's to this
 `issuedAt`. There is no pairing floor for clauses, and no quota.

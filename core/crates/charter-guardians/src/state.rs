@@ -207,7 +207,8 @@ pub struct HeldClause {
     pub issued_at: i64,
     /// The slot's bar: a replacement must have `issuedAt` above it. The
     /// clause's effective time, min(`issued_at`, the ward clock at
-    /// acceptance); when the signer departs, min(that, the departure time).
+    /// acceptance), never below the bar it replaced; when the signer
+    /// departs, min(that, the departure time).
     /// The reference always sets it; `None` (a state persisted before the
     /// clamp) reads as `issued_at`. OQ: Clause floor after a departure.
     pub floor: Option<i64>,
@@ -1563,9 +1564,10 @@ pub struct ClauseInput<'a> {
 /// same `(subject, kind)`, and above its author's own floor for that slot.
 ///
 /// - The bar is the held clause's effective time, min(`issuedAt`, the ward
-///   clock when it was accepted), lowered to the departure time if its
-///   signer departs. A far-future clause therefore pins nothing: any later
-///   clause from a current signer replaces it.
+///   clock when it was accepted), never below the bar it replaced, and
+///   lowered to the departure time if its signer departs. A far-future
+///   clause therefore pins nothing: any later clause from a current signer
+///   replaces it.
 /// - Each signer's floor is the highest `issuedAt` accepted from it for the
 ///   slot. A signer's `issuedAt` only ever rises, so a clause at or below it
 ///   is a re-delivery (`replay`): a relay can't replay a superseded
@@ -1592,7 +1594,10 @@ pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) 
         {
             return drop(Reason::Replay);
         }
+        // The new bar never falls below the old one, so a ward clock stepped
+        // back can't reopen what the old bar closed.
         let effective = effective_time(clause.issued_at, now);
+        let bar = held.map_or(effective, |h| h.bar().max(effective));
         let clamped = clause.issued_at > now;
         // The clause it replaces keeps its signer's floor (it may have been
         // held before floors were kept).
@@ -1612,7 +1617,7 @@ pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) 
             root,
             id: clause.id.to_owned(),
             issued_at: clause.issued_at,
-            floor: Some(effective),
+            floor: Some(bar),
             signer_floors,
         });
         if clamped {
