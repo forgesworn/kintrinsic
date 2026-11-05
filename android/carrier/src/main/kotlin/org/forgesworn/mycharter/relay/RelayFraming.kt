@@ -20,10 +20,11 @@ object RelayFraming {
         reqMessage(subId, listOf(guardianPubkeyHex), sinceUnix)
 
     /**
-     * One subscription for gift-wraps p-tagged to ANY of [pubkeysHex]: a
-     * phone-held root and its working key (D5), since wards write to the
-     * working key once they list it and to the root before then. Repeats are
-     * dropped; the order is kept (primary first).
+     * One subscription for gift-wraps p-tagged to ANY of [pubkeysHex].
+     * Repeats are dropped; the order is kept. The carrier's sockets each name
+     * one key (see [RelayRoute]): a relay that hands wraps only to the
+     * signed-in recipient may refuse a filter naming a key it has not seen
+     * sign in on that connection.
      */
     fun reqMessage(subId: String, pubkeysHex: List<String>, sinceUnix: Long): String =
         JSONArray()

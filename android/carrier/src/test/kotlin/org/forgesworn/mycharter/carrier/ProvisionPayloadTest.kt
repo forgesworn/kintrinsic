@@ -39,6 +39,10 @@ class ProvisionPayloadTest {
         // A wrap naming none of ours, or none at all: the primary's secret.
         assertEquals(sk, p.secretFor("e".repeat(64)))
         assertEquals(sk, p.secretFor(null))
+        // Exactly the key asked for, or nothing: what a socket signs AUTH with.
+        assertEquals(wSk, p.secretOf(wPk))
+        assertEquals(sk, p.secretOf(pk))
+        assertNull(p.secretOf("e".repeat(64)))
         // The primary repeated in the list, or a key twice: listed once.
         val dup = ProvisionPayload.parse(
             json(keys = """[{"skHex":"$sk","pubkeyHex":"$pk"},{"skHex":"$wSk","pubkeyHex":"$wPk"},{"skHex":"$wSk","pubkeyHex":"$wPk"}]"""),
