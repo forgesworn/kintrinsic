@@ -1602,6 +1602,48 @@ mod tests {
         assert_eq!(ward.w.relays, vec![ONE.to_string(), TWO.to_string()]);
     }
 
+    /// STATUS `guardians` as the spine fills it: `pinSet`, the clamp
+    /// counter, and each pending statement's event `id` and `signer` (D4,
+    /// D1, D10). STATUS goes only to guardians, so `pending` belongs there.
+    #[test]
+    fn status_carries_the_pin_the_clamp_count_and_each_pending_id() {
+        let ward = Ward::new("status");
+        let g = |ward: &Ward| ward.w.build_status(ward.now).unwrap().guardians.unwrap();
+        let before = g(&ward);
+        assert!(!before.pin_set);
+        assert_eq!(before.clamped, 0);
+        assert!(before.pending.is_empty());
+
+        ward.approve_w1();
+        ward.set_pin();
+        let cg = ward.statement(
+            ROOT,
+            format!("kintrinsic/guardian/{}", pk(ROOT2).to_hex()),
+            pk(ROOT2),
+            ward.now - 50,
+            json!({}),
+        );
+        assert_eq!(ward.deliver(&cg, W1, 2), AckResult::Applied);
+        // A clause dated ahead of the ward's clock is clamped, not refused.
+        assert_eq!(
+            ward.deliver(&ward.clause(W1, ward.now + 1000, 25), W1, 3),
+            AckResult::Applied
+        );
+        assert_eq!(ward.held_minutes(), Some(25));
+
+        let after = g(&ward);
+        assert!(after.pin_set);
+        assert_eq!(after.clamped, 1);
+        assert_eq!(after.pending.len(), 1);
+        assert_eq!(after.pending[0].id, cg.id);
+        assert_eq!(after.pending[0].signer, pk(ROOT));
+        let wire = serde_json::to_value(&after).unwrap();
+        assert_eq!(wire["pinSet"], true);
+        assert_eq!(wire["clamped"], 1);
+        assert_eq!(wire["pending"][0]["id"], cg.id.to_hex());
+        assert_eq!(wire["pending"][0]["signer"], pk(ROOT).to_hex());
+    }
+
     #[test]
     fn a_ward_paired_before_the_section_keeps_its_clauses_enforced() {
         let base = temp_base("migrate");
