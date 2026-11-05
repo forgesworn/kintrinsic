@@ -1501,6 +1501,26 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(fitted.child.rules!.length).toBeGreaterThan(0);
   });
 
+  it("settles a family-wide and a device rule of the same second by the lower event id, in either order", async () => {
+    const subject = "aa".repeat(32);
+    const sk = generateSecretKey();
+    // Two clauses of the same second, one family-wide, one for the phone.
+    let fam = clause(sk, "budget", T, { a: 1 });
+    let dev = clause(sk, "budget", T, { b: 1 });
+    if (fam.id > dev.id) [fam, dev] = [dev, fam];
+    // Now `fam` has the lower id: it wins both ways round.
+    const kept = (entries: { event: SignedEvent; machine?: string }[]) => {
+      const h = harness([]);
+      for (const e of entries) h.gk.recordRules(subject, [e]);
+      return h.gk.rulesFor(subject).map((r) => [r.event.id, r.machine]);
+    };
+    expect(kept([{ event: fam }, { event: dev, machine: PHONE }])).toEqual([[fam.id, undefined]]);
+    expect(kept([{ event: dev, machine: PHONE }, { event: fam }])).toEqual([[fam.id, undefined]]);
+    // And with the lower id on the device rule, the device rule stays both ways round.
+    expect(kept([{ event: dev }, { event: fam, machine: PHONE }]).sort()).toEqual([[dev.id, undefined], [fam.id, PHONE]].sort());
+    expect(kept([{ event: fam, machine: PHONE }, { event: dev }]).sort()).toEqual([[dev.id, undefined], [fam.id, PHONE]].sort());
+  });
+
   it("seeds each received rule once: a tie keeps this install's own, a later local edit wins", async () => {
     const subject = "aa".repeat(32);
     const h = harness([]);

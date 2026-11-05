@@ -1453,9 +1453,10 @@ export class GuardianKeys {
    * (no `machine`) went the same to every device, a device rule to that
    * device only. Per key the newest `issuedAt` wins. On a tie this install's
    * own rule stays (decision 3); between two received ones the lower event
-   * id wins, as on the wards. A ward holds one rule per kind, so a newer
-   * family-wide rule replaces that kind's older device rules, and a device
-   * rule no newer than the family-wide one is already replaced. `local`
+   * id wins, as on the wards. A ward holds one rule per kind, so a family-wide
+   * rule replaces that kind's device rules it beats, and a device rule the
+   * family-wide one beats is already replaced: newer `issuedAt` wins, a tie
+   * goes to the lower event id, whichever arrives first. `local`
    * marks rules this install signed itself. A malformed event is ignored.
    * Returns the keys that changed (`ruleKey`).
    */
@@ -1480,14 +1481,15 @@ export class GuardianKeys {
           if (mine === !!opts.local && held[key].id <= e.id) continue;
         }
       }
-      if (machine !== undefined && issuedAtOf(c.kind) >= c.issuedAt) continue;
+      // Family-wide against device rules: newer issuedAt wins, a tie goes to the lower event id.
+      if (machine !== undefined && held[c.kind] && !beats(c.issuedAt, e.id, issuedAtOf(c.kind), held[c.kind].id)) continue;
       held[key] = plain(e);
       if (opts.local) local[key] = e.id;
       else delete local[key];
       changed.add(key);
       if (machine === undefined) {
         for (const k of Object.keys(held)) {
-          if (k.startsWith(`${c.kind}@`) && issuedAtOf(k) < c.issuedAt) {
+          if (k.startsWith(`${c.kind}@`) && beats(c.issuedAt, e.id, issuedAtOf(k), held[k].id)) {
             delete held[k];
             delete local[k];
             changed.add(k);
@@ -1880,6 +1882,11 @@ export interface RuleEntry {
   event: SignedEvent;
   /** The ward machine (64 hex) of a device rule; absent for a family-wide one. */
   machine?: string;
+}
+
+/** Does a rule (`issuedAt`, event id) beat another: newer wins, a tie goes to the lower id. */
+function beats(at: number, id: string, otherAt: number, otherId: string): boolean {
+  return at > otherAt || (at === otherAt && id < otherId);
 }
 
 /** Roster rules per child per list (family-wide, device): more are ignored. */
