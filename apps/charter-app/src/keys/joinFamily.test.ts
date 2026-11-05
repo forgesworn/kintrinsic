@@ -325,6 +325,9 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     expect(invite.event.tags.find((t) => t[0] === "p")?.[1]).toBe(R2);
     expect(A.gk.trustedRoots()).toEqual([R_A, R2].sort());
 
+    // Its own code, pasted where the other parent's goes: a hint true for a phone-held identity.
+    expect(() => B.gk.anchorRoot(code)).toThrow("That's this phone's own code. Ask the other parent for theirs.");
+    expect(() => B.gk.anchorRoot(code)).not.toThrow(/second phone/);
     // B scans A's code, then confirms in person: W signs and seals, with R2's approval of W inline (rule 6).
     expect(B.gk.anchorRoot(`nostr:${nip19.npubEncode(R_A)}`)).toBe(R_A);
     const confirm = await B.gk.confirmPresence(presenceCode(PHONE, inviteD, invite.event.id));
@@ -384,6 +387,8 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     const signet = install(wBSk, rBSk, []);
     await signet.gk.approveThisInstall({ via: "signet", label: "B's phone" });
     await expect(signet.gk.joinWithThisPhone()).rejects.toThrow(/already uses My Signet/);
+    // A My Signet identity keeps the second-phone hint.
+    expect(() => signet.gk.anchorRoot(nip19.npubEncode(R_B))).toThrow(/For a second phone of your own, skip this step/);
   });
 
   it("a roster child that shares a device with one this install added keeps one child, under the smaller id", () => {

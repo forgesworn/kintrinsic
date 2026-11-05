@@ -743,6 +743,9 @@ export class GuardianKeys {
     if (!key) throw new Error("That isn't a guardian code. It starts with npub1.");
     if (key === this.workingPubkey()) throw new Error("That's this phone's own key, not the other parent's guardian code.");
     if (key === this.signetRoot()?.pubkey) {
+      // A phone-held identity has no second phone to approve (that is a
+      // restore from its backup), so the second-phone hint is My Signet's alone.
+      if (this.signetRoot()?.via === "phone") throw new Error("That's this phone's own code. Ask the other parent for theirs.");
       throw new Error(
         "That's your own guardian code. Scan the code on the phone of the parent who invited you. (For a second phone of your own, skip this step.)",
       );
