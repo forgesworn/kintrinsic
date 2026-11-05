@@ -478,9 +478,43 @@ async fn a_helper_reads_the_state_without_writing_it() {
     let peeked = guardians::peek_keys(&w.dir, &pairing(), NOW + 50);
     assert!(peeked.signers().is_signer(&pk(W)));
     assert_eq!(std::fs::read(&state).unwrap(), before);
-    // charter-pair re-pairing clears it all.
+    // charter-pair re-pairing clears it all, both copies (rule 10).
+    let second = w
+        .dir
+        .join(charter_sys::guardian_store::GUARDIAN_STATE_SECONDARY_FILE);
+    assert!(second.exists(), "the state is kept in two copies");
     guardians::clear_state(&w.dir).unwrap();
     assert!(!state.exists());
+    assert!(!second.exists());
+}
+
+/// Rule 10: the daemon's load reads the second copy when the first is gone
+/// or corrupt, and puts the first back from it; neither readable fails
+/// closed rather than starting afresh from the pairing record.
+#[tokio::test]
+async fn the_daemon_reads_the_second_copy_and_fails_closed_without_either() {
+    let w = Ward::new("twocopies");
+    let keys = w.keys();
+    let b = w.broker(&keys);
+    approve(&w, &b, ROOT, W, 1).await;
+    drop(b);
+    drop(keys);
+    let state = w.dir.join(charter_sys::guardian_store::GUARDIAN_STATE_FILE);
+    let second = w
+        .dir
+        .join(charter_sys::guardian_store::GUARDIAN_STATE_SECONDARY_FILE);
+    std::fs::write(&state, b"{ not json").unwrap();
+    let again = w.keys();
+    assert!(again.is_available());
+    assert!(again.signers().is_signer(&pk(W)), "restored, not migrated");
+    drop(again);
+    assert_eq!(
+        std::fs::read(&state).unwrap(),
+        std::fs::read(&second).unwrap()
+    );
+    std::fs::write(&state, b"{ not json").unwrap();
+    std::fs::write(&second, b"{ nor this").unwrap();
+    assert!(!w.keys().is_available());
 }
 
 // ---------------------------------------------------------------------------

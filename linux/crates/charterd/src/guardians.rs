@@ -20,7 +20,9 @@ use std::sync::Arc;
 use charter_ipc::dto::{GuardiansView, PendingStatementView, RuleSetterView};
 use charter_primitives::PubKey;
 use charter_spine::{GuardianKeys, GuardianStatements, MintedToken, PresenceError};
-use charter_sys::guardian_store::{FileGuardianStateStore, GUARDIAN_STATE_FILE};
+use charter_sys::guardian_store::{
+    FileGuardianStateStore, GUARDIAN_STATE_FILE, GUARDIAN_STATE_SECONDARY_FILE,
+};
 use charter_sys::presence_token::PresenceTokenStore;
 use charter_sys::secret_file::{read_secret, remove_secret, write_secret};
 use charter_transport::Pairing;
@@ -66,13 +68,14 @@ pub fn peek_keys(dir: &Path, pairing: &Pairing, now: u64) -> GuardianKeys {
     GuardianKeys::peek(Arc::new(FileGuardianStateStore::in_dir(dir)), pairing, now)
 }
 
-/// Forget the guardian-keys state, the presence token and any presence
-/// request: what a local unpair or a fresh pin by an administrator does (rule
-/// 11), so the new pairing never inherits a root, working key or token from
-/// the old one. Absent files are fine.
+/// Forget the guardian-keys state (both copies, rule 10), the presence token
+/// and any presence request: what a local unpair or a fresh pin by an
+/// administrator does (rule 11), so the new pairing never inherits a root,
+/// working key or token from the old one. Absent files are fine.
 pub fn clear_state(dir: &Path) -> std::io::Result<()> {
     for f in [
         GUARDIAN_STATE_FILE,
+        GUARDIAN_STATE_SECONDARY_FILE,
         PRESENCE_TOKEN_FILE,
         PRESENCE_REQUEST_FILE,
     ] {
@@ -468,6 +471,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for f in [
             GUARDIAN_STATE_FILE,
+            GUARDIAN_STATE_SECONDARY_FILE,
             PRESENCE_TOKEN_FILE,
             PRESENCE_REQUEST_FILE,
         ] {
@@ -476,6 +480,7 @@ mod tests {
         clear_state(&dir).unwrap();
         for f in [
             GUARDIAN_STATE_FILE,
+            GUARDIAN_STATE_SECONDARY_FILE,
             PRESENCE_TOKEN_FILE,
             PRESENCE_REQUEST_FILE,
         ] {
