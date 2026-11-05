@@ -1439,39 +1439,59 @@ export class GuardianKeys {
 
   /**
    * Keep signed inner CLAUSE events as the rules in force for the child with
-   * roster subject `subject`: per clause kind, the newest `issuedAt` wins. A
-   * malformed event is ignored. Returns the kinds that changed.
+   * roster subject `subject`, keyed by `(kind, device)`: a family-wide rule
+   * (no `machine`) went the same to every device, a device rule to that
+   * device only. Per key the newest `issuedAt` wins (a tie keeps the lower
+   * event id, as wards do). A ward holds one rule per kind, so a newer
+   * family-wide rule replaces that kind's older device rules, and a device
+   * rule no newer than the family-wide one is already replaced. A malformed
+   * event is ignored. Returns the keys that changed (`ruleKey`).
    */
-  recordRules(subject: string, events: readonly SignedEvent[]): string[] {
+  recordRules(subject: string, entries: readonly RuleEntry[]): string[] {
     if (!HEX64.test(subject)) return [];
     const held = { ...(this.deps.read().keys.rules?.[subject] ?? {}) };
-    const changed: string[] = [];
-    for (const e of events) {
+    const changed = new Set<string>();
+    const issuedAtOf = (key: string) => (held[key] ? (clauseOf(held[key])?.issuedAt ?? -1) : -1);
+    for (const { event: e, machine } of entries) {
       const c = clauseOf(e);
-      if (!c) continue;
-      const cur = held[c.kind] ? clauseOf(held[c.kind]) : null;
-      // Newest issuedAt wins; a tie keeps the lower event id, as wards do.
-      if (cur && (cur.issuedAt > c.issuedAt || (cur.issuedAt === c.issuedAt && held[c.kind].id <= e.id))) continue;
-      held[c.kind] = plain(e);
-      changed.push(c.kind);
+      if (!c || (machine !== undefined && !HEX64.test(machine))) continue;
+      const key = ruleKey(c.kind, machine);
+      const cur = held[key] ? clauseOf(held[key]) : null;
+      if (cur && (cur.issuedAt > c.issuedAt || (cur.issuedAt === c.issuedAt && held[key].id <= e.id))) continue;
+      if (machine !== undefined && issuedAtOf(c.kind) >= c.issuedAt) continue;
+      held[key] = plain(e);
+      changed.add(key);
+      if (machine === undefined) {
+        for (const k of Object.keys(held)) {
+          if (k.startsWith(`${c.kind}@`) && issuedAtOf(k) < c.issuedAt) {
+            delete held[k];
+            changed.add(k);
+          }
+        }
+      }
     }
-    if (changed.length > 0) this.deps.write((k) => ({ ...k, rules: { ...(k.rules ?? {}), [subject]: held } }));
-    return changed.sort();
+    if (changed.size > 0) this.deps.write((k) => ({ ...k, rules: { ...(k.rules ?? {}), [subject]: held } }));
+    return [...changed].sort();
   }
 
-  /** The rules in force this install holds for one child, oldest kind name first. */
-  rulesFor(subject: string): SignedEvent[] {
+  /** The rules in force this install holds for one child, by key (`ruleKey` order). */
+  rulesFor(subject: string): RuleEntry[] {
     const held = this.deps.read().keys.rules?.[subject] ?? {};
     return Object.keys(held)
       .sort()
-      .map((k) => held[k]);
+      .map((k) => {
+        const machine = machineOfRuleKey(k);
+        return machine ? { event: held[k], machine } : { event: held[k] };
+      });
   }
 
   /**
-   * The rules a verified roster carried (content `children[].rules`), each
-   * kept only if it verifies as a CLAUSE and its author is a current signer
-   * of the family: a root or working key that a ward this install vouches
-   * for reports. Older rosters carry none. Returns the subjects that changed.
+   * The rules a verified roster carried (content `children[].rules` for the
+   * family-wide ones, `children[].deviceRules` as `{ machine, rule }` for the
+   * device ones), each kept only if it verifies as a CLAUSE and its author is
+   * a current signer of the family: a root or working key that a ward this
+   * install vouches for reports. Older rosters carry none, or no device
+   * rules. Returns the subjects that changed.
    */
   private takeRosterRules(inner: SignedEvent): string[] {
     let children: unknown;
@@ -1482,14 +1502,22 @@ export class GuardianKeys {
     }
     if (!Array.isArray(children)) return [];
     const signers = new Set(this.vouchedRoots({ presenceWards: false }).flatMap((r) => [r.root, ...r.keys]));
+    const fromSigner = (e: unknown): e is SignedEvent => isSignedClause(e) && signers.has((e as SignedEvent).pubkey);
     const changed: string[] = [];
     for (const ch of children) {
-      const c = ch as { subject?: unknown; rules?: unknown };
-      if (typeof c.subject !== "string" || !HEX64.test(c.subject) || !Array.isArray(c.rules)) continue;
-      const ok = c.rules.slice(0, 64).filter(
-        (e): e is SignedEvent => isSignedClause(e) && signers.has((e as SignedEvent).pubkey),
-      );
-      if (this.recordRules(c.subject, ok).length > 0) changed.push(c.subject);
+      const c = ch as { subject?: unknown; rules?: unknown; deviceRules?: unknown };
+      if (typeof c.subject !== "string" || !HEX64.test(c.subject)) continue;
+      const entries: RuleEntry[] = [];
+      if (Array.isArray(c.rules)) for (const e of c.rules.slice(0, MAX_ROSTER_RULES)) if (fromSigner(e)) entries.push({ event: e });
+      if (Array.isArray(c.deviceRules)) {
+        for (const d of c.deviceRules.slice(0, MAX_ROSTER_RULES)) {
+          const o = d as { machine?: unknown; rule?: unknown } | null;
+          if (o && typeof o.machine === "string" && HEX64.test(o.machine) && fromSigner(o.rule)) {
+            entries.push({ event: o.rule, machine: o.machine });
+          }
+        }
+      }
+      if (this.recordRules(c.subject, entries).length > 0) changed.push(c.subject);
     }
     return changed.sort();
   }
@@ -1562,9 +1590,11 @@ export class GuardianKeys {
     const w = this.workingOps();
     const event = await buildFamilyRoster(signerOf(w), {
       // Each child also carries the rules in force (Q3), outside the record's
-      // own `issuedAt`: rules merge per kind, records per child.
+      // own `issuedAt`: rules merge per (kind, device), records per child.
       children: children.map(({ subject, issuedAt, name, colour, devices }) => {
-        const rules = this.rulesFor(subject);
+        const held = this.rulesFor(subject);
+        const rules = held.filter((r) => !r.machine).map((r) => r.event);
+        const deviceRules = held.flatMap((r) => (r.machine ? [{ machine: r.machine, rule: r.event }] : []));
         return {
           subject,
           issuedAt,
@@ -1572,6 +1602,7 @@ export class GuardianKeys {
           colour,
           devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })),
           ...(rules.length > 0 ? { rules } : {}),
+          ...(deviceRules.length > 0 ? { deviceRules } : {}),
         } as Parameters<typeof buildFamilyRoster>[1]["children"][number];
       }),
       approval: root.approval,
@@ -1765,6 +1796,33 @@ export class GuardianKeys {
     }
     return [...out.values()];
   }
+}
+
+/** A rule in force: a signed inner CLAUSE event, and the device it went to when it went to one only. */
+export interface RuleEntry {
+  event: SignedEvent;
+  /** The ward machine (64 hex) of a device rule; absent for a family-wide one. */
+  machine?: string;
+}
+
+/** Roster rules per child per list (family-wide, device): more are ignored. */
+const MAX_ROSTER_RULES = 64;
+
+/** A held rule's key: the clause kind, and `@machine` for a device rule. */
+export function ruleKey(kind: string, machine?: string): string {
+  return machine ? `${kind}@${machine}` : kind;
+}
+
+/** The machine of a device rule's key; undefined for a family-wide one. */
+export function machineOfRuleKey(key: string): string | undefined {
+  const at = key.indexOf("@");
+  return at < 0 ? undefined : key.slice(at + 1);
+}
+
+/** The clause kind of a held rule's key. */
+export function kindOfRuleKey(key: string): string {
+  const at = key.indexOf("@");
+  return at < 0 ? key : key.slice(0, at);
 }
 
 /** A CLAUSE payload's kind and `issuedAt`, from a signed inner event; null when it isn't one. */

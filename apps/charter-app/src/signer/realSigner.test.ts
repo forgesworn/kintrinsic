@@ -12,7 +12,7 @@ import { appRulesToGrant } from "../wire/clause";
 import type { GrantAppRules } from "../wire/types";
 import { unwrapClause, unwrapGrant, type GuardianOps } from "../wire/giftwrap";
 import type { DecisionContext } from "./Signer";
-import { RealSigner, type ChildTarget } from "./realSigner";
+import { RealSigner, type ChildTarget, type SignedRule } from "./realSigner";
 
 // The signer persists its clause clock (`nextIssuedAt`) so a reload can't step
 // back under it; with a frozen `now` that floor would leak between tests.
@@ -1041,24 +1041,25 @@ describe("RealSigner.signMaintenanceClause", () => {
 });
 
 describe("RealSigner keeps a rule change's signed clauses for the family roster (Q3)", () => {
-  it("hands on one signed inner clause per kind once sent, and nothing when every send failed", async () => {
-    const kept: { childId: string; inner: NostrEvent[] }[] = [];
+  it("hands on one family-wide signed inner per kind once sent, and nothing when every send failed", async () => {
+    const kept: { childId: string; signed: SignedRule[] }[] = [];
     const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }, { id: "dev2", pubkey: DPK2 }], relays: RELAYS };
     const signer = new RealSigner({
       connectGuardian: async () => localGuardian(),
       publish: async () => {},
       resolveChild: () => target,
       now: () => 1_700_000_000,
-      onRulesSigned: (childId, inner) => kept.push({ childId, inner }),
+      onRulesSigned: (childId, signed) => kept.push({ childId, signed }),
     });
     await signer.connect("local");
     await signer.signClause("child_sam", devicePolicy);
     expect(kept).toHaveLength(1);
     expect(kept[0].childId).toBe("child_sam");
-    expect(kept[0].inner.map((e) => JSON.parse(e.content).kind).sort()).toEqual(["budget", "schedule"]);
-    for (const e of kept[0].inner) {
-      expect(e.kind).toBe(31113);
-      expect(e.pubkey).toBe(GUARDIAN);
+    expect(kept[0].signed.map((r) => JSON.parse(r.inner.content).kind).sort()).toEqual(["budget", "schedule"]);
+    for (const r of kept[0].signed) {
+      expect(r.machine).toBeUndefined();
+      expect(r.inner.kind).toBe(31113);
+      expect(r.inner.pubkey).toBe(GUARDIAN);
     }
 
     const failing = new RealSigner({
@@ -1068,10 +1069,41 @@ describe("RealSigner keeps a rule change's signed clauses for the family roster 
       },
       resolveChild: () => target,
       now: () => 1_700_000_000,
-      onRulesSigned: (childId, inner) => kept.push({ childId, inner }),
+      onRulesSigned: (childId, signed) => kept.push({ childId, signed }),
     });
     await failing.connect("local");
     await expect(failing.signClause("child_sam", devicePolicy)).rejects.toThrow();
     expect(kept).toHaveLength(1);
+  });
+
+  it("keeps a rule per device when the devices' clauses differ, and the device kinds always per device", async () => {
+    const kept: SignedRule[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }, { id: "dev2", pubkey: DPK2 }], relays: RELAYS };
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async () => {},
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (_c, signed) => kept.push(...signed),
+    });
+    await signer.connect("local");
+    const split: Policy = {
+      ...devicePolicy,
+      deviceOverrides: { dev2: { budget: { ...devicePolicy.budget!, dailyMinutes: 30 } } },
+    };
+    await signer.signClause("child_sam", split);
+    const view = kept.map((r) => [JSON.parse(r.inner.content).kind, r.machine ?? null]).sort();
+    expect(view).toEqual([
+      ["budget", DPK1],
+      ["budget", DPK2],
+      ["schedule", null],
+    ]);
+
+    kept.length = 0;
+    await signer.signDebuggingClause("child_sam", DPK2, { allow: true });
+    expect(kept.map((r) => [JSON.parse(r.inner.content).kind, r.machine])).toEqual([["debugging", DPK2]]);
+    kept.length = 0;
+    await signer.signMaintenanceClause("child_sam", 10);
+    expect(kept.map((r) => r.machine).sort()).toEqual([DPK1, DPK2].sort());
   });
 });

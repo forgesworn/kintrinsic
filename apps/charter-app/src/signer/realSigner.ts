@@ -123,11 +123,14 @@ export interface RealSignerDeps {
    */
   pickOps?: (machine: string) => GuardianOps | undefined;
   /**
-   * The signed inner CLAUSE events of a rule change, one per kind, once it
-   * was sent or held for the home network: the family roster carries them to
-   * the other guardians' phones as the rules in force (Q3). Absent = not kept.
+   * The signed inner CLAUSE events of a rule change, once it was sent or held
+   * for the home network: the family roster carries them to the other
+   * guardians' phones as the rules in force (Q3). One per kind when every
+   * device got the same clause (no `machine`), else one per device with its
+   * machine; `update`, `maintenance` and `debugging` always name the device.
+   * Absent = not kept.
    */
-  onRulesSigned?: (childId: string, inner: NostrEvent[]) => void;
+  onRulesSigned?: (childId: string, signed: SignedRule[]) => void;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -139,6 +142,43 @@ const CLAUSE_META: PublishMeta = { kind: "clause" };
  * all-or-nothing sentence (docs/local-network-design.md, "Routing and
  * fallback" step 5).
  */
+/** One signed rule for the family roster: the inner CLAUSE, and its device when it went to that device only. */
+export interface SignedRule {
+  inner: NostrEvent;
+  machine?: string;
+}
+
+/** Kinds that always concern one device, whatever the others were sent. */
+const DEVICE_RULE_KINDS = new Set(["update", "maintenance", "debugging"]);
+
+/**
+ * The signed inners of one rule change, per kind and device. A kind every
+ * device got the same clause for is one family-wide rule; a kind whose
+ * clauses differ between devices (per-device rules), and the device kinds,
+ * are one rule per device (decision 1, keyed by `(subject, kind, device)`).
+ */
+class RulesSigned {
+  private byKind = new Map<string, Map<string, NostrEvent>>();
+
+  add(kind: string, device: string, inner: NostrEvent): void {
+    const m = this.byKind.get(kind) ?? new Map<string, NostrEvent>();
+    m.set(device, inner);
+    this.byKind.set(kind, m);
+  }
+
+  rules(): SignedRule[] {
+    const out: SignedRule[] = [];
+    for (const [kind, byDevice] of this.byKind) {
+      const all = [...byDevice];
+      // Compare the clause itself, not who signed it: one device may take W, another R.
+      const same = all.every(([, e]) => e.content === all[0][1].content);
+      if (same && !DEVICE_RULE_KINDS.has(kind)) out.push({ inner: all[0][1] });
+      else for (const [machine, inner] of all) out.push({ inner, machine });
+    }
+    return out;
+  }
+}
+
 class SendBatch {
   readonly held: QueuedForHomeNetworkError[] = [];
   readonly reached = new Set<string>();
@@ -415,6 +455,20 @@ export class RealSigner implements Signer {
     return `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`;
   }
 
+  /** Sign one clause for one device, keep its signed inner for the roster, and wrap it. */
+  private async wrapRule(
+    clause: ClausePayload,
+    device: string,
+    guardian: GuardianOps,
+    issuedAt: number,
+    signed: RulesSigned,
+  ): Promise<NostrEvent> {
+    const ops = this.sealerFor(device, guardian);
+    const inner = await signClauseInner(clause, ops, issuedAt);
+    signed.add(clause.kind, device, inner);
+    return giftWrapSigned(inner, device, ops, issuedAt);
+  }
+
   async signClause(childId: string, policy: Policy): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
@@ -425,15 +479,9 @@ export class RealSigner implements Signer {
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
     const issuedAt = this.nextIssuedAt();
-    // One signed inner per kind for the family roster: the first device's.
-    // With per-device rules the devices' bodies differ; the roster carries one.
-    const signed = new Map<string, NostrEvent>();
-    const wrapOne = async (clause: ClausePayload, device: string) => {
-      const ops = this.sealerFor(device, guardian);
-      const inner = await signClauseInner(clause, ops, issuedAt);
-      if (!signed.has(clause.kind)) signed.set(clause.kind, inner);
-      return giftWrapSigned(inner, device, ops, issuedAt);
-    };
+    // Every device's signed inner, per kind, for the family roster.
+    const signed = new RulesSigned();
+    const wrapOne = (clause: ClausePayload, device: string) => this.wrapRule(clause, device, guardian, issuedAt, signed);
     if (policy.scope.kind === "app") {
       // App-scope rebuilds the child's ONE aggregate `appRules` clause, which
       // is the same set for every device — per-app rules are not splittable.
@@ -464,9 +512,10 @@ export class RealSigner implements Signer {
   }
 
   /** `settle`, handing the signed rules on once they were sent or held (a send that failed outright set nothing). */
-  private settleRules(batch: SendBatch, childId: string, signed: Map<string, NostrEvent>): SignOutcome {
+  private settleRules(batch: SendBatch, childId: string, signed: RulesSigned): SignOutcome {
     const note = () => {
-      if (signed.size > 0) this.deps.onRulesSigned?.(childId, [...signed.values()]);
+      const rules = signed.rules();
+      if (rules.length > 0) this.deps.onRulesSigned?.(childId, rules);
     };
     try {
       const out = this.settle(batch);
@@ -536,11 +585,12 @@ export class RealSigner implements Signer {
     const body = { v: 1 as const, untilUnix: issuedAt + minutes * 60, issuedAt };
     const clause: ClausePayload = { v: 1, kind: "maintenance", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
+    const signed = new RulesSigned();
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+      const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
   }
 
   /**
@@ -803,11 +853,12 @@ export class RealSigner implements Signer {
     const body = updateToGrant(manifest, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
+    const signed = new RulesSigned();
     for (const device of phones) {
-      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+      const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
   }
 
   async signDebUpdateClause(
@@ -841,9 +892,10 @@ export class RealSigner implements Signer {
     const body = debUpdateToGrant(deb, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+    const signed = new RulesSigned();
+    const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
     await this.send(target.relays, wrap, CLAUSE_META, held);
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
   }
 
   /**
@@ -883,10 +935,11 @@ export class RealSigner implements Signer {
     const body = debuggingToGrant(grant, issuedAt);
     const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+    const signed = new RulesSigned();
+    const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     try {
-      return { ...this.settle(held), issuedAt };
+      return { ...this.settleRules(held, childId, signed), issuedAt };
     } catch (err) {
       // A held send throws; hand the caller the value that was really signed.
       if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;

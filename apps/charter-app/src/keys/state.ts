@@ -142,9 +142,11 @@ export interface GuardianKeysState {
   roster: LocalRoster;
   /**
    * The rules in force per child (roster subject), as signed inner CLAUSE
-   * events, one per clause kind, newest `issuedAt` wins (decision Q3): what
-   * this install signed itself, and what another guardian's roster carried
-   * from a current signer. Shared in the roster so both phones hold the same.
+   * events keyed by `(kind, device)`: the kind alone for a family-wide rule,
+   * `kind@machine` for a rule that went to one device (decision Q3). Newest
+   * `issuedAt` per key wins. What this install signed itself, and what
+   * another guardian's roster carried from a current signer. Shared in the
+   * roster so both phones hold the same.
    */
   rules: Record<string, Record<string, SignedEvent>>;
   /** Statements this install sent, by `d`. */
@@ -244,7 +246,13 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     rules: Object.fromEntries(
       Object.entries(rec(o.rules) as Record<string, unknown>)
         .filter(([k]) => /^[0-9a-f]{64}$/.test(k))
-        .map(([k, v]) => [k, rec(v) as Record<string, SignedEvent>]),
+        .map(([k, v]) => [
+          k,
+          // Kind keys from before device rules existed are family-wide rules.
+          Object.fromEntries(
+            Object.entries(rec(v) as Record<string, SignedEvent>).filter(([key]) => /^[a-z]{1,32}(@[0-9a-f]{64})?$/.test(key)),
+          ),
+        ]),
     ),
     roster:
       typeof o.roster === "object" && o.roster !== null && Array.isArray(o.roster.children)

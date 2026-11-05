@@ -196,9 +196,14 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       knownRoot: () => keysRef.current.root?.pubkey,
       workingKey: installWorkingKey,
       pickOps: (machine) => (keys.keyFor(machine) === "working" ? keys.workingOps() : undefined),
-      onRulesSigned: (childId, inner) => {
+      onRulesSigned: (childId, signed) => {
         const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
-        if (child?.rosterId) keys.recordRules(child.rosterId, inner as SignedEvent[]);
+        if (child?.rosterId) {
+          keys.recordRules(
+            child.rosterId,
+            signed.map(({ inner, machine }) => (machine ? { event: inner as SignedEvent, machine } : { event: inner as SignedEvent })),
+          );
+        }
       },
     }),
     [keys],
@@ -246,7 +251,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       keys.reportedRoots(),
       keys.trustedRoots(),
       // The rules in force travel with it (Q3): a new rule shares it again.
-      Object.entries(rules ?? {}).map(([subject, byKind]) => [subject, Object.values(byKind).map((e) => e.id).sort()]),
+      Object.entries(rules ?? {}).map(([subject, byKey]) => [subject, Object.entries(byKey).map(([k, e]) => `${k}:${e.id}`).sort()]),
     ]);
     if (sig === lastRoster.current) return;
     lastRoster.current = sig;

@@ -1353,9 +1353,9 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     await connectSignetRoot(h);
     h.gk.anchorRoot(R2);
     // Newest per kind: the older schedule is replaced, an older one after it is ignored.
-    expect(h.gk.recordRules(subject, [clause(wSk, "schedule", T - 10), clause(wSk, "budget", T - 5)])).toEqual(["budget", "schedule"]);
-    expect(h.gk.recordRules(subject, [clause(wSk, "schedule", T)])).toEqual(["schedule"]);
-    expect(h.gk.recordRules(subject, [clause(wSk, "schedule", T - 1)])).toEqual([]);
+    expect(h.gk.recordRules(subject, [{ event: clause(wSk, "schedule", T - 10) }, { event: clause(wSk, "budget", T - 5) }])).toEqual(["budget", "schedule"]);
+    expect(h.gk.recordRules(subject, [{ event: clause(wSk, "schedule", T) }])).toEqual(["schedule"]);
+    expect(h.gk.recordRules(subject, [{ event: clause(wSk, "schedule", T - 1) }])).toEqual([]);
     h.published.length = 0;
     await h.gk.sendRoster();
     const opened = unwrapToWorkingKey(h.published[0].wrap, W2sk)!;
@@ -1384,14 +1384,63 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     });
     other.anchorRoot(R);
     // The other parent already holds a newer budget of their own.
-    other.recordRules(subject, [clause(W2sk, "budget", T + 5)]);
+    other.recordRules(subject, [{ event: clause(W2sk, "budget", T + 5) }]);
     expect(other.receiveRoster({ sealAuthor: W, inner })).toMatchObject({ ok: true });
     const held = keys2.rules[subject];
     expect(Object.keys(held).sort()).toEqual(["budget", "schedule"]);
     expect(held.schedule.id).toBe(sent[1].id);
     expect(held.budget.pubkey).toBe(W2);
     // And it shares them on in its own roster.
-    expect(other.rulesFor(subject).map((e) => e.id)).toEqual([held.budget.id, held.schedule.id]);
+    expect(other.rulesFor(subject).map((r) => r.event.id)).toEqual([held.budget.id, held.schedule.id]);
+  });
+
+  it("keys rules by device: device rules travel apart, and a newer family-wide rule replaces older ones", async () => {
+    const W2sk = generateSecretKey();
+    const W2 = getPublicKey(W2sk);
+    const guardians = { roots: [{ root: R, keys: [W] }, { root: R2, keys: [W2] }], pending: [], tombstones: 0, relays: [] };
+    const subject = "aa".repeat(32);
+    const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", rosterId: subject, devices: [{ ...readyWard(PHONE, "android"), guardians }] };
+    const h = harness([child]);
+    await connectSignetRoot(h);
+    h.gk.anchorRoot(R2);
+    const old = clause(wSk, "schedule", T - 20);
+    const onPhone = clause(wSk, "schedule", T - 10, { phone: 1 });
+    const onLaptop = clause(wSk, "schedule", T - 10, { laptop: 1 });
+    expect(h.gk.recordRules(subject, [{ event: old }, { event: onPhone, machine: PHONE }, { event: onLaptop, machine: LAPTOP }])).toEqual(
+      ["schedule", `schedule@${LAPTOP}`, `schedule@${PHONE}`].sort(),
+    );
+    // A device rule no newer than the family-wide one is already replaced.
+    expect(h.gk.recordRules(subject, [{ event: clause(wSk, "schedule", T - 20, { stale: 1 }), machine: PHONE }])).toEqual([]);
+    h.published.length = 0;
+    await h.gk.sendRoster();
+    const opened = unwrapToWorkingKey(h.published[0].wrap, W2sk)!;
+    const sent = JSON.parse(opened.inner.content).children[0];
+    expect(sent.rules.map((e: SignedEvent) => e.id)).toEqual([old.id]);
+    expect(sent.deviceRules.map((d: { machine: string; rule: SignedEvent }) => [d.machine, d.rule.id]).sort()).toEqual(
+      [[LAPTOP, onLaptop.id], [PHONE, onPhone.id]].sort(),
+    );
+
+    // The other install takes them by device too.
+    let keys2 = emptyGuardianKeys();
+    const other = new GuardianKeys({
+      read: () => ({ keys: keys2, children: [{ id: "x", name: "?", colour: "#000", devices: [{ ...readyWard(LAPTOP, "linux"), guardians }] }] }),
+      write: (f) => {
+        keys2 = f(keys2);
+      },
+      workingKey: () => W2sk,
+      root: () => opsOf(r2Sk),
+      publish: async () => {},
+      now: () => T,
+      defaultRelays: [],
+    });
+    other.anchorRoot(R);
+    expect(other.receiveRoster({ sealAuthor: W, inner: opened.inner })).toMatchObject({ ok: true });
+    expect(Object.keys(keys2.rules[subject]).sort()).toEqual(["schedule", `schedule@${LAPTOP}`, `schedule@${PHONE}`].sort());
+
+    // A newer family-wide schedule went to every device: the device rules go.
+    const shared = clause(wSk, "schedule", T);
+    expect(h.gk.recordRules(subject, [{ event: shared }])).toEqual(["schedule", `schedule@${LAPTOP}`, `schedule@${PHONE}`].sort());
+    expect(h.gk.rulesFor(subject).map((r) => [r.event.id, r.machine])).toEqual([[shared.id, undefined]]);
   });
 
   it("holds no rules for a child it was never told about", async () => {
