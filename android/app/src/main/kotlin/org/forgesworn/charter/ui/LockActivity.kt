@@ -7,10 +7,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
 import android.os.Bundle
+import android.text.InputType
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.forgesworn.charter.native.CharterCore
@@ -49,6 +51,8 @@ class LockActivity : Activity() {
     private var askReqId: String? = null
     /** The type the ward picked for the ask (§Times); null = the default. */
     private var askTimeId: String? = null
+    /** How many minutes the ward last asked for on this shade; null = not yet. */
+    private var askMinutes: Int? = null
 
     /**
      * The ask's outcome AS THE CORE KNOWS IT, re-read on every render.
@@ -763,10 +767,12 @@ class LockActivity : Activity() {
             root.addView(text(info!!.usedLine, CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 20))
         }
 
-        // "Ask for more time" — the sanctioned exit. One-shot per lock, fixed
-        // 30-minute opening ask, limitHit routed from the CURRENT lock reason
-        // (level state, M7: schedule reason → schedule pool, else budget — a
-        // bedtime ask charged to the budget pool would never unlock).
+        // "Ask for more time" — the sanctioned exit. One-shot per lock; the
+        // ward picks how much (10 min, 20 min, 1 hour, or a typed amount —
+        // the fixed 30 it used to send also fixed what the guardian could
+        // answer with); limitHit routed from the CURRENT lock reason (level
+        // state, M7: schedule reason → schedule pool, else budget — a bedtime
+        // ask charged to the budget pool would never unlock).
         root.addView(
             spring,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
@@ -791,38 +797,81 @@ class LockActivity : Activity() {
         // (no named time) is the untyped ask it has always been.
         val offered = info?.askTimes.orEmpty()
         val chosen = AskType.resolve(offered, askTimeId, info?.defaultAskTime)
-        val askBtn = CharterTheme.primaryButton(this, askLabel).apply {
-            setOnClickListener {
-                isEnabled = false
-                asked = true
-                askStatus.text = "Asking…"
-                val limitHit = if (info?.reason == "schedule") "schedule" else "budget"
-                val params = AskType.params(
-                    30,
-                    limitHit,
-                    AskType.resolve(offered, askTimeId, info?.defaultAskTime)?.id,
-                )
-                askWorker.post {
-                    val res = runCatching {
-                        CharterCore.submitRequest("time.extend", params)
-                    }.getOrNull()
-                    runOnUiThread {
-                        if (res?.reqId != null) {
-                            askReqId = res.reqId
-                            askOutcome = "pending"
-                            askCreatedAt = System.currentTimeMillis() / 1000
-                            paintAsk()
-                            watchAskOutcome(res.reqId)
-                        } else {
-                            // Failed to even submit — let the ward retry.
-                            asked = false
-                            askOutcome = null
-                            paintAsk()
-                            askStatus.text = res.wardMessageOr("Couldn't reach your guardian — try again.")
-                        }
+        val askBtn = CharterTheme.primaryButton(this, askLabel)
+        // Sends the ask for [minutes]. Called from the amount chooser below,
+        // never straight from the button: how much is the ward's call.
+        fun submitAsk(minutes: Int) {
+            askMinutes = minutes
+            askBtn.isEnabled = false
+            asked = true
+            askStatus.text = "Asking…"
+            val limitHit = if (info?.reason == "schedule") "schedule" else "budget"
+            val params = AskType.params(
+                minutes,
+                limitHit,
+                AskType.resolve(offered, askTimeId, info?.defaultAskTime)?.id,
+            )
+            askWorker.post {
+                val res = runCatching {
+                    CharterCore.submitRequest("time.extend", params)
+                }.getOrNull()
+                runOnUiThread {
+                    if (res?.reqId != null) {
+                        askReqId = res.reqId
+                        askOutcome = "pending"
+                        askCreatedAt = System.currentTimeMillis() / 1000
+                        paintAsk()
+                        watchAskOutcome(res.reqId)
+                    } else {
+                        // Failed to even submit — let the ward retry.
+                        asked = false
+                        askOutcome = null
+                        paintAsk()
+                        askStatus.text = res.wardMessageOr("Couldn't reach your guardian — try again.")
                     }
                 }
             }
+        }
+        // "Custom…": a typed number of minutes, 1..=1440 (the wire's u16 cap —
+        // the core refuses anything else before it leaves, so say so here
+        // rather than report a failed send). Re-shown with the hint on a bad
+        // entry; a cancel sends nothing and leaves the button live.
+        fun promptCustomMinutes(error: String? = null) {
+            val input = EditText(this).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                hint = "Minutes"
+                askMinutes?.takeIf { it !in AskMinutes.PRESETS }?.let { setText(it.toString()) }
+                if (error != null) setError(error)
+                setSelection(text.length)
+            }
+            android.app.AlertDialog.Builder(this@LockActivity)
+                .setTitle("How many minutes?")
+                .setView(input)
+                .setPositiveButton("Ask") { dialog, _ ->
+                    dialog.dismiss()
+                    val minutes = AskMinutes.parseCustom(input.text?.toString())
+                    if (minutes != null) submitAsk(minutes) else promptCustomMinutes(AskMinutes.CUSTOM_RANGE_HINT)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        askBtn.setOnClickListener {
+            if (asked) return@setOnClickListener
+            // How much: a tap on an amount sends it, the way the type chooser
+            // works; the last pick (else 20 min) is the one marked.
+            val labels = AskMinutes.chooserLabels().toTypedArray()
+            android.app.AlertDialog.Builder(this@LockActivity)
+                .setTitle("How much more time?")
+                .setSingleChoiceItems(labels, AskMinutes.checkedIndex(askMinutes)) { dialog, which ->
+                    dialog.dismiss()
+                    if (which == AskMinutes.CUSTOM_INDEX) {
+                        promptCustomMinutes()
+                    } else {
+                        submitAsk(AskMinutes.PRESETS[which])
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
         if (!standDown) {
             if (chosen != null && offered.size > 1) {

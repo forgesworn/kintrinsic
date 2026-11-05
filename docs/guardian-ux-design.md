@@ -152,7 +152,10 @@ sheet, built on the existing `.sheet` pattern (SignSheet, AppHoldSheet):
 
 It is full-width with big targets and nothing beside it, so nothing can
 overlap. An ask opens it pre-filled with the amount asked for, and its button
-reads "Approve 15 min".
+reads "Approve 15 min". The ask is an opening bid, not a ceiling: the stepper
+goes above it as well as below (the device enacts any grant up to 1440), and a
+row of set-to presets — 10 min, 20 min, 30 min, 1 hour, the same amounts the
+ward's own chooser offers — answers "give them the hour instead" in one tap.
 
 ## Routes (nothing dead)
 

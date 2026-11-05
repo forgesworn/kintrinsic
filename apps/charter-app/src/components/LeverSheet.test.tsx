@@ -189,11 +189,46 @@ describe("LeverSheet", () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it("steps the persisted chosen amount down in fives, never above what was asked", async () => {
+    it("steps the persisted chosen amount in fives, below AND above what was asked", async () => {
       mount(<LeverSheet mode="approve" child={CHILD} request={ASK} onClose={onClose} />);
-      expect(button("+").disabled).toBe(true); // already at the ask
+      // The ask is an opening bid, not a ceiling: the device enacts any grant
+      // up to 1440, so "+" is live at the asked amount.
+      expect(button("+").disabled).toBe(false);
       await click(button("−"));
       expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 25);
+      await click(button("+"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 35);
+    });
+
+    it("stops at the gift ceiling, or at the ask itself when that is larger", async () => {
+      mount(
+        <LeverSheet mode="approve" child={CHILD} request={{ ...ASK, chosenMinutes: 240 }} onClose={onClose} />,
+      );
+      expect(button("+").disabled).toBe(true);
+      mount(
+        <LeverSheet
+          mode="approve"
+          child={CHILD}
+          request={{ ...ASK, minutesRequested: 300, chosenMinutes: 300 }}
+          onClose={onClose}
+        />,
+      );
+      expect(button("Approve 300 min")).toBeDefined();
+      expect(button("+").disabled).toBe(true);
+    });
+
+    it("a preset sets the amount outright, above the ask included, and says what was asked", async () => {
+      mount(<LeverSheet mode="approve" child={CHILD} request={ASK} onClose={onClose} />);
+      await click(button("1 hour"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 60);
+      await click(button("10 min"));
+      expect(ctx.setRequestChosenMinutes).toHaveBeenCalledWith("r1", 10);
+      // The note names the ask whenever the amount differs from it, either way.
+      mount(
+        <LeverSheet mode="approve" child={CHILD} request={{ ...ASK, chosenMinutes: 60 }} onClose={onClose} />,
+      );
+      expect(container.textContent).toContain("They asked for 30 min.");
+      expect(button("Approve 60 min")).toBeDefined();
     });
 
     it("reads a previously chosen amount, so a retry doesn't snap back to the ask", async () => {
