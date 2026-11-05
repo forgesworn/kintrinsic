@@ -4,6 +4,8 @@
  * comments name the clause it comes from.
  */
 
+/** CLAUSE, guardian → ward (existing kind); a roster carries copies of them. */
+export const CHARTER_CLAUSE = 31113
 /** Scan-to-pair offer, guardian → unpaired ward (existing kind). */
 export const CHARTER_DEVICE_PAIR_OFFER = 31117
 /** Family roster, guardian install ↔ guardian install. Wards never read it. */

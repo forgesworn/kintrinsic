@@ -161,6 +161,12 @@ export interface RosterChild {
   name: string
   colour: string
   devices: RosterDevice[]
+  /**
+   * The sender's view of the rules in force for this child: the signed inner
+   * CLAUSE event (kind 31113) per `(subject, kind)`. Optional, for older
+   * senders.
+   */
+  rules?: SignedEvent[]
 }
 
 export interface FamilyRosterOptions {

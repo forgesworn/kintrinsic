@@ -2882,8 +2882,17 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
   The inner event is signed by a W and gift-wrapped to each other W, and
   carries the sender's approval.
 - Content: `{ v: 1, children: [{ subject, issuedAt, name, colour, devices:
-  [{ machine, platform, name }] }] }`.
+  [{ machine, platform, name }], rules: [<signed inner CLAUSE event>] }] }`.
 - Records merge per child: the newest `issuedAt` per `subject` wins.
+- **The roster carries the rules.** `rules` is the sender's view of what is
+  in force for the child: one signed inner CLAUSE event (kind 31113) per
+  `(subject, kind)`. Rules merge on their own: the newest `issuedAt` per
+  `(subject, kind)` wins (a tie: the lower event id), whatever the child
+  record does. So a joining parent's app starts from the family's rules, and
+  both parents' apps converge on one screen. A receiving install takes a rule
+  only if it verifies and its author is a key the family's wards report as a
+  current signer (the roster's own trust rule); any other rule is skipped,
+  not the roster. `rules` may be absent, from an older sender.
 - A receiving install never deletes a device it paired itself or has had a
   STATUS from.
 - A device known only from a roster is shown as unconfirmed until a STATUS

@@ -3,6 +3,12 @@
  * roster.
  *
  * - Records merge per child: the newest `issuedAt` per `subject` wins.
+ * - Each child carries the sender's view of the rules in force, one signed
+ *   CLAUSE per `(subject, kind)`. Rules merge on their own, newest
+ *   `issuedAt` per `(subject, kind)` (a tie: the lower event id), whatever
+ *   the child record did. A rule is taken only if it verifies and its author
+ *   is a current signer by the wards' STATUS (a reported root, or a key
+ *   listed under one); any other rule is ignored, not the roster.
  * - A receiving install never deletes a device it paired itself or has had a
  *   STATUS from.
  * - A device known only from a roster is unconfirmed until a STATUS from it
@@ -10,9 +16,17 @@
  * - A roster is accepted only from a W approved by a root that the family's
  *   wards report in STATUS, and listed under that root there.
  */
-import { isEventShape, parseStatement, verifySignedEvent } from './statements.js'
+import { hasMarker, isEventShape, parseStatement, verifySignedEvent } from './statements.js'
 import { tryParseStrictJson } from './json.js'
-import { CHARTER_FAMILY_ROSTER, FUTURE_SKEW_SECONDS, isHex64, isUnixSeconds, type Inbound } from './types.js'
+import {
+  CHARTER_CLAUSE,
+  CHARTER_FAMILY_ROSTER,
+  FUTURE_SKEW_SECONDS,
+  isHex64,
+  isUnixSeconds,
+  type Inbound,
+  type SignedEvent,
+} from './types.js'
 
 export interface LocalRosterDevice {
   machine: string
@@ -30,6 +44,12 @@ export interface LocalRosterChild {
   name: string
   colour: string
   devices: LocalRosterDevice[]
+  /**
+   * The rules in force as this install knows them: one signed CLAUSE per
+   * clause kind, sorted by kind. Absent in a roster stored before rules
+   * travelled; the merge always writes it.
+   */
+  rules?: SignedEvent[]
 }
 
 export interface LocalRoster {
@@ -44,13 +64,15 @@ export type RosterReason =
   | 'content_not_json'
   | 'bad_version'
   | 'bad_children'
+  | 'bad_rules'
   | 'future'
   | 'bad_approval'
   | 'root_not_reported'
   | 'key_not_reported'
 
 export type MergeRosterResult =
-  | { ok: true; roster: LocalRoster; updated: string[] }
+  /** `ignoredRules`: rules that did not verify or whose author is not a current signer. */
+  | { ok: true; roster: LocalRoster; updated: string[]; ignoredRules: number }
   | { ok: false; reason: RosterReason }
 
 /** A device is confirmed once this install paired it or had a STATUS from it. */
@@ -77,6 +99,26 @@ function validChild(x: unknown): x is LocalRosterChild {
       return isHex64(o.machine) && typeof o.platform === 'string' && typeof o.name === 'string'
     })
   )
+}
+
+/** A CLAUSE as a roster rule: its clause kind and `issuedAt`, or null if it is not one. */
+function ruleKey(ev: SignedEvent, subject: string): { kind: string; issuedAt: number } | null {
+  if (ev.kind !== CHARTER_CLAUSE || !hasMarker(ev)) return null
+  const parsed = tryParseStrictJson(ev.content)
+  if (!parsed.ok) return null
+  const c = parsed.value
+  if (typeof c !== 'object' || c === null || Array.isArray(c)) return null
+  const o = c as Record<string, unknown>
+  if (typeof o.kind !== 'string' || o.kind === '' || !isUnixSeconds(o.issuedAt)) return null
+  // A clause naming another child is not this child's rule; absent is the
+  // pairing's sole subject.
+  if (o.subject !== undefined && o.subject !== subject) return null
+  return { kind: o.kind, issuedAt: o.issuedAt }
+}
+
+/** `a` replaces `b`: newer `issuedAt`, or the same and a lower event id. */
+function ruleNewer(a: { issuedAt: number; id: string }, b: { issuedAt: number; id: string }): boolean {
+  return a.issuedAt > b.issuedAt || (a.issuedAt === b.issuedAt && a.id < b.id)
 }
 
 /**
@@ -106,6 +148,11 @@ export function mergeRoster(
   const o = c as Record<string, unknown>
   if (o.v !== 1) return { ok: false, reason: 'bad_version' }
   if (!Array.isArray(o.children) || !o.children.every(validChild)) return { ok: false, reason: 'bad_children' }
+  for (const ch of o.children as unknown as Record<string, unknown>[]) {
+    if (ch.rules !== undefined && (!Array.isArray(ch.rules) || !ch.rules.every((r) => typeof r === 'object' && r !== null && !Array.isArray(r)))) {
+      return { ok: false, reason: 'bad_rules' }
+    }
+  }
   if ((o.children as LocalRosterChild[]).some((ch) => ch.issuedAt > now + FUTURE_SKEW_SECONDS)) {
     return { ok: false, reason: 'future' }
   }
@@ -117,9 +164,44 @@ export function mergeRoster(
   if (!root) return { ok: false, reason: 'root_not_reported' }
   if (!root.keys.includes(inner.pubkey)) return { ok: false, reason: 'key_not_reported' }
 
+  // A rule's author must be a current signer by the wards' STATUS.
+  const signers = new Set<string>()
+  for (const r of reported) {
+    signers.add(r.root)
+    for (const k of r.keys) signers.add(k)
+  }
+
   const out: LocalRoster = JSON.parse(JSON.stringify(local)) as LocalRoster
-  const updated: string[] = []
+  for (const ch of out.children) ch.rules = ch.rules ?? []
+  const updated = new Set<string>()
+  let ignoredRules = 0
   for (const inc of o.children as LocalRosterChild[]) {
+    // Rules first: they merge whatever the child record does below.
+    const accepted: { ev: SignedEvent; kind: string; issuedAt: number }[] = []
+    for (const r of (inc.rules ?? []) as unknown[]) {
+      const key = isEventShape(r) && verifySignedEvent(r) && signers.has(r.pubkey) ? ruleKey(r, inc.subject) : null
+      if (!key) ignoredRules++
+      else accepted.push({ ev: r as SignedEvent, ...key })
+    }
+    if (accepted.length > 0) {
+      let holder = out.children.find((ch) => ch.subject === inc.subject)
+      if (!holder) {
+        holder = { subject: inc.subject, issuedAt: -1, name: '', colour: '', devices: [], rules: [] }
+        out.children.push(holder)
+      }
+      const rules = holder.rules ?? []
+      for (const a of accepted) {
+        const i = rules.findIndex((x) => ruleKey(x, inc.subject)?.kind === a.kind)
+        const held = i >= 0 ? rules[i] : undefined
+        const cur = held ? ruleKey(held, inc.subject) : null
+        if (held && cur && !ruleNewer({ issuedAt: a.issuedAt, id: a.ev.id }, { issuedAt: cur.issuedAt, id: held.id })) continue
+        if (i >= 0) rules.splice(i, 1)
+        rules.push(a.ev)
+        updated.add(inc.subject)
+      }
+      rules.sort((x, y) => cmp(ruleKey(x, inc.subject)?.kind ?? '', ruleKey(y, inc.subject)?.kind ?? ''))
+      holder.rules = rules
+    }
     const mine = out.children.find((ch) => ch.subject === inc.subject)
     // Newest issuedAt per subject wins; a tie keeps the local record.
     if (mine && mine.issuedAt >= inc.issuedAt) continue
@@ -138,13 +220,20 @@ export function mergeRoster(
       if (isDeviceConfirmed(m) && !devices.some((d) => d.machine === m.machine)) devices.push({ ...m })
     }
     devices.sort((a, b) => cmp(a.machine, b.machine))
-    const child: LocalRosterChild = { subject: inc.subject, issuedAt: inc.issuedAt, name: inc.name, colour: inc.colour, devices }
+    const child: LocalRosterChild = {
+      subject: inc.subject,
+      issuedAt: inc.issuedAt,
+      name: inc.name,
+      colour: inc.colour,
+      devices,
+      rules: mine?.rules ?? [],
+    }
     out.children = out.children.filter((ch) => ch.subject !== inc.subject)
     out.children.push(child)
-    updated.push(inc.subject)
+    updated.add(inc.subject)
   }
   out.children.sort((a, b) => cmp(a.subject, b.subject))
-  return { ok: true, roster: out, updated: updated.sort(cmp) }
+  return { ok: true, roster: out, updated: [...updated].sort(cmp), ignoredRules }
 }
 
 /** Record that a STATUS arrived from `machine`: the device is now confirmed. */

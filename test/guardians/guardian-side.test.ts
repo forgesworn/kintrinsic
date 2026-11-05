@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import {
+  CHARTER_CLAUSE,
   approvalTemplate,
   buildApproval,
   cancelTemplate,
@@ -86,7 +87,35 @@ describe('family roster merge', () => {
   })
   test('an older or same-second record does not replace the local one', () => {
     const r = mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0, [dev('44')]) }, REP, T0)
-    expect(r.ok && r.roster).toEqual(local)
+    expect(r.ok && r.roster).toEqual({ children: [{ ...local.children[0], rules: [] }] })
+  })
+  test('rules merge per (subject, kind), newest issuedAt, from current signers only', () => {
+    const rule = (by: typeof W2, kind: string, issuedAt: number, subject: string | undefined = kid) =>
+      sign(by, { kind: CHARTER_CLAUSE, created_at: issuedAt, tags: [['t', 'charter-device']], content: JSON.stringify({ kind, ...(subject ? { subject } : {}), issuedAt, body: {} }) })
+    const mine = rule(W1, 'schedule', T0 + 600)
+    const base: LocalRoster = { children: [{ ...local.children[0]!, rules: [mine] }] }
+    const REP2 = [{ root: R1.pk, keys: [W1.pk] }, { root: R2.pk, keys: [W2.pk] }]
+    const withRules = (issuedAt: number, rules: unknown[]) =>
+      sign(W2, familyRosterTemplate({ children: [{ subject: kid, issuedAt, name: 'Robin', colour: '#123456', devices: [], rules: rules as never }], approval: approval(R2, W2, { issuedAt: T0 }), createdAt: T0 }))
+    const apps = rule(R1, 'apps', T0 + 400)
+    const r = mergeRoster(base, { sealAuthor: W2.pk, inner: withRules(T0 - 1, [
+      rule(W2, 'schedule', T0 + 500), // older than mine: kept out
+      apps, // new kind: added
+      rule(X, 'budget', T0 + 700), // not a current signer: ignored
+      { ...rule(W2, 'times', T0 + 700), sig: '00'.repeat(64) }, // does not verify: ignored
+      rule(W2, 'connections', T0 + 700, 'bb'.repeat(32)), // another child's: ignored
+    ]) }, REP2, T0)
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    // The child record is older, so it is left alone; its rules still merge.
+    expect(r.roster.children[0]!.name).toBe('Rob')
+    expect(r.roster.children[0]!.rules?.map((e) => e.id)).toEqual([apps.id, mine.id])
+    expect(r.updated).toEqual([kid])
+    expect(r.ignoredRules).toBe(3)
+    const newer = rule(W2, 'schedule', T0 + 601)
+    const r2 = mergeRoster(base, { sealAuthor: W2.pk, inner: withRules(T0, [newer]) }, REP2, T0)
+    expect(r2.ok && r2.roster.children[0]!.rules?.map((e) => e.id)).toEqual([newer.id])
+    expect(mergeRoster(base, { sealAuthor: W2.pk, inner: withRules(T0, 'x' as never) }, REP2, T0)).toEqual({ ok: false, reason: 'bad_rules' })
   })
   test('only from a W approved by a root the wards report, sealed by that W', () => {
     expect(mergeRoster(local, { sealAuthor: W2.pk, inner: roster(T0 + 1, []) }, [{ root: R1.pk, keys: [W2.pk] }], T0)).toEqual({ ok: false, reason: 'root_not_reported' })

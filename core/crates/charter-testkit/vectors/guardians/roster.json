@@ -403,6 +403,22 @@
             "pairedHere": false,
             "statusSeen": false
           }
+        ],
+        "rules": [
+          {
+            "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+            "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+            "created_at": 1700000600,
+            "kind": 31113,
+            "tags": [
+              [
+                "t",
+                "charter-device"
+              ]
+            ],
+            "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+            "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+          }
         ]
       }
     ]
@@ -474,6 +490,22 @@
                   "pairedHere": false,
                   "statusSeen": false
                 }
+              ],
+              "rules": [
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
               ]
             },
             {
@@ -489,14 +521,16 @@
                   "pairedHere": false,
                   "statusSeen": false
                 }
-              ]
+              ],
+              "rules": []
             }
           ]
         },
         "updated": [
           "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
           "a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d"
-        ]
+        ],
+        "ignoredRules": 0
       }
     },
     {
@@ -565,11 +599,28 @@
                   "pairedHere": false,
                   "statusSeen": false
                 }
+              ],
+              "rules": [
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
               ]
             }
           ]
         },
-        "updated": []
+        "updated": [],
+        "ignoredRules": 0
       }
     },
     {
@@ -638,11 +689,28 @@
                   "pairedHere": false,
                   "statusSeen": false
                 }
+              ],
+              "rules": [
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
               ]
             }
           ]
         },
-        "updated": []
+        "updated": [],
+        "ignoredRules": 0
       }
     },
     {
@@ -704,13 +772,30 @@
                   "pairedHere": true,
                   "statusSeen": false
                 }
+              ],
+              "rules": [
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
               ]
             }
           ]
         },
         "updated": [
           "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3"
-        ]
+        ],
+        "ignoredRules": 0
       }
     },
     {
@@ -1149,6 +1234,374 @@
       "expect": {
         "ok": false,
         "reason": "bad_signature"
+      }
+    },
+    {
+      "name": "rules_merge",
+      "description": "Rules merge per (subject, kind), newest issuedAt, independently of the child record (older here, so left alone). A rule from a key the wards don't report, one that doesn't verify, or one naming another child is ignored, not the roster.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "f7d63bf34de037d9ea1475ad0586c9a100204b17c583147af026c1ce4a6c289a",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1699999999,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[{\"id\":\"ad75c2038a09ea51657ac4d89c0bb15fb8122031dcacd6fe06f23747e020d8f9\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000500,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"schedule\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000500,\\\"body\\\":{}}\",\"sig\":\"e299423902ea1664965ae2d4b7122a1f68f32a1944b42525b3a8888811b8bb6401003a210805e53c6b886a434c4c42a1a9a2c22ffb2e406d0d39972aaedcf5de\"},{\"id\":\"21593474de9ee7b397e8731b5a357da99c1e852e7025d5ea4c5f9addd77232c2\",\"pubkey\":\"e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840\",\"created_at\":1700000400,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"apps\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000400,\\\"body\\\":{}}\",\"sig\":\"38a449f969a02aaf246165d4b06cf48b2a7db68b1f06df281aa274637e302f64febea3dfe6c4dc40ba8fa51de2273025bec88bc084cedc1d3303b220686c0f7f\"},{\"id\":\"5a65e49fc22ce97f5c8217470e8c0291621be2d68607e492b70e43627d5bd9dd\",\"pubkey\":\"29507d2e800d162b5d53381200714d296ce5eb41c8b7161da239a72dececcd26\",\"created_at\":1700000700,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"budget\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000700,\\\"body\\\":{}}\",\"sig\":\"691c3aee15c04400130ec3ceda635e7fbe33cedb2b9face6d794ceb2e1ebcce88fc502429f13ebebaed29544d4a62e21535a6854c9919b45676f01bd6f088384\"},{\"id\":\"8d6c7e16f45da9c9b4a761abd4c17ba05285959fad92b920a3c591c1c5193243\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000700,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"times\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000700,\\\"body\\\":{}}\",\"sig\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"},{\"id\":\"54edab556790d88918638dfd2d52893f9b54df126a68576f418616af3adcb85e\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000700,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"connections\\\",\\\"subject\\\":\\\"a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d\\\",\\\"issuedAt\\\":1700000700,\\\"body\\\":{}}\",\"sig\":\"ae63037463724448145b52d0199423cb5b7f760f45ffedf00a7c4a087217e924d0a6bcb590f34d3e26827c6da0fd1da7234f0c02f832f90389d6af1dc8c00889\"},{\"id\":\"1ac09e6027ef99367f06d4430154d18cf0059e62e6b5e7d9b7ee6147cebf467f\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000700,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"learning\\\",\\\"issuedAt\\\":1700000700,\\\"body\\\":{}}\",\"sig\":\"2fd90ab8dd7b69044abb934f2dfbd22c2e53226457d8eb607d01f35f0a08cc23aa0bd058c631108fcce90b4e4a4d83da4e833e1264f3e9e56333a04ff478ce02\"}]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "becaef149720db155d3958f0ef4075fcf741a1a8b49dae5caa40d8ba5d49b0be590365e8bfc8f89a3cedf7cd6af7d5d0d152f7b5241108c3a32be38e2cb822ee"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": true,
+        "roster": {
+          "children": [
+            {
+              "subject": "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+              "issuedAt": 1700000000,
+              "name": "Rob",
+              "colour": "#000000",
+              "devices": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "platform": "linux",
+                  "name": "laptop",
+                  "pairedHere": true,
+                  "statusSeen": false
+                },
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "platform": "android",
+                  "name": "tablet",
+                  "pairedHere": false,
+                  "statusSeen": true
+                },
+                {
+                  "machine": "ccfdaea731f95fcb9b64e684c038688bdd50834cebde32042612cc197a285dfa",
+                  "platform": "android",
+                  "name": "old phone",
+                  "pairedHere": false,
+                  "statusSeen": false
+                }
+              ],
+              "rules": [
+                {
+                  "id": "21593474de9ee7b397e8731b5a357da99c1e852e7025d5ea4c5f9addd77232c2",
+                  "pubkey": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+                  "created_at": 1700000400,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"apps\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000400,\"body\":{}}",
+                  "sig": "38a449f969a02aaf246165d4b06cf48b2a7db68b1f06df281aa274637e302f64febea3dfe6c4dc40ba8fa51de2273025bec88bc084cedc1d3303b220686c0f7f"
+                },
+                {
+                  "id": "1ac09e6027ef99367f06d4430154d18cf0059e62e6b5e7d9b7ee6147cebf467f",
+                  "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "created_at": 1700000700,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"learning\",\"issuedAt\":1700000700,\"body\":{}}",
+                  "sig": "2fd90ab8dd7b69044abb934f2dfbd22c2e53226457d8eb607d01f35f0a08cc23aa0bd058c631108fcce90b4e4a4d83da4e833e1264f3e9e56333a04ff478ce02"
+                },
+                {
+                  "id": "e394107ead9f046e1fc6df7b9d1427655cb1eb665d1dd22fdf131d3c2fed3adc",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "043f9f10f055404751f6adec684f9934adc57e2b2b1c2be2f07f9470849bf4f4c2deafebee5f7fa988f5ddcbaa375298f26b1531816c27fe9017a4b6dc3016f5"
+                }
+              ]
+            }
+          ]
+        },
+        "updated": [
+          "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3"
+        ],
+        "ignoredRules": 3
+      }
+    },
+    {
+      "name": "rules_newer_replaces",
+      "description": "A newer rule of a kind replaces the local one; a new child arrives with its rules.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "266f3ee4ea25e72eba376d997bd6307e6c1e80da0d3753095b0b402fe162f29a",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[{\"id\":\"bd2807a0ec5b1617f413cb9f644930fc2793fd1dcf28fa1ced58814f6efaf62b\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000601,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"schedule\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000601,\\\"body\\\":{}}\",\"sig\":\"3559ebd68cd260ad63e4760b277563d44e7727e0f604acb1d8e15870d660bc011d04227a85e788552688b90296579fc760775fdfe7e436e64b8c6ab9ca92409b\"}]},{\"subject\":\"a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d\",\"issuedAt\":1700000001,\"name\":\"Sam\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[{\"id\":\"9735f51af8af2dc9d189c7b62e10a3d18fe864bbfede0540597d516d21c69122\",\"pubkey\":\"2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc\",\"created_at\":1700000005,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"apps\\\",\\\"subject\\\":\\\"a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d\\\",\\\"issuedAt\\\":1700000005,\\\"body\\\":{}}\",\"sig\":\"7b8b26f5f89664cffc7a37d4fbfb613992df486490911ba43ab33015dac50fcba730e134e7ead5b2d87d1adea6031decc99388eaf7dd085242ad0d2ebbf509b3\"}]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "6075b548440c706e2a6e937b499691e54eabe0d46ec39aefbd2279ea69a86573cfc9808e944da8e4d57c5ef97204901b47004fbf74c5032439992f7b53f82970"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": true,
+        "roster": {
+          "children": [
+            {
+              "subject": "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+              "issuedAt": 1700000000,
+              "name": "Rob",
+              "colour": "#000000",
+              "devices": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "platform": "linux",
+                  "name": "laptop",
+                  "pairedHere": true,
+                  "statusSeen": false
+                },
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "platform": "android",
+                  "name": "tablet",
+                  "pairedHere": false,
+                  "statusSeen": true
+                },
+                {
+                  "machine": "ccfdaea731f95fcb9b64e684c038688bdd50834cebde32042612cc197a285dfa",
+                  "platform": "android",
+                  "name": "old phone",
+                  "pairedHere": false,
+                  "statusSeen": false
+                }
+              ],
+              "rules": [
+                {
+                  "id": "bd2807a0ec5b1617f413cb9f644930fc2793fd1dcf28fa1ced58814f6efaf62b",
+                  "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "created_at": 1700000601,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000601,\"body\":{}}",
+                  "sig": "3559ebd68cd260ad63e4760b277563d44e7727e0f604acb1d8e15870d660bc011d04227a85e788552688b90296579fc760775fdfe7e436e64b8c6ab9ca92409b"
+                }
+              ]
+            },
+            {
+              "subject": "a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d",
+              "issuedAt": 1700000001,
+              "name": "Sam",
+              "colour": "#123456",
+              "devices": [],
+              "rules": [
+                {
+                  "id": "9735f51af8af2dc9d189c7b62e10a3d18fe864bbfede0540597d516d21c69122",
+                  "pubkey": "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc",
+                  "created_at": 1700000005,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"apps\",\"subject\":\"a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d\",\"issuedAt\":1700000005,\"body\":{}}",
+                  "sig": "7b8b26f5f89664cffc7a37d4fbfb613992df486490911ba43ab33015dac50fcba730e134e7ead5b2d87d1adea6031decc99388eaf7dd085242ad0d2ebbf509b3"
+                }
+              ]
+            }
+          ]
+        },
+        "updated": [
+          "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+          "a632dae4de1f76df3c342aae890678b0ce427e97d7296080723379aaa376cf4d"
+        ],
+        "ignoredRules": 0
+      }
+    },
+    {
+      "name": "rules_same_second_lower_id",
+      "description": "Two rules of one kind with the same issuedAt: the lower event id wins, so every install converges.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "e7eae9cd5f97880f644377fa8b79fb78d65a42883892d80e3366384755991e24",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":[{\"id\":\"6264a15c8198dff2d42718896c5e459328d6eac35d592f439646ca4e0fcb7b2c\",\"pubkey\":\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\",\"created_at\":1700000600,\"kind\":31113,\"tags\":[[\"t\",\"charter-device\"]],\"content\":\"{\\\"kind\\\":\\\"schedule\\\",\\\"subject\\\":\\\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\\\",\\\"issuedAt\\\":1700000600,\\\"body\\\":{}}\",\"sig\":\"c83a8acce3c6c2e6fadde8f20b5623dae9825d11e0e2491e5d318c9fa738179044f067049f119b3825ea4f111ecf78aab3ad06689e0653102cfcc4fd3e541755\"}]}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "0e9ae76819aca3b8f0ede9fc30759ae46972d475ebe07eaf934c5264fd61fd1761be8fb4e2234477eb4a2488798f6cc9805d1097e7badd4fb8432479d789cb16"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": true,
+        "roster": {
+          "children": [
+            {
+              "subject": "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3",
+              "issuedAt": 1700000000,
+              "name": "Rob",
+              "colour": "#000000",
+              "devices": [
+                {
+                  "machine": "e07acf3609b2f8036551513e64703f64526df7278902efc731ee08c30dd68d6a",
+                  "platform": "linux",
+                  "name": "laptop",
+                  "pairedHere": true,
+                  "statusSeen": false
+                },
+                {
+                  "machine": "67de9d877241b17dc5e783189d524d8d9d722f3edddbd7eaa5c5abde266630b7",
+                  "platform": "android",
+                  "name": "tablet",
+                  "pairedHere": false,
+                  "statusSeen": true
+                },
+                {
+                  "machine": "ccfdaea731f95fcb9b64e684c038688bdd50834cebde32042612cc197a285dfa",
+                  "platform": "android",
+                  "name": "old phone",
+                  "pairedHere": false,
+                  "statusSeen": false
+                }
+              ],
+              "rules": [
+                {
+                  "id": "6264a15c8198dff2d42718896c5e459328d6eac35d592f439646ca4e0fcb7b2c",
+                  "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+                  "created_at": 1700000600,
+                  "kind": 31113,
+                  "tags": [
+                    [
+                      "t",
+                      "charter-device"
+                    ]
+                  ],
+                  "content": "{\"kind\":\"schedule\",\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000600,\"body\":{}}",
+                  "sig": "c83a8acce3c6c2e6fadde8f20b5623dae9825d11e0e2491e5d318c9fa738179044f067049f119b3825ea4f111ecf78aab3ad06689e0653102cfcc4fd3e541755"
+                }
+              ]
+            }
+          ]
+        },
+        "updated": [
+          "45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3"
+        ],
+        "ignoredRules": 0
+      }
+    },
+    {
+      "name": "bad_rules",
+      "description": "A child's rules must be a list of objects.",
+      "inbound": {
+        "sealAuthor": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+        "inner": {
+          "id": "0f59b8c2ff09fb6ebcccdb7b253c4a0274f3f7583731f9324d8975a72dc20023",
+          "pubkey": "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe",
+          "created_at": 1700001000,
+          "kind": 31119,
+          "tags": [
+            [
+              "t",
+              "charter-device"
+            ]
+          ],
+          "content": "{\"v\":1,\"children\":[{\"subject\":\"45b17c6932464a8c7c583b9f86db2a145251704305a76e23bdbe7d752bc207d3\",\"issuedAt\":1700000000,\"name\":\"Robin\",\"colour\":\"#123456\",\"devices\":[],\"rules\":\"not a list\"}],\"approval\":{\"id\":\"c3379567787451c1645e86e2ba514e4a67b1543378d5ce5d9e69a23aaf223078\",\"pubkey\":\"77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d\",\"created_at\":1700000000,\"kind\":31120,\"tags\":[[\"d\",\"kintrinsic/device/4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"p\",\"4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe\"],[\"t\",\"charter-device\"]],\"content\":\"{\\\"v\\\":1,\\\"issuedAt\\\":1700000000}\",\"sig\":\"8fcd5305a2975b9c4cb1c7c6b06eacd84b7b1918fd82188f53eedcc64d0adc6ebc8906b48a2ffc68fb8f18a00925dfa673aa44b508de9a565105cdc6506b28b1\"}}",
+          "sig": "09e16c3e7bfa65d9144c8e90898d370790956e19b1084f52da0630f8e93441cd58dd09b5b51bb5418cd41cc6ad009b3a6885693366b701bebf6e9c113560f759"
+        }
+      },
+      "reported": [
+        {
+          "root": "e47e9e0117f18c251e64adf0408d8abf5a7693b4a7724dc3cf0be624f8686840",
+          "keys": [
+            "2e956787ad46abd5dbfa150194a24bd1410390d299a2026173f39299f1080abc"
+          ]
+        },
+        {
+          "root": "77ce2c630ae31080d6d81e348868f49859d09f4a176592c34491c185585e266d",
+          "keys": [
+            "4457041b54cdaeb1ed3f8af57e0b46fd8bd657fc2547503ece077d7f911214fe"
+          ]
+        }
+      ],
+      "now": 1700001000,
+      "expect": {
+        "ok": false,
+        "reason": "bad_rules"
       }
     }
   ]

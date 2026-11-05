@@ -1017,6 +1017,10 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
   const kid = bytesToHex(seedBytes("guardians.roster.subject.kid"));
   const kid2 = bytesToHex(seedBytes("guardians.roster.subject.kid2"));
   const m = (label) => bytesToHex(seedBytes(`guardians.roster.machine.${label}`));
+  // A CLAUSE as a roster carries it: the signed inner event (kind 31113).
+  const rule = (by, kind, issuedAt, subject = kid) =>
+    signWith(by.sk, { kind: G.CHARTER_CLAUSE, created_at: issuedAt, tags: [MARKER], content: JSON.stringify({ kind, ...(subject ? { subject } : {}), issuedAt, body: {} }) });
+  const localRule = rule(W1, "schedule", T0 + 600);
   const local = {
     children: [
       {
@@ -1026,6 +1030,7 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
           { machine: m("tablet"), platform: "android", name: "tablet", pairedHere: false, statusSeen: true },
           { machine: m("old"), platform: "android", name: "old phone", pairedHere: false, statusSeen: false },
         ],
+        rules: [localRule],
       },
     ],
   };
@@ -1042,7 +1047,7 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
     if (got !== want) throw new Error(`roster ${name}: want ${want}, got ${got}`);
     vectors.push({
       name, description, inbound: { sealAuthor: sealer.pk, inner }, reported: rep, now,
-      expect: r.ok ? { ok: true, roster: r.roster, updated: r.updated } : { ok: false, reason: r.reason },
+      expect: r.ok ? { ok: true, roster: r.roster, updated: r.updated, ignoredRules: r.ignoredRules } : { ok: false, reason: r.reason },
     });
   };
   add("newer_replaces_keeps_confirmed", "A newer record replaces name, colour and devices, but never deletes a device paired here or seen in STATUS; new devices arrive unconfirmed; a new child is added.", W2,
@@ -1067,6 +1072,22 @@ write("scenarios.json", { version: 1, keys: keysJson(), scenarios });
     rosterEv(W2, R2, [child(kid, T0 + 1, [{ machine: "ABC", platform: "android", name: "x" }])]), reported, "bad_children");
   add("wrong_kind", "Kind must be 31119.", W2, signWith(W2.sk, { kind: 31118, created_at: now, tags: [MARKER], content: JSON.stringify({ v: 1, children: [], approval: apW2 }) }), reported, "wrong_kind");
   add("bad_signature", "id and sig must verify.", W2, { ...rosterEv(W2, R2, [child(kid, T0 + 1, [])]), sig: "00".repeat(64) }, reported, "bad_signature");
+  const withRules = (issuedAt, rules, subject = kid) => rosterEv(W2, R2, [{ ...child(subject, issuedAt, []), rules }]);
+  add("rules_merge", "Rules merge per (subject, kind), newest issuedAt, independently of the child record (older here, so left alone). A rule from a key the wards don't report, one that doesn't verify, or one naming another child is ignored, not the roster.", W2,
+    withRules(T0 - 1, [
+      rule(W2, "schedule", T0 + 500),
+      rule(R1, "apps", T0 + 400),
+      rule(X, "budget", T0 + 700),
+      { ...rule(W2, "times", T0 + 700), sig: "00".repeat(64) },
+      rule(W2, "connections", T0 + 700, kid2),
+      rule(W2, "learning", T0 + 700, null),
+    ]), reported, "ok");
+  add("rules_newer_replaces", "A newer rule of a kind replaces the local one; a new child arrives with its rules.", W2,
+    rosterEv(W2, R2, [{ ...child(kid, T0, []), rules: [rule(W2, "schedule", T0 + 601)] }, { ...child(kid2, T0 + 1, [], "Sam"), rules: [rule(W1, "apps", T0 + 5, kid2)] }]), reported, "ok");
+  add("rules_same_second_lower_id", "Two rules of one kind with the same issuedAt: the lower event id wins, so every install converges.", W2,
+    withRules(T0, [rule(W2, "schedule", T0 + 600)]), reported, "ok");
+  add("bad_rules", "A child's rules must be a list of objects.", W2,
+    withRules(T0, "not a list"), reported, "bad_rules");
   write("roster.json", { version: 1, keys: keysJson(), local, vectors });
 }
 

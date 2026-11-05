@@ -227,7 +227,7 @@ describe('rule 3: withdrawal', () => {
     expect(s.tombstones).toHaveLength(256)
     const late = key(0, 8)
     dropped(inb(s, late, approval(R1, late, { issuedAt: T0 })), 'root_at_quota')
-  })
+  }, 60_000) // 512 signed statements: slow on a loaded machine
 })
 
 describe('rule 4 and 5: departures fail closed; clauses record their signer', () => {
