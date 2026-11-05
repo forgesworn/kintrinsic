@@ -823,10 +823,14 @@ export class GuardianKeys {
     let p = remover ? parseGuardianKey(remover) : null;
     if (remover && !p) throw new Error("That isn't a guardian ID (npub).");
     if (!p) {
+      // The devices name the signer where they can; otherwise the one other parent there.
       const others = new Set<string>();
       for (const dev of this.allDevices()) {
-        if (!dev.guardians?.pending.some((x) => x.d === d)) continue;
-        for (const r of dev.guardians.roots) if (r.root !== me) others.add(r.root);
+        const entry = dev.guardians?.pending.find((x) => x.d === d);
+        if (!entry || !dev.guardians) continue;
+        const named = removerOn(dev.guardians, me, entry);
+        if (named) others.add(named);
+        else for (const r of dev.guardians.roots) if (r.root !== me) others.add(r.root);
       }
       if (others.size !== 1) {
         throw new Error("Couldn't tell which parent asked for this removal.");
@@ -1241,8 +1245,27 @@ export class GuardianKeys {
     const last = this.deps.read().keys.statusRepliedTs?.[m];
     if (last !== undefined && status.ts <= last) return;
     this.deps.write((k) => ({ ...k, statusRepliedTs: { ...k.statusRepliedTs, [m]: status.ts } }));
+    this.noteClamped(m, status.guardians?.clamped);
     await this.resendPin(status);
     await this.objectAutomatically(status);
+  }
+
+  /**
+   * Decision D1: a ward counts the events dated ahead of its clock that it
+   * took at its own time instead. A rise between two STATUS reports means its
+   * clock is behind a sender's; it is remembered (when) for a plain notice.
+   * The first report only sets the baseline.
+   */
+  private noteClamped(m: string, count: number | undefined): void {
+    if (count === undefined) return;
+    const prev = this.deps.read().keys.clamped?.[m];
+    if (prev && prev.count === count) return;
+    const rose = prev !== undefined && count > prev.count;
+    const at = this.deps.now();
+    this.deps.write((k) => ({
+      ...k,
+      clamped: { ...(k.clamped ?? {}), [m]: { count, ...(rose ? { roseAt: at } : prev?.roseAt !== undefined ? { roseAt: prev.roseAt } : {}) } },
+    }));
   }
 
   /**
@@ -1268,10 +1291,10 @@ export class GuardianKeys {
     );
     const before = keys.objected[m] ?? [];
     const done = before.filter((x) => against.some((p) => (p.id ?? p.d) === x));
-    const remover = removerOn(g, me);
     const ops = this.objectorOps(g);
     for (const p of against) {
       const mark = p.id ?? p.d;
+      const remover = removerOn(g, me, p);
       if (done.includes(mark) || !remover || !ops) continue;
       try {
         const event = await buildObjection(signerOf(ops), p.d, remover, { issuedAt: now });
@@ -1629,11 +1652,13 @@ function rosterApprovalSigner(inner: SignedEvent): string | null {
 
 /**
  * The remover a ward's pending removal of `me` must name in an objection's
- * `p`: STATUS doesn't carry a pending statement's signer, so it is the one
- * other root that ward pins; null when it pins none or several (OQ "The
- * objection's p when STATUS doesn't name the remover").
+ * `p`: the signer the ward reports for that entry (`pending[].signer`), and,
+ * from a ward that doesn't report it yet, the one other root that ward pins;
+ * null when it pins none or several (OQ "The objection's p when STATUS
+ * doesn't name the remover").
  */
-export function removerOn(g: StatusGuardians, me: string): string | null {
+export function removerOn(g: StatusGuardians, me: string, p?: { signer?: string }): string | null {
+  if (p?.signer !== undefined && p.signer !== me) return p.signer;
   const others = [...new Set(g.roots.map((r) => r.root).filter((r) => r !== me))];
   return others.length === 1 ? others[0] : null;
 }

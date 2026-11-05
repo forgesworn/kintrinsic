@@ -15,6 +15,8 @@ import { phoneHeldRoot } from "../keys/state";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
   androidWardsWithoutPin,
+  clockBehindLine,
+  clockBehindWards,
   departedWards,
   durationWords,
   familyWards,
@@ -514,6 +516,11 @@ function DeviceCard({
             {line}
           </p>
         )
+      )}
+      {clockBehindWards([ward], guardianKeys.state, now).length > 0 && (
+        <p className="card-sub" style={{ margin: "4px 0 0" }}>
+          {clockBehindLine(ward.device.label)}
+        </p>
       )}
       {pending.map((p) => (
         <PendingRow key={p.d} p={p} me={me} now={now} busy={busy} act={act} />

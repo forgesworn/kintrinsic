@@ -121,6 +121,12 @@ describe("STATUS guardians", () => {
     // kind must agree with the d.
     expect(parseStatusGuardians({ ...g, pending: [{ ...g.pending[0], kind: "move" }] })).toBeUndefined();
     expect(parseStatusGuardians({ ...g, pending: [{ ...g.pending[0], expiresAt: "10" }] })).toBeUndefined();
+    expect(parseStatusGuardians({ ...g, pending: [{ ...g.pending[0], signer: "nope" }] })).toBeUndefined();
+  });
+
+  it("keeps the pending statement's signer where the ward reports it", () => {
+    const withSigner = { ...g, pending: [{ ...g.pending[0], signer: W }] };
+    expect(parseStatusGuardians(withSigner)).toEqual(withSigner);
   });
 
   it("rides on a parsed STATUS, with appVersionCode", () => {

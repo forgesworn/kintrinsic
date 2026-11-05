@@ -1222,3 +1222,38 @@ describe("a phone-held root mints a working key (decision D5)", () => {
     expect(w).not.toBe(w2);
   });
 });
+
+describe("STATUS follow-ups: the remover's key and the clock counter", () => {
+  it("objects naming the signer the device reports, even with several other parents", async () => {
+    const R3 = getPublicKey(generateSecretKey());
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }]);
+    await connectSignetRoot(h);
+    const removal = `kintrinsic/unguardian/${R}`;
+    await h.gk.noteWardStatus({
+      machine: PHONE,
+      ts: T + 10,
+      guardians: {
+        roots: [{ root: R, keys: [W] }, { root: R2, keys: [] }, { root: R3, keys: [] }],
+        pending: [{ d: removal, id: "ab".repeat(32), signer: R3, kind: "removal", expiresAt: T + 1000 }],
+        tombstones: 0,
+        relays: [],
+      },
+    });
+    expect(h.published).toHaveLength(1);
+    const st = parseStatement(open(h.published[0].wrap, phoneSk).inner);
+    expect(st.ok && st.statement).toMatchObject({ type: "objection", p: R3, signer: W });
+  });
+
+  it("remembers when a device's clamp counter rises, not its first report", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] }]);
+    const g = (clamped: number) => ({ roots: [{ root: R, keys: [W] }], pending: [], tombstones: 0, relays: [], clamped });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 1, guardians: g(3) });
+    expect(h.keys().clamped[PHONE]).toEqual({ count: 3 });
+    h.setNow(T + 50);
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 2, guardians: g(4) });
+    expect(h.keys().clamped[PHONE]).toEqual({ count: 4, roseAt: T + 50 });
+    h.setNow(T + 90);
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 3, guardians: g(4) });
+    expect(h.keys().clamped[PHONE]).toEqual({ count: 4, roseAt: T + 50 });
+  });
+});

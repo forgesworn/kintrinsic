@@ -175,50 +175,6 @@ export class RealSigner implements Signer {
   private lastIssuedAt = RealSigner.loadLastIssuedAt();
 
   private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
-  /** The last non-policy clause sent per child and device. */
-  private static readonly STANDING_KEY = "charter.signer.standing.v1";
-
-  private static loadStanding(): Record<string, Record<string, ClausePayload>> {
-    try {
-      const raw = JSON.parse(localStorage.getItem(RealSigner.STANDING_KEY) ?? "{}") as unknown;
-      return typeof raw === "object" && raw !== null && !Array.isArray(raw)
-        ? (raw as Record<string, Record<string, ClausePayload>>)
-        : {};
-    } catch {
-      return {};
-    }
-  }
-
-  /**
-   * Remember a gift, stand-down, maintenance window, update or debugging
-   * clause as the latest of its kind for each device it went to. Only once it
-   * was sent or held for the home network: a send that failed outright is not
-   * standing anywhere.
-   */
-  private recordStanding(childId: string, machines: string[], clause: ClausePayload): void {
-    const all = RealSigner.loadStanding();
-    const mine = { ...(all[childId] ?? {}) };
-    for (const m of machines) mine[`${clause.kind}:${m}`] = clause;
-    all[childId] = mine;
-    try {
-      localStorage.setItem(RealSigner.STANDING_KEY, JSON.stringify(all));
-    } catch {
-      // Private mode / quota: the record is best-effort.
-    }
-  }
-
-  /** `settle`, recording the clause as standing when it was sent or held. */
-  private settleStanding(batch: SendBatch, childId: string, machines: string[], clause: ClausePayload): SignOutcome {
-    try {
-      const out = this.settle(batch);
-      this.recordStanding(childId, machines, clause);
-      return out;
-    } catch (err) {
-      if (err instanceof QueuedForHomeNetworkError) this.recordStanding(childId, machines, clause);
-      throw err;
-    }
-  }
-
   private static loadLastIssuedAt(): number {
     try {
       const n = Number(localStorage.getItem(RealSigner.ISSUED_AT_KEY));
@@ -255,6 +211,13 @@ export class RealSigner implements Signer {
 
   constructor(private deps: RealSignerDeps) {
     this.state = deps.initial ?? { connected: false, kind: "none", autoSign: false };
+    // The record of standing clauses fed the pre-departure re-sign, which is
+    // gone (decision D2); nothing reads it, so the old copy is dropped.
+    try {
+      localStorage.removeItem("charter.signer.standing.v1");
+    } catch {
+      // Storage unavailable: nothing to drop.
+    }
   }
 
   status(): SignerState {
@@ -545,7 +508,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
+    return this.settle(held);
   }
 
   /**
@@ -585,8 +548,8 @@ export class RealSigner implements Signer {
       "clause",
       `Give ${minutes} more minutes${what} to ${target.name ?? childId}${where}`,
     );
-    const clause = await this.sendGift(target, guardian, recipients, { minutes, tz, groupId, time }, held);
-    return this.settleStanding(held, childId, recipients.map((d) => d.pubkey), clause);
+    await this.sendGift(target, guardian, recipients, { minutes, tz, groupId, time }, held);
+    return this.settle(held);
   }
 
   /** A typed gift (or an answer that buys another kind of time) must not go to a
@@ -720,8 +683,8 @@ export class RealSigner implements Signer {
     // and `settle` reports it. A genuine failure still stops here, before any
     // minutes are given (the ask stays open to be answered again).
     await this.sendTimeExtendGrant("approved", { ...ctx, minutesGranted: 0 }, wire, held);
-    const clause = await this.sendGift(target, guardian, [device], { minutes, tz: ctx.tz, time }, held);
-    return this.settleStanding(held, ctx.childId, [device.pubkey], clause);
+    await this.sendGift(target, guardian, [device], { minutes, tz: ctx.tz, time }, held);
+    return this.settle(held);
   }
 
   /**
@@ -780,7 +743,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settleStanding(held, childId, target.devices.map((d) => d.pubkey), clause);
+    return this.settle(held);
   }
 
   async signUpdateClause(
@@ -812,7 +775,7 @@ export class RealSigner implements Signer {
       const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settleStanding(held, childId, phones.map((d) => d.pubkey), clause);
+    return this.settle(held);
   }
 
   async signDebUpdateClause(
@@ -848,7 +811,7 @@ export class RealSigner implements Signer {
     if (target.subject) clause.subject = target.subject;
     const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
-    return this.settleStanding(held, childId, [device.pubkey], clause);
+    return this.settle(held);
   }
 
   /**
@@ -891,7 +854,7 @@ export class RealSigner implements Signer {
     const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     try {
-      return { ...this.settleStanding(held, childId, [device.pubkey], clause), issuedAt };
+      return { ...this.settle(held), issuedAt };
     } catch (err) {
       // A held send throws; hand the caller the value that was really signed.
       if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;

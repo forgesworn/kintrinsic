@@ -9,8 +9,8 @@
 
 import { nip19 } from "nostr-tools";
 import type { Child, Device } from "../domain/types";
-import type { GuardianKeysState } from "../keys/state";
-import type { StatusGuardians } from "../keys/statusGuardians";
+import { phoneHeldRoot, type GuardianKeysState } from "../keys/state";
+import { keyStanding, type StatusGuardians } from "../keys/statusGuardians";
 import type { WardReadiness } from "../keys/versionGate";
 import { splitPendingD, type PendingType } from "../keys/sdk";
 import { PENDING_LIFETIME_SECONDS, removerOn } from "../keys/guardianKeys";
@@ -186,10 +186,21 @@ export interface RemovalAgainstMe {
   /** The children those devices belong to, each once. */
   children: string[];
   takesEffectAt?: number;
-  /** The parent who asked, when every device listing it names the same one (the one other guardian there). */
+  /**
+   * The parent who asked, when every device listing it names the same one:
+   * the signer the device reports, else the one other guardian there.
+   */
   remover?: string;
   /** This phone has objected at every device listing it (decision Q1). */
   objected: boolean;
+  /**
+   * Why this phone can't object on its own (at some device not yet objected
+   * at): it can't tell who asked, or the device hasn't taken this phone's
+   * day-to-day key yet and the identity would have to approve. Absent when it can.
+   */
+  blocked?: "remover" | "key";
+  /** The other parents on the devices listing it: who may have asked, when `remover` is unknown. */
+  candidates: string[];
 }
 
 /** Pending removals of this install's root, merged across devices (for the removal notice). */
@@ -198,25 +209,38 @@ export function removalsAgainstMe(
   keys: GuardianKeysState,
   me: string,
   now: number,
+  workingPubkey?: string | null,
 ): RemovalAgainstMe[] {
-  const out = new Map<string, RemovalAgainstMe & { removers: Set<string | null> }>();
+  const out = new Map<string, RemovalAgainstMe & { removers: Set<string | null>; noKey: boolean }>();
   for (const w of wards) {
+    const g = w.device.guardians!;
     for (const p of pendingFor(w.device.guardians, keys, me, now)) {
       if (p.role !== "against-me") continue;
-      const e = out.get(p.d) ?? { d: p.d, devices: [], children: [], objected: true, removers: new Set<string | null>() };
+      const e =
+        out.get(p.d) ??
+        { d: p.d, devices: [], children: [], objected: true, candidates: [], removers: new Set<string | null>(), noKey: false };
       e.devices.push(w.device.label);
       if (!e.children.includes(w.childName)) e.children.push(w.childName);
-      e.removers.add(removerOn(w.device.guardians!, me));
-      if (!(keys.objected?.[w.device.devicePubkey] ?? []).includes(p.id ?? p.d)) e.objected = false;
+      const raw = g.pending.find((x) => x.d === p.d && (p.id === undefined || x.id === p.id));
+      e.removers.add(removerOn(g, me, raw));
+      for (const r of g.roots) if (r.root !== me && !e.candidates.includes(r.root)) e.candidates.push(r.root);
+      const done = (keys.objected?.[w.device.devicePubkey] ?? []).includes(p.id ?? p.d);
+      if (!done) e.objected = false;
+      // Mirrors `objectorOps`: W listed under this identity, or a phone-held
+      // identity signing for itself.
+      const s = workingPubkey ? keyStanding(g, workingPubkey) : { as: "none" as const };
+      const canSign = (!!keys.root && s.as === "working" && s.root === me) || (phoneHeldRoot(keys) && keyStanding(g, me).as === "root");
+      if (!done && !canSign) e.noKey = true;
       if (p.takesEffectAt !== undefined) {
         e.takesEffectAt = e.takesEffectAt === undefined ? p.takesEffectAt : Math.min(e.takesEffectAt, p.takesEffectAt);
       }
       out.set(p.d, e);
     }
   }
-  return [...out.values()].map(({ removers, ...e }) => {
+  return [...out.values()].map(({ removers, noKey, ...e }) => {
     const only = removers.size === 1 ? [...removers][0] : null;
-    return { ...e, ...(only ? { remover: only } : {}) };
+    const blocked = e.objected ? undefined : !only ? ("remover" as const) : noKey ? ("key" as const) : undefined;
+    return { ...e, ...(only ? { remover: only } : {}), ...(blocked ? { blocked } : {}) };
   });
 }
 
@@ -443,4 +467,20 @@ export function guardiansSubroute(hash = window.location.hash): string | null {
   const parts = hash.replace(/^#\/?/, "").split("/");
   if (parts[0] !== "settings" || parts[1] !== "guardians") return null;
   return parts.slice(2).join("/");
+}
+
+/** A device's clock notice is shown this long after its clamp counter last rose. */
+export const CLOCK_NOTICE_SECONDS = 3 * 24 * 60 * 60;
+
+/** The plain line for a device whose clock is behind (decision D1's clamp counter rose). */
+export function clockBehindLine(label: string): string {
+  return `${label}'s clock is behind this phone's; rules still apply, in the order they arrive.`;
+}
+
+/** The devices whose clamp counter rose between two reports within `CLOCK_NOTICE_SECONDS` of `now`. */
+export function clockBehindWards(wards: readonly WardRef[], keys: GuardianKeysState, now: number): WardRef[] {
+  return wards.filter((w) => {
+    const at = keys.clamped?.[w.device.devicePubkey]?.roseAt;
+    return at !== undefined && now - at < CLOCK_NOTICE_SECONDS;
+  });
 }

@@ -4,6 +4,9 @@ import { parsePresenceCode } from "../keys/presenceCode";
 import {
   androidWardsSettingPin,
   androidWardsWithoutPin,
+  clockBehindLine,
+  clockBehindWards,
+  CLOCK_NOTICE_SECONDS,
   pinStateOf,
   durationWords,
   familyWards,
@@ -106,14 +109,24 @@ describe("guardians view", () => {
     expect(pendingFor(g, keys, ME, 850).map((p) => p.d)).toEqual([removalOfMe]);
     expect(pendingFor(g, keys, ME, 900)).toEqual([]);
     const wards = familyWards(family([device("Laptop", LAPTOP, "linux", g), device("Phone", PHONE, "android", g)]));
-    expect(removalsAgainstMe(wards, keys, ME, 100)).toEqual([
-      { d: removalOfMe, devices: ["Laptop", "Phone"], children: ["Robin"], takesEffectAt: 500, remover: OTHER, objected: false },
+    expect(removalsAgainstMe(wards, keys, ME, 100, MY_W)).toEqual([
+      {
+        d: removalOfMe,
+        devices: ["Laptop", "Phone"],
+        children: ["Robin"],
+        takesEffectAt: 500,
+        remover: OTHER,
+        objected: false,
+        candidates: [OTHER],
+      },
     ]);
     // Objected at one device only: not yet "objected".
     const one = { ...keys, objected: { [LAPTOP]: [removalOfMe] } };
-    expect(removalsAgainstMe(wards, one, ME, 100)[0].objected).toBe(false);
+    expect(removalsAgainstMe(wards, one, ME, 100, MY_W)[0].objected).toBe(false);
     const both = { ...keys, objected: { [LAPTOP]: [removalOfMe], [PHONE]: [removalOfMe] } };
-    expect(removalsAgainstMe(wards, both, ME, 100)[0].objected).toBe(true);
+    expect(removalsAgainstMe(wards, both, ME, 100, MY_W)[0].objected).toBe(true);
+    // A device that doesn't list this phone's key: it can't object on its own.
+    expect(removalsAgainstMe(wards, keys, ME, 100, "ab".repeat(32))[0].blocked).toBe("key");
     expect(removalsAgainstMe(wards, both, ME, 900)).toEqual([]);
   });
 
@@ -192,5 +205,38 @@ describe("guardians view", () => {
     expect(guardiansSubroute("#/settings/guardians/join")).toBe("join");
     expect(guardiansSubroute("#/settings")).toBeNull();
     expect(guardiansSubroute("#/settings/add-child")).toBeNull();
+  });
+
+  it("names the remover the device reports, and asks who when it can't tell (follow-ups to Q1)", () => {
+    const THIRD = "6".repeat(64);
+    const keys = { ...emptyGuardianKeys(), root: signetRoot() };
+    const three = (signer?: string) =>
+      guardians({
+        roots: [
+          { root: ME, keys: [MY_W] },
+          { root: OTHER, keys: [] },
+          { root: THIRD, keys: [] },
+        ],
+        pending: [{ d: removalOfMe, kind: "removal", expiresAt: 900, ...(signer ? { signer } : {}) }],
+      });
+    const named = familyWards(family([device("Laptop", LAPTOP, "linux", three(THIRD))]));
+    expect(removalsAgainstMe(named, keys, ME, 100, MY_W)[0]).toMatchObject({ remover: THIRD });
+    expect(removalsAgainstMe(named, keys, ME, 100, MY_W)[0].blocked).toBeUndefined();
+    const unknown = familyWards(family([device("Laptop", LAPTOP, "linux", three())]));
+    const r = removalsAgainstMe(unknown, keys, ME, 100, MY_W)[0];
+    expect(r.remover).toBeUndefined();
+    expect(r.blocked).toBe("remover");
+    expect(r.candidates.sort()).toEqual([OTHER, THIRD].sort());
+  });
+
+  it("shows a device's clock notice only after its clamp counter rose, for a few days", () => {
+    const wards = familyWards(family([device("Robin's phone", PHONE, "android", guardians())]));
+    const keys = { ...emptyGuardianKeys(), clamped: { [PHONE]: { count: 2, roseAt: 1000 } } };
+    expect(clockBehindWards(wards, keys, 1000 + 60).map((w) => w.device.label)).toEqual(["Robin's phone"]);
+    expect(clockBehindWards(wards, keys, 1000 + CLOCK_NOTICE_SECONDS)).toEqual([]);
+    expect(clockBehindWards(wards, { ...emptyGuardianKeys(), clamped: { [PHONE]: { count: 2 } } }, 1060)).toEqual([]);
+    expect(clockBehindLine("Robin's phone")).toBe(
+      "Robin's phone's clock is behind this phone's; rules still apply, in the order they arrive.",
+    );
   });
 });

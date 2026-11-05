@@ -132,6 +132,12 @@ export interface GuardianKeysState {
    * arrives again; only a newer one is acted on.
    */
   statusRepliedTs: Record<string, number>;
+  /**
+   * Per ward machine: its STATUS `clamped` counter (events dated ahead of its
+   * clock, taken at its own time instead, decision D1) as last read, and when
+   * it last rose between two STATUS reports (unix s, this phone's clock).
+   */
+  clamped: Record<string, { count: number; roseAt?: number }>;
   /** The family roster as merged from other guardians' installs (subject = `Child.rosterId`). */
   roster: LocalRoster;
   /** Statements this install sent, by `d`. */
@@ -169,7 +175,7 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -198,6 +204,15 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     statusRepliedTs: Object.fromEntries(
       Object.entries(rec(o.statusRepliedTs) as Record<string, unknown>).filter(
         (e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1]),
+      ),
+    ),
+    clamped: Object.fromEntries(
+      Object.entries(rec(o.clamped) as Record<string, unknown>).filter(
+        (e): e is [string, { count: number; roseAt?: number }] =>
+          typeof e[1] === "object" &&
+          e[1] !== null &&
+          typeof (e[1] as { count?: unknown }).count === "number" &&
+          ((e[1] as { roseAt?: unknown }).roseAt === undefined || typeof (e[1] as { roseAt?: unknown }).roseAt === "number"),
       ),
     ),
     roster:

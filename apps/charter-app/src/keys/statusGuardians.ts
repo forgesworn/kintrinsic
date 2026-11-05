@@ -1,21 +1,24 @@
 // STATUS `guardians` (contract, *Guardian roots and working keys*, STATUS):
 // who the ward trusts, as it sees it.
 //
-//   { roots: [{ root, keys: [W…] }], pending: [{ d, id?, kind, takesEffectAt?, expiresAt }],
+//   { roots: [{ root, keys: [W…] }], pending: [{ d, id?, signer?, kind, takesEffectAt?, expiresAt }],
 //     tombstones, relays, pinSet?, clamped? }
 //
 // Parsed strictly: anything malformed drops the WHOLE object (undefined), so a
 // half-read view never says a key is or isn't trusted when it can't be sure.
-// Absent means a ward that predates the section. `pending[].id`, `pinSet` and
-// `clamped` are newer than the rest, so a ward that doesn't send them yet
+// Absent means a ward that predates the section. `pending[].id`,
+// `pending[].signer`, `pinSet` and `clamped` are newer than the rest, so a ward that doesn't send them yet
 // still parses; each is checked when present.
 
 import { splitPendingD, type PendingType, type StatusGuardians as RefStatusGuardians } from "./sdk";
 
 // The newer fields are optional here whether or not the reference has them
 // yet, so both shapes compile: a ward that predates them still parses.
-/** One pending statement a ward reports; `id` is its event id (newer wards). */
-export type StatusPending = Omit<RefStatusGuardians["pending"][number], "id"> & { id?: string };
+/**
+ * One pending statement a ward reports; `id` is its event id and `signer` the
+ * 64-hex key that signed it (newer wards).
+ */
+export type StatusPending = Omit<RefStatusGuardians["pending"][number], "id" | "signer"> & { id?: string; signer?: string };
 
 /** STATUS `guardians` as this app reads it: the reference's shape plus the newer fields. */
 export interface StatusGuardians extends Omit<RefStatusGuardians, "pending" | "pinSet" | "clamped"> {
@@ -67,9 +70,11 @@ export function parseStatusGuardians(
     if (!isUint(e.expiresAt)) return undefined;
     if (e.takesEffectAt !== undefined && !isUint(e.takesEffectAt)) return undefined;
     if (e.id !== undefined && (typeof e.id !== "string" || !HEX64.test(e.id))) return undefined;
+    if (e.signer !== undefined && (typeof e.signer !== "string" || !HEX64.test(e.signer))) return undefined;
     pending.push({
       d: e.d,
       ...(e.id !== undefined ? { id: e.id as string } : {}),
+      ...(e.signer !== undefined ? { signer: e.signer as string } : {}),
       kind: e.kind as PendingType,
       ...(e.takesEffectAt !== undefined ? { takesEffectAt: e.takesEffectAt as number } : {}),
       expiresAt: e.expiresAt,
