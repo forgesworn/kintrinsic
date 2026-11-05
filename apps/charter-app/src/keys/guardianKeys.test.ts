@@ -1437,6 +1437,34 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(other.rulesFor(subject).map((r) => r.event.id)).toEqual([held.budget.id, held.schedule.id]);
   });
 
+  it("a rule dated far ahead counts from when it arrived, so a later rule from the other parent still wins", async () => {
+    const W2sk = generateSecretKey();
+    const subject = "aa".repeat(32);
+    const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", rosterId: subject, devices: [readyWard(PHONE, "android")] };
+    const h = harness([child]);
+    const YEAR = 365 * 86400;
+    // This parent's phone was a year ahead once: its rule arrives dated then.
+    const ahead = clause(wSk, "schedule", T + YEAR, { ahead: 1 });
+    expect(h.gk.recordRules(subject, [{ event: ahead }], { local: true })).toEqual(["schedule"]);
+    expect(h.keys().ruleSeenAt?.[ahead.id]).toBe(T);
+    // The other parent's ordinary rule, set a minute later: it is the rule in force.
+    h.setNow(T + 60);
+    const later = clause(W2sk, "schedule", T + 60, { later: 1 });
+    expect(h.gk.recordRules(subject, [{ event: later }])).toEqual(["schedule"]);
+    expect(h.gk.ruleInForce(subject, "schedule")?.event.id).toBe(later.id);
+    // The far-ahead rule coming round again in a roster keeps its first time.
+    h.setNow(T + 3600);
+    expect(h.gk.recordRules(subject, [{ event: ahead }])).toEqual([]);
+    expect(h.gk.ruleInForce(subject, "schedule")?.event.id).toBe(later.id);
+    // An ordinary rule no later than the far-ahead one's arrival still loses to it.
+    const h2 = harness([child]);
+    h2.gk.recordRules(subject, [{ event: ahead }]);
+    expect(h2.gk.recordRules(subject, [{ event: clause(W2sk, "schedule", T - 1) }])).toEqual([]);
+    // The same goes for a device rule against a far-ahead family-wide one.
+    h2.setNow(T + 10);
+    expect(h2.gk.recordRules(subject, [{ event: clause(W2sk, "schedule", T + 10, { phone: 1 }), machine: PHONE }])).toEqual([`schedule@${PHONE}`]);
+  });
+
   it("keys rules by device: device rules travel apart, and a newer family-wide rule replaces older ones", async () => {
     const W2sk = generateSecretKey();
     const W2 = getPublicKey(W2sk);
@@ -1582,6 +1610,7 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(h2.gk.ruleInForce(subject, "schedule")!.event.id).toBe(low.id);
 
     // A newer received one wins, and is to be put on the screens once.
+    h.setNow(T + 5);
     const theirs = clause(other, "schedule", T + 5);
     expect(h.gk.recordRules(subject, [{ event: theirs }])).toEqual(["schedule"]);
     expect(Object.keys(h.gk.rulesToApply(subject))).toEqual(["schedule"]);
@@ -1590,6 +1619,7 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(h.gk.ruleInForce(subject, "schedule", PHONE)).toMatchObject({ key: "schedule", local: false });
 
     // A local edit made after it wins.
+    h.setNow(T + 6);
     const later = clause(wSk, "schedule", T + 6);
     expect(h.gk.recordRules(subject, [{ event: later }], { local: true })).toEqual(["schedule"]);
     expect(h.gk.ruleInForce(subject, "schedule")).toMatchObject({ local: true });

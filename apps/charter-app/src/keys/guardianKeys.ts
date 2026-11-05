@@ -1498,11 +1498,13 @@ export class GuardianKeys {
    * Keep signed inner CLAUSE events as the rules in force for the child with
    * roster subject `subject`, keyed by `(kind, device)`: a family-wide rule
    * (no `machine`) went the same to every device, a device rule to that
-   * device only. Per key the newest `issuedAt` wins; a tie goes to the lower
+   * device only. Per key the newest effective time wins: `min(issuedAt, when
+   * this install first saw it)`, as a ward clamps (decision D1), so one rule
+   * dated far ahead can't hide every later one. A tie goes to the lower
    * event id, whether this install signed it or not, so both phones and the
    * wards agree. A ward holds one rule per kind, so a family-wide
    * rule replaces that kind's device rules it beats, and a device rule the
-   * family-wide one beats is already replaced: newer `issuedAt` wins, a tie
+   * family-wide one beats is already replaced: the newer effective time wins, a tie
    * goes to the lower event id, whichever arrives first. `local`
    * marks rules this install signed itself. A malformed event is ignored.
    * Returns the keys that changed (`ruleKey`).
@@ -1513,26 +1515,38 @@ export class GuardianKeys {
     const held = { ...(state.rules?.[subject] ?? {}) };
     const local = { ...(state.localRules?.[subject] ?? {}) };
     const changed = new Set<string>();
-    const issuedAtOf = (key: string) => (held[key] ? (clauseOf(held[key])?.issuedAt ?? -1) : -1);
+    const now = this.deps.now();
+    const seen = { ...(state.ruleSeenAt ?? {}) };
+    let stamped = false;
+    // A rule's effective time: its issuedAt, or when first seen here if that was earlier.
+    const effective = (e: SignedEvent, issuedAt: number): number => {
+      if (seen[e.id] === undefined && issuedAt > now) {
+        seen[e.id] = now;
+        stamped = true;
+      }
+      return seen[e.id] === undefined ? issuedAt : Math.min(issuedAt, seen[e.id]);
+    };
+    const effectiveOf = (key: string) => (held[key] ? effective(held[key], clauseOf(held[key])?.issuedAt ?? -1) : -1);
     for (const { event: e, machine } of entries) {
       const c = clauseOf(e);
       if (!c || (machine !== undefined && !HEX64.test(machine))) continue;
       const key = ruleKey(c.kind, machine);
-      const cur = held[key] ? clauseOf(held[key]) : null;
-      if (cur) {
-        if (cur.issuedAt > c.issuedAt) continue;
+      const at = effective(e, c.issuedAt);
+      if (held[key]) {
+        const curAt = effectiveOf(key);
+        if (curAt > at) continue;
         // A tie goes to the lower event id, local or received, as on the wards.
-        if (cur.issuedAt === c.issuedAt && held[key].id <= e.id) continue;
+        if (curAt === at && held[key].id <= e.id) continue;
       }
-      // Family-wide against device rules: newer issuedAt wins, a tie goes to the lower event id.
-      if (machine !== undefined && held[c.kind] && !beats(c.issuedAt, e.id, issuedAtOf(c.kind), held[c.kind].id)) continue;
+      // Family-wide against device rules: the newer effective time wins, a tie goes to the lower event id.
+      if (machine !== undefined && held[c.kind] && !beats(at, e.id, effectiveOf(c.kind), held[c.kind].id)) continue;
       held[key] = plain(e);
       if (opts.local) local[key] = e.id;
       else delete local[key];
       changed.add(key);
       if (machine === undefined) {
         for (const k of Object.keys(held)) {
-          if (k.startsWith(`${c.kind}@`) && beats(c.issuedAt, e.id, issuedAtOf(k), held[k].id)) {
+          if (k.startsWith(`${c.kind}@`) && beats(at, e.id, effectiveOf(k), held[k].id)) {
             delete held[k];
             delete local[k];
             changed.add(k);
@@ -1540,12 +1554,16 @@ export class GuardianKeys {
         }
       }
     }
-    if (changed.size > 0) {
-      this.deps.write((k) => ({
-        ...k,
-        rules: { ...(k.rules ?? {}), [subject]: held },
-        localRules: { ...(k.localRules ?? {}), [subject]: local },
-      }));
+    if (changed.size > 0 || stamped) {
+      this.deps.write((k) => {
+        const rules = changed.size > 0 ? { ...(k.rules ?? {}), [subject]: held } : (k.rules ?? {});
+        return {
+          ...k,
+          rules,
+          localRules: changed.size > 0 ? { ...(k.localRules ?? {}), [subject]: local } : k.localRules,
+          ruleSeenAt: boundSeen(seen, rules),
+        };
+      });
     }
     return [...changed].sort();
   }
@@ -1928,6 +1946,20 @@ export interface RuleEntry {
 }
 
 /** Does a rule (`issuedAt`, event id) beat another: newer wins, a tie goes to the lower id. */
+/** First-seen times kept for rules dated ahead (`ruleSeenAt`); the oldest not held go first. */
+const MAX_RULE_SEEN = 512;
+
+/** `seen` bounded to `MAX_RULE_SEEN`, never dropping a rule still held. */
+function boundSeen(seen: Record<string, number>, rules: Record<string, Record<string, SignedEvent>>): Record<string, number> {
+  const ids = Object.keys(seen);
+  if (ids.length <= MAX_RULE_SEEN) return seen;
+  const held = new Set(Object.values(rules).flatMap((byKey) => Object.values(byKey).map((e) => e.id)));
+  const drop = ids.filter((id) => !held.has(id)).sort((a, b) => seen[a] - seen[b]).slice(0, ids.length - MAX_RULE_SEEN);
+  const out = { ...seen };
+  for (const id of drop) delete out[id];
+  return out;
+}
+
 function beats(at: number, id: string, otherAt: number, otherId: string): boolean {
   return at > otherAt || (at === otherAt && id < otherId);
 }

@@ -151,13 +151,21 @@ export interface GuardianKeysState {
    * The rules in force per child (roster subject), as signed inner CLAUSE
    * events keyed by `(kind, device)`: the kind alone for a family-wide rule,
    * `kind@machine` for a rule that went to one device (decision Q3). Newest
-   * `issuedAt` per key wins. What this install signed itself, and what
+   * effective time per key wins (`ruleSeenAt`). What this install signed itself, and what
    * another guardian's roster carried from a current signer. Shared in the
    * roster so both phones hold the same.
    */
   rules: Record<string, Record<string, SignedEvent>>;
   /** Per child and rule key: the event id of the rule this install signed itself, while it is the one held. */
   localRules: Record<string, Record<string, string>>;
+  /**
+   * When this install first saw a rule dated ahead of its own clock (unix s),
+   * by event id. A rule's effective time is `min(issuedAt, first seen)`, as a
+   * ward clamps it (decision D1), so one rule dated far ahead can't hide every
+   * later rule. Recorded once, so a rule that arrives again in a later roster
+   * keeps its first time. Rules dated at or before their arrival need none.
+   */
+  ruleSeenAt?: Record<string, number>;
   /**
    * Per child and rule key: the event id of the received rule last put on
    * this install's rule screens (or left as set elsewhere when the screen
@@ -294,6 +302,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     ),
     presenceConfirmed: rec(o.presenceConfirmed) as Record<string, number>,
     heldRosters: rec(o.heldRosters) as Record<string, HeldRoster>,
+    ruleSeenAt: Object.fromEntries(Object.entries(rec(o.ruleSeenAt)).filter(([, v]) => typeof v === "number" && Number.isFinite(v))) as Record<string, number>,
     restoredFrom: reviveRestored(o.restoredFrom),
   };
 }
