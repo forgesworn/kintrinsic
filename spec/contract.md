@@ -2876,6 +2876,10 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
       A root at its quota can't approve new working keys until a re-pair;
       other roots are unaffected.
     - A ward persists a statement before it applies it.
+    - Known limit on upgrade: a far-future machine-wide content clause held
+      from before the upgrade, which records no signer and so is read as the
+      pinned root's, holds its slot for the pinned root until the ward's
+      clock passes it; any other current signer can still replace it.
     - A ward keeps its guardian-keys state in two copies, each written
       atomically, and reads either. If neither can be read, it fails closed:
       the signer set is empty, so nothing signed is accepted, nothing is
