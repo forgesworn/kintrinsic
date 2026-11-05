@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "
 import { getPublicKey, SimplePool, type NostrEvent } from "nostr-tools";
 import type { Child, SignerState } from "../domain/types";
 import { GuardianKeys, type SendReport } from "../keys/guardianKeys";
+import type { SignedEvent } from "../keys/sdk";
 import { reviveGuardianKeys, type GuardianKeysState, type InstallRoot, type RootVia } from "../keys/state";
 import type { ChildReadiness } from "../keys/versionGate";
 import type { GuardianOps } from "../wire/giftwrap";
@@ -195,6 +196,10 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       knownRoot: () => keysRef.current.root?.pubkey,
       workingKey: installWorkingKey,
       pickOps: (machine) => (keys.keyFor(machine) === "working" ? keys.workingOps() : undefined),
+      onRulesSigned: (childId, inner) => {
+        const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
+        if (child?.rosterId) keys.recordRules(child.rosterId, inner as SignedEvent[]);
+      },
     }),
     [keys],
   );
@@ -204,6 +209,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
   // rate-limited inside, so a heartbeat that changes nothing costs nothing.
   const syncing = useRef(false);
   const rootKey = keysState?.root?.pubkey;
+  const rules = keysState?.rules;
   useEffect(() => {
     if (!rootKey || syncing.current) return;
     syncing.current = true;
@@ -239,13 +245,15 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       keysChildren(children, DEFAULT_RELAYS).map((c) => [c.rosterId, c.name, c.colour, c.devices.map((d) => [d.machine, d.name])]),
       keys.reportedRoots(),
       keys.trustedRoots(),
+      // The rules in force travel with it (Q3): a new rule shares it again.
+      Object.entries(rules ?? {}).map(([subject, byKind]) => [subject, Object.values(byKind).map((e) => e.id).sort()]),
     ]);
     if (sig === lastRoster.current) return;
     lastRoster.current = sig;
     void keys.sendRoster().catch(() => {
       lastRoster.current = null;
     });
-  }, [children, rootKey, keys]);
+  }, [children, rootKey, keys, rules]);
 
   const approveInstall = useCallback<GuardianKeysApi["approveInstall"]>(
     async (opts = {}) => {

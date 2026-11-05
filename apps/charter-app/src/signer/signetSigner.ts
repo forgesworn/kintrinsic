@@ -39,6 +39,8 @@ export interface SignetSignerConfig {
   workingKey?: () => Uint8Array;
   /** Per-ward key choice (see RealSignerDeps). */
   pickOps?: RealSignerDeps["pickOps"];
+  /** Keep a rule change's signed clauses for the family roster (Q3). */
+  onRulesSigned?: RealSignerDeps["onRulesSigned"];
 }
 
 /**
@@ -136,5 +138,6 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
     childPolicies: config.childPolicies,
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),
     pickOps: config.pickOps,
+    onRulesSigned: config.onRulesSigned,
   });
 }

@@ -1039,3 +1039,39 @@ describe("RealSigner.signMaintenanceClause", () => {
     expect(shut.issuedAt).toBeGreaterThanOrEqual(open.issuedAt);
   });
 });
+
+describe("RealSigner keeps a rule change's signed clauses for the family roster (Q3)", () => {
+  it("hands on one signed inner clause per kind once sent, and nothing when every send failed", async () => {
+    const kept: { childId: string; inner: NostrEvent[] }[] = [];
+    const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }, { id: "dev2", pubkey: DPK2 }], relays: RELAYS };
+    const signer = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async () => {},
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (childId, inner) => kept.push({ childId, inner }),
+    });
+    await signer.connect("local");
+    await signer.signClause("child_sam", devicePolicy);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].childId).toBe("child_sam");
+    expect(kept[0].inner.map((e) => JSON.parse(e.content).kind).sort()).toEqual(["budget", "schedule"]);
+    for (const e of kept[0].inner) {
+      expect(e.kind).toBe(31113);
+      expect(e.pubkey).toBe(GUARDIAN);
+    }
+
+    const failing = new RealSigner({
+      connectGuardian: async () => localGuardian(),
+      publish: async () => {
+        throw new Error("no relay");
+      },
+      resolveChild: () => target,
+      now: () => 1_700_000_000,
+      onRulesSigned: (childId, inner) => kept.push({ childId, inner }),
+    });
+    await failing.connect("local");
+    await expect(failing.signClause("child_sam", devicePolicy)).rejects.toThrow();
+    expect(kept).toHaveLength(1);
+  });
+});

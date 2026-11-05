@@ -67,7 +67,7 @@ import {
   type SignedEvent,
   type StatementType,
 } from "./sdk";
-import { giftWrapSigned, type GuardianOps } from "../wire/giftwrap";
+import { CHARTER_DEVICE_CLAUSE, giftWrapSigned, type GuardianOps } from "../wire/giftwrap";
 import { QueuedForHomeNetworkError } from "../signer/routePublish";
 import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } from "./versionGate";
 import { keyStanding, type StatusGuardians } from "./statusGuardians";
@@ -1434,6 +1434,67 @@ export class GuardianKeys {
   }
 
   // ---------------------------------------------------------------------
+  // The rules in force, carried by the roster (decision Q3)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Keep signed inner CLAUSE events as the rules in force for the child with
+   * roster subject `subject`: per clause kind, the newest `issuedAt` wins. A
+   * malformed event is ignored. Returns the kinds that changed.
+   */
+  recordRules(subject: string, events: readonly SignedEvent[]): string[] {
+    if (!HEX64.test(subject)) return [];
+    const held = { ...(this.deps.read().keys.rules?.[subject] ?? {}) };
+    const changed: string[] = [];
+    for (const e of events) {
+      const c = clauseOf(e);
+      if (!c) continue;
+      const cur = held[c.kind] ? clauseOf(held[c.kind]) : null;
+      // Newest issuedAt wins; a tie keeps the lower event id, as wards do.
+      if (cur && (cur.issuedAt > c.issuedAt || (cur.issuedAt === c.issuedAt && held[c.kind].id <= e.id))) continue;
+      held[c.kind] = plain(e);
+      changed.push(c.kind);
+    }
+    if (changed.length > 0) this.deps.write((k) => ({ ...k, rules: { ...(k.rules ?? {}), [subject]: held } }));
+    return changed.sort();
+  }
+
+  /** The rules in force this install holds for one child, oldest kind name first. */
+  rulesFor(subject: string): SignedEvent[] {
+    const held = this.deps.read().keys.rules?.[subject] ?? {};
+    return Object.keys(held)
+      .sort()
+      .map((k) => held[k]);
+  }
+
+  /**
+   * The rules a verified roster carried (content `children[].rules`), each
+   * kept only if it verifies as a CLAUSE and its author is a current signer
+   * of the family: a root or working key that a ward this install vouches
+   * for reports. Older rosters carry none. Returns the subjects that changed.
+   */
+  private takeRosterRules(inner: SignedEvent): string[] {
+    let children: unknown;
+    try {
+      children = (JSON.parse(inner.content) as { children?: unknown }).children;
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(children)) return [];
+    const signers = new Set(this.vouchedRoots({ presenceWards: false }).flatMap((r) => [r.root, ...r.keys]));
+    const changed: string[] = [];
+    for (const ch of children) {
+      const c = ch as { subject?: unknown; rules?: unknown };
+      if (typeof c.subject !== "string" || !HEX64.test(c.subject) || !Array.isArray(c.rules)) continue;
+      const ok = c.rules.slice(0, 64).filter(
+        (e): e is SignedEvent => isSignedClause(e) && signers.has((e as SignedEvent).pubkey),
+      );
+      if (this.recordRules(c.subject, ok).length > 0) changed.push(c.subject);
+    }
+    return changed.sort();
+  }
+
+  // ---------------------------------------------------------------------
   // Family roster (31119), working key ↔ working key
   // ---------------------------------------------------------------------
 
@@ -1500,13 +1561,19 @@ export class GuardianKeys {
     if (recipients.length === 0 || children.length === 0) return { sent: [], held: [], failed: [] };
     const w = this.workingOps();
     const event = await buildFamilyRoster(signerOf(w), {
-      children: children.map(({ subject, issuedAt, name, colour, devices }) => ({
-        subject,
-        issuedAt,
-        name,
-        colour,
-        devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })),
-      })),
+      // Each child also carries the rules in force (Q3), outside the record's
+      // own `issuedAt`: rules merge per kind, records per child.
+      children: children.map(({ subject, issuedAt, name, colour, devices }) => {
+        const rules = this.rulesFor(subject);
+        return {
+          subject,
+          issuedAt,
+          name,
+          colour,
+          devices: devices.map(({ machine, platform, name: n }) => ({ machine, platform, name: n })),
+          ...(rules.length > 0 ? { rules } : {}),
+        } as Parameters<typeof buildFamilyRoster>[1]["children"][number];
+      }),
       approval: root.approval,
       createdAt: this.deps.now(),
     });
@@ -1604,6 +1671,8 @@ export class GuardianKeys {
     const merged = mergeRoster(this.localRoster(), inbound, this.vouchedRoots(), this.deps.now());
     if (!merged.ok) return merged;
     this.deps.write((k) => ({ ...k, roster: merged.roster }));
+    // The sender checked out: take the rules it carries, each checked itself.
+    this.takeRosterRules(inbound.inner);
     return { ok: true, updated: merged.updated };
   }
 
@@ -1695,6 +1764,42 @@ export class GuardianKeys {
       }
     }
     return [...out.values()];
+  }
+}
+
+/** A CLAUSE payload's kind and `issuedAt`, from a signed inner event; null when it isn't one. */
+function clauseOf(e: SignedEvent): { kind: string; issuedAt: number } | null {
+  if (e.kind !== CHARTER_DEVICE_CLAUSE) return null;
+  try {
+    const c = JSON.parse(e.content) as { v?: unknown; kind?: unknown; issuedAt?: unknown };
+    if (c.v !== 1 || typeof c.kind !== "string" || c.kind.length === 0 || c.kind.length > 32) return null;
+    if (typeof c.issuedAt !== "number" || !Number.isSafeInteger(c.issuedAt) || c.issuedAt < 0) return null;
+    return { kind: c.kind, issuedAt: c.issuedAt };
+  } catch {
+    return null;
+  }
+}
+
+/** A well-formed, validly signed CLAUSE event. */
+function isSignedClause(e: unknown): boolean {
+  if (typeof e !== "object" || e === null) return false;
+  const o = e as Record<string, unknown>;
+  if (
+    typeof o.id !== "string" ||
+    typeof o.pubkey !== "string" ||
+    !HEX64.test(o.pubkey) ||
+    typeof o.sig !== "string" ||
+    typeof o.content !== "string" ||
+    typeof o.created_at !== "number" ||
+    !Array.isArray(o.tags)
+  ) {
+    return false;
+  }
+  if (!clauseOf(o as unknown as SignedEvent)) return false;
+  try {
+    return verifyEvent(o as unknown as NostrEvent);
+  } catch {
+    return false;
   }
 }
 

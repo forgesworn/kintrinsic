@@ -110,6 +110,18 @@ export async function giftWrapSigned(
 }
 
 /**
+ * Sign the inner CLAUSE event (31113) alone: what `giftWrapClause` wraps, and
+ * what the family roster carries as a rule in force (Q3).
+ */
+export async function signClauseInner(
+  payload: ClausePayload,
+  guardian: GuardianOps,
+  createdAt: number,
+): Promise<NostrEvent> {
+  return guardian.signEvent({ kind: CHARTER_DEVICE_CLAUSE, created_at: createdAt, tags: [MARKER], content: JSON.stringify(payload) });
+}
+
+/**
  * Build the inner CLAUSE event (31113) and gift-wrap it to `devicePubkey`.
  * Returns the outer 1059 ready to publish to the device's relay(s).
  */

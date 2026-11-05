@@ -1335,3 +1335,67 @@ describe("moving a phone-held root to My Signet (decision D5)", () => {
     expect(gk.phoneKeyRetirable()).toBe(false);
   });
 });
+
+describe("the roster carries the rules in force (decision Q3)", () => {
+  const clause = (sk: Uint8Array, kind: string, issuedAt: number, body: unknown = {}) =>
+    finalizeEvent(
+      { kind: 31113, created_at: issuedAt, tags: [["t", "charter-device"]], content: JSON.stringify({ v: 1, kind, issuedAt, body }) },
+      sk,
+    ) as SignedEvent;
+
+  it("sends one clause per kind, and the other install keeps only verified ones from a current signer, newest per kind", async () => {
+    const W2sk = generateSecretKey();
+    const W2 = getPublicKey(W2sk);
+    const guardians = { roots: [{ root: R, keys: [W] }, { root: R2, keys: [W2] }], pending: [], tombstones: 0, relays: [] };
+    const subject = "aa".repeat(32);
+    const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", rosterId: subject, devices: [{ ...readyWard(PHONE, "android"), guardians }] };
+    const h = harness([child]);
+    await connectSignetRoot(h);
+    h.gk.anchorRoot(R2);
+    // Newest per kind: the older schedule is replaced, an older one after it is ignored.
+    expect(h.gk.recordRules(subject, [clause(wSk, "schedule", T - 10), clause(wSk, "budget", T - 5)])).toEqual(["budget", "schedule"]);
+    expect(h.gk.recordRules(subject, [clause(wSk, "schedule", T)])).toEqual(["schedule"]);
+    expect(h.gk.recordRules(subject, [clause(wSk, "schedule", T - 1)])).toEqual([]);
+    h.published.length = 0;
+    await h.gk.sendRoster();
+    const opened = unwrapToWorkingKey(h.published[0].wrap, W2sk)!;
+    const sent = JSON.parse(opened.inner.content).children[0].rules as SignedEvent[];
+    expect(sent.map((e) => JSON.parse(e.content).kind)).toEqual(["budget", "schedule"]);
+
+    // Smuggle in a clause from a stranger and a tampered one: the sender's own
+    // signature covers them, but each rule is checked on its own.
+    const stranger = generateSecretKey();
+    const tampered = { ...clause(wSk, "content", T), content: JSON.stringify({ v: 1, kind: "content", issuedAt: T, body: { x: 1 } }) };
+    const content = JSON.parse(opened.inner.content);
+    content.children[0].rules = [...sent, clause(stranger, "apps", T), tampered];
+    const inner = finalizeEvent({ kind: opened.inner.kind, created_at: T, tags: opened.inner.tags, content: JSON.stringify(content) }, wSk) as SignedEvent;
+
+    let keys2 = emptyGuardianKeys();
+    const other = new GuardianKeys({
+      read: () => ({ keys: keys2, children: [{ id: "x", name: "?", colour: "#000", devices: [{ ...readyWard(LAPTOP, "linux"), guardians }] }] }),
+      write: (f) => {
+        keys2 = f(keys2);
+      },
+      workingKey: () => W2sk,
+      root: () => opsOf(r2Sk),
+      publish: async () => {},
+      now: () => T,
+      defaultRelays: [],
+    });
+    other.anchorRoot(R);
+    // The other parent already holds a newer budget of their own.
+    other.recordRules(subject, [clause(W2sk, "budget", T + 5)]);
+    expect(other.receiveRoster({ sealAuthor: W, inner })).toMatchObject({ ok: true });
+    const held = keys2.rules[subject];
+    expect(Object.keys(held).sort()).toEqual(["budget", "schedule"]);
+    expect(held.schedule.id).toBe(sent[1].id);
+    expect(held.budget.pubkey).toBe(W2);
+    // And it shares them on in its own roster.
+    expect(other.rulesFor(subject).map((e) => e.id)).toEqual([held.budget.id, held.schedule.id]);
+  });
+
+  it("holds no rules for a child it was never told about", async () => {
+    const h = harness([]);
+    expect(h.gk.rulesFor("aa".repeat(32))).toEqual([]);
+  });
+});

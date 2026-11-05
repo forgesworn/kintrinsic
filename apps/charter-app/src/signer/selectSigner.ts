@@ -20,6 +20,8 @@ export interface SelectSignerDeps {
     knownRoot: () => string | undefined;
     workingKey: () => Uint8Array;
     pickOps: NonNullable<RealSignerDeps["pickOps"]>;
+    /** Keep a rule change's signed clauses for the family roster (Q3). */
+    onRulesSigned?: RealSignerDeps["onRulesSigned"];
   };
   /** Fall back to the demo mock signer (development only). Defaults to `import.meta.env.DEV`. */
   allowMock?: boolean;
@@ -42,7 +44,7 @@ export function selectSigner(signerState: SignerState, deps: SelectSignerDeps): 
       localRoute: deps.localRoute,
       // Start disconnected (mount effect reconnects), but carry autoSign forward.
       initial: { connected: false, kind: "local", autoSign: signerState.autoSign },
-      ...(deps.keys ? { pickOps: deps.keys.pickOps } : {}),
+      ...(deps.keys ? { pickOps: deps.keys.pickOps, onRulesSigned: deps.keys.onRulesSigned } : {}),
     });
   }
   if (signerState.bunkerUri) {

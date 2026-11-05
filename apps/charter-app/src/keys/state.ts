@@ -140,6 +140,13 @@ export interface GuardianKeysState {
   clamped: Record<string, { count: number; roseAt?: number }>;
   /** The family roster as merged from other guardians' installs (subject = `Child.rosterId`). */
   roster: LocalRoster;
+  /**
+   * The rules in force per child (roster subject), as signed inner CLAUSE
+   * events, one per clause kind, newest `issuedAt` wins (decision Q3): what
+   * this install signed itself, and what another guardian's roster carried
+   * from a current signer. Shared in the roster so both phones hold the same.
+   */
+  rules: Record<string, Record<string, SignedEvent>>;
   /** Statements this install sent, by `d`. */
   sent: Record<string, SentStatement>;
   /** Wards confirmed in person here that no child of this install has yet, by machine. */
@@ -182,7 +189,7 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, clamped: {}, rules: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
 }
 
 function reviveRestored(x: unknown): GuardianKeysState["restoredFrom"] {
@@ -233,6 +240,11 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
           typeof (e[1] as { count?: unknown }).count === "number" &&
           ((e[1] as { roseAt?: unknown }).roseAt === undefined || typeof (e[1] as { roseAt?: unknown }).roseAt === "number"),
       ),
+    ),
+    rules: Object.fromEntries(
+      Object.entries(rec(o.rules) as Record<string, unknown>)
+        .filter(([k]) => /^[0-9a-f]{64}$/.test(k))
+        .map(([k, v]) => [k, rec(v) as Record<string, SignedEvent>]),
     ),
     roster:
       typeof o.roster === "object" && o.roster !== null && Array.isArray(o.roster.children)

@@ -36,6 +36,8 @@ export interface LocalSignerConfig {
    * from this phone's day-to-day key, not its old key.
    */
   pickOps?: RealSignerDeps["pickOps"];
+  /** Keep a rule change's signed clauses for the family roster (Q3). */
+  onRulesSigned?: RealSignerDeps["onRulesSigned"];
 }
 
 /**
@@ -82,5 +84,6 @@ export function createLocalSigner(config: LocalSignerConfig): RealSigner {
     confirmGate: config.confirmGate,
     initial: config.initial,
     pickOps: config.pickOps,
+    onRulesSigned: config.onRulesSigned,
   });
 }

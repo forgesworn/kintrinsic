@@ -17,7 +17,9 @@ import {
   giftWrapGrant,
   giftWrapPairOffer,
   giftWrapRelease,
+  giftWrapSigned,
   giftWrapUsageSync,
+  signClauseInner,
   type GuardianOps,
 } from "../wire/giftwrap";
 import type { UsageSyncPayload } from "../wire/usageSync";
@@ -120,6 +122,12 @@ export interface RealSignerDeps {
    * key, as before the section. Absent = always the root's.
    */
   pickOps?: (machine: string) => GuardianOps | undefined;
+  /**
+   * The signed inner CLAUSE events of a rule change, one per kind, once it
+   * was sent or held for the home network: the family roster carries them to
+   * the other guardians' phones as the rules in force (Q3). Absent = not kept.
+   */
+  onRulesSigned?: (childId: string, inner: NostrEvent[]) => void;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -417,17 +425,26 @@ export class RealSigner implements Signer {
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
     const issuedAt = this.nextIssuedAt();
+    // One signed inner per kind for the family roster: the first device's.
+    // With per-device rules the devices' bodies differ; the roster carries one.
+    const signed = new Map<string, NostrEvent>();
+    const wrapOne = async (clause: ClausePayload, device: string) => {
+      const ops = this.sealerFor(device, guardian);
+      const inner = await signClauseInner(clause, ops, issuedAt);
+      if (!signed.has(clause.kind)) signed.set(clause.kind, inner);
+      return giftWrapSigned(inner, device, ops, issuedAt);
+    };
     if (policy.scope.kind === "app") {
       // App-scope rebuilds the child's ONE aggregate `appRules` clause, which
       // is the same set for every device — per-app rules are not splittable.
       const clauses = this.appRulesClauses(childId, policy, target.subject, issuedAt);
       for (const clause of clauses) {
         for (const device of target.devices) {
-          const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+          const wrap = await wrapOne(clause, device.pubkey);
           await this.send(target.relays, wrap, CLAUSE_META, held);
         }
       }
-      return this.settle(held);
+      return this.settleRules(held, childId, signed);
     }
 
     // Device scope: each device gets the charter as it applies to IT — the base
@@ -439,11 +456,26 @@ export class RealSigner implements Signer {
       const effective = effectivePolicyForDevice(policy, device.id);
       const clauses = policyToClauses(target.subject, effective, issuedAt);
       for (const clause of clauses) {
-        const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+        const wrap = await wrapOne(clause, device.pubkey);
         await this.send(target.relays, wrap, CLAUSE_META, held);
       }
     }
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
+  }
+
+  /** `settle`, handing the signed rules on once they were sent or held (a send that failed outright set nothing). */
+  private settleRules(batch: SendBatch, childId: string, signed: Map<string, NostrEvent>): SignOutcome {
+    const note = () => {
+      if (signed.size > 0) this.deps.onRulesSigned?.(childId, [...signed.values()]);
+    };
+    try {
+      const out = this.settle(batch);
+      note();
+      return out;
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) note();
+      throw err;
+    }
   }
 
   /**
