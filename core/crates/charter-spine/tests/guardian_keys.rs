@@ -780,6 +780,7 @@ async fn a_gift_wrapped_relays_change_keeps_its_pin_out_of_the_pairing_record() 
         "L2: the PIN record never reaches the pairing record"
     );
     assert!(keys.has_guardian_pin());
+    assert!(keys.status_guardians(NOW).unwrap().pin_set);
     assert!(w.store.raw().unwrap().contains(&"5a".repeat(16)));
 
     // The same change again is unchanged; a stranger's is refused.
@@ -965,6 +966,13 @@ async fn add_coguardian(w: &Ward, b: &B, keys: &GuardianKeys) {
     let pending = keys.pending_statements(NOW);
     assert_eq!(pending.len(), 1);
     let d = pending[0].d.clone();
+    // STATUS names it by its event id and signer (D10), so a typed presence
+    // code can point at it.
+    let g = keys.status_guardians(NOW).unwrap();
+    assert_eq!(g.pending.len(), 1);
+    assert_eq!(g.pending[0].id, cg.id);
+    assert_eq!(g.pending[0].signer, pk(ROOT_SEED));
+    assert_eq!(g.pending[0].d, d);
 
     // A token for something not pending is refused.
     assert_eq!(

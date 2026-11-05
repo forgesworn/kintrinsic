@@ -493,6 +493,8 @@ mod tests {
             pending: vec![],
             tombstones: 1,
             relays: vec![],
+            pin_set: false,
+            clamped: 0,
         });
         assert!(should_emit_status(Some(&prev), &cur, 300));
     }

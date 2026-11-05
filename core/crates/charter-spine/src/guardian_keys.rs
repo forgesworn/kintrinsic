@@ -78,7 +78,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use charter_guardians::{self as cg, GuardianState, Reason, Verdict};
 use charter_link::AckResult;
-use charter_primitives::{kinds, NostrEvent, PubKey, SignerSet};
+use charter_primitives::{kinds, EventId, NostrEvent, PubKey, SignerSet};
 use charter_proto::{
     PendingKind, ReleasePayload, StatusGuardianRoot, StatusGuardians, StatusPendingStatement,
 };
@@ -871,22 +871,31 @@ fn status_guardians_of(state: &GuardianState) -> StatusGuardians {
                 })
             })
             .collect(),
+        // Every pending statement was validated on acceptance, so its id and
+        // signer parse; one that somehow did not is left out rather than
+        // reported under a made-up key.
         pending: g
             .pending
             .into_iter()
-            .map(|p| StatusPendingStatement {
-                d: p.d,
-                kind: match p.kind {
-                    cg::PendingType::Coguardian => PendingKind::Coguardian,
-                    cg::PendingType::Removal => PendingKind::Removal,
-                    cg::PendingType::Move => PendingKind::Move,
-                },
-                takes_effect_at: p.takes_effect_at.map(|t| t.max(0) as u64),
-                expires_at: p.expires_at.max(0) as u64,
+            .filter_map(|p| {
+                Some(StatusPendingStatement {
+                    id: EventId::from_hex(&p.id).ok()?,
+                    d: p.d,
+                    kind: match p.kind {
+                        cg::PendingType::Coguardian => PendingKind::Coguardian,
+                        cg::PendingType::Removal => PendingKind::Removal,
+                        cg::PendingType::Move => PendingKind::Move,
+                    },
+                    signer: PubKey::from_hex(&p.signer).ok()?,
+                    takes_effect_at: p.takes_effect_at.map(|t| t.max(0) as u64),
+                    expires_at: p.expires_at.max(0) as u64,
+                })
             })
             .collect(),
         tombstones: u32::try_from(g.tombstones).unwrap_or(u32::MAX),
         relays: g.relays,
+        pin_set: g.pin_set,
+        clamped: g.clamped,
     }
 }
 
