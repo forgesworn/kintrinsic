@@ -2628,11 +2628,38 @@ A root is never asked to decrypt ward traffic.
   author is in the signer set.
 - A PAIR_OFFER to an unpaired ward is governed by *Scan-to-pair* (below and in
   its own section), not by the signer set.
-- All existing checks (inner `id` and `sig`, kind, marker tag, replay floor,
-  pairing floor, skew) still apply.
-- In addition, **a CLAUSE or statement whose `issuedAt` is more than 300
-  seconds ahead of the ward's clock is refused.** A far-future rule could
-  otherwise never be replaced. A ward's clock is not the child's to set.
+- All existing checks (inner `id` and `sig`, kind, marker tag, replay floor)
+  still apply, and a GRANT and a RELAYS keep their own pairing floor and skew
+  or age rules. A CLAUSE has no pairing floor: its `issuedAt` is guardian
+  time and the pairing time is ward time, so comparing the two would refuse a
+  family's first rules whenever the clocks differ.
+- **A time claimed ahead of the ward's clock is clamped to it, never
+  refused.**
+  - Every CLAUSE and statement has an **effective time**: `min(issuedAt, the
+    ward's clock when it arrived)`. Wherever this section compares times or
+    counts from one ("newer than", newest wins, expiry, cancels, objections,
+    departures), it uses effective times.
+  - A held clause's effective time is its slot's bar: a CLAUSE of the same
+    `(subject, kind)` replaces it only if its `issuedAt` is above the bar.
+  - A CLAUSE whose `issuedAt` was clamped has its event `id` remembered for
+    its `(subject, kind)` until that slot's bar reaches its `issuedAt`. A
+    CLAUSE with a remembered `id` is refused as a replay. Without this, a
+    relay could re-deliver a superseded far-future clause, whose real
+    `issuedAt` beats the clamped bar. A ward remembers at most **256** ids per
+    `(subject, kind)`; past that, a CLAUSE that would need remembering is
+    refused until the ward's clock catches up with some of them.
+  - A statement's slot (rule 2) holds one statement and its `id`; a statement
+    with the stored `id` is ignored.
+  - STATUS `guardians.clamped` counts the accepted events whose time was
+    clamped, so a parent can see that a clock is adrift.
+  - Why: a far-future rule from one signer must not pin a slot against the
+    other parent, and no clock state (a ward running slow, a guardian phone
+    that was ever ahead) may lock a family out. With skewed clocks, newest
+    wins becomes newest by arrival, the one order both parents can see. A
+    far-future clause from a key that later departs is bounded by the same
+    bar. A ward's clock is not the child's to set.
+  - A GRANT keeps its existing skew rule, USAGE_SYNC is not gated by time, and
+    a pasted RELAYS code keeps its 600-second rule.
 
 **Statements: kind `CHARTER_GUARDIAN_STATEMENT = 31120`.**
 
@@ -2661,7 +2688,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 - `<W>` and `<R2>` are 64 lowercase hex.
 - A statement is ignored if its `d` and `p` disagree, its content is malformed,
   or its `v` is not 1.
-- `issuedAt` orders statements; `created_at` is ignored.
+- `issuedAt`, as an effective time (*Who may sign what*), orders statements;
+  `created_at` is ignored.
 
 **Delivery and the two seal exceptions.**
 - Statements are gift-wrapped to each ward (relays and the local link), as
@@ -2687,7 +2715,7 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    - The one re-binding is a confirmed root move (rule 8).
 2. **No pairing floor for statements.** A W approved before this ward paired
    still counts.
-   - Among statements with the same `d`, the newest `issuedAt` wins.
+   - Among statements with the same `d`, the newest effective time wins.
    - A withdrawal, removal or cancel wins a same-second tie.
 3. **Withdrawal is permanent and checked against the binding root.**
    - A withdrawal counts only if signed by W's binding root.
@@ -2702,11 +2730,11 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
      the departed keys.
    - Clauses they signed **stay enforced** until a clause of the same
      `(subject, kind)` from a current signer replaces them.
-   - The replacement is compared only with clauses of that `(subject, kind)`
-     still held from **current** signers. It must be newer than every one of
-     those, but the departed key's own `issuedAt` is ignored. So a far-future
-     clause from a departed key can't pin a rule for ever, and a relay can't
-     restore an older rule from a current signer.
+   - The replacement must be newer than the held clause's effective time,
+     which the departure lowers to the departure time if that is earlier. The
+     departed key's own `issuedAt` is never the bar. So a far-future clause
+     from a departed key can't pin a rule for ever, and a relay can't restore
+     an older rule from a current signer.
    - A guardian app re-signs the current clause set with a live key before it
      sends a departure.
 5. **Stored clauses record their signer.** The ward screen and STATUS then say
@@ -2719,14 +2747,14 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    - Until then it is pending, and is reported in STATUS to every root's
      working keys.
    - Both roots then have equal authority. Among clauses of one kind from
-     current signers, the newest `issuedAt` wins, whoever signed it.
+     current signers, the newest wins by effective time, whoever signed it.
 7. **Root removal.**
    - Signed by R2 itself, it takes effect at once, unless R2 is the last root.
      The last root leaves only by unpairing.
    - Signed by another pinned root R1, it needs **presence confirmation by an
      install bound to R1**, and it has a **72-hour notice period**.
-     - It takes effect at the later of the confirmation and `issuedAt` plus
-       72 hours.
+     - It takes effect at the later of the confirmation and 72 hours after
+       the ward received it.
      - Throughout, it is reported in STATUS to R2's working keys.
      - R2 can **object** with a statement whose `d` is
        `kintrinsic/object/<d of the removal>` and whose `p` is R1. That drops
@@ -2736,8 +2764,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    - Removal never leaves a ward with no roots; a removal that would is
      refused.
    - Once a removal applies, every pending statement signed by R2 is dropped.
-   - Re-pinning R2 later needs a co-guardian statement newer than the removal,
-     confirmed afresh.
+   - Re-pinning R2 later needs a co-guardian statement newer than the removal
+     (by effective time), confirmed afresh.
 8. **Root move.**
    - It takes effect only after **presence confirmation by an install bound to
      R2**. A W approved by R2 travels with the move.
@@ -2771,9 +2799,9 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 **Pending statements.**
 - A co-guardian, removal or move is pending until it takes effect, is
   cancelled or objected to, or expires.
-- It expires at its `expiresAt`, clamped to at most 7 days after `issuedAt`.
-  Without one, it expires 7 days after `issuedAt`.
-- A cancel drops pending statements with its `d` whose `issuedAt` is at or
+- It expires at its `expiresAt`, clamped to at most 7 days after its
+  effective time. Without one, it expires 7 days after its effective time.
+- A cancel drops pending statements with its `d` whose effective time is at or
   below the cancel's. A later statement with that `d` is unaffected.
 
 **Presence confirmation.**
@@ -2837,7 +2865,9 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 - `roots`: a list of `{ root, keys: [working-key hex] }`;
 - `pending`: a list of `{ d, kind: 'coguardian' | 'removal' | 'move', takesEffectAt?, expiresAt }`;
 - `tombstones`: a count, so a dropped withdrawal shows up as a mismatch;
-- `relays`: the ward's current relay list.
+- `relays`: the ward's current relay list;
+- `clamped`: a count, since pairing, of accepted clauses and statements whose
+  `issuedAt` was ahead of the ward's clock (*Who may sign what*).
 
 Every root's working keys receive it, and a departed key receives one last
 STATUS that shows its departure.

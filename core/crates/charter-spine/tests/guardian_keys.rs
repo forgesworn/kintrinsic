@@ -407,10 +407,14 @@ async fn a_departed_keys_clause_stays_until_a_current_signer_replaces_it_above_t
         .await;
     assert_eq!(out.result, AckResult::Applied);
 
-    // While it is current, an older clause from the root cannot replace it.
-    let older = clause(ROOT_SEED, NOW + 10, 90);
-    let out = b.ingest_local(&w.sealed(&older, ROOT_SEED, 3), LOCAL).await;
+    // It is held at its effective time, min(NOW + 300, NOW): a clause at or
+    // below that cannot replace it (one above it could, at once).
+    let at_bar = clause(ROOT_SEED, NOW - 5, 90);
+    let out = b
+        .ingest_local(&w.sealed(&at_bar, ROOT_SEED, 3), LOCAL)
+        .await;
     assert_eq!(out.result, AckResult::Superseded);
+    let older = clause(ROOT_SEED, NOW + 10, 90);
 
     // The root withdraws the working key at NOW.
     let out = b
@@ -496,10 +500,13 @@ async fn connections_and_times_clauses_take_the_one_acceptance_path() {
         assert_eq!(out.result, AckResult::Applied, "{kind:?}");
         assert_eq!(held(&b), HeldSigner::Key(pk(WORKING_SEED)), "{kind:?}");
 
-        // While that key is current, an older one from the root is refused.
-        let older = event(ROOT_SEED, NOW + 10);
-        let out = b.ingest_local(&w.sealed(&older, ROOT_SEED, 3), LOCAL).await;
+        // It is held at its effective time, min(NOW + 300, NOW): one from the
+        // root at or below that is refused.
+        let out = b
+            .ingest_local(&w.sealed(&event(ROOT_SEED, NOW - 5), ROOT_SEED, 3), LOCAL)
+            .await;
         assert_eq!(out.result, AckResult::Superseded, "{kind:?}");
+        let older = event(ROOT_SEED, NOW + 10);
 
         // The root withdraws the key: its clause stays, its new ones don't.
         let out = b

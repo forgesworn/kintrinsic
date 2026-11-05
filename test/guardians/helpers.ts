@@ -10,6 +10,7 @@ import {
   rootMoveTemplate,
   rootRemovalTemplate,
   withdrawalTemplate,
+  type ClauseInput,
   type EventTemplate,
   type GuardianState,
   type SignedEvent,
@@ -80,4 +81,12 @@ export function pairedR1(): GuardianState {
   const r = pairFromOffer({ sealAuthor: R1.pk, inner: offer }, { token: TOKEN, mintedAt: T0 - 10 }, T0)
   if (!r.ok) throw new Error(`pair failed: ${r.reason}`)
   return r.state
+}
+
+/**
+ * A CLAUSE input with a deterministic stand-in id (the reference compares ids
+ * as strings): the same author, slot and issuedAt is the same clause.
+ */
+export function clauseInput(c: Omit<ClauseInput, 'id'> & { id?: string }): ClauseInput {
+  return { ...c, id: c.id ?? `${c.author}:${c.subject}:${c.kind}:${c.issuedAt}` }
 }

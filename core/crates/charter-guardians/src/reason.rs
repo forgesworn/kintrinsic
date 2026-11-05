@@ -167,6 +167,12 @@ pub enum Reason {
     PinNotWrapped,
     #[serde(rename = "bad_pin_record")]
     BadPinRecord,
+    #[serde(rename = "replay")]
+    Replay,
+    #[serde(rename = "clamp_quota")]
+    ClampQuota,
+    #[serde(rename = "relays_root_only")]
+    RelaysRootOnly,
 }
 
 /// Why a statement event (kind 31120) is malformed, in check order.
@@ -256,6 +262,9 @@ pub const DROP_REASONS: &[Reason] = &[
     Reason::BadOffer,
     Reason::PinNotWrapped,
     Reason::BadPinRecord,
+    Reason::Replay,
+    Reason::ClampQuota,
+    Reason::RelaysRootOnly,
 ];
 
 impl Reason {
@@ -339,6 +348,9 @@ impl Reason {
             Reason::BadOffer => "bad_offer",
             Reason::PinNotWrapped => "pin_not_wrapped",
             Reason::BadPinRecord => "bad_pin_record",
+            Reason::Replay => "replay",
+            Reason::ClampQuota => "clamp_quota",
+            Reason::RelaysRootOnly => "relays_root_only",
         }
     }
 
@@ -377,7 +389,7 @@ mod tests {
         let want = concat!(
             "bad_event bad_signature wrong_kind missing_marker d_tag_count p_tag_count unknown_d_prefix bad_key d_p_mismatch bad_cancel_target bad_objection_target content_not_json bad_version bad_issued_at bad_label bad_expires_at ",
             "paired approval_applied approval_updated approval_rebound approval_preempted withdrawal_applied withdrawal_held coguardian_pending removal_pending removal_applied move_pending cancel_applied cancel_held objection_applied objection_held token_registered coguardian_applied move_applied removal_confirmed clause_accepted signed_accepted relays_applied status_sent ticked ",
-            "future seal_mismatch signer_not_pinned not_signer duplicate stale tie_not_newer expires_at_not_allowed key_role_conflict key_departed bound_elsewhere root_at_quota root_key_quota held_quota not_binding_root already_withdrawn already_pinned target_not_pinned not_newer_than_departure root_quota last_root expired cancelled objected cancel_signer_mismatch objection_mismatch not_pending bad_confirm token_invalid confirmer_not_bound approval_required bad_approval pairing_floor not_newer bad_offer pin_not_wrapped bad_pin_record"
+            "future seal_mismatch signer_not_pinned not_signer duplicate stale tie_not_newer expires_at_not_allowed key_role_conflict key_departed bound_elsewhere root_at_quota root_key_quota held_quota not_binding_root already_withdrawn already_pinned target_not_pinned not_newer_than_departure root_quota last_root expired cancelled objected cancel_signer_mismatch objection_mismatch not_pending bad_confirm token_invalid confirmer_not_bound approval_required bad_approval pairing_floor not_newer bad_offer pin_not_wrapped bad_pin_record replay clamp_quota relays_root_only"
         );
         let want: Vec<&str> = want.split_whitespace().collect();
         assert_eq!(all.len(), want.len());

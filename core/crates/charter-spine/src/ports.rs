@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use charter_link::AckResult;
-use charter_primitives::{PubKey, SignerSet, SinglePinned};
+use charter_primitives::{EventId, PubKey, SignerSet, SinglePinned};
 use charter_proto::StatusGuardians;
 use charter_sys::SysResult;
 use charter_transport::relay_config::GuardianPin;
@@ -119,6 +119,9 @@ impl GuardianApplied {
 /// and 5 to judge against the clause it holds for the same `(subject, kind)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClauseCandidate<'a> {
+    /// The CLAUSE event's id: a clause dated ahead of the ward clock is
+    /// remembered by it, so a replay is refused.
+    pub id: EventId,
     pub author: PubKey,
     pub seal_author: PubKey,
     /// 64 lowercase hex.

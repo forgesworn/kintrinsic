@@ -1136,13 +1136,17 @@ impl GuardianStatements for GuardianKeys {
                             kind: clause.kind.to_owned(),
                             signer,
                             root,
+                            id: String::new(),
                             issued_at,
                             floor,
+                            remembered: Vec::new(),
                         });
                     }
                 }
             }
+            let clause_id = clause.id.to_hex();
             let input = cg::ClauseInput {
+                id: &clause_id,
                 author: &author,
                 seal_author: &seal,
                 subject: clause.subject_hex,
@@ -1154,7 +1158,7 @@ impl GuardianStatements for GuardianKeys {
                 return (Some(with_state(d, step.state)), ClauseGate::Accepted);
             }
             let gate = match step.outcome.reason {
-                Reason::NotNewer => {
+                Reason::NotNewer | Reason::Replay => {
                     let held_is_this = cg::held_clause(&base, clause.subject_hex, clause.kind)
                         .is_some_and(|h| {
                             h.signer == author && h.issued_at == secs(clause.issued_at)

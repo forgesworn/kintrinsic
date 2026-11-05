@@ -143,7 +143,7 @@ Every input has `type` and `now`.
 | `tick` | — | Advance timers only |
 | `presence_token` | `token` (32 hex), `statementD` (a pending `d`, or `null` for any) | The ward mints a presence token on a privileged request |
 | `presence_confirm` | `sealAuthor`, `inner` (kind 31121 signed event) | A presence confirmation, already unwrapped |
-| `clause` | `author`, `sealAuthor`, `subject`, `kind` (opaque strings), `issuedAt` | A CLAUSE's signer, seal and identity; the clause body is out of scope |
+| `clause` | `id` (64 hex, the CLAUSE event id), `author`, `sealAuthor`, `subject`, `kind` (opaque strings), `issuedAt` | A CLAUSE's id, signer, seal and identity; the clause body is out of scope |
 | `signed` | `author`, `sealAuthor`, `ts` | The signer-set gate for a GRANT or USAGE_SYNC |
 | `relays` | `author`, `channel` (`"wrapped"` or `"pasted"`), `sealAuthor` (hex for `wrapped`, `null` for `pasted`), `ts` (the event's `created_at`), `relays` (string list), optional `guardianPin` (any JSON value: the body's `guardianPin` field) | A RELAYS change, gift-wrapped or pasted as an offline relay code |
 | `status_sent` | — | The ward has sent a STATUS (departed keys have had their last one) |
@@ -180,10 +180,15 @@ that.
   "departed": ["<hex>", ...],
   "recipients": ["<hex>", ...],
   "farewell": ["<hex>", ...],
-  "clauses": [ { "subject": "<s>", "kind": "<s>", "signer": "<hex>", "root": "<hex>", "issuedAt": <int>, "floor": <int> | null } ],
+  "clauses": [ {
+      "subject": "<s>", "kind": "<s>", "signer": "<hex>", "root": "<hex>",
+      "id": "<hex>", "issuedAt": <int>, "floor": <int>,
+      "remembered": [ { "id": "<hex>", "issuedAt": <int> } ]
+  } ],
   "relays": ["<url>", ...],
   "statusRelays": ["<url>", ...],
-  "guardianPin": { "v": 1, "salt": "<hex>", "hash": "<hex>" } | null
+  "guardianPin": { "v": 1, "salt": "<hex>", "hash": "<hex>" } | null,
+  "clamped": <int>
 }
 ```
 
@@ -193,11 +198,12 @@ that.
 - `signers`: the signer set, sorted by `key`; `root` is the key itself for a
   root, else its binding root.
 - `pending`: sorted by `d`. `receivedAt` is the ward's `now` when the
-  statement was accepted. `expiresAt` = min(`expiresAt`, `issuedAt` +
-  604800), or `issuedAt` + 604800 without one. `takesEffectAt` is set only on
-  a confirmed removal: max(confirmation `now`, max(`issuedAt`, `receivedAt`)
-  + 259200). STATUS `guardians.pending` is `{ d, kind, takesEffectAt?,
-  expiresAt }` from this.
+  statement was accepted. Its **effective time** is min(`issuedAt`,
+  `receivedAt`). `expiresAt` = min(`expiresAt`, effective + 604800), or
+  effective + 604800 without one. `takesEffectAt` is set only on a confirmed
+  removal: max(confirmation `now`, `receivedAt` + 259200). STATUS
+  `guardians.pending` is `{ id, d, kind, takesEffectAt?, expiresAt }` from
+  this (`id` is `statement`).
 - `tombstones`: applied withdrawals plus applied removals, for the life of the
   pairing (STATUS `guardians.tombstones`).
 - `held`: held early withdrawals plus held cancels and objections (stored
@@ -210,9 +216,12 @@ that.
 - `farewell`: keys that left the signer set while recipients, owed one last
   STATUS; cleared by `status_sent`. STATUS goes to `recipients` ∪ `farewell`.
 - `clauses`: held clauses, sorted by `subject` then `kind`. `root` is the
-  signer's root when the clause was accepted. `floor` is null until the
-  signer departs, then min(`issuedAt`, the time of the departure, and any
-  earlier floor).
+  signer's root when the clause was accepted; `id` and `issuedAt` are the
+  clause's own. `floor` is the slot's bar: the clause's effective time,
+  min(`issuedAt`, the ward's `now` when it was accepted), and when its signer
+  departs, min(that, the time of the departure). `remembered` lists, sorted by
+  `id`, the clamped clauses of this `(subject, kind)` (accepted with
+  `issuedAt` > `now`) whose `issuedAt` is still above the bar.
 - `relays`: the current relay list as given. `statusRelays`: `relays`, then,
   while the ward has more than one root, each relay list replaced within the
   last 604800 s (a list replaced at time t counts while `now` < t + 604800),
@@ -220,11 +229,20 @@ that.
   At most the **8** most recent replaced lists are kept: when a 9th would be
   added, the oldest is dropped (scenario `relays_previous_cap`).
 - `guardianPin`: the last PIN record set by a wrapped RELAYS, or null.
+- `clamped`: since pairing, the accepted clauses and statements (an
+  `inbound` statement, a confirmation's inline approval, a pair offer's
+  approval) whose `issuedAt` was greater than the ward's `now`. STATUS
+  `guardians.clamped`.
 
 Internal state (stored statements, tokens, tombstone and token order) is not
 projected; its order carries no meaning.
 
 ### Ward semantics the vectors pin
+
+**Effective time.** A clause's or statement's effective time is
+min(`issuedAt`, the ward's `now` when it was accepted). Nothing is refused for
+being dated ahead of the ward clock; every comparison below that names an
+effective time uses it.
 
 **Timers (run first on every step at `now`, and alone on `tick`).**
 1. Drop presence tokens with `now` ≥ `mintedAt` + 600.
@@ -243,7 +261,7 @@ drops every presence token bound to its `d`.
 
 **Applying a removal of R2** (self, confirmed, or by timer) at time t: refused
 (`last_root`) unless at least one other, distinct root is pinned. Otherwise:
-unpin R2; record it as departed at the removal's `issuedAt`; add a tombstone;
+unpin R2; record it as departed at the removal's effective time; add a tombstone;
 every active W bound to R2 departs; floor the held clauses of R2 and those
 keys at t; drop every pending statement signed by R2 or naming R2; drop held
 withdrawals signed by R2.
@@ -251,7 +269,7 @@ withdrawals signed by R2.
 **Applying a confirmed co-guardian or move for R2:** first drop every pending
 statement naming R2 (so R2 is never pinned twice). A co-guardian appends R2
 to `roots` and binds the confirming W. A move R → R2: R2 takes R's place in
-`roots`; R is recorded as departed at the move's `issuedAt`; the confirming W
+`roots`; R is recorded as departed at the move's effective time; the confirming W
 binds to R2; every other active W bound to R departs, and only R2 may re-bind
 it later (`approval_rebound`); the held clauses of R and those keys are
 floored at `now`; pending statements signed by or naming R, and held
@@ -267,19 +285,20 @@ once: `approval_preempted`).
 **Stored statements.** Approvals, co-guardians, removals, moves, cancels and
 objections are stored, when accepted (never when dropped), newest per
 **slot**. The slot is the `d`, except a cancel (`d` + its signer) and an
-objection (`d` + its `p`). Within a slot: the same event id is `duplicate`; a
-lower `issuedAt` is `stale`; the same `issuedAt` with a higher event id
-(compared as lowercase hex) is `tie_not_newer`, and with a lower event id it
-wins and replaces the stored one. Each stored statement keeps the ward time it
+objection (`d` + its `p`). Within a slot, comparing the newcomer's effective
+time min(`issuedAt`, `now`) with the stored one's: the same event id is
+`duplicate`; a lower effective time is `stale`; the same effective time with
+a higher event id (compared as lowercase hex) is `tie_not_newer`, and with a
+lower event id it wins and replaces the stored one. Each stored statement keeps the ward time it
 was accepted. A cancel or objection stored without acting is "held" and counts
 toward its signer's 64.
 
 **Held cancels and objections.** A co-guardian, removal or move arriving later
 is dropped (`cancelled`) if the stored cancel for its `d` from the same signer
-has `issuedAt` ≥ the newcomer's. A removal of R2 by R1 (arriving, being
+has an effective time ≥ the newcomer's. A removal of R2 by R1 (arriving, being
 confirmed, or falling due) is dropped (`objected`) if the stored objection for
-its `d` naming R1 (signed by R2) has `issuedAt` ≥ the removal's, **or** was
-accepted by the ward less than 604800 s before.
+its `d` naming R1 (signed by R2) has an effective time ≥ the removal's, **or**
+was accepted by the ward less than 604800 s before.
 
 ### Reason codes and check order
 
@@ -287,12 +306,11 @@ Every step returns the first failing check's reason, in the order given.
 
 **`inbound`** — after the timers:
 1. the statement checks above (any statement reason);
-2. `future`: `issuedAt` > `now` + 300;
-3. `seal_mismatch`: an approval not sealed by the W it names; a withdrawal,
+2. `seal_mismatch`: an approval not sealed by the W it names; a withdrawal,
    co-guardian, removal, move or cancel sealed by neither its signer nor an
    active W bound to its signer; an objection not sealed by its signer;
-4. `signer_not_pinned`: the signer is not a pinned root;
-5. by type:
+3. `signer_not_pinned`: the signer is not a pinned root;
+4. by type:
    - **approval:** `expires_at_not_allowed` (has `expiresAt`) →
      `key_role_conflict` (W is pinned or W = signer) → `key_departed` (W is a
      departed root not pinned again; or W withdrawn; or W departed and not
@@ -310,7 +328,7 @@ Every step returns the first failing check's reason, in the order given.
      one for W) → `held_quota` (64) → `withdrawal_held`;
    - **co-guardian / move:** `already_pinned` → `key_role_conflict` (R2 is a
      known working key) → `not_newer_than_departure` (R2 departed at an
-     `issuedAt` ≥ this one) → slot order → `expired` (`now` ≥ computed
+     effective time ≥ this one's) → slot order → `expired` (`now` ≥ computed
      `expiresAt`) → `cancelled` → `root_quota` (co-guardian only: 4 roots) →
      `coguardian_pending` / `move_pending`;
    - **removal:** `target_not_pinned` → slot order → signed by R2:
@@ -318,7 +336,7 @@ Every step returns the first failing check's reason, in the order given.
      `expired` → `objected` → `cancelled` → `removal_pending`;
    - **cancel:** slot order → `cancel_signer_mismatch` (a pending statement
      with the target `d` has another signer) → `cancel_applied` (that
-     pending statement's `issuedAt` ≤ the cancel's) → `held_quota` →
+     pending statement's effective time ≤ the cancel's) → `held_quota` →
      `cancel_held`;
    - **objection:** `objection_mismatch` (signer is not the root named in
      `d`) → slot order → `objection_applied` (a pending removal with the
@@ -341,10 +359,10 @@ is bound to another `d`) → then:
   `last_root`, the removal dropped) or `removal_confirmed`;
 - co-guardian / move: `approval_required` (no `approval`) → `bad_approval`
   (not a valid statement, not an approval, not signed by R2, or not naming
-  the confirmer) → `expires_at_not_allowed` → `future` → `already_pinned` (R2
-  pinned now) → `key_role_conflict` (R2 is a known working key, or the
-  confirmer is pinned, or is R2) → `not_newer_than_departure` (R2 departed at
-  an `issuedAt` ≥ the pending statement's) → `key_departed` (confirmer is a
+  the confirmer) → `expires_at_not_allowed` → `already_pinned` (R2 pinned
+  now) → `key_role_conflict` (R2 is a known working key, or the confirmer is
+  pinned, or is R2) → `not_newer_than_departure` (R2 departed at an effective
+  time ≥ the pending statement's) → `key_departed` (confirmer is a
   departed root, or known and not active) → `bound_elsewhere` (co-guardian:
   confirmer already bound; move: bound to a root other than the one moving) →
   slot order of the approval → `root_at_quota` (R2) → `root_quota`
@@ -353,14 +371,19 @@ is bound to another `d`) → then:
 A token is spent only by an accepted confirmation (`removal_confirmed`,
 `removal_applied`, `coguardian_applied`, `move_applied`).
 
-**`clause`:** `future` (`issuedAt` > `now` + 300) → `seal_mismatch` →
-`not_signer` → `pairing_floor` (`issuedAt` < the pairing time) → `not_newer`
-(a held clause of the same `(subject, kind)` exists and `issuedAt` ≤ its
-`issuedAt` if its signer is a signer now, else ≤ its `floor`) →
-`clause_accepted` (replaces the held clause; `floor` null).
+**`clause`:** `seal_mismatch` → `not_signer` → `replay` (the held clause of
+the same `(subject, kind)` lists this `id` in `remembered`) → `not_newer` (a
+held clause exists and `issuedAt` ≤ its `floor`) → `clamp_quota` (`issuedAt`
+> `now`, and `remembered` already holds 256 entries with `issuedAt` >
+min(`issuedAt`, `now`)) → `clause_accepted`. An accepted clause replaces the
+held one with `floor` = min(`issuedAt`, `now`); `remembered` keeps the held
+one's entries whose `issuedAt` > that floor, plus `{ id, issuedAt }` when
+`issuedAt` > `now`. There is no pairing floor for clauses. The 256 cap is not
+exercised here (it would bloat this file); the references test it directly.
 
-**`signed`:** `future` (`ts` > `now` + 300) → `seal_mismatch` → `not_signer`
-→ `signed_accepted`.
+**`signed`:** `seal_mismatch` → `not_signer` → `signed_accepted`. No time is
+judged: a GRANT keeps its own skew rule outside this gate, and USAGE_SYNC has
+none.
 
 **`relays`:** `seal_mismatch` (`wrapped` only: seal author ≠ author) →
 `not_signer` → `future` (`ts` > `now`) → `stale` (`now` − `ts` > 600) →
@@ -381,7 +404,8 @@ string list, `ts` an integer) → `token_invalid` (not equal in constant time;
 working key from a root by its key) → `bad_approval` (not a valid approval
 statement, `null` included) → `seal_mismatch` (its `p` ≠ seal author) →
 `key_role_conflict` (approval signed by W itself) → `expires_at_not_allowed`
-→ `future` → `paired` (R pinned, W bound). The pairing time is `now`;
+→ `paired` (R pinned, W bound; `clamped` is 1 if the approval's `issuedAt` >
+`now`). The pairing time is `now`;
 `relays` are the offer's. "A contested token pins nobody" (two keys, one
 token) is outside these vectors.
 
@@ -410,7 +434,8 @@ Dropped: `future`, `seal_mismatch`, `signer_not_pinned`, `not_signer`,
 `cancel_signer_mismatch`, `objection_mismatch`, `not_pending`,
 `bad_confirm`, `token_invalid`, `confirmer_not_bound`, `approval_required`,
 `bad_approval`, `pairing_floor`, `not_newer`, `bad_offer`,
-`pin_not_wrapped`, `bad_pin_record`.
+`pin_not_wrapped`, `bad_pin_record`, `replay`, `clamp_quota`,
+`relays_root_only`.
 
 The meanings are as in the check orders above. The same lists are exported
 by the reference as `STATEMENT_REASONS`, `ACCEPT_REASONS` and `DROP_REASONS`.

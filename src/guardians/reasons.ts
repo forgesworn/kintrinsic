@@ -96,6 +96,9 @@ export const DROP_REASONS = [
   'bad_offer',
   'pin_not_wrapped',
   'bad_pin_record',
+  'replay', // a clause whose event id the slot remembers (a clamped clause seen before)
+  'clamp_quota', // a clause dated ahead of the ward clock, with 256 such ids already remembered for its slot
+  'relays_root_only', // a RELAYS signed by a working key that would change the relay list
 ] as const
 export type DropReason = (typeof DROP_REASONS)[number]
 

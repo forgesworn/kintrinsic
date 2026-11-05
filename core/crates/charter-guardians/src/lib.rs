@@ -30,11 +30,12 @@ pub use pin::{
 pub use reason::{Reason, TickResult, ACCEPT_REASONS, DROP_REASONS, STATEMENT_REASONS};
 pub use state::{
     accept_clause, accept_signed_event, apply_inbound, apply_presence_confirm, apply_relays,
-    held_clause, is_departed, is_pinned, is_signer, mark_status_sent, mark_status_sent_to,
-    pair_from_offer, pair_from_seal, pending_expiry, project_state, recipients,
-    register_presence_token, root_of, signer_set, status_guardians, status_recipients,
-    status_relays, tick, ClauseInput, GuardianState, Outcome, PairToken, Paired, ProjectedState,
-    RelaysChannel, RelaysInput, StatusGuardians, Step, TickEntry, Verdict,
+    effective_time, held_clause, is_departed, is_pinned, is_signer, mark_status_sent,
+    mark_status_sent_to, pair_from_offer, pair_from_seal, pending_expiry, project_state,
+    recipients, register_presence_token, root_of, signer_set, status_guardians, status_recipients,
+    status_relays, tick, ClauseInput, GuardianState, HeldClause, Outcome, PairToken, Paired,
+    ProjectedState, RelaysChannel, RelaysInput, RememberedClause, StatusGuardians, Step, TickEntry,
+    Verdict,
 };
 pub use statement::{parse_statement, split_pending_d, PendingType, Statement, StatementType};
 
@@ -56,8 +57,10 @@ pub const MAX_TOMBSTONES_PER_ROOT: usize = 256;
 /// Each root's quota of held early statements: withdrawals, and also held
 /// cancels and objections. OQ: Held-statement quota.
 pub const MAX_HELD_PER_ROOT: usize = 64;
-/// A CLAUSE or statement more than this far ahead of the ward clock is refused.
-pub const FUTURE_SKEW_SECONDS: i64 = 300;
+/// Per `(subject, kind)`, the most clamped clause ids a ward remembers (a
+/// clause dated ahead of the ward clock). A further clamped clause is
+/// refused (`clamp_quota`) until the slot's bar passes some of them.
+pub const MAX_REMEMBERED_PER_SLOT: usize = 256;
 /// Pending statements expire at most this long after `issuedAt`.
 pub const PENDING_MAX_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// Notice period for a root removal signed by another root (rule 7).

@@ -19,7 +19,7 @@ import {
 import {
   R1, R2, R3, W1, W1b, W2, W3, T0, DAY, TOKEN, TOKEN2,
   approval, withdrawal, coGuardian, removal, move, cancel, objection, confirm, signRaw,
-  pairedR1W1, type Key,
+  pairedR1W1, clauseInput, type Key,
 } from './helpers.js'
 
 const H72 = 72 * 3600
@@ -104,7 +104,7 @@ describe('H3 and P7: objections', () => {
 describe('H4: the clause floor survives a departure', () => {
   test('a relay cannot restore a superseded clause after the newer signer departs', () => {
     let s = twoRoots()
-    const cl = (a: Key, issuedAt: number, now: number) => acceptClause(s, { author: a.pk, sealAuthor: a.pk, subject: 'kid', kind: 'apps', issuedAt }, now)
+    const cl = (a: Key, issuedAt: number, now: number) => acceptClause(s, clauseInput({ author: a.pk, sealAuthor: a.pk, subject: 'kid', kind: 'apps', issuedAt }), now)
     s = ok(cl(W1, T0 + 100, T0 + 100))
     s = ok(cl(W2, T0 + 200, T0 + 200))
     s = ok(inb(s, R2, withdrawal(R2, W2, { issuedAt: T0 + 210 }), T0 + 210))
@@ -112,12 +112,13 @@ describe('H4: the clause floor survives a departure', () => {
     dropped(cl(W1, T0 + 100, T0 + 220), 'not_newer')
     ok(cl(W1, T0 + 201, T0 + 220), 'clause_accepted')
   })
-  test('a far-future clause from a departed key is floored at the departure time', () => {
+  test('a far-future clause from a departed key is held at its effective time', () => {
     let s = twoRoots()
-    s = ok(acceptClause(s, { author: W2.pk, sealAuthor: W2.pk, subject: 'kid', kind: 'apps', issuedAt: T0 + 500 }, T0 + 200))
+    s = ok(acceptClause(s, clauseInput({ author: W2.pk, sealAuthor: W2.pk, subject: 'kid', kind: 'apps', issuedAt: T0 + 500 }), T0 + 200))
+    expect(heldClause(s, 'kid', 'apps')?.floor).toBe(T0 + 200)
     s = ok(inb(s, R2, withdrawal(R2, W2, { issuedAt: T0 + 210 }), T0 + 210))
-    expect(heldClause(s, 'kid', 'apps')?.floor).toBe(T0 + 210)
-    ok(acceptClause(s, { author: W1.pk, sealAuthor: W1.pk, subject: 'kid', kind: 'apps', issuedAt: T0 + 211 }, T0 + 220))
+    expect(heldClause(s, 'kid', 'apps')?.floor).toBe(T0 + 200)
+    ok(acceptClause(s, clauseInput({ author: W1.pk, sealAuthor: W1.pk, subject: 'kid', kind: 'apps', issuedAt: T0 + 211 }), T0 + 220))
   })
 })
 

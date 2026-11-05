@@ -25,7 +25,7 @@ import {
 import {
   R1, R2, R3, R4, R5, W1, W1b, W2, W3, W4, X, T0, DAY, TOKEN, TOKEN2,
   key, sign, approval, withdrawal, coGuardian, removal, move, cancel, objection, confirm,
-  pairedR1W1, pairedR1, type Key,
+  pairedR1W1, pairedR1, clauseInput, type Key,
 } from './helpers.js'
 
 const H72 = 72 * 3600
@@ -132,10 +132,17 @@ describe('signer set, approvals and the seal exceptions', () => {
   test('a root cannot approve itself or another root as a working key', () => {
     dropped(inb(pairedR1W1(), R1, approval(R1, R1, { issuedAt: T0 })), 'key_role_conflict')
   })
-  test('the 300-second future refusal: +300 accepted, +301 refused', () => {
+  test('a statement dated ahead of the ward clock is clamped, not refused, and counted', () => {
     const now = T0 + 10
-    ok(inb(pairedR1W1(), W1b, approval(R1, W1b, { issuedAt: now + 300 }), now))
-    dropped(inb(pairedR1W1(), W1b, approval(R1, W1b, { issuedAt: now + 301 }), now), 'future')
+    let s = ok(inb(pairedR1W1(), W1b, approval(R1, W1b, { issuedAt: now }), now))
+    expect(s.clamped).toBe(0)
+    s = ok(inb(pairedR1W1(), W1b, approval(R1, W1b, { issuedAt: now + 301 }), now))
+    expect(s.clamped).toBe(1)
+    expect(statusGuardians(s).clamped).toBe(1)
+    // Ordering uses the effective time: a correctly dated update a second
+    // later replaces it.
+    s = ok(inb(s, W1b, approval(R1, W1b, { issuedAt: now + 1, label: 'two' }), now + 1), 'approval_updated')
+    expect(s.clamped).toBe(1)
   })
   test('statements from a non-signer are dropped, not buffered', () => {
     const s = dropped(inb(pairedR1W1(), X, coGuardian(X, R2, { issuedAt: T0 })), 'signer_not_pinned')
@@ -223,16 +230,31 @@ describe('rule 3: withdrawal', () => {
 })
 
 describe('rule 4 and 5: departures fail closed; clauses record their signer', () => {
-  const cl = (author: Key, issuedAt: number, seal = author) => ({ author: author.pk, sealAuthor: seal.pk, subject: 'kid', kind: 'schedule', issuedAt })
+  const cl = (author: Key, issuedAt: number, seal = author) => clauseInput({ author: author.pk, sealAuthor: seal.pk, subject: 'kid', kind: 'schedule', issuedAt })
   test('a clause from a signer is stored with its signer and root', () => {
     const s = ok(acceptClause(pairedR1W1(), cl(W1, T0 + 1), T0 + 10), 'clause_accepted')
-    expect(heldClause(s, 'kid', 'schedule')).toEqual({ subject: 'kid', kind: 'schedule', signer: W1.pk, root: R1.pk, issuedAt: T0 + 1, floor: null })
+    expect(heldClause(s, 'kid', 'schedule')).toEqual({
+      subject: 'kid', kind: 'schedule', signer: W1.pk, root: R1.pk,
+      id: cl(W1, T0 + 1).id, issuedAt: T0 + 1, floor: T0 + 1, remembered: [],
+    })
   })
-  test('a non-signer, a wrong seal, the pairing floor and the future are refused', () => {
+  test('a non-signer and a wrong seal are refused; no pairing floor and no future refusal', () => {
     dropped(acceptClause(pairedR1W1(), cl(X, T0 + 1), T0 + 10), 'not_signer')
     dropped(acceptClause(pairedR1W1(), cl(W1, T0 + 1, R1), T0 + 10), 'seal_mismatch')
-    dropped(acceptClause(pairedR1W1(), cl(W1, T0 - 1), T0 + 10), 'pairing_floor')
-    dropped(acceptClause(pairedR1W1(), cl(W1, T0 + 311), T0 + 10), 'future')
+    ok(acceptClause(pairedR1W1(), cl(W1, T0 - 1), T0 + 10), 'clause_accepted')
+    const s = ok(acceptClause(pairedR1W1(), cl(W1, T0 + 311), T0 + 10), 'clause_accepted')
+    expect(heldClause(s, 'kid', 'schedule')).toMatchObject({ issuedAt: T0 + 311, floor: T0 + 10, remembered: [{ id: cl(W1, T0 + 311).id, issuedAt: T0 + 311 }] })
+    expect(s.clamped).toBe(1)
+  })
+  test('a clamped clause pins nothing, and its id blocks a replay until the bar passes it', () => {
+    let s = twoRoots()
+    s = ok(acceptClause(s, cl(W1, T0 + DAY), T0 + 100))
+    s = ok(acceptClause(s, cl(W2, T0 + 200), T0 + 200))
+    expect(heldClause(s, 'kid', 'schedule')?.remembered).toEqual([{ id: cl(W1, T0 + DAY).id, issuedAt: T0 + DAY }])
+    dropped(acceptClause(s, cl(W1, T0 + DAY), T0 + 300), 'replay')
+    s = ok(acceptClause(s, cl(W2, T0 + DAY), T0 + DAY + 1))
+    expect(heldClause(s, 'kid', 'schedule')?.remembered).toEqual([])
+    dropped(acceptClause(s, cl(W1, T0 + DAY), T0 + DAY + 2), 'not_newer')
   })
   test('a clause must be newer than the held clause from a current signer', () => {
     const s = ok(acceptClause(pairedR1W1(), cl(W1, T0 + 5), T0 + 10))
@@ -252,7 +274,8 @@ describe('rule 4 and 5: departures fail closed; clauses record their signer', ()
   test('GRANT / USAGE_SYNC: the signer-set gate', () => {
     ok(acceptSignedEvent(pairedR1W1(), { author: W1.pk, sealAuthor: W1.pk, ts: T0 }, T0 + 1), 'signed_accepted')
     dropped(acceptSignedEvent(pairedR1W1(), { author: X.pk, sealAuthor: X.pk, ts: T0 }, T0 + 1), 'not_signer')
-    dropped(acceptSignedEvent(pairedR1W1(), { author: W1.pk, sealAuthor: W1.pk, ts: T0 + 302 }, T0 + 1), 'future')
+    // No time gate here: GRANT keeps its own skew rule; USAGE_SYNC has none.
+    ok(acceptSignedEvent(pairedR1W1(), { author: W1.pk, sealAuthor: W1.pk, ts: T0 + DAY }, T0 + 1), 'signed_accepted')
   })
 })
 
@@ -261,8 +284,8 @@ describe('rule 6: co-guardian', () => {
     const s = twoRoots()
     expect(s.roots.map((r) => r.root)).toEqual([R1.pk, R2.pk])
     expect(signerSet(s)).toEqual([R1.pk, R2.pk, W1.pk, W2.pk].sort())
-    let c = ok(acceptClause(s, { author: W1.pk, sealAuthor: W1.pk, subject: 'k', kind: 'x', issuedAt: T0 + 40 }, T0 + 50))
-    c = ok(acceptClause(c, { author: W2.pk, sealAuthor: W2.pk, subject: 'k', kind: 'x', issuedAt: T0 + 41 }, T0 + 50))
+    let c = ok(acceptClause(s, clauseInput({ author: W1.pk, sealAuthor: W1.pk, subject: 'k', kind: 'x', issuedAt: T0 + 40 }), T0 + 50))
+    c = ok(acceptClause(c, clauseInput({ author: W2.pk, sealAuthor: W2.pk, subject: 'k', kind: 'x', issuedAt: T0 + 41 }), T0 + 50))
     expect(heldClause(c, 'k', 'x')?.root).toBe(R2.pk)
   })
   test('pending is reported in STATUS', () => {
@@ -419,7 +442,7 @@ describe('rule 8: root move', () => {
   })
   test('the old root signs nothing new after the move', () => {
     const { s } = moved()
-    dropped(acceptClause(s, { author: R1.pk, sealAuthor: R1.pk, subject: 'k', kind: 'x', issuedAt: T0 + 200 }, T0 + 210), 'not_signer')
+    dropped(acceptClause(s, clauseInput({ author: R1.pk, sealAuthor: R1.pk, subject: 'k', kind: 'x', issuedAt: T0 + 200 }), T0 + 210), 'not_signer')
   })
   test('a move can be cancelled by R; a co-guardian or move signed by a W is not a root statement', () => {
     let s = ok(inb(pairedR1W1(), W1, move(R1, R3, { issuedAt: T0 + 100 }), T0 + 110))
@@ -501,6 +524,7 @@ describe('rule 9 recipients and STATUS', () => {
       pending: [],
       tombstones: 0,
       relays: ['wss://a.example', 'wss://b.example'],
+      clamped: 0,
     })
   })
   test('rule 11: RELAYS from any signer; a multi-root ward also uses the previous relays for 7 days', () => {

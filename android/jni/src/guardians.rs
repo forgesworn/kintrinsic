@@ -200,6 +200,7 @@ impl Warden {
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_default();
         let candidate = ClauseCandidate {
+            id: event.id,
             author: vc.signer(),
             seal_author,
             subject_hex,

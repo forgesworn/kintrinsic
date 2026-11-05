@@ -101,6 +101,7 @@ pub fn apply_step(state: Option<&GuardianState>, input: &Value) -> (Option<Guard
         "clause" => accept_clause(
             st,
             &ClauseInput {
+                id: s(input, "id"),
                 author: s(input, "author"),
                 seal_author: s(input, "sealAuthor"),
                 subject: s(input, "subject"),

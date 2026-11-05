@@ -93,6 +93,11 @@ const DAY = 86_400;
 const H72 = 72 * 3600;
 const RELAYS = ["wss://relay.one.example", "wss://relay.two.example"];
 const tokenHex = (label) => bytesToHex(seedBytes(`guardians.token.${label}`).slice(0, 16));
+// A CLAUSE's event id: the clause body is out of scope, so the id is derived
+// from what identifies the clause in a step. The same arguments give the same
+// id, so repeating a step is a re-delivery of that clause.
+const clauseId = (author, subject, kind, issuedAt) =>
+  bytesToHex(seedBytes(`guardians.clause:${author.name}:${subject}:${kind}:${issuedAt}`));
 const MARKER = ["t", "charter-device"];
 
 const st = {
@@ -272,9 +277,9 @@ function scenario(name, rules, description, build) {
       const input = { type: "presence_confirm", now, sealAuthor: seal.pk, inner };
       return run("confirm", input, () => G.applyPresenceConfirm(state, { sealAuthor: seal.pk, inner }, now), want);
     },
-    clause(author, issuedAt, now, want, { seal = author, subject = "subject-a", kind = "schedule" } = {}) {
-      const input = { type: "clause", now, author: author.pk, sealAuthor: seal.pk, subject, kind, issuedAt };
-      return run("clause", input, () => G.acceptClause(state, { author: author.pk, sealAuthor: seal.pk, subject, kind, issuedAt }, now), want);
+    clause(author, issuedAt, now, want, { seal = author, subject = "subject-a", kind = "schedule", id = clauseId(author, subject, kind, issuedAt) } = {}) {
+      const input = { type: "clause", now, id, author: author.pk, sealAuthor: seal.pk, subject, kind, issuedAt };
+      return run("clause", input, () => G.acceptClause(state, { id, author: author.pk, sealAuthor: seal.pk, subject, kind, issuedAt }, now), want);
     },
     signed(author, ts, now, want, seal = author) {
       const input = { type: "signed", now, author: author.pk, sealAuthor: seal.pk, ts };
@@ -424,36 +429,65 @@ scenario("rule2_tie_withdrawal_wins", ["2", "3"], "A withdrawal and an approval 
   c.inbound(R1, st.withdrawal(R1, W3, { issuedAt: T0 }), T0 + 13, A("withdrawal_applied"));
 });
 
-scenario("rule4_departure_clauses", ["4", "5"], "Departed keys sign nothing new; their clauses stay until a current signer replaces them; their issuedAt is ignored, a current signer's is not.", (c) => {
+scenario("rule4_departure_clauses", ["4", "5", "who may sign what"], "Departed keys sign nothing new; their clauses stay until a current signer replaces them. A far-future clause is held at its effective time, so it pins nothing. No pairing floor for clauses.", (c) => {
   pairW1(c);
   c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 }), T0 + 10, A("approval_applied"));
-  c.clause(W1b, T0 + 310, T0 + 10, A("clause_accepted"));
-  c.clause(W1, T0 + 20, T0 + 20, D("not_newer"));
+  c.clause(W1b, T0 + DAY, T0 + 10, A("clause_accepted"));
+  c.clause(W1, T0 + 10, T0 + 20, D("not_newer"));
   c.inbound(W1, st.withdrawal(R1, W1b, { issuedAt: T0 + 30 }), T0 + 30, A("withdrawal_applied"));
   c.clause(W1b, T0 + 400, T0 + 400, D("not_signer"));
   c.clause(W1, T0 + 40, T0 + 40, A("clause_accepted"));
   c.clause(R1, T0 + 40, T0 + 41, D("not_newer"));
   c.clause(R1, T0 + 41, T0 + 41, A("clause_accepted"));
   c.clause(W1, T0 + 42, T0 + 42, D("seal_mismatch"), { seal: R1 });
-  c.clause(W1, T0 - 1, T0 + 42, D("pairing_floor"), { subject: "subject-b" });
+  c.clause(W1, T0 - 1, T0 + 42, A("clause_accepted"), { subject: "subject-b" });
 });
 
-scenario("future_refusal", ["who may sign what"], "A CLAUSE or statement more than 300 seconds ahead of the ward clock is refused; exactly 300 is accepted.", (c) => {
-  pairW1(c);
-  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 411 }), T0 + 110, D("future"));
-  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 410 }), T0 + 110, A("approval_applied"));
-  c.clause(W1, T0 + 411, T0 + 110, D("future"));
-  c.clause(W1, T0 + 410, T0 + 110, A("clause_accepted"));
-  c.inbound(W1, st.coguardian(R1, R2, { issuedAt: T0 + 411 }), T0 + 110, D("future"));
+scenario("clause_clamp", ["who may sign what", "4", "6"], "A clause dated ahead of the ward clock is accepted at its effective time, min(issuedAt, now): the other parent's next rule replaces it. Its id is remembered until the bar passes its issuedAt, so a relay can't replay it.", (c) => {
+  twoRoots(c);
+  const o = { kind: "apps" };
+  c.clause(W1, T0 + DAY, T0 + 100, A("clause_accepted"), o);
+  c.clause(W2, T0 + 200, T0 + 200, A("clause_accepted"), o);
+  c.clause(W1, T0 + DAY, T0 + 300, D("replay"), o);
+  c.clause(W1, T0 + DAY + 1, T0 + 400, A("clause_accepted"), o);
+  c.clause(W1, T0 + DAY + 1, T0 + 500, D("replay"), o);
+  c.clause(W2, T0 + 400, T0 + 450, D("not_newer"), o);
+  c.clause(W2, T0 + DAY + 5, T0 + DAY + 10, A("clause_accepted"), o);
+  c.clause(W1, T0 + DAY, T0 + DAY + 20, D("not_newer"), o);
+  c.clause(W1, T0 + DAY + 1000, T0 + DAY + 20, A("clause_accepted"), o);
+  c.clause(W2, T0 + DAY + 500, T0 + DAY + 20, A("clause_accepted"), o);
+  c.clause(W1, T0 + DAY + 1000, T0 + DAY + 30, D("replay"), o);
+  c.clause(W1, T0 + DAY + 21, T0 + DAY + 30, A("clause_accepted"), o);
 });
 
-scenario("signer_gate_grant_usage_sync", ["who may sign what"], "GRANT and USAGE_SYNC authors must be in the signer set, seal = author, and not more than 300 s ahead.", (c) => {
+scenario("statement_clamp", ["who may sign what", "pending", "7"], "A statement dated ahead of the ward clock is accepted; ordering, expiry, cancels, objections and departures use its effective time, min(issuedAt, now at receipt), so another device's correct clock is never refused.", (c) => {
+  twoRoots(c);
+  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + DAY }), T0 + 110, A("approval_applied"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY }), T0 + 120, A("coguardian_pending"));
+  c.inbound(W1b, st.cancel(R1, dG(R3), { issuedAt: T0 + 130 }), T0 + 130, A("cancel_applied"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 115 }), T0 + 140, D("stale"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 125 }), T0 + 140, D("cancelled"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + 135 }), T0 + 140, A("coguardian_pending"));
+  c.inbound(W1, st.removal(R1, R2, { issuedAt: T0 + DAY }), T0 + 140, A("removal_pending"));
+  c.inbound(R2, st.objection(R2, dU(R2), R1, { issuedAt: T0 + 150 }), T0 + 150, A("objection_applied"));
+  c.inbound(W2, st.removal(R2, R2, { issuedAt: T0 + 2 * DAY }), T0 + 160, A("removal_applied"));
+  const cg = st.coguardian(R1, R2, { issuedAt: T0 + 170 });
+  c.inbound(W1, cg, T0 + 170, A("coguardian_pending"));
+  c.token(tokenHex("clamp"), dG(R2), T0 + 180);
+  c.confirm(W3, confirmEv(W3, cg.id, tokenHex("clamp"), T0 + 190, st.approval(R2, W3, { issuedAt: T0 + 3 * DAY })), T0 + 190, A("coguardian_applied"));
+});
+
+scenario("pair_approval_clamped", ["scan-to-pair", "who may sign what"], "A pair offer's approval dated ahead of the ward clock still pairs; it counts as clamped.", (c) => {
+  c.pair(W1, T0, { approval: st.approval(R1, W1, { issuedAt: T0 + DAY }) });
+});
+
+scenario("signer_gate_grant_usage_sync", ["who may sign what"], "GRANT and USAGE_SYNC authors must be in the signer set and seal = author. The gate judges no time: a GRANT keeps its own skew rule; USAGE_SYNC has none.", (c) => {
   pairW1(c);
   c.signed(W1, T0 + 5, T0 + 10, A("signed_accepted"));
   c.signed(R1, T0 + 5, T0 + 10, A("signed_accepted"));
   c.signed(X, T0 + 5, T0 + 10, D("not_signer"));
   c.signed(W1, T0 + 5, T0 + 10, D("seal_mismatch"), R1);
-  c.signed(W1, T0 + 311, T0 + 10, D("future"));
+  c.signed(W1, T0 + DAY, T0 + 10, A("signed_accepted"));
 });
 
 scenario("rule6_coguardian", ["6", "presence confirmation"], "A co-guardian takes effect only after presence confirmation by an install bound to R2, which carries R2's approval; then both roots have equal authority.", (c) => {

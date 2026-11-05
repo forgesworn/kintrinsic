@@ -1244,6 +1244,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_default();
         let candidate = ClauseCandidate {
+            id: received.clause.id,
             author: vc.signer(),
             seal_author: received.seal_author,
             subject_hex,

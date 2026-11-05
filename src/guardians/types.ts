@@ -28,8 +28,18 @@ export const MAX_TOMBSTONES_PER_ROOT = 256
  * docs/guardian-keys-open-questions.md, "Held-statement quota").
  */
 export const MAX_HELD_PER_ROOT = 64
-/** A CLAUSE or statement more than this far ahead of the ward clock is refused. */
+/**
+ * Guardian side only: a family roster child record more than this far ahead
+ * of the receiving install's clock refuses the roster. Wards never refuse a
+ * CLAUSE or statement for its time: they clamp it (`acceptClause`).
+ */
 export const FUTURE_SKEW_SECONDS = 300
+/**
+ * Per `(subject, kind)`, the most clamped clause ids a ward remembers (a
+ * clause dated ahead of the ward clock). A further clamped clause is refused
+ * (`clamp_quota`) until the slot's bar passes some of them.
+ */
+export const MAX_REMEMBERED_PER_SLOT = 256
 /** Pending statements expire at most this long after `issuedAt`. */
 export const PENDING_MAX_SECONDS = 7 * 24 * 60 * 60
 /** Notice period for a root removal signed by another root (rule 7). */

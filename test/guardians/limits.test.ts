@@ -5,6 +5,8 @@ import {
   applyPresenceConfirm,
   registerPresenceToken,
   applyRelays,
+  acceptClause,
+  heldClause,
   parseStatement,
   parseStrictJson,
   tryParseStrictJson,
@@ -12,10 +14,11 @@ import {
   CHARTER_GUARDIAN_STATEMENT,
   MAX_JSON_DEPTH,
   PREVIOUS_RELAYS_MAX,
+  MAX_REMEMBERED_PER_SLOT,
   type GuardianState,
   type StepResult,
 } from '../../src/guardians/index.js'
-import { R1, R2, W1, W2, T0, DAY, TOKEN2, approval, coGuardian, confirm, signRaw, pairedR1W1, type Key } from './helpers.js'
+import { R1, R2, W1, W2, T0, DAY, TOKEN2, approval, coGuardian, confirm, signRaw, pairedR1W1, clauseInput, type Key } from './helpers.js'
 
 const dW = ['d', `kintrinsic/device/${W1.pk}`]
 const pW = ['p', W1.pk]
@@ -94,5 +97,35 @@ describe('N3: previous relay lists are capped', () => {
     let s = twoRoots()
     for (let n = 1; n <= 10; n++) s = rel(s, W1, T0 + 100 + n)
     expect(projectState(s, T0 + 110 + 7 * DAY).statusRelays).toEqual(['wss://n10.example'])
+  })
+})
+
+describe('D1: the clamped-clause id quota', () => {
+  const cl = (issuedAt: number) => clauseInput({ author: W1.pk, sealAuthor: W1.pk, subject: 'kid', kind: 'apps', issuedAt })
+  test('256 clamped ids per slot; the 257th is clamp_quota until the bar passes some', () => {
+    expect(MAX_REMEMBERED_PER_SLOT).toBe(256)
+    let s = pairedR1W1()
+    const now = T0 + 100
+    // Each clause is newer than the last (issuedAt strictly rising, all ahead
+    // of the clock), so each is accepted and remembered.
+    for (let i = 1; i <= 256; i++) {
+      const r = acceptClause(s, cl(T0 + DAY + i), now)
+      expect(r.outcome.reason).toBe('clause_accepted')
+      s = r.state
+    }
+    expect(heldClause(s, 'kid', 'apps')?.remembered).toHaveLength(256)
+    expect(acceptClause(s, cl(T0 + DAY + 257), now).outcome).toMatchObject({ result: 'dropped', reason: 'clamp_quota' })
+    // A remembered id is a replay whatever the clock.
+    expect(acceptClause(s, cl(T0 + DAY + 10), T0 + DAY + 10).outcome.reason).toBe('replay')
+    // Once the clock reaches some of them, a new clamped clause's bar (its
+    // effective time) prunes those, freeing room.
+    const later = acceptClause(s, cl(T0 + DAY + 1000), T0 + DAY + 128)
+    expect(later.outcome.reason).toBe('clause_accepted')
+    expect(heldClause(later.state, 'kid', 'apps')?.remembered).toHaveLength(129)
+    expect(heldClause(later.state, 'kid', 'apps')?.floor).toBe(T0 + DAY + 128)
+    // A clause that needs no memory prunes every id its bar reaches.
+    const settled = acceptClause(later.state, cl(T0 + DAY + 2000), T0 + DAY + 3000)
+    expect(heldClause(settled.state, 'kid', 'apps')?.remembered).toEqual([])
+    expect(acceptClause(settled.state, cl(T0 + DAY + 1000), T0 + DAY + 3001).outcome.reason).toBe('not_newer')
   })
 })

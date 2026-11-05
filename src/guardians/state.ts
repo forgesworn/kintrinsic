@@ -29,10 +29,10 @@ import {
 import {
   CHARTER_DEVICE_PAIR_OFFER,
   CHARTER_PRESENCE_CONFIRM,
-  FUTURE_SKEW_SECONDS,
   HEX32,
   MAX_ACTIVE_KEYS_PER_ROOT,
   MAX_HELD_PER_ROOT,
+  MAX_REMEMBERED_PER_SLOT,
   MAX_ROOTS,
   MAX_TOMBSTONES_PER_ROOT,
   OBJECTION_BLOCK_SECONDS,
@@ -141,6 +141,12 @@ export interface PresenceToken {
   mintedAt: number
 }
 
+/** A clamped clause's id, remembered for its slot until the bar passes it. */
+export interface RememberedClause {
+  id: string
+  issuedAt: number
+}
+
 /** A held clause: the minimal model of rules 4 and 5. */
 export interface HeldClause {
   subject: string
@@ -148,13 +154,23 @@ export interface HeldClause {
   signer: string
   /** The signer's root at acceptance, for "set by" display (rule 5). */
   root: string
+  /** The clause's event id. */
+  id: string
+  /** The clause's own `issuedAt`, as signed. */
   issuedAt: number
   /**
-   * Set when the signer departs: min(`issuedAt`, the departure time). While
-   * the signer is departed, a replacement must be newer than this.
+   * The slot's bar: a replacement must have `issuedAt` above it. The clause's
+   * effective time, min(`issuedAt`, the ward clock at acceptance); when the
+   * signer departs, min(that, the departure time).
    * OQ: Clause floor after a departure.
    */
-  floor: number | null
+  floor: number
+  /**
+   * Ids of clamped clauses (dated ahead of the ward clock when accepted) for
+   * this `(subject, kind)`, kept while their `issuedAt` is above the bar, so a
+   * relay can't replay one over a newer rule. Sorted by `id`.
+   */
+  remembered: RememberedClause[]
 }
 
 export interface GuardianState {
@@ -177,6 +193,11 @@ export interface GuardianState {
   guardianPin: GuardianPinRecord | null
   /** Departed keys owed one last STATUS showing their departure. */
   farewell: string[]
+  /**
+   * Accepted clauses and statements whose `issuedAt` was ahead of the ward
+   * clock (and so clamped to it), since pairing. STATUS `guardians.clamped`.
+   */
+  clamped: number
 }
 
 export interface TickEntry {
@@ -324,10 +345,23 @@ export function statusRelays(s: GuardianState, now: number): string[] {
   return out
 }
 
-/** Pending expiry: `expiresAt` clamped to 7 days after `issuedAt`; 7 days without one. */
-export function pendingExpiry(issuedAt: number, expiresAt: number | null): number {
-  const cap = issuedAt + PENDING_MAX_SECONDS
+/**
+ * Pending expiry: `expiresAt` clamped to 7 days after the statement's
+ * effective time (`effectiveTime`); 7 days without one.
+ */
+export function pendingExpiry(effective: number, expiresAt: number | null): number {
+  const cap = effective + PENDING_MAX_SECONDS
   return expiresAt === null ? cap : Math.min(expiresAt, cap)
+}
+
+/**
+ * A claimed time as the ward uses it: never ahead of the ward clock when the
+ * event arrived. A clause's or statement's `issuedAt` ahead of the clock is
+ * clamped to it, so one signer's fast clock can't pin a slot against another
+ * signer, and no clock state refuses a rule outright.
+ */
+export function effectiveTime(issuedAt: number, receivedAt: number): number {
+  return Math.min(issuedAt, receivedAt)
 }
 
 /** The storage slot of a statement: see `StoredStatement`. OQ: Cancel or objection before its statement. */
@@ -367,11 +401,17 @@ function putStatement(s: GuardianState, st: Statement, now: number, held = false
  * order; the loser is `tie_not_newer`.
  * OQ: Same d, same issuedAt, different content.
  */
-function orderAgainst(stored: { id: string; issuedAt: number } | undefined, st: Statement): ReasonCode | null {
+function orderAgainst(
+  stored: { id: string; issuedAt: number; receivedAt: number } | undefined,
+  st: Statement,
+  now: number,
+): ReasonCode | null {
   if (!stored) return null
   if (stored.id === st.id) return 'duplicate'
-  if (st.issuedAt < stored.issuedAt) return 'stale'
-  if (st.issuedAt === stored.issuedAt && cmp(st.id, stored.id) > 0) return 'tie_not_newer'
+  const mine = effectiveTime(st.issuedAt, now)
+  const theirs = effectiveTime(stored.issuedAt, stored.receivedAt)
+  if (mine < theirs) return 'stale'
+  if (mine === theirs && cmp(st.id, stored.id) > 0) return 'tie_not_newer'
   return null
 }
 
@@ -390,7 +430,7 @@ function upsertDepartedRoot(s: GuardianState, root: string, issuedAt: number, by
 /** Rule 4 floor: clamp the held clauses of keys departing at `at`. OQ: Clause floor after a departure. */
 function clampClauses(s: GuardianState, keys: string[], at: number): void {
   for (const c of s.clauses) {
-    if (keys.includes(c.signer)) c.floor = Math.min(c.floor ?? c.issuedAt, c.issuedAt, at)
+    if (keys.includes(c.signer)) c.floor = Math.min(c.floor, at)
   }
 }
 
@@ -410,17 +450,19 @@ function withdraw(
 
 /**
  * Apply a root removal (rule 7) at time `at`. Refused unless another,
- * distinct root remains: removal never leaves a ward with no roots.
+ * distinct root remains: removal never leaves a ward with no roots. R2 is
+ * recorded as departed at the removal's effective time.
  */
 function applyRemoval(
   s: GuardianState,
   r: { d: string; id: string; signer: string; key: string; issuedAt: number },
+  effective: number,
   at: number,
 ): 'applied' | 'last_root' {
   const R2 = r.key
   if (!isPinned(s, R2) || s.roots.filter((x) => x.root !== R2).length < 1) return 'last_root'
   s.roots = s.roots.filter((x) => x.root !== R2)
-  upsertDepartedRoot(s, R2, r.issuedAt, 'removal')
+  upsertDepartedRoot(s, R2, effective, 'removal')
   s.tombstones.push({ type: 'removal', d: r.d, id: r.id, key: R2, signer: r.signer, issuedAt: r.issuedAt })
   const gone = [R2]
   for (const k of s.keys) {
@@ -459,19 +501,26 @@ function bindKey(s: GuardianState, approval: Statement, now: number): WorkingKey
 
 /**
  * An objection by `removed` against removals signed by `remover`: it drops a
- * removal arriving later whose `issuedAt` is at or below its own, and any
- * removal arriving within 7 days of the objection reaching the ward.
+ * removal whose effective time is at or below its own, and any removal
+ * judged within 7 days of the objection reaching the ward.
  * OQ: Cancel or objection before its statement; OQ: Removal re-issued after an objection.
  */
-function objectedBy(s: GuardianState, d: string, removed: string, remover: string, issuedAt: number, now: number): boolean {
+function objectedBy(s: GuardianState, d: string, removed: string, remover: string, effective: number, now: number): boolean {
   const o = storedFor(s, `${STATEMENT_PREFIXES.objection}${d}|${remover}`)
-  return !!o && o.signer === removed && (o.issuedAt >= issuedAt || now < o.receivedAt + OBJECTION_BLOCK_SECONDS)
+  return (
+    !!o &&
+    o.signer === removed &&
+    (effectiveTime(o.issuedAt, o.receivedAt) >= effective || now < o.receivedAt + OBJECTION_BLOCK_SECONDS)
+  )
 }
 
-/** A held cancel for `d` from `signer` at or after `issuedAt`. OQ: Cancel or objection before its statement. */
-function cancelledBy(s: GuardianState, d: string, signer: string, issuedAt: number): boolean {
+/**
+ * A stored cancel for `d` from `signer` whose effective time is at or after
+ * `effective`. OQ: Cancel or objection before its statement.
+ */
+function cancelledBy(s: GuardianState, d: string, signer: string, effective: number): boolean {
   const c = storedFor(s, `${STATEMENT_PREFIXES.cancel}${d}|${signer}`)
-  return !!c && c.issuedAt >= issuedAt
+  return !!c && effectiveTime(c.issuedAt, c.receivedAt) >= effective
 }
 
 // ---------------------------------------------------------------------------
@@ -506,10 +555,10 @@ function advance(s: GuardianState, now: number): TickEntry[] {
     if (best.act === 'expire') {
       dropPending(s, (x) => x.d === p.d)
       out.push({ d: p.d, result: 'expired', reason: 'expired' })
-    } else if (objectedBy(s, p.d, p.key, p.signer, p.issuedAt, best.at)) {
+    } else if (objectedBy(s, p.d, p.key, p.signer, effectiveTime(p.issuedAt, p.receivedAt), best.at)) {
       dropPending(s, (x) => x.d === p.d)
       out.push({ d: p.d, result: 'refused', reason: 'objected' })
-    } else if (applyRemoval(s, p, best.at) === 'applied') {
+    } else if (applyRemoval(s, p, effectiveTime(p.issuedAt, p.receivedAt), best.at) === 'applied') {
       out.push({ d: p.d, result: 'applied', reason: 'removal_applied' })
     } else {
       dropPending(s, (x) => x.d === p.d)
@@ -586,7 +635,7 @@ function processApproval(s: GuardianState, st: Statement, now: number) {
       mode = 'update'
     }
   }
-  const order = orderAgainst(storedFor(s, st.d), st)
+  const order = orderAgainst(storedFor(s, st.d), st, now)
   if (order) return drop(order)
   if (mode !== 'update') {
     if (rootAtQuota(s, R)) return drop('root_at_quota')
@@ -654,23 +703,28 @@ function addPending(s: GuardianState, st: Statement, type: PendingType, expiresA
   putStatement(s, st, now)
 }
 
-/** Rule 7: re-pinning a departed root needs a statement strictly newer than its departure. */
-function departedAtOrAfter(s: GuardianState, key: string, issuedAt: number): boolean {
+/**
+ * Rule 7: re-pinning a departed root needs a statement whose effective time
+ * is strictly after the departure's (both clamped to the ward clock, so a
+ * far-future removal can't lock a parent out).
+ */
+function departedAtOrAfter(s: GuardianState, key: string, effective: number): boolean {
   const dep = s.departedRoots.find((d) => d.root === key)
   // A same-second removal wins. OQ: Same-second ties across different d.
-  return !!dep && issuedAt <= dep.issuedAt
+  return !!dep && effective <= dep.issuedAt
 }
 
 function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
   const R2 = st.key
+  const effective = effectiveTime(st.issuedAt, now)
   if (isPinned(s, R2)) return drop('already_pinned')
   if (keyRecord(s, R2)) return drop('key_role_conflict')
-  if (departedAtOrAfter(s, R2, st.issuedAt)) return drop('not_newer_than_departure')
-  const order = orderAgainst(storedFor(s, st.d), st)
+  if (departedAtOrAfter(s, R2, effective)) return drop('not_newer_than_departure')
+  const order = orderAgainst(storedFor(s, st.d), st, now)
   if (order) return drop(order)
-  const expiresAt = pendingExpiry(st.issuedAt, st.expiresAt)
+  const expiresAt = pendingExpiry(effective, st.expiresAt)
   if (now >= expiresAt) return drop('expired')
-  if (cancelledBy(s, st.d, st.signer, st.issuedAt)) return drop('cancelled')
+  if (cancelledBy(s, st.d, st.signer, effective)) return drop('cancelled')
   if (st.type === 'coguardian' && s.roots.length >= MAX_ROOTS) return drop('root_quota')
   addPending(s, st, st.type as PendingType, expiresAt, now)
   return accept(st.type === 'coguardian' ? 'coguardian_pending' : 'move_pending')
@@ -678,19 +732,20 @@ function processCoGuardianOrMove(s: GuardianState, st: Statement, now: number) {
 
 function processRemoval(s: GuardianState, st: Statement, now: number) {
   const R2 = st.key
+  const effective = effectiveTime(st.issuedAt, now)
   if (!isPinned(s, R2)) return drop('target_not_pinned')
-  const order = orderAgainst(storedFor(s, st.d), st)
+  const order = orderAgainst(storedFor(s, st.d), st, now)
   if (order) return drop(order)
   if (st.signer === R2) {
     if (s.roots.filter((x) => x.root !== R2).length < 1) return drop('last_root')
     putStatement(s, st, now)
-    applyRemoval(s, st, now)
+    applyRemoval(s, st, effective, now)
     return accept('removal_applied')
   }
-  const expiresAt = pendingExpiry(st.issuedAt, st.expiresAt)
+  const expiresAt = pendingExpiry(effective, st.expiresAt)
   if (now >= expiresAt) return drop('expired')
-  if (objectedBy(s, st.d, R2, st.signer, st.issuedAt, now)) return drop('objected')
-  if (cancelledBy(s, st.d, st.signer, st.issuedAt)) return drop('cancelled')
+  if (objectedBy(s, st.d, R2, st.signer, effective, now)) return drop('objected')
+  if (cancelledBy(s, st.d, st.signer, effective)) return drop('cancelled')
   addPending(s, st, 'removal', expiresAt, now)
   return accept('removal_pending')
 }
@@ -704,13 +759,14 @@ function holdOrDrop(s: GuardianState, st: Statement, now: number, reason: 'cance
 }
 
 function processCancel(s: GuardianState, st: Statement, now: number) {
-  const order = orderAgainst(storedFor(s, statementSlot(st)), st)
+  const order = orderAgainst(storedFor(s, statementSlot(st)), st, now)
   if (order) return drop(order)
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
   if (pend && pend.signer !== st.signer) return drop('cancel_signer_mismatch')
-  // At or below: a same-second cancel wins. OQ: Same-second ties across different d.
-  if (pend && pend.issuedAt <= st.issuedAt) {
+  // At or below, by effective time: a same-second cancel wins. OQ: Same-second
+  // ties across different d.
+  if (pend && effectiveTime(pend.issuedAt, pend.receivedAt) <= effectiveTime(st.issuedAt, now)) {
     dropPending(s, (p) => p.d === target)
     putStatement(s, st, now)
     return accept('cancel_applied')
@@ -720,7 +776,7 @@ function processCancel(s: GuardianState, st: Statement, now: number) {
 
 function processObjection(s: GuardianState, st: Statement, now: number) {
   if (st.signer !== st.key) return drop('objection_mismatch')
-  const order = orderAgainst(storedFor(s, statementSlot(st)), st)
+  const order = orderAgainst(storedFor(s, statementSlot(st)), st, now)
   if (order) return drop(order)
   const target = st.target as string
   const pend = s.pending.find((p) => p.d === target)
@@ -734,13 +790,33 @@ function processObjection(s: GuardianState, st: Statement, now: number) {
   return holdOrDrop(s, st, now, 'objection_held')
 }
 
+function processStatement(s: GuardianState, st: Statement, now: number) {
+  switch (st.type) {
+    case 'approval':
+      return processApproval(s, st, now)
+    case 'withdrawal':
+      return processWithdrawal(s, st, now)
+    case 'coguardian':
+    case 'move':
+      return processCoGuardianOrMove(s, st, now)
+    case 'removal':
+      return processRemoval(s, st, now)
+    case 'cancel':
+      return processCancel(s, st, now)
+    case 'objection':
+      return processObjection(s, st, now)
+  }
+}
+
 /**
  * Apply one gift-wrapped statement (kind 31120) at the ward.
  *
  * `sealAuthor` is the authenticated seal author from the NIP-59 unwrap;
  * `inner` is the signed statement. Checks run in this order: statement
- * validity (`parseStatement`), the 300-second future refusal, the seal rule,
- * the signer being a pinned root, then the type's own checks.
+ * validity (`parseStatement`), the seal rule, the signer being a pinned
+ * root, then the type's own checks. A statement dated ahead of the ward clock
+ * is not refused: every comparison uses its effective time
+ * (`effectiveTime`), and an accepted one counts in `clamped`.
  *
  * Presence confirmations (kind 31121) go to `applyPresenceConfirm`, not here.
  */
@@ -749,24 +825,11 @@ export function applyInbound(state: GuardianState, inbound: Inbound, now: number
     const parsed = parseStatement(inbound.inner)
     if (!parsed.ok) return drop(parsed.reason)
     const st = parsed.statement
-    if (st.issuedAt > now + FUTURE_SKEW_SECONDS) return drop('future')
     if (!sealAllowed(s, st, inbound.sealAuthor)) return drop('seal_mismatch')
     if (!isPinned(s, st.signer)) return drop('signer_not_pinned')
-    switch (st.type) {
-      case 'approval':
-        return processApproval(s, st, now)
-      case 'withdrawal':
-        return processWithdrawal(s, st, now)
-      case 'coguardian':
-      case 'move':
-        return processCoGuardianOrMove(s, st, now)
-      case 'removal':
-        return processRemoval(s, st, now)
-      case 'cancel':
-        return processCancel(s, st, now)
-      case 'objection':
-        return processObjection(s, st, now)
-    }
+    const r = processStatement(s, st, now)
+    if (r.result === 'accepted' && st.issuedAt > now) s.clamped += 1
+    return r
   })
 }
 
@@ -836,17 +899,18 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
       if (pend.confirmedAt !== null) return drop('duplicate')
       const rec = activeKey(s, W)
       if (!rec || rec.root !== pend.signer) return drop('confirmer_not_bound')
-      if (objectedBy(s, pend.d, pend.key, pend.signer, pend.issuedAt, now)) {
+      const pendEffective = effectiveTime(pend.issuedAt, pend.receivedAt)
+      if (objectedBy(s, pend.d, pend.key, pend.signer, pendEffective, now)) {
         dropPending(s, (p) => p.d === pend.d)
         return drop('objected')
       }
       spend()
       pend.confirmedAt = now
-      // Notice runs from the later of issuedAt and the ward's own receipt.
-      // OQ: Removal notice measured from receipt.
-      pend.takesEffectAt = Math.max(now, Math.max(pend.issuedAt, pend.receivedAt) + REMOVAL_NOTICE_SECONDS)
+      // Notice runs from the ward's own receipt (the effective time is never
+      // later). OQ: Removal notice measured from receipt.
+      pend.takesEffectAt = Math.max(now, pend.receivedAt + REMOVAL_NOTICE_SECONDS)
       if (pend.takesEffectAt <= now) {
-        if (applyRemoval(s, pend, now) === 'last_root') {
+        if (applyRemoval(s, pend, pendEffective, now) === 'last_root') {
           dropPending(s, (p) => p.d === pend.d)
           return drop('last_root')
         }
@@ -865,21 +929,22 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
     const ap = pa.statement
     if (ap.type !== 'approval' || ap.signer !== R2 || ap.key !== W) return drop('bad_approval')
     if (ap.expiresAt !== null) return drop('expires_at_not_allowed')
-    if (ap.issuedAt > now + FUTURE_SKEW_SECONDS) return drop('future')
     if (isPinned(s, R2)) return drop('already_pinned')
     if (keyRecord(s, R2) || isPinned(s, W) || W === R2) return drop('key_role_conflict')
-    if (departedAtOrAfter(s, R2, pend.issuedAt)) return drop('not_newer_than_departure')
+    const pendEffective = effectiveTime(pend.issuedAt, pend.receivedAt)
+    if (departedAtOrAfter(s, R2, pendEffective)) return drop('not_newer_than_departure')
     if (isDepartedRoot(s, W)) return drop('key_departed')
     const rec = keyRecord(s, W)
     if (rec) {
       if (rec.status !== 'active') return drop('key_departed')
       if (pend.type === 'coguardian' || rec.root !== pend.signer) return drop('bound_elsewhere')
     }
-    const order = orderAgainst(storedFor(s, ap.d), ap)
+    const order = orderAgainst(storedFor(s, ap.d), ap, now)
     if (order) return drop(order)
     if (rootAtQuota(s, R2)) return drop('root_at_quota')
     if (pend.type === 'coguardian' && s.roots.length >= MAX_ROOTS) return drop('root_quota')
     spend()
+    if (ap.issuedAt > now) s.clamped += 1
     // Whichever statement pins R2 first, every other pending one naming R2 goes.
     dropPending(s, (p) => p.key === R2)
 
@@ -895,7 +960,7 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
     const R = pend.signer
     const idx = s.roots.findIndex((r) => r.root === R)
     s.roots.splice(idx, 1, { root: R2, pinnedAt: now, via: 'move' })
-    upsertDepartedRoot(s, R, pend.issuedAt, 'move')
+    upsertDepartedRoot(s, R, pendEffective, 'move')
     const gone = [R]
     for (const k of s.keys) {
       if (k.status === 'active' && k.root === R && k.key !== W) {
@@ -918,6 +983,8 @@ export function applyPresenceConfirm(state: GuardianState, inbound: Inbound, now
 // ---------------------------------------------------------------------------
 
 export interface ClauseInput {
+  /** The CLAUSE event's id (64 lowercase hex). */
+  id: string
   author: string
   sealAuthor: string
   subject: string
@@ -926,32 +993,48 @@ export interface ClauseInput {
 }
 
 /**
- * Rules 4 and 5: accept a CLAUSE if its author is in the signer set and it is
- * newer than the held clause of the same `(subject, kind)`: newer than its
- * `issuedAt` while its signer is current, newer than its departure floor once
- * the signer has departed. Checks run: future, seal, signer, pairing floor,
- * newer.
+ * Rules 4 and 5 with the clock clamp: accept a CLAUSE if its author is in the
+ * signer set and its `issuedAt` is above the bar of the held clause of the
+ * same `(subject, kind)`.
+ *
+ * - The bar is the held clause's effective time, min(`issuedAt`, the ward
+ *   clock when it was accepted), lowered to the departure time if its signer
+ *   departs. A far-future clause therefore pins nothing: any later clause
+ *   from a current signer replaces it.
+ * - A clause dated ahead of the ward clock has its id remembered for the slot
+ *   until the bar reaches its `issuedAt`, so a relay can't replay it over a
+ *   newer rule (`replay`). At most 256 per slot (`clamp_quota`).
+ *
+ * Checks run: seal, signer, replay, newer, clamp quota.
  */
 export function acceptClause(state: GuardianState, clause: ClauseInput, now: number): StepResult {
   return step(state, now, (s) => {
-    if (clause.issuedAt > now + FUTURE_SKEW_SECONDS) return drop('future')
     if (clause.sealAuthor !== clause.author) return drop('seal_mismatch')
     if (!isSigner(s, clause.author)) return drop('not_signer')
-    if (clause.issuedAt < s.pairedAt) return drop('pairing_floor')
-    const held = s.clauses.find((c) => c.subject === clause.subject && c.kind === clause.kind)
-    if (held) {
-      const bar = isSigner(s, held.signer) ? held.issuedAt : (held.floor ?? held.issuedAt)
-      if (clause.issuedAt <= bar) return drop('not_newer')
-    }
-    s.clauses = s.clauses.filter((c) => !(c.subject === clause.subject && c.kind === clause.kind))
+    const same = (c: HeldClause) => c.subject === clause.subject && c.kind === clause.kind
+    const held = s.clauses.find(same)
+    const remembered = held?.remembered ?? []
+    if (remembered.some((r) => r.id === clause.id)) return drop('replay')
+    if (held && clause.issuedAt <= held.floor) return drop('not_newer')
+    const effective = effectiveTime(clause.issuedAt, now)
+    const clamped = clause.issuedAt > now
+    // The new bar is `effective`: an id whose issuedAt it reaches needs no memory.
+    const kept = remembered.filter((r) => r.issuedAt > effective).map((r) => ({ ...r }))
+    if (clamped && kept.length >= MAX_REMEMBERED_PER_SLOT) return drop('clamp_quota')
+    if (clamped) kept.push({ id: clause.id, issuedAt: clause.issuedAt })
+    kept.sort((a, b) => cmp(a.id, b.id))
+    s.clauses = s.clauses.filter((c) => !same(c))
     s.clauses.push({
       subject: clause.subject,
       kind: clause.kind,
       signer: clause.author,
       root: rootOf(s, clause.author) as string,
+      id: clause.id,
       issuedAt: clause.issuedAt,
-      floor: null,
+      floor: effective,
+      remembered: kept,
     })
+    if (clamped) s.clamped += 1
     return accept('clause_accepted')
   })
 }
@@ -970,13 +1053,11 @@ export interface SignedEventInput {
 
 /**
  * The signer-set gate for a GRANT or USAGE_SYNC: seal author is the inner
- * author, the author is in the signer set, and `ts` is not more than 300
- * seconds ahead (OQ: 300-second future refusal for GRANT, RELAYS and
- * USAGE_SYNC). Their own existing checks still apply on top.
+ * author and the author is in the signer set. `ts` is not judged here: a
+ * GRANT keeps its own existing skew rule, and USAGE_SYNC has none.
  */
 export function acceptSignedEvent(state: GuardianState, ev: SignedEventInput, now: number): StepResult {
   return step(state, now, (s) => {
-    if (ev.ts > now + FUTURE_SKEW_SECONDS) return drop('future')
     if (ev.sealAuthor !== ev.author) return drop('seal_mismatch')
     if (!isSigner(s, ev.author)) return drop('not_signer')
     return accept('signed_accepted')
@@ -1105,6 +1186,7 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
     previousRelays: [],
     guardianPin: null,
     farewell: [],
+    clamped: 0,
   }
 
   if (o.approval === undefined) {
@@ -1117,7 +1199,7 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
   if (ap.key !== inbound.sealAuthor) return { ok: false, reason: 'seal_mismatch' }
   if (ap.signer === ap.key) return { ok: false, reason: 'key_role_conflict' }
   if (ap.expiresAt !== null) return { ok: false, reason: 'expires_at_not_allowed' }
-  if (ap.issuedAt > now + FUTURE_SKEW_SECONDS) return { ok: false, reason: 'future' }
+  if (ap.issuedAt > now) state.clamped = 1
   state.roots.push({ root: ap.signer, pinnedAt: now, via: 'pair' })
   bindKey(state, ap, now)
   return { ok: true, reason: 'paired', state: normalise(state), root: ap.signer, workingKey: ap.key }
@@ -1132,6 +1214,8 @@ export interface StatusGuardians {
   pending: { d: string; kind: PendingType; takesEffectAt?: number; expiresAt: number }[]
   tombstones: number
   relays: string[]
+  /** Accepted clauses and statements whose claimed time was clamped to the ward clock, since pairing. */
+  clamped: number
 }
 
 /** The `guardians` object a ward adds to STATUS. */
@@ -1152,6 +1236,7 @@ export function statusGuardians(state: GuardianState): StatusGuardians {
     })),
     tombstones: state.tombstones.length,
     relays: [...state.relays],
+    clamped: state.clamped,
   }
 }
 
@@ -1179,6 +1264,7 @@ export interface ProjectedState {
   relays: string[]
   statusRelays: string[]
   guardianPin: GuardianPinRecord | null
+  clamped: number
 }
 
 export function projectState(state: GuardianState, now: number): ProjectedState {
@@ -1204,10 +1290,11 @@ export function projectState(state: GuardianState, now: number): ProjectedState 
     departed: [...departed].sort(cmp),
     recipients: recipients(state),
     farewell: [...state.farewell],
-    clauses: state.clauses.map((c) => ({ ...c })),
+    clauses: state.clauses.map((c) => ({ ...c, remembered: c.remembered.map((r) => ({ ...r })) })),
     relays: [...state.relays],
     statusRelays: statusRelays(state, now),
     guardianPin: state.guardianPin ? { ...state.guardianPin } : null,
+    clamped: state.clamped,
   }
 }
 

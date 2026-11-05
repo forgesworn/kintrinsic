@@ -172,6 +172,14 @@ pub struct PresenceToken {
     pub minted_at: i64,
 }
 
+/// A clamped clause's id, remembered for its slot until the bar passes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RememberedClause {
+    pub id: String,
+    pub issued_at: i64,
+}
+
 /// A held clause: the minimal model of rules 4 and 5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,10 +189,29 @@ pub struct HeldClause {
     pub signer: String,
     /// The signer's root at acceptance, for "set by" display (rule 5).
     pub root: String,
+    /// The clause's event id (empty for a slot seeded from a legacy store).
+    #[serde(default)]
+    pub id: String,
+    /// The clause's own `issuedAt`, as signed.
     pub issued_at: i64,
-    /// Set when the signer departs: min(`issued_at`, the departure time).
-    /// OQ: Clause floor after a departure.
+    /// The slot's bar: a replacement must have `issuedAt` above it. The
+    /// clause's effective time, min(`issued_at`, the ward clock at
+    /// acceptance); when the signer departs, min(that, the departure time).
+    /// The reference always sets it; `None` (a state persisted before the
+    /// clamp) reads as `issued_at`. OQ: Clause floor after a departure.
     pub floor: Option<i64>,
+    /// Ids of clamped clauses (dated ahead of the ward clock when accepted)
+    /// for this `(subject, kind)`, kept while their `issuedAt` is above the
+    /// bar, so a relay can't replay one over a newer rule. Sorted by `id`.
+    #[serde(default)]
+    pub remembered: Vec<RememberedClause>,
+}
+
+impl HeldClause {
+    /// The bar a replacement's `issuedAt` must be above.
+    pub fn bar(&self) -> i64 {
+        self.floor.unwrap_or(self.issued_at)
+    }
 }
 
 /// A relay list replaced within the last 7 days (rule 11).
@@ -218,6 +245,11 @@ pub struct GuardianState {
     pub guardian_pin: Option<GuardianPinRecord>,
     /// Departed keys owed one last STATUS showing their departure.
     pub farewell: Vec<String>,
+    /// Accepted clauses and statements whose `issuedAt` was ahead of the
+    /// ward clock (and so clamped to it), since pairing. STATUS
+    /// `guardians.clamped`.
+    #[serde(default)]
+    pub clamped: u64,
 }
 
 /// One pending statement resolved by the timer advance.
@@ -417,11 +449,19 @@ pub fn status_relays(s: &GuardianState, now: i64) -> Vec<String> {
     out
 }
 
-/// Pending expiry: `expires_at` clamped to 7 days after `issued_at`; 7 days
-/// without one.
-pub fn pending_expiry(issued_at: i64, expires_at: Option<i64>) -> i64 {
-    let cap = issued_at + PENDING_MAX_SECONDS;
+/// Pending expiry: `expires_at` clamped to 7 days after the statement's
+/// effective time ([`effective_time`]); 7 days without one.
+pub fn pending_expiry(effective: i64, expires_at: Option<i64>) -> i64 {
+    let cap = effective + PENDING_MAX_SECONDS;
     expires_at.map_or(cap, |e| e.min(cap))
+}
+
+/// A claimed time as the ward uses it: never ahead of the ward clock when
+/// the event arrived. A clause's or statement's `issuedAt` ahead of the
+/// clock is clamped to it, so one signer's fast clock can't pin a slot
+/// against another signer, and no clock state refuses a rule outright.
+pub fn effective_time(issued_at: i64, received_at: i64) -> i64 {
+    issued_at.min(received_at)
 }
 
 /// The storage slot of a statement. OQ: Cancel or objection before its
@@ -466,15 +506,18 @@ fn put_statement(s: &mut GuardianState, st: &Statement, now: i64, held: bool) {
 /// Rule 2 within one slot: re-delivery is `duplicate`, an older one `stale`,
 /// and at the same `issuedAt` the lower event id wins (`tie_not_newer`).
 /// OQ: Same d, same issuedAt, different content.
-fn order_against(stored: Option<&StoredStatement>, st: &Statement) -> Option<Reason> {
+/// Both sides compare by effective time.
+fn order_against(stored: Option<&StoredStatement>, st: &Statement, now: i64) -> Option<Reason> {
     let stored = stored?;
     if stored.id == st.id {
         return Some(Reason::Duplicate);
     }
-    if st.issued_at < stored.issued_at {
+    let mine = effective_time(st.issued_at, now);
+    let theirs = effective_time(stored.issued_at, stored.received_at);
+    if mine < theirs {
         return Some(Reason::Stale);
     }
-    if st.issued_at == stored.issued_at && cmp_str(&st.id, &stored.id) == Ordering::Greater {
+    if mine == theirs && cmp_str(&st.id, &stored.id) == Ordering::Greater {
         return Some(Reason::TieNotNewer);
     }
     None
@@ -515,7 +558,7 @@ fn upsert_departed_root(s: &mut GuardianState, root: &str, issued_at: i64, by: D
 fn clamp_clauses(s: &mut GuardianState, keys: &[String], at: i64) {
     for c in &mut s.clauses {
         if keys.contains(&c.signer) {
-            c.floor = Some(c.floor.unwrap_or(c.issued_at).min(c.issued_at).min(at));
+            c.floor = Some(c.bar().min(at));
         }
     }
 }
@@ -555,6 +598,8 @@ struct RemovalRef {
     signer: String,
     key: String,
     issued_at: i64,
+    /// The removal's effective time: R2 is recorded as departed at it.
+    effective: i64,
 }
 
 impl From<&PendingRecord> for RemovalRef {
@@ -565,6 +610,7 @@ impl From<&PendingRecord> for RemovalRef {
             signer: p.signer.clone(),
             key: p.key.clone(),
             issued_at: p.issued_at,
+            effective: effective_time(p.issued_at, p.received_at),
         }
     }
 }
@@ -577,7 +623,7 @@ fn apply_removal(s: &mut GuardianState, r: &RemovalRef, at: i64) -> bool {
         return false;
     }
     s.roots.retain(|x| x.root != r2);
-    upsert_departed_root(s, r2, r.issued_at, DepartedBy::Removal);
+    upsert_departed_root(s, r2, r.effective, DepartedBy::Removal);
     s.tombstones.push(Tombstone {
         kind: TombstoneType::Removal,
         d: r.d.clone(),
@@ -623,8 +669,8 @@ fn bind_key(s: &mut GuardianState, approval: &Statement, now: i64) -> usize {
 }
 
 /// An objection by `removed` against removals of it signed by `remover`: it
-/// drops a removal whose `issuedAt` is at or below its own, and any removal
-/// judged within 7 days of the objection reaching the ward.
+/// drops a removal whose effective time is at or below its own, and any
+/// removal judged within 7 days of the objection reaching the ward.
 /// OQ: Cancel or objection before its statement; OQ: Removal re-issued after
 /// an objection.
 fn objected_by(
@@ -632,21 +678,22 @@ fn objected_by(
     d: &str,
     removed: &str,
     remover: &str,
-    issued_at: i64,
+    effective: i64,
     now: i64,
 ) -> bool {
     let slot = format!("{}{d}|{remover}", StatementType::Objection.prefix());
     stored_for(s, &slot).is_some_and(|o| {
         o.signer == removed
-            && (o.issued_at >= issued_at || now < o.received_at + OBJECTION_BLOCK_SECONDS)
+            && (effective_time(o.issued_at, o.received_at) >= effective
+                || now < o.received_at + OBJECTION_BLOCK_SECONDS)
     })
 }
 
-/// A stored cancel for `d` from `signer` at or after `issued_at`.
-/// OQ: Cancel or objection before its statement.
-fn cancelled_by(s: &GuardianState, d: &str, signer: &str, issued_at: i64) -> bool {
+/// A stored cancel for `d` from `signer` whose effective time is at or after
+/// `effective`. OQ: Cancel or objection before its statement.
+fn cancelled_by(s: &GuardianState, d: &str, signer: &str, effective: i64) -> bool {
     let slot = format!("{}{d}|{signer}", StatementType::Cancel.prefix());
-    stored_for(s, &slot).is_some_and(|c| c.issued_at >= issued_at)
+    stored_for(s, &slot).is_some_and(|c| effective_time(c.issued_at, c.received_at) >= effective)
 }
 
 // ---------------------------------------------------------------------------
@@ -698,7 +745,14 @@ fn advance(s: &mut GuardianState, now: i64) -> Vec<TickEntry> {
         if act == Due::Expire {
             drop_pending_d(s, &p.d);
             out.push(entry(TickResult::Expired, Reason::Expired));
-        } else if objected_by(s, &p.d, &p.key, &p.signer, p.issued_at, at) {
+        } else if objected_by(
+            s,
+            &p.d,
+            &p.key,
+            &p.signer,
+            effective_time(p.issued_at, p.received_at),
+            at,
+        ) {
             drop_pending_d(s, &p.d);
             out.push(entry(TickResult::Refused, Reason::Objected));
         } else if apply_removal(s, &RemovalRef::from(&p), at) {
@@ -817,7 +871,7 @@ fn process_approval(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
             KeyStatus::Active => mode = Mode::Update,
         }
     }
-    if let Some(reason) = order_against(stored_for(s, &st.d), st) {
+    if let Some(reason) = order_against(stored_for(s, &st.d), st, now) {
         return drop(reason);
     }
     if mode != Mode::Update {
@@ -940,35 +994,37 @@ fn add_pending(
     put_statement(s, st, now, false);
 }
 
-/// Rule 7: re-pinning a departed root needs a statement strictly newer than
-/// its departure. A same-second removal wins. OQ: Same-second ties across
-/// different d.
-fn departed_at_or_after(s: &GuardianState, key: &str, issued_at: i64) -> bool {
+/// Rule 7: re-pinning a departed root needs a statement whose effective
+/// time is strictly after the departure's (both clamped to the ward clock, so
+/// a far-future removal can't lock a parent out). A same-second removal
+/// wins. OQ: Same-second ties across different d.
+fn departed_at_or_after(s: &GuardianState, key: &str, effective: i64) -> bool {
     s.departed_roots
         .iter()
         .find(|d| d.root == key)
-        .is_some_and(|d| issued_at <= d.issued_at)
+        .is_some_and(|d| effective <= d.issued_at)
 }
 
 fn process_coguardian_or_move(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
     let r2 = st.key.as_str();
+    let effective = effective_time(st.issued_at, now);
     if is_pinned(s, r2) {
         return drop(Reason::AlreadyPinned);
     }
     if key_record(s, r2).is_some() {
         return drop(Reason::KeyRoleConflict);
     }
-    if departed_at_or_after(s, r2, st.issued_at) {
+    if departed_at_or_after(s, r2, effective) {
         return drop(Reason::NotNewerThanDeparture);
     }
-    if let Some(reason) = order_against(stored_for(s, &st.d), st) {
+    if let Some(reason) = order_against(stored_for(s, &st.d), st, now) {
         return drop(reason);
     }
-    let expires_at = pending_expiry(st.issued_at, st.expires_at);
+    let expires_at = pending_expiry(effective, st.expires_at);
     if now >= expires_at {
         return drop(Reason::Expired);
     }
-    if cancelled_by(s, &st.d, &st.signer, st.issued_at) {
+    if cancelled_by(s, &st.d, &st.signer, effective) {
         return drop(Reason::Cancelled);
     }
     let is_cog = st.kind == StatementType::Coguardian;
@@ -990,10 +1046,11 @@ fn process_coguardian_or_move(s: &mut GuardianState, st: &Statement, now: i64) -
 
 fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
     let r2 = st.key.as_str();
+    let effective = effective_time(st.issued_at, now);
     if !is_pinned(s, r2) {
         return drop(Reason::TargetNotPinned);
     }
-    if let Some(reason) = order_against(stored_for(s, &st.d), st) {
+    if let Some(reason) = order_against(stored_for(s, &st.d), st, now) {
         return drop(reason);
     }
     if st.signer == r2 {
@@ -1007,18 +1064,19 @@ fn process_removal(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
             signer: st.signer.clone(),
             key: st.key.clone(),
             issued_at: st.issued_at,
+            effective,
         };
         apply_removal(s, &r, now);
         return accept(Reason::RemovalApplied);
     }
-    let expires_at = pending_expiry(st.issued_at, st.expires_at);
+    let expires_at = pending_expiry(effective, st.expires_at);
     if now >= expires_at {
         return drop(Reason::Expired);
     }
-    if objected_by(s, &st.d, r2, &st.signer, st.issued_at, now) {
+    if objected_by(s, &st.d, r2, &st.signer, effective, now) {
         return drop(Reason::Objected);
     }
-    if cancelled_by(s, &st.d, &st.signer, st.issued_at) {
+    if cancelled_by(s, &st.d, &st.signer, effective) {
         return drop(Reason::Cancelled);
     }
     add_pending(s, st, PendingType::Removal, expires_at, now);
@@ -1036,7 +1094,7 @@ fn hold_or_drop(s: &mut GuardianState, st: &Statement, now: i64, reason: Reason)
 }
 
 fn process_cancel(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
-    if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st) {
+    if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st, now) {
         return drop(reason);
     }
     let target = st.target.as_deref().unwrap_or_default();
@@ -1044,9 +1102,9 @@ fn process_cancel(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
         if pend.signer != st.signer {
             return drop(Reason::CancelSignerMismatch);
         }
-        // At or below: a same-second cancel wins. OQ: Same-second ties
-        // across different d.
-        if pend.issued_at <= st.issued_at {
+        // At or below, by effective time: a same-second cancel wins.
+        // OQ: Same-second ties across different d.
+        if effective_time(pend.issued_at, pend.received_at) <= effective_time(st.issued_at, now) {
             drop_pending_d(s, target);
             put_statement(s, st, now, false);
             return accept(Reason::CancelApplied);
@@ -1059,7 +1117,7 @@ fn process_objection(s: &mut GuardianState, st: &Statement, now: i64) -> Judged 
     if st.signer != st.key {
         return drop(Reason::ObjectionMismatch);
     }
-    if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st) {
+    if let Some(reason) = order_against(stored_for(s, &slot_of(st)), st, now) {
         return drop(reason);
     }
     let target = st.target.as_deref().unwrap_or_default();
@@ -1073,12 +1131,25 @@ fn process_objection(s: &mut GuardianState, st: &Statement, now: i64) -> Judged 
     hold_or_drop(s, st, now, Reason::ObjectionHeld)
 }
 
+fn process_statement(s: &mut GuardianState, st: &Statement, now: i64) -> Judged {
+    match st.kind {
+        StatementType::Approval => process_approval(s, st, now),
+        StatementType::Withdrawal => process_withdrawal(s, st, now),
+        StatementType::Coguardian | StatementType::Move => process_coguardian_or_move(s, st, now),
+        StatementType::Removal => process_removal(s, st, now),
+        StatementType::Cancel => process_cancel(s, st, now),
+        StatementType::Objection => process_objection(s, st, now),
+    }
+}
+
 /// Apply one gift-wrapped statement (kind 31120) at the ward.
 ///
 /// `seal_author` is the authenticated seal author from the NIP-59 unwrap;
 /// `inner` is the signed statement as JSON. Checks run in this order:
-/// statement validity, the 300-second future refusal, the seal rule, the
-/// signer being a pinned root, then the type's own checks.
+/// statement validity, the seal rule, the signer being a pinned root, then
+/// the type's own checks. A statement dated ahead of the ward clock is not
+/// refused: every comparison uses its effective time ([`effective_time`]),
+/// and an accepted one counts in `clamped`.
 ///
 /// Presence confirmations (kind 31121) go to [`apply_presence_confirm`].
 pub fn apply_inbound(state: &GuardianState, seal_author: &str, inner: &Value, now: i64) -> Step {
@@ -1087,25 +1158,17 @@ pub fn apply_inbound(state: &GuardianState, seal_author: &str, inner: &Value, no
             Ok(st) => st,
             Err(reason) => return drop(reason),
         };
-        if st.issued_at > now + FUTURE_SKEW_SECONDS {
-            return drop(Reason::Future);
-        }
         if !seal_allowed(s, &st, seal_author) {
             return drop(Reason::SealMismatch);
         }
         if !is_pinned(s, &st.signer) {
             return drop(Reason::SignerNotPinned);
         }
-        match st.kind {
-            StatementType::Approval => process_approval(s, &st, now),
-            StatementType::Withdrawal => process_withdrawal(s, &st, now),
-            StatementType::Coguardian | StatementType::Move => {
-                process_coguardian_or_move(s, &st, now)
-            }
-            StatementType::Removal => process_removal(s, &st, now),
-            StatementType::Cancel => process_cancel(s, &st, now),
-            StatementType::Objection => process_objection(s, &st, now),
+        let judged = process_statement(s, &st, now);
+        if judged.0 == Verdict::Accepted && st.issued_at > now {
+            s.clamped += 1;
         }
+        judged
     })
 }
 
@@ -1217,15 +1280,15 @@ pub fn apply_presence_confirm(
             if !bound_to_signer {
                 return drop(Reason::ConfirmerNotBound);
             }
-            if objected_by(s, &pend.d, &pend.key, &pend.signer, pend.issued_at, now) {
+            let pend_effective = effective_time(pend.issued_at, pend.received_at);
+            if objected_by(s, &pend.d, &pend.key, &pend.signer, pend_effective, now) {
                 drop_pending_d(s, &pend.d);
                 return drop(Reason::Objected);
             }
             spend(s);
-            // Notice runs from the later of issuedAt and the ward's own
-            // receipt. OQ: Removal notice measured from receipt.
-            let takes_effect_at =
-                now.max(pend.issued_at.max(pend.received_at) + REMOVAL_NOTICE_SECONDS);
+            // Notice runs from the ward's own receipt (the effective time is
+            // never later). OQ: Removal notice measured from receipt.
+            let takes_effect_at = now.max(pend.received_at + REMOVAL_NOTICE_SECONDS);
             {
                 let p = &mut s.pending[pi];
                 p.confirmed_at = Some(now);
@@ -1257,16 +1320,14 @@ pub fn apply_presence_confirm(
         if ap.expires_at.is_some() {
             return drop(Reason::ExpiresAtNotAllowed);
         }
-        if ap.issued_at > now + FUTURE_SKEW_SECONDS {
-            return drop(Reason::Future);
-        }
         if is_pinned(s, r2) {
             return drop(Reason::AlreadyPinned);
         }
         if key_record(s, r2).is_some() || is_pinned(s, w) || w == r2 {
             return drop(Reason::KeyRoleConflict);
         }
-        if departed_at_or_after(s, r2, pend.issued_at) {
+        let pend_effective = effective_time(pend.issued_at, pend.received_at);
+        if departed_at_or_after(s, r2, pend_effective) {
             return drop(Reason::NotNewerThanDeparture);
         }
         if is_departed_root(s, w) {
@@ -1280,7 +1341,7 @@ pub fn apply_presence_confirm(
                 return drop(Reason::BoundElsewhere);
             }
         }
-        if let Some(reason) = order_against(stored_for(s, &ap.d), &ap) {
+        if let Some(reason) = order_against(stored_for(s, &ap.d), &ap, now) {
             return drop(reason);
         }
         if root_at_quota(s, r2) {
@@ -1290,6 +1351,9 @@ pub fn apply_presence_confirm(
             return drop(Reason::RootQuota);
         }
         spend(s);
+        if ap.issued_at > now {
+            s.clamped += 1;
+        }
         // Whichever statement pins R2 first, every other pending one naming
         // R2 goes.
         drop_pending(s, |p| p.key == r2);
@@ -1320,7 +1384,7 @@ pub fn apply_presence_confirm(
             Some(idx) => s.roots[idx] = new_root,
             None => s.roots.push(new_root),
         }
-        upsert_departed_root(s, r, pend.issued_at, DepartedBy::Move);
+        upsert_departed_root(s, r, pend_effective, DepartedBy::Move);
         let mut gone = vec![r.to_owned()];
         for k in &mut s.keys {
             if k.status == KeyStatus::Active && k.root == r && k.key != w {
@@ -1342,9 +1406,12 @@ pub fn apply_presence_confirm(
 // Clauses and other signed events
 // ---------------------------------------------------------------------------
 
-/// A CLAUSE's signer, seal and identity; the clause body is the caller's.
+/// A CLAUSE's id, signer, seal and identity; the clause body is the
+/// caller's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClauseInput<'a> {
+    /// The CLAUSE event's id (64 lowercase hex).
+    pub id: &'a str,
     pub author: &'a str,
     pub seal_author: &'a str,
     pub subject: &'a str,
@@ -1352,36 +1419,56 @@ pub struct ClauseInput<'a> {
     pub issued_at: i64,
 }
 
-/// Rules 4 and 5: accept a CLAUSE if its author is in the signer set and it
-/// is newer than the held clause of the same `(subject, kind)`: newer than
-/// its `issuedAt` while its signer is current, newer than its departure floor
-/// once the signer has departed. Checks: future, seal, signer, pairing
-/// floor, newer.
+/// Rules 4 and 5 with the clock clamp: accept a CLAUSE if its author is in
+/// the signer set and its `issuedAt` is above the bar of the held clause of
+/// the same `(subject, kind)`.
+///
+/// - The bar is the held clause's effective time, min(`issuedAt`, the ward
+///   clock when it was accepted), lowered to the departure time if its
+///   signer departs. A far-future clause therefore pins nothing: any later
+///   clause from a current signer replaces it.
+/// - A clause dated ahead of the ward clock has its id remembered for the
+///   slot until the bar reaches its `issuedAt`, so a relay can't replay it
+///   over a newer rule (`replay`). At most [`MAX_REMEMBERED_PER_SLOT`] per
+///   slot (`clamp_quota`).
+///
+/// Checks: seal, signer, replay, newer, clamp quota.
 pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) -> Step {
     step(state, now, |s| {
-        if clause.issued_at > now + FUTURE_SKEW_SECONDS {
-            return drop(Reason::Future);
-        }
         if clause.seal_author != clause.author {
             return drop(Reason::SealMismatch);
         }
         if !is_signer(s, clause.author) {
             return drop(Reason::NotSigner);
         }
-        if clause.issued_at < s.paired_at {
-            return drop(Reason::PairingFloor);
-        }
         let same = |c: &HeldClause| c.subject == clause.subject && c.kind == clause.kind;
-        if let Some(held) = s.clauses.iter().find(|c| same(c)) {
-            let bar = if is_signer(s, &held.signer) {
-                held.issued_at
-            } else {
-                held.floor.unwrap_or(held.issued_at)
-            };
-            if clause.issued_at <= bar {
-                return drop(Reason::NotNewer);
-            }
+        let held = s.clauses.iter().find(|c| same(c));
+        let remembered: &[RememberedClause] = held.map_or(&[], |h| &h.remembered);
+        if remembered.iter().any(|r| r.id == clause.id) {
+            return drop(Reason::Replay);
         }
+        if held.is_some_and(|h| clause.issued_at <= h.bar()) {
+            return drop(Reason::NotNewer);
+        }
+        let effective = effective_time(clause.issued_at, now);
+        let clamped = clause.issued_at > now;
+        // The new bar is `effective`: an id whose issuedAt it reaches needs no
+        // memory.
+        let mut kept: Vec<RememberedClause> = remembered
+            .iter()
+            .filter(|r| r.issued_at > effective)
+            .cloned()
+            .collect();
+        if clamped && kept.len() >= MAX_REMEMBERED_PER_SLOT {
+            return drop(Reason::ClampQuota);
+        }
+        if clamped {
+            kept.push(RememberedClause {
+                id: clause.id.to_owned(),
+                issued_at: clause.issued_at,
+            });
+        }
+        kept.sort_by(|a, b| cmp_str(&a.id, &b.id));
         let root = root_of(s, clause.author).unwrap_or_default();
         s.clauses.retain(|c| !same(c));
         s.clauses.push(HeldClause {
@@ -1389,9 +1476,14 @@ pub fn accept_clause(state: &GuardianState, clause: &ClauseInput<'_>, now: i64) 
             kind: clause.kind.to_owned(),
             signer: clause.author.to_owned(),
             root,
+            id: clause.id.to_owned(),
             issued_at: clause.issued_at,
-            floor: None,
+            floor: Some(effective),
+            remembered: kept,
         });
+        if clamped {
+            s.clamped += 1;
+        }
         accept(Reason::ClauseAccepted)
     })
 }
@@ -1409,8 +1501,9 @@ pub fn held_clause<'a>(
 }
 
 /// The signer-set gate for a GRANT or USAGE_SYNC: the seal author is the
-/// inner author, the author is in the signer set, and `ts` is not more than
-/// 300 seconds ahead. Their own existing checks still apply on top.
+/// inner author and the author is in the signer set. `ts` is not judged
+/// here: a GRANT keeps its own existing skew rule, and USAGE_SYNC has none.
+/// (`ts` stays in the signature for callers; it is unused.)
 pub fn accept_signed_event(
     state: &GuardianState,
     author: &str,
@@ -1418,10 +1511,8 @@ pub fn accept_signed_event(
     ts: i64,
     now: i64,
 ) -> Step {
+    let _ = ts;
     step(state, now, |s| {
-        if ts > now + FUTURE_SKEW_SECONDS {
-            return drop(Reason::Future);
-        }
         if seal_author != author {
             return drop(Reason::SealMismatch);
         }
@@ -1639,6 +1730,7 @@ pub fn pair_from_seal(
         previous_relays: Vec::new(),
         guardian_pin: None,
         farewell: Vec::new(),
+        clamped: 0,
     };
 
     let Some(approval) = approval else {
@@ -1666,8 +1758,8 @@ pub fn pair_from_seal(
     if ap.expires_at.is_some() {
         return Err(Reason::ExpiresAtNotAllowed);
     }
-    if ap.issued_at > now + FUTURE_SKEW_SECONDS {
-        return Err(Reason::Future);
+    if ap.issued_at > now {
+        state.clamped = 1;
     }
     state.roots.push(PinnedRoot {
         root: ap.signer.clone(),
@@ -1707,11 +1799,15 @@ pub struct StatusPending {
 
 /// The `guardians` object a ward adds to STATUS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StatusGuardians {
     pub roots: Vec<RootKeys>,
     pub pending: Vec<StatusPending>,
     pub tombstones: usize,
     pub relays: Vec<String>,
+    /// Accepted clauses and statements whose claimed time was clamped to the
+    /// ward clock, since pairing.
+    pub clamped: u64,
 }
 
 fn root_keys(s: &GuardianState) -> Vec<RootKeys> {
@@ -1749,6 +1845,7 @@ pub fn status_guardians(s: &GuardianState) -> StatusGuardians {
             .collect(),
         tombstones: s.tombstones.len(),
         relays: s.relays.clone(),
+        clamped: s.clamped,
     }
 }
 
@@ -1790,6 +1887,7 @@ pub struct ProjectedState {
     pub relays: Vec<String>,
     pub status_relays: Vec<String>,
     pub guardian_pin: Option<GuardianPinRecord>,
+    pub clamped: u64,
 }
 
 /// Project the state as the golden vectors record it, at `now`.
@@ -1835,5 +1933,6 @@ pub fn project_state(s: &GuardianState, now: i64) -> ProjectedState {
         relays: s.relays.clone(),
         status_relays: status_relays(s, now),
         guardian_pin: s.guardian_pin.clone(),
+        clamped: s.clamped,
     }
 }
