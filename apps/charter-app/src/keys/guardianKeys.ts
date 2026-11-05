@@ -1149,7 +1149,9 @@ export class GuardianKeys {
 
   /**
    * A STATUS from a paired ward, as it arrived (the household may not have
-   * recorded it yet): what this install does in reply.
+   * recorded it yet): what this install does in reply. Only a STATUS newer
+   * than the last one replied to counts: polling delivers the same and older
+   * ones again, and replying to those would resend on every poll.
    *
    * The guardian PIN: a ward this install is sending a PIN to becomes "set"
    * once its STATUS shows `pinSet`; until then each newer STATUS resends the
@@ -1157,6 +1159,10 @@ export class GuardianKeys {
    * local-only family's own key): a resend runs unattended.
    */
   async noteWardStatus(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
+    const m = status.machine;
+    const last = this.deps.read().keys.statusRepliedTs?.[m];
+    if (last !== undefined && status.ts <= last) return;
+    this.deps.write((k) => ({ ...k, statusRepliedTs: { ...k.statusRepliedTs, [m]: status.ts } }));
     await this.resendPin(status);
     await this.objectAutomatically(status);
   }

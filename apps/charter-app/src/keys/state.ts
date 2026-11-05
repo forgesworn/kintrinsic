@@ -119,6 +119,12 @@ export interface GuardianKeysState {
    * from a ward that doesn't report ids. Kept while the ward still lists them.
    */
   objected: Record<string, string[]>;
+  /**
+   * Per ward machine: the `ts` of the newest STATUS this install has replied
+   * to (`noteWardStatus`). STATUS is polled, so the same or an older one
+   * arrives again; only a newer one is acted on.
+   */
+  statusRepliedTs: Record<string, number>;
   /** The family roster as merged from other guardians' installs (subject = `Child.rosterId`). */
   roster: LocalRoster;
   /** Statements this install sent, by `d`. */
@@ -156,7 +162,7 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, statusRepliedTs: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -180,6 +186,11 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     objected: Object.fromEntries(
       Object.entries(rec(o.objected) as Record<string, unknown>).filter(
         (e): e is [string, string[]] => Array.isArray(e[1]) && e[1].every((x) => typeof x === "string"),
+      ),
+    ),
+    statusRepliedTs: Object.fromEntries(
+      Object.entries(rec(o.statusRepliedTs) as Record<string, unknown>).filter(
+        (e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1]),
       ),
     ),
     roster:

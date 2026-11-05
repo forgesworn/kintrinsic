@@ -721,6 +721,21 @@ describe("objecting automatically to a removal of this parent (Q1)", () => {
     expect(h.keys().objected).toEqual({});
   });
 
+  it("doesn't object again when polling re-delivers an older STATUS after the removal was dropped", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android", [{ root: R2, keys: [] }])] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    const roots = [{ root: R, keys: [W] }, { root: R2, keys: [] }];
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 100, guardians: view(roots) });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 200, guardians: view(roots, []) });
+    expect(h.keys().objected).toEqual({});
+    // The relay hands back both again on the next poll.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 100, guardians: view(roots) });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 200, guardians: view(roots, []) });
+    expect(h.published).toHaveLength(1);
+    expect(h.keys().objected).toEqual({});
+  });
+
   it("keys a removal by its d where the ward reports no id", async () => {
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android", [{ root: R2, keys: [] }])] }]);
     await connectSignetRoot(h);

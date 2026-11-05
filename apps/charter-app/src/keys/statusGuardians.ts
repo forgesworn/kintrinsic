@@ -12,11 +12,13 @@
 
 import { splitPendingD, type PendingType, type StatusGuardians as RefStatusGuardians } from "./sdk";
 
+// The newer fields are optional here whether or not the reference has them
+// yet, so both shapes compile: a ward that predates them still parses.
 /** One pending statement a ward reports; `id` is its event id (newer wards). */
-export type StatusPending = RefStatusGuardians["pending"][number] & { id?: string };
+export type StatusPending = Omit<RefStatusGuardians["pending"][number], "id"> & { id?: string };
 
 /** STATUS `guardians` as this app reads it: the reference's shape plus the newer fields. */
-export interface StatusGuardians extends Omit<RefStatusGuardians, "pending"> {
+export interface StatusGuardians extends Omit<RefStatusGuardians, "pending" | "pinSet" | "clamped"> {
   pending: StatusPending[];
   /** Android: whether the ward holds a guardian PIN. Absent = the ward doesn't say. */
   pinSet?: boolean;
