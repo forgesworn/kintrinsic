@@ -3762,19 +3762,25 @@ async fn run_enforcement(config: DaemonConfig) -> Result<(), String> {
                     departed.len()
                 );
             }
-            let view = crate::guardians::build_view(keys, now as u64);
+            // Rule 5: the child-facing view, never a pending statement. An
+            // unreadable state publishes the stuck view (empty lists and
+            // "Rules can't be changed on this computer"), never a stale list
+            // of who governs this ward (rule 10).
+            let view = Some(crate::guardians::build_view(keys, now as u64));
             if view != guardians_view_last {
-                let path = std::path::Path::new(crate::guardians::GUARDIANS_VIEW_PATH);
-                match &view {
-                    Some(v) => {
-                        if let Err(e) = crate::guardians::publish_view(path, v) {
-                            eprintln!("charterd: could not publish the guardians view: {e}");
-                        }
+                if let Some(v) = &view {
+                    // Unavailable at start was logged above; this is the
+                    // state going away while running, logged once.
+                    if v.unavailable && guardians_view_last.is_some() {
+                        eprintln!(
+                            "charterd: ERROR — the guardian-keys state is no longer readable; \
+                             nothing a guardian signs is accepted. Cached clauses are still \
+                             enforced"
+                        );
                     }
-                    // The state became unreadable: show nothing rather than
-                    // a stale list of who governs this ward.
-                    None => {
-                        let _ = std::fs::remove_file(path);
+                    let path = std::path::Path::new(crate::guardians::GUARDIANS_VIEW_PATH);
+                    if let Err(e) = crate::guardians::publish_view(path, v) {
+                        eprintln!("charterd: could not publish the guardians view: {e}");
                     }
                 }
                 guardians_view_last = view;

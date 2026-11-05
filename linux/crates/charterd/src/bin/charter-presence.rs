@@ -25,11 +25,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use charter_primitives::PubKey;
 use charterd::guardians::{
-    minted_for, peek_keys, pending_kind, presence_payload, presence_request_pending,
-    presence_short_form, request_presence, short_npub, withdraw_presence_request, PresenceRequest,
-    STATE_DIR,
+    confirmable, minted_for, peek_keys, presence_payload, presence_request_pending,
+    presence_short_form, request_presence, withdraw_presence_request,
+    ConfirmablePending as Pending, PresenceRequest, STATE_DIR,
 };
 use charterd::pairing_setup::read_device_pub;
 
@@ -50,43 +49,18 @@ fn fail(code: i32, msg: &str) -> ! {
     std::process::exit(code);
 }
 
-struct Pending {
-    d: String,
-    /// The pending statement's event id (64 hex).
-    statement: String,
-    kind: &'static str,
-    key: String,
-    takes_effect_at: Option<i64>,
-    expires_at: i64,
-}
-
+/// What is waiting to be confirmed in person, from the privileged view of
+/// the state (rule 5: never shown on the child-facing screen, CLI or any
+/// world-readable file; only here, behind the administrator's password).
 fn pending(pairing: &charter_transport::Pairing) -> Vec<Pending> {
     let keys = peek_keys(Path::new(STATE_DIR), pairing, now());
-    if !keys.is_available() {
+    confirmable(&keys, now()).unwrap_or_else(|| {
         fail(
             1,
-            "the guardian state on this computer cannot be read. Re-pair from the Kintrinsic \
-             app to recover.",
-        );
-    }
-    keys.pending_statements(now())
-        .into_iter()
-        // A removal already confirmed is only waiting out its notice: there
-        // is nothing left to confirm (as on Android; review batch 2,
-        // platforms I2).
-        .filter(|p| p.confirmed_at.is_none())
-        .map(|p| Pending {
-            key: charter_guardians::split_pending_d(&p.d)
-                .and_then(|(_, k)| PubKey::from_hex(k).ok())
-                .map(|k| short_npub(&k))
-                .unwrap_or_default(),
-            kind: pending_kind(p.kind),
-            takes_effect_at: p.takes_effect_at,
-            expires_at: p.expires_at,
-            statement: p.statement,
-            d: p.d,
-        })
-        .collect()
+            "the guardian state on this computer cannot be read, so rules can't be changed \
+             on this computer. Unpair and pair again from the Kintrinsic app to recover.",
+        )
+    })
 }
 
 fn describe(p: &Pending) -> String {

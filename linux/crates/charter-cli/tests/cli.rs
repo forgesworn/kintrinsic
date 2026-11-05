@@ -427,32 +427,31 @@ async fn ask_for_more_without_a_flag_uses_the_daemon_s_default_time() {
 
 /// Rule 5: `charter status` says who set each rule, each label next to its
 /// root's short npub; a label's control characters never reach the terminal.
+/// The machine-wide rule is named as this computer's.
 #[tokio::test]
 async fn status_names_who_set_each_rule() {
-    use charter_ipc::{GuardiansView, PendingStatementView, RuleSetterView};
+    use charter_ipc::{GuardiansView, RuleSetterView, WorkingKeyView};
+    let rule = |subject: String, kind: &str, label: Option<&str>| RuleSetterView {
+        subject,
+        kind: kind.into(),
+        root: "npub1aaaa…zzzz".into(),
+        signer: "npub1kkkk…yyyy".into(),
+        label: label.map(String::from),
+    };
     let view = GuardiansView {
         roots: vec!["npub1aaaa…zzzz".into()],
-        rules: vec![
-            RuleSetterView {
-                subject: "bb".repeat(32),
-                kind: "budget".into(),
-                root: "npub1aaaa…zzzz".into(),
-                label: Some("Mum's \u{1b}[2Jphone".into()),
-            },
-            RuleSetterView {
-                subject: "bb".repeat(32),
-                kind: "schedule".into(),
-                root: "npub1aaaa…zzzz".into(),
-                label: None,
-            },
-        ],
-        pending: vec![PendingStatementView {
-            d: "kintrinsic/guardian/cc".into(),
-            kind: "coguardian".into(),
-            key: "npub1cccc…yyyy".into(),
-            takes_effect_at: None,
-            expires_at: 1,
+        keys: vec![WorkingKeyView {
+            root: "npub1aaaa…zzzz".into(),
+            key: "npub1kkkk…yyyy".into(),
+            label: Some("Mum's \u{1b}[2Jphone".into()),
         }],
+        rules: vec![
+            rule("bb".repeat(32), "budget", Some("Mum's \u{1b}[2Jphone")),
+            rule("bb".repeat(32), "schedule", None),
+            rule(String::new(), "content", None),
+        ],
+        pin_set: true,
+        unavailable: false,
     };
     let out = dispatch(
         &MockCharterdClient::new(),
@@ -467,12 +466,20 @@ async fn status_names_who_set_each_rule() {
         "{}",
         out.rendered
     );
+    assert!(out.rendered.contains("  Mum's [2Jphone (npub1aaaa…zzzz)"));
     assert!(out
         .rendered
         .contains("budget     Mum's [2Jphone (npub1aaaa…zzzz)"));
     assert!(out.rendered.contains("schedule   npub1aaaa…zzzz"));
-    assert!(out.rendered.contains("coguardian npub1cccc…yyyy"));
+    assert!(
+        out.rendered
+            .contains("content    npub1aaaa…zzzz, this computer's rule"),
+        "{}",
+        out.rendered
+    );
+    assert!(out.rendered.contains("Guardian PIN: set"));
     assert!(!out.rendered.contains('\u{1b}'));
+    assert!(!out.rendered.contains("confirm"));
     // The JSON form is the request rows alone, as before.
     let json = dispatch(
         &MockCharterdClient::new(),
@@ -482,4 +489,25 @@ async fn status_names_who_set_each_rule() {
     )
     .await;
     assert!(!json.rendered.contains("Guardians"));
+}
+
+/// Rule 10: a ward whose guardian-keys state cannot be read is told, in
+/// plain words, that its rules can't be changed here.
+#[tokio::test]
+async fn status_says_when_rules_cant_be_changed() {
+    let out = dispatch(
+        &MockCharterdClient::new(),
+        &MockPairingSink::new(true).with_guardians(charter_ipc::GuardiansView::stuck()),
+        &MockExecProbe::new(),
+        &argv(&["status"]),
+    )
+    .await;
+    assert_eq!(out.code, EXIT_OK);
+    assert!(
+        out.rendered
+            .ends_with("Rules can't be changed on this computer. Ask a parent."),
+        "{}",
+        out.rendered
+    );
+    assert!(!out.rendered.contains("Guardians:"));
 }

@@ -240,11 +240,29 @@ async fn add_coguardian(w: &Ward, b: &B, keys: &GuardianKeys) {
         json!({}),
     );
     assert_eq!(ingest(w, b, &cg, W, 2).await, AckResult::Applied);
-    let pending = guardians::build_view(keys, NOW).unwrap().pending;
+    // Rule 5 (Q2): the pending statement is listed only in the privileged
+    // flow `charter-presence` runs as root…
+    let pending = guardians::confirmable(keys, NOW).expect("state readable");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].kind, "coguardian");
     assert_eq!(pending[0].key, guardians::short_npub(&pk(ROOT2)));
     let d = pending[0].d.clone();
+    // …never in the world-readable view the CLI, tray and console read.
+    let view = guardians::build_view(keys, NOW);
+    assert_eq!(view.roots, vec![guardians::short_npub(&pk(ROOT))]);
+    let published = w.dir.join("guardians.json");
+    guardians::publish_view(&published, &view).unwrap();
+    let text = std::fs::read_to_string(&published).unwrap();
+    for leak in [
+        "pending",
+        "coguardian",
+        d.as_str(),
+        pending[0].statement.as_str(),
+        pending[0].key.as_str(),
+        &pk(ROOT2).to_hex(),
+    ] {
+        assert!(!text.contains(leak), "{leak} in {text}");
+    }
 
     guardians::request_presence(&w.dir, &d, NOW).unwrap();
     let request = guardians::PresenceRequest {
@@ -326,10 +344,12 @@ async fn an_existing_single_guardian_ward_migrates_and_keeps_enforcing() {
     );
     assert_eq!(held_minutes(&b), Some(45));
     // Rule 5: the view names its root, with no label for a root.
-    let view = guardians::build_view(&keys, NOW).unwrap();
+    let view = guardians::build_view(&keys, NOW);
     assert_eq!(view.roots, vec![guardians::short_npub(&pk(ROOT))]);
     assert_eq!(view.rules.len(), 1);
     assert_eq!(view.rules[0].label, None);
+    assert_eq!(view.rules[0].signer, guardians::short_npub(&pk(ROOT)));
+    assert!(!view.pin_set);
 }
 
 #[tokio::test]
@@ -349,7 +369,13 @@ async fn an_approved_working_key_signs_until_it_is_withdrawn() {
     );
     assert_eq!(held_minutes(&b), Some(30));
     // Rule 5: W's label next to its ROOT's short npub.
-    let view = guardians::build_view(&keys, NOW).unwrap();
+    let view = guardians::build_view(&keys, NOW);
+    assert_eq!(view.keys.len(), 1);
+    assert_eq!(
+        view.keys[0].named(),
+        format!("Mum's phone ({})", guardians::short_npub(&pk(ROOT)))
+    );
+    assert_eq!(view.keys[0].key, guardians::short_npub(&pk(W)));
     assert_eq!(
         view.rules[0].set_by(),
         format!("Mum's phone ({})", guardians::short_npub(&pk(ROOT)))

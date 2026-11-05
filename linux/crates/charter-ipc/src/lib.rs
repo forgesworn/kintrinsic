@@ -18,7 +18,7 @@ pub mod real;
 
 pub use client::{CharterdClient, ExecProbe, PairingSink};
 pub use dto::{
-    DaemonEvent, ExecMeta, GuardiansView, Op, PairingStateView, PendingStatementView, ReqState,
-    RequestStatusView, RuleSetterView, TimeLeftView,
+    DaemonEvent, ExecMeta, GuardiansView, Op, PairingStateView, ReqState, RequestStatusView,
+    RuleSetterView, TimeLeftView, WorkingKeyView, RULES_STUCK_NOTICE,
 };
 pub use error::{IpcError, IpcResult};

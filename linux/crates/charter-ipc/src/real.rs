@@ -387,11 +387,23 @@ mod local_port_tests {
         // The warden's published view (rule 5) rides along when present.
         std::fs::write(
             dir.join("guardians.json"),
-            r#"{"roots":["npub1abc…xyz"],"rules":[{"subject":"bb","kind":"budget","root":"npub1abc…xyz","label":"Mum"}],"pending":[]}"#,
+            r#"{"roots":["npub1abc…xyz"],"rules":[{"subject":"bb","kind":"budget","root":"npub1abc…xyz","label":"Mum"}],"pinSet":true}"#,
         )
         .unwrap();
         let g = block_on(sink.pairing_state()).unwrap().guardians.unwrap();
         assert_eq!(g.roots, vec!["npub1abc…xyz".to_string()]);
         assert_eq!(g.rules[0].set_by(), "Mum (npub1abc…xyz)");
+        assert!(g.pin_set);
+        assert_eq!(g.notice(), None);
+        // A view written by an older warden, with pending statements, still
+        // reads; they are dropped, never shown.
+        std::fs::write(
+            dir.join("guardians.json"),
+            r#"{"roots":["npub1abc…xyz"],"pending":[{"d":"x","kind":"removal","key":"k","expiresAt":1}]}"#,
+        )
+        .unwrap();
+        let g = block_on(sink.pairing_state()).unwrap().guardians.unwrap();
+        assert_eq!(g.roots.len(), 1);
+        assert!(!serde_json::to_string(&g).unwrap().contains("pending"));
     }
 }

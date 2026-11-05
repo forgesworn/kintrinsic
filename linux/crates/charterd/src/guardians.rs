@@ -2,7 +2,9 @@
 //! (`spec/contract.md`): where the guardian-keys state lives, the presence
 //! code an administrator shows at the ward, the offline-unlock codes for
 //! every key in the signer set, and the world-readable view of who the ward
-//! trusts and who set its rules (rule 5).
+//! trusts and who set its rules (rule 5). Pending statements never reach the
+//! world-readable view: only the privileged confirm-in-person flow
+//! (`charter-presence`, run as root) lists them ([`confirmable`]).
 //!
 //! The daemon is the ONE writer of the state document (`guardian-state.json`,
 //! `0600`): it loads it once per run and hands the same adapter to the
@@ -17,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use charter_ipc::dto::{GuardiansView, PendingStatementView, RuleSetterView};
+use charter_ipc::dto::{GuardiansView, RuleSetterView, WorkingKeyView};
 use charter_primitives::PubKey;
 use charter_spine::{GuardianKeys, GuardianStatements, MintedToken, PresenceError};
 use charter_sys::guardian_store::{
@@ -327,55 +329,94 @@ fn clean_label(s: &str) -> String {
     charter_spine::clean_label(s)
 }
 
-/// Who the ward trusts and who set each rule it holds, for the CLI and the
-/// tray. `None` when the state is unavailable.
-pub fn build_view(keys: &GuardianKeys, now: u64) -> Option<GuardiansView> {
-    let projected = keys.project(now)?;
-    let short_hex = |h: &str| PubKey::from_hex(h).ok().map(|k| short_npub(&k));
-    let roots = projected
+/// Who the ward trusts and who set each rule it holds, for the CLI, the tray
+/// and the world-readable `/run/charter/guardians.json` (rule 5), from
+/// [`GuardianKeys::ward_view`]: never a pending statement (rule 5, Q2). When
+/// the state is unavailable, the stuck view, which says rules can't be
+/// changed here (rule 10).
+pub fn build_view(keys: &GuardianKeys, now: u64) -> GuardiansView {
+    let Some(ward) = keys.ward_view(now) else {
+        return GuardiansView::stuck();
+    };
+    let label = |l: &Option<String>| l.as_deref().map(clean_label).filter(|l| !l.is_empty());
+    let roots = ward.roots.iter().map(|r| short_npub(&r.root)).collect();
+    let working = ward
         .roots
         .iter()
-        .filter_map(|r| short_hex(&r.root))
-        .collect();
-    let rules = projected
-        .clauses
-        .iter()
-        .filter_map(|c| {
-            let root = short_hex(&c.root)?;
-            let label = PubKey::from_hex(&c.signer)
-                .ok()
-                .and_then(|k| keys.signer_label(&k))
-                .map(|l| clean_label(&l))
-                .filter(|l| !l.is_empty());
-            Some(RuleSetterView {
-                subject: c.subject.clone(),
-                kind: c.kind.clone(),
-                root,
-                label,
-            })
+        .flat_map(|r| {
+            let root = short_npub(&r.root);
+            r.keys
+                .iter()
+                .zip(r.key_labels.iter())
+                .map(move |(k, l)| WorkingKeyView {
+                    root: root.clone(),
+                    key: short_npub(k),
+                    label: label(l),
+                })
         })
         .collect();
-    let pending = keys
-        .pending_statements(now)
-        .into_iter()
-        .map(|p| {
-            let key = charter_guardians::split_pending_d(&p.d)
-                .and_then(|(_, k)| short_hex(k))
-                .unwrap_or_default();
-            PendingStatementView {
-                kind: pending_kind(p.kind).to_owned(),
-                d: p.d,
-                key,
+    let rules = ward
+        .rules
+        .iter()
+        .map(|c| RuleSetterView {
+            subject: c.subject.clone(),
+            kind: c.kind.clone(),
+            // A label is only ever shown beside the signer's root; with no
+            // root recorded the signer's own short npub stands alone.
+            root: short_npub(c.root.as_ref().unwrap_or(&c.signer)),
+            signer: short_npub(&c.signer),
+            label: c.root.and(label(&c.label)),
+        })
+        .collect();
+    GuardiansView {
+        roots,
+        keys: working,
+        rules,
+        pin_set: ward.pin_set,
+        unavailable: false,
+    }
+}
+
+/// One statement waiting for a guardian to confirm in person, as the
+/// privileged flow lists it. Never written anywhere world-readable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmablePending {
+    /// The statement's `d`, which a presence token is bound to.
+    pub d: String,
+    /// The pending statement's event id (64 hex).
+    pub statement: String,
+    /// `coguardian`, `removal` or `move`.
+    pub kind: &'static str,
+    /// The root it names, as a short npub.
+    pub key: String,
+    pub takes_effect_at: Option<i64>,
+    pub expires_at: i64,
+}
+
+/// What an administrator may confirm in person, from
+/// [`GuardianKeys::privileged_view`]: for `charter-presence` (root, via
+/// pkexec or sudo) only. A removal already confirmed is only waiting out its
+/// notice, so there is nothing left to confirm (as on Android; review batch
+/// 2, platforms I2). `None` when the state is unavailable.
+pub fn confirmable(keys: &GuardianKeys, now: u64) -> Option<Vec<ConfirmablePending>> {
+    let view = keys.privileged_view(now)?;
+    Some(
+        view.pending
+            .into_iter()
+            .filter(|p| p.confirmed_at.is_none())
+            .map(|p| ConfirmablePending {
+                key: charter_guardians::split_pending_d(&p.d)
+                    .and_then(|(_, k)| PubKey::from_hex(k).ok())
+                    .map(|k| short_npub(&k))
+                    .unwrap_or_default(),
+                kind: pending_kind(p.kind),
                 takes_effect_at: p.takes_effect_at,
                 expires_at: p.expires_at,
-            }
-        })
-        .collect();
-    Some(GuardiansView {
-        roots,
-        rules,
-        pending,
-    })
+                statement: p.statement,
+                d: p.d,
+            })
+            .collect(),
+    )
 }
 
 /// The STATUS wire name of a pending statement's kind.
