@@ -124,7 +124,7 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
   // statement the confirmation names; an invitation must be scanned.
   if (token) {
     const items = wards.flatMap((w) =>
-      pendingFor(w.device.guardians, guardianKeys.state, me)
+      pendingFor(w.device.guardians, guardianKeys.state, me, Math.floor(Date.now() / 1000))
         // Only what this phone itself confirms: a removal it started, or its
         // own identity move. An invitation it sent is confirmed by the other
         // parent's phone, never this one.

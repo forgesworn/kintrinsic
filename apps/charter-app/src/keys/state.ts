@@ -113,6 +113,12 @@ export interface GuardianKeysState {
   approvalSentAt: Record<string, number>;
   /** Per Android ward machine: the guardian PIN this install sent, until the ward says it holds one. */
   pins: Record<string, PinDelivery>;
+  /**
+   * Per ward machine: the pending removals of this install's root it has
+   * objected to there (decision Q1), by the removal's event id, or its `d`
+   * from a ward that doesn't report ids. Kept while the ward still lists them.
+   */
+  objected: Record<string, string[]>;
   /** The family roster as merged from other guardians' installs (subject = `Child.rosterId`). */
   roster: LocalRoster;
   /** Statements this install sent, by `d`. */
@@ -150,7 +156,7 @@ export interface GuardianKeysState {
 }
 
 export function emptyGuardianKeys(): GuardianKeysState {
-  return { v: 1, approvalSentAt: {}, pins: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
+  return { v: 1, approvalSentAt: {}, pins: {}, objected: {}, roster: { children: [] }, sent: {}, presenceWards: {}, anchoredRoots: {}, presenceConfirmed: {}, heldRosters: {} };
 }
 
 /** Revive a persisted value; anything unusable becomes the empty state. */
@@ -169,6 +175,11 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     pins: Object.fromEntries(
       Object.entries(rec(o.pins) as Record<string, PinDelivery>).filter(
         ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set") && typeof v.sentAt === "number",
+      ),
+    ),
+    objected: Object.fromEntries(
+      Object.entries(rec(o.objected) as Record<string, unknown>).filter(
+        (e): e is [string, string[]] => Array.isArray(e[1]) && e[1].every((x) => typeof x === "string"),
       ),
     ),
     roster:

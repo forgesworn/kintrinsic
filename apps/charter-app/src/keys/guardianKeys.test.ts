@@ -684,6 +684,103 @@ describe("root move", () => {
   });
 });
 
+describe("objecting automatically to a removal of this parent (Q1)", () => {
+  const removalOfMe = `kintrinsic/unguardian/${R}`;
+  const ID = "ab".repeat(32);
+  const pending = (over: { id?: string; expiresAt?: number } = {}) => [
+    { d: removalOfMe, kind: "removal" as const, takesEffectAt: T + 72 * 3600, expiresAt: T + 7 * 86400, ...over },
+  ];
+  const view = (roots: { root: string; keys: string[] }[], p = pending({ id: ID })) => ({
+    roots,
+    pending: p,
+    tombstones: 0,
+    relays: ["wss://ward.example"],
+  });
+
+  it("objects once per removal per ward, signed and sealed by W, naming the other root", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android", [{ root: R2, keys: [] }])] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    const g = view([{ root: R, keys: [W] }, { root: R2, keys: [] }]);
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g });
+    expect(h.published).toHaveLength(1);
+    const { sealAuthor, inner } = open(h.published[0].wrap, phoneSk);
+    expect(sealAuthor).toBe(W);
+    const st = parseStatement(inner);
+    expect(st.ok && st.statement).toMatchObject({ type: "objection", d: `kintrinsic/object/${removalOfMe}`, p: R2, signer: W });
+    expect(h.keys().objected).toEqual({ [PHONE]: [ID] });
+    // The same removal again, in this or a later STATUS: no second objection.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 20, guardians: g });
+    expect(h.published).toHaveLength(1);
+    // Re-issued after the block (a new id): objected to afresh.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 30, guardians: view(g.roots, pending({ id: "cd".repeat(32) })) });
+    expect(h.published).toHaveLength(2);
+    expect(h.keys().objected).toEqual({ [PHONE]: ["cd".repeat(32)] });
+    // Gone from the ward's report: forgotten.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 40, guardians: view(g.roots, []) });
+    expect(h.keys().objected).toEqual({});
+  });
+
+  it("keys a removal by its d where the ward reports no id", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android", [{ root: R2, keys: [] }])] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    const g = view([{ root: R, keys: [W] }, { root: R2, keys: [] }], pending());
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g });
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 11, guardians: g });
+    expect(h.published).toHaveLength(1);
+    expect(h.keys().objected).toEqual({ [PHONE]: [removalOfMe] });
+  });
+
+  it("sends nothing when the remover is ambiguous, W isn't listed there, or the removal has expired", async () => {
+    const R3 = getPublicKey(generateSecretKey());
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android", [{ root: R2, keys: [] }])] }]);
+    await connectSignetRoot(h);
+    h.published.length = 0;
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: view([{ root: R, keys: [W] }, { root: R2, keys: [] }, { root: R3, keys: [] }]) });
+    // W not bound here yet: the root would have to sign, which needs a prompt.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 11, guardians: view([{ root: R, keys: [] }, { root: R2, keys: [] }]) });
+    await h.gk.noteWardStatus({
+      machine: PHONE,
+      ts: T + 12,
+      guardians: view([{ root: R, keys: [W] }, { root: R2, keys: [] }], pending({ id: ID, expiresAt: T - 1 })),
+    });
+    expect(h.published).toHaveLength(0);
+    expect(h.keys().objected).toEqual({});
+  });
+
+  it("a phone-held root objects with its own key", async () => {
+    const removalOfW = `kintrinsic/unguardian/${W}`;
+    const ward = device(PHONE, "android", { statusSeen: true, appVersionCode: 55 });
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }], opsOf(wSk));
+    const g = {
+      roots: [{ root: W, keys: [] }, { root: R2, keys: [] }],
+      pending: [{ d: removalOfW, kind: "removal" as const, expiresAt: T + 100 }],
+      tombstones: 0,
+      relays: [],
+    };
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g });
+    expect(h.published).toHaveLength(1);
+    const { sealAuthor, inner } = open(h.published[0].wrap, phoneSk);
+    expect(sealAuthor).toBe(W);
+    const st = parseStatement(inner);
+    expect(st.ok && st.statement).toMatchObject({ type: "objection", d: `kintrinsic/object/${removalOfW}`, p: R2, signer: W });
+  });
+
+  it("doesn't object to a removal this install sent itself", async () => {
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android", [{ root: R2, keys: [] }])] }]);
+    await connectSignetRoot(h);
+    const left = await h.gk.leaveFamily();
+    h.published.length = 0;
+    await h.gk.noteWardStatus({
+      machine: PHONE,
+      ts: T + 10,
+      guardians: view([{ root: R, keys: [W] }, { root: R2, keys: [] }], pending({ id: left.event.id })),
+    });
+    expect(h.published).toHaveLength(0);
+  });
+});
+
 describe("guardian PIN", () => {
   it("sends a gift-wrapped PIN-only RELAYS to ready Android wards only", async () => {
     const old = "f6".repeat(32);

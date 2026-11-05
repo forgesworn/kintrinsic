@@ -2026,7 +2026,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // for the versioning gate and the per-ward key choice.
     dispatch({ type: "SET_DEVICE_KEYS_VIEW", status });
     // And what this install does in reply: resend a guardian PIN the ward
-    // doesn't hold yet. Decided from this STATUS itself (the dispatch above
+    // doesn't hold yet, and object to a pending removal of this parent
+    // (decision Q1). Decided from this STATUS itself (the dispatch above
     // hasn't reached the household yet); a failed send waits for the next one.
     void keysCore.noteWardStatus(status).catch(() => {});
     // Record the day's usage for the weekly picture (B1) + the device's minute

@@ -8,6 +8,7 @@ import GuardianMove from "./GuardianMove";
 import GuardianLostPhone from "./GuardianLostPhone";
 import PresenceScanner from "./PresenceScanner";
 import GuardianCode from "./GuardianCode";
+import RemovalNotice from "./RemovalNotice";
 import { AnchorScanFields } from "./AnchorScan";
 import { familyGateReason } from "../keys/guardianKeys";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
@@ -26,7 +27,6 @@ import {
   pendingTitle,
   pinStateOf,
   readinessLine,
-  removalsAgainstMe,
   removeGate,
   rootsView,
   shortNpub,
@@ -141,12 +141,15 @@ export default function Guardians({ sub }: { sub: string }) {
           <RemoveParent target={arg ?? ""} />
         </PinGate>
       );
+    case "leave":
+      // From the removal notice: the overview with leaving already asked.
+      return <Overview key="leave" leaving />;
     default:
       return <Overview />;
   }
 }
 
-function Overview() {
+function Overview({ leaving = false }: { leaving?: boolean }) {
   const { state, guardianKeys } = useCharter();
   const now = useNowUnix();
   const wards = familyWards(state.children);
@@ -155,7 +158,6 @@ function Overview() {
   const roots = rootsView(wards, me);
   const keys = guardianKeys.state;
   const readiness = guardianKeys.familyReadiness();
-  const againstMe = removalsAgainstMe(wards, keys, me);
   const movedAway = guardianKeys.movedAwayRoots();
   // Adopted roster devices show in the device list; only ones no child holds show apart.
   const roster = guardianKeys
@@ -172,7 +174,7 @@ function Overview() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<{ what: string; report: ReportLike } | null>(null);
-  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(leaving);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
 
   async function act(what: string, fn: () => Promise<ReportLike>) {
@@ -228,29 +230,7 @@ function Overview() {
         </div>
       ))}
 
-      {againstMe.map((r) => (
-        <div key={r.d} style={{ marginBottom: 12 }}>
-          <Banner tone="warn">
-            <strong>The other parent has asked to remove you</strong> from {r.devices.join(", ")}.
-            {r.takesEffectAt !== undefined &&
-              (r.takesEffectAt > now
-                ? ` It can take effect in ${durationWords(r.takesEffectAt - now)}, once they confirm in person.`
-                : " It takes effect as soon as they confirm in person.")}{" "}
-            If you object, it's dropped and you both stay. Your{" "}
-            {keys.root?.via === "heartwood" ? "Heartwood" : "My Signet"} signs the objection and may ask more than
-            once.
-            <div style={{ marginTop: 8 }}>
-              <Button
-                variant="danger"
-                disabled={busy !== null}
-                onClick={() => void act("Objection", () => guardianKeys.objectToRemoval(r.d))}
-              >
-                {busy === "Objection" ? "Objecting…" : "Object"}
-              </Button>
-            </div>
-          </Banner>
-        </div>
-      ))}
+      <RemovalNotice />
 
       {report && (
         <Card style={{ marginBottom: 12 }}>
@@ -491,7 +471,7 @@ function DeviceCard({
   const me = myRootOf(guardianKeys);
   const r = guardianKeys.childReadiness(ward.childId).wards.find((w) => w.machine === ward.device.devicePubkey);
   const line = r ? readinessLine(r.readiness) : null;
-  const pending = pendingFor(ward.device.guardians, guardianKeys.state, me);
+  const pending = pendingFor(ward.device.guardians, guardianKeys.state, me, now);
   const unconfirmed = isUnconfirmed(ward.device);
   const silent = r && !r.readiness.ready && r.readiness.reason === "silent";
   return (
@@ -555,7 +535,7 @@ function PendingRow({
         ? "Waiting for them to confirm in person here."
         : "Waiting for you to confirm in person here."
       : p.role === "against-me"
-        ? "You can object (see above)."
+        ? "This phone objects for you (see above)."
         : null;
   return (
     <div className="stack" style={{ gap: 4, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>

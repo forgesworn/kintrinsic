@@ -13,7 +13,7 @@ import type { GuardianKeysState } from "../keys/state";
 import type { StatusGuardians } from "../keys/statusGuardians";
 import type { WardReadiness } from "../keys/versionGate";
 import { splitPendingD, type PendingType } from "../keys/sdk";
-import { PENDING_LIFETIME_SECONDS } from "../keys/guardianKeys";
+import { PENDING_LIFETIME_SECONDS, removerOn } from "../keys/guardianKeys";
 import { MIN_PIN_LENGTH } from "../keys/pin";
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -115,13 +115,18 @@ export interface PendingView {
   role: PendingRole;
   /** The statement's event id, when this install knows it (it sent it). */
   statement?: string;
+  /** The statement's event id as the device reports it (newer devices). */
+  id?: string;
 }
 
-/** What is waiting on one device. */
-export function pendingFor(g: StatusGuardians | undefined, keys: GuardianKeysState, me: string): PendingView[] {
+/**
+ * What is waiting on one device: what its latest STATUS lists, less anything
+ * past its `expiresAt` at `now` (unix s), which the device has dropped too.
+ */
+export function pendingFor(g: StatusGuardians | undefined, keys: GuardianKeysState, me: string, now: number): PendingView[] {
   return (g?.pending ?? []).flatMap((p) => {
     const t = splitPendingD(p.d);
-    if (!t) return [];
+    if (!t || p.expiresAt <= now) return [];
     // A removal of this install's root is never its own pending item: one
     // it signed itself (leaving) applies at once. The same `d` can hold a
     // past self-removal in `sent` and now someone else's removal of it.
@@ -144,30 +149,62 @@ export function pendingFor(g: StatusGuardians | undefined, keys: GuardianKeysSta
         expiresAt: p.expiresAt,
         role,
         ...(statement ? { statement } : {}),
+        ...(p.id ? { id: p.id } : {}),
       },
     ];
   });
 }
 
-/** Pending removals of this install's root, merged across devices (for the objection banner). */
+/** A pending removal of this install's root, merged across the devices that list it. */
+export interface RemovalAgainstMe {
+  d: string;
+  devices: string[];
+  /** The children those devices belong to, each once. */
+  children: string[];
+  takesEffectAt?: number;
+  /** The parent who asked, when every device listing it names the same one (the one other guardian there). */
+  remover?: string;
+  /** This phone has objected at every device listing it (decision Q1). */
+  objected: boolean;
+}
+
+/** Pending removals of this install's root, merged across devices (for the removal notice). */
 export function removalsAgainstMe(
   wards: readonly WardRef[],
   keys: GuardianKeysState,
   me: string,
-): { d: string; devices: string[]; takesEffectAt?: number }[] {
-  const out = new Map<string, { devices: string[]; takesEffectAt?: number }>();
+  now: number,
+): RemovalAgainstMe[] {
+  const out = new Map<string, RemovalAgainstMe & { removers: Set<string | null> }>();
   for (const w of wards) {
-    for (const p of pendingFor(w.device.guardians, keys, me)) {
+    for (const p of pendingFor(w.device.guardians, keys, me, now)) {
       if (p.role !== "against-me") continue;
-      const e = out.get(p.d) ?? { devices: [] };
+      const e = out.get(p.d) ?? { d: p.d, devices: [], children: [], objected: true, removers: new Set<string | null>() };
       e.devices.push(w.device.label);
+      if (!e.children.includes(w.childName)) e.children.push(w.childName);
+      e.removers.add(removerOn(w.device.guardians!, me));
+      if (!(keys.objected?.[w.device.devicePubkey] ?? []).includes(p.id ?? p.d)) e.objected = false;
       if (p.takesEffectAt !== undefined) {
         e.takesEffectAt = e.takesEffectAt === undefined ? p.takesEffectAt : Math.min(e.takesEffectAt, p.takesEffectAt);
       }
       out.set(p.d, e);
     }
   }
-  return [...out].map(([d, e]) => ({ d, ...e }));
+  return [...out.values()].map(({ removers, ...e }) => {
+    const only = removers.size === 1 ? [...removers][0] : null;
+    return { ...e, ...(only ? { remover: only } : {}) };
+  });
+}
+
+/** What to call another parent: the name this phone knows them by, else a short npub. */
+export function parentName(root: string, keys: GuardianKeysState): string {
+  return keys.anchoredRoots?.[root]?.label ?? shortNpub(root);
+}
+
+/** "Robin", "Robin and Sam", "Robin, Sam and Alex". */
+export function namesList(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 /** An action and, when it can't be offered, the one line saying why. */

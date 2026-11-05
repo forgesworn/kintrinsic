@@ -26,8 +26,10 @@
 // - approval: sealed by the W it names (proof of possession);
 // - withdrawal, co-guardian, removal, move, cancel: signed by R, sealed by W
 //   where the ward holds W bound to R, else by R itself;
-// - objection: signed AND sealed by R (docs/guardian-keys-open-questions.md,
-//   "Sealing an objection");
+// - objection: sent automatically when a ward reports a pending removal of
+//   this install's root (decision Q1), signed AND sealed by W, bound to that
+//   root; a phone-held root signs and seals it itself (`noteWardStatus`). The
+//   manual `objectToRemoval` still signs and seals with R;
 // - presence confirmation and roster: signed and sealed by W;
 // - the guardian PIN, a PIN-only RELAYS (no relay list): signed and sealed by
 //   the same key, the one the ward's other events use.
@@ -1156,6 +1158,70 @@ export class GuardianKeys {
    */
   async noteWardStatus(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
     await this.resendPin(status);
+    await this.objectAutomatically(status);
+  }
+
+  /**
+   * Decision Q1: a ward reports a pending removal of this install's root
+   * that this install didn't send, so this install objects at once, to that
+   * ward only, and once per removal there (`keys.objected`). The objection
+   * names the remover (`p`): the one other root that ward pins, and nothing
+   * is sent when there is more than one. It is signed and sealed by W where
+   * the ward lists W under this install's root (no approval prompt: this runs
+   * unattended), or by the local key where that key is the root itself.
+   * Nothing is recorded for a send that failed, so the next STATUS retries.
+   */
+  private async objectAutomatically(status: { machine: string; guardians?: StatusGuardians }): Promise<void> {
+    const g = status.guardians;
+    const m = status.machine;
+    const d = this.findDevice(m);
+    if (!g || !d) return;
+    const { keys } = this.deps.read();
+    const me = this.rootPubkey();
+    const now = this.deps.now();
+    const against = g.pending.filter(
+      (p) => p.kind === "removal" && splitPendingD(p.d)?.key === me && p.expiresAt > now && !this.sentByMe(p, keys),
+    );
+    const before = keys.objected[m] ?? [];
+    const done = before.filter((x) => against.some((p) => (p.id ?? p.d) === x));
+    const remover = removerOn(g, me);
+    const w = this.workingPubkey();
+    const standing = keyStanding(g, w);
+    const canSign = keys.root ? standing.as === "working" && standing.root === me : standing.as === "root";
+    for (const p of against) {
+      const mark = p.id ?? p.d;
+      if (done.includes(mark) || !remover || !canSign) continue;
+      const ops = this.workingOps();
+      try {
+        const event = await buildObjection(signerOf(ops), p.d, remover, { issuedAt: now });
+        const wrap = await giftWrapSigned(event, m, ops, now);
+        try {
+          await this.deps.publish(this.relaysFor(d), wrap);
+        } catch (e) {
+          if (!(e instanceof QueuedForHomeNetworkError)) throw e;
+        }
+        done.push(mark);
+        this.remember(event);
+      } catch {
+        // Offline, or no relay took it: the next STATUS from this ward tries again.
+      }
+    }
+    if (JSON.stringify(done) !== JSON.stringify(before)) {
+      this.deps.write((k) => {
+        const objected = { ...k.objected };
+        if (done.length > 0) objected[m] = done;
+        else delete objected[m];
+        return { ...k, objected };
+      });
+    }
+  }
+
+  /** Did this install send the pending statement `p` (by its id, or by its `d` and age without one)? */
+  private sentByMe(p: { d: string; id?: string; expiresAt: number }, keys: GuardianKeysState): boolean {
+    const own = keys.sent[p.d];
+    if (!own) return false;
+    if (p.id !== undefined) return own.id === p.id;
+    return p.expiresAt <= own.issuedAt + PENDING_LIFETIME_SECONDS + 300;
   }
 
   private async resendPin(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
@@ -1462,6 +1528,17 @@ function rosterApprovalSigner(inner: SignedEvent): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The remover a ward's pending removal of `me` must name in an objection's
+ * `p`: STATUS doesn't carry a pending statement's signer, so it is the one
+ * other root that ward pins; null when it pins none or several (OQ "The
+ * objection's p when STATUS doesn't name the remover").
+ */
+export function removerOn(g: StatusGuardians, me: string): string | null {
+  const others = [...new Set(g.roots.map((r) => r.root).filter((r) => r !== me))];
+  return others.length === 1 ? others[0] : null;
 }
 
 /**

@@ -96,13 +96,24 @@ describe("guardians view", () => {
         { d: removalOfOther, kind: "removal", takesEffectAt: 400, expiresAt: 800 },
       ],
     });
-    const items = pendingFor(g, keys, ME);
+    const items = pendingFor(g, keys, ME, 100);
     expect(items.map((p) => [p.d, p.role, p.statement])).toEqual([
       [removalOfMe, "against-me", undefined],
       [removalOfOther, "mine", STATEMENT],
     ]);
+    // Past its expiresAt the device has dropped it, so it isn't shown.
+    expect(pendingFor(g, keys, ME, 850).map((p) => p.d)).toEqual([removalOfMe]);
+    expect(pendingFor(g, keys, ME, 900)).toEqual([]);
     const wards = familyWards(family([device("Laptop", LAPTOP, "linux", g), device("Phone", PHONE, "android", g)]));
-    expect(removalsAgainstMe(wards, keys, ME)).toEqual([{ d: removalOfMe, devices: ["Laptop", "Phone"], takesEffectAt: 500 }]);
+    expect(removalsAgainstMe(wards, keys, ME, 100)).toEqual([
+      { d: removalOfMe, devices: ["Laptop", "Phone"], children: ["Robin"], takesEffectAt: 500, remover: OTHER, objected: false },
+    ]);
+    // Objected at one device only: not yet "objected".
+    const one = { ...keys, objected: { [LAPTOP]: [removalOfMe] } };
+    expect(removalsAgainstMe(wards, one, ME, 100)[0].objected).toBe(false);
+    const both = { ...keys, objected: { [LAPTOP]: [removalOfMe], [PHONE]: [removalOfMe] } };
+    expect(removalsAgainstMe(wards, both, ME, 100)[0].objected).toBe(true);
+    expect(removalsAgainstMe(wards, both, ME, 900)).toEqual([]);
   });
 
   it("finds Android wards with no guardian PIN from their own STATUS (D4)", () => {

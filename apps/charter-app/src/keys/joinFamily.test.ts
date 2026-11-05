@@ -232,8 +232,8 @@ describe("a second parent joins the family (H1, batch 3b review)", () => {
     B.setChildren(applyDeviceKeysView(B.children(), status(PHONE, T + 120, withRemoval, "android")));
     B.setChildren(applyDeviceKeysView(B.children(), status(LAPTOP, T + 120, withRemoval, "linux")));
     const wards = familyWards(B.children());
-    expect(pendingFor(wards[0].device.guardians, B.keys(), R_B)[0].role).toBe("against-me");
-    expect(removalsAgainstMe(wards, B.keys(), R_B).map((r) => r.d)).toEqual([removalD]);
+    expect(pendingFor(wards[0].device.guardians, B.keys(), R_B, T + 120)[0].role).toBe("against-me");
+    expect(removalsAgainstMe(wards, B.keys(), R_B, T + 120).map((r) => r.d)).toEqual([removalD]);
     const objection = await B.gk.objectToRemoval(removalD);
     expect(objection.sent.sort()).toEqual([PHONE, LAPTOP].sort());
     const parsed = parseStatement(objection.event as SignedEvent);

@@ -71,15 +71,27 @@ describe("Guardians screens", () => {
     expect(s.guardianKeys.leaveFamily).toHaveBeenCalledOnce();
   });
 
-  it("shows an objection banner for a pending removal of you and objects", async () => {
+  it("says this phone objected to a removal of you, and offers leaving instead (Q1)", async () => {
     const d = `kintrinsic/unguardian/${ME}`;
     const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 9_999_999_999, expiresAt: 9_999_999_999 }] });
-    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys: { root: signetRoot() } });
+    const keys = {
+      root: signetRoot(),
+      anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" as const, label: "Sam" } },
+    };
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys }));
+    expect(container.textContent).toContain("Sam asked to remove you from Robin's devices.");
+    expect(container.textContent).toContain("This phone objects for you as soon as it reaches the device.");
+    expect(button(container, "Object")).toBeUndefined();
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys: { ...keys, objected: { [LAPTOP]: [d] } } });
     render(s);
-    expect(container.textContent).toContain("The other parent has asked to remove you");
-    await act(async () => button(container, "Object")!.click());
-    expect(s.guardianKeys.objectToRemoval).toHaveBeenCalledWith(d);
-    expect(container.textContent).toContain("Objection sent");
+    expect(container.textContent).toContain(
+      "Sam asked to remove you from Robin's devices. We've objected on your behalf, so you stay a guardian.",
+    );
+    expect(s.guardianKeys.objectToRemoval).not.toHaveBeenCalled();
+    await act(async () => button(container, "Leave the family instead")!.click());
+    expect(window.location.hash).toBe("#/settings/guardians/leave");
+    render(s, "leave");
+    expect(container.textContent).toContain("You stop being a guardian of every device at once");
   });
 
   it("shows no objection banner when the pending removal is of the other parent, and offers cancelling your own", async () => {
@@ -279,11 +291,11 @@ describe("Guardians screens", () => {
       keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: ME } } },
     });
     render(s);
-    expect(container.textContent).toContain("The other parent has asked to remove you");
+    expect(container.textContent).toContain("asked to remove you from Robin's devices");
     expect(button(container, "Cancel this")).toBeUndefined();
   });
 
-  it("offers no cancel on an expired item", () => {
+  it("doesn't show an expired item: the device has dropped it", () => {
     const d = `kintrinsic/unguardian/${OTHER}`;
     const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 5, expiresAt: 10 }] });
     render(
@@ -292,7 +304,7 @@ describe("Guardians screens", () => {
         keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: OTHER } } },
       }),
     );
-    expect(container.textContent).toContain("expired");
+    expect(container.textContent).not.toContain("Removal of");
     expect(button(container, "Cancel this")).toBeUndefined();
   });
 
