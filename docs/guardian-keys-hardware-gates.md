@@ -355,7 +355,12 @@ cd ../linux && cargo run -q -p xtask -- deb
 
 **Devices:** a spare Android ward that can be sacrificed, paired as in gate 1. Do not use the family's real ward.
 
-1. Corrupt both of the ward's guardian state files (`guardian-state.json` and its `.2` fallback, in the ward app's private storage). If the debug-signed test APK does not allow `adb shell run-as`, record this gate as not run.
+1. Corrupt both of the ward's guardian state files. This needs a debuggable test build of the ward; on a release build `run-as` is refused, and the gate is recorded as not run. Find the files, then overwrite both:
+   ```
+   adb shell run-as org.forgesworn.charter find . -name 'guardian-state.json*'
+   adb shell run-as org.forgesworn.charter sh -c 'echo broken > <path>/guardian-state.json; echo broken > <path>/guardian-state.json.2'
+   ```
+   Replace `<path>` with the directory the first command printed.
 2. Restart the ward app, then lock the ward.
    **Expect:** the lock screen's first line, and About this device, say "Rules can't be changed on this phone. Ask a parent." The lock still holds: the ward stays locked and the existing rules still apply.
 3. Restore the files, or unpair and pair again, and confirm the notice goes away.
