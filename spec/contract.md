@@ -2834,7 +2834,7 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
       encrypted to a key that may have departed, and the stored clauses stay
       enforced. It never rebuilds the state from the pairing record, which
       would re-admit a root since removed or moved. The ward's own screen
-      says that rules can't be changed. Recovery is a local unpair by an
+      says that rules can't be changed on this device. Recovery is a local unpair by an
       administrator on Linux, or a re-pair or factory reset on Android.
 11. **Re-pairing and relays on a ward with this section.**
     - Pinning a different root in place of a current one happens only through
