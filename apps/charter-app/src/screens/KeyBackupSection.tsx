@@ -47,7 +47,8 @@ export default function KeyBackupSection({ busy }: { busy: boolean }) {
       const { encryptGuardianBackup } = await import("../signer/keyBackup");
       const { loadOrCreateGuardianKey } = await import("../signer/guardianKey");
       const { exportPersistedState } = await import("../store/store");
-      setBlob(await encryptGuardianBackup(loadOrCreateGuardianKey(), exportPersistedState(), pass));
+      const { householdForBackup } = await import("../store/householdExport");
+      setBlob(await encryptGuardianBackup(loadOrCreateGuardianKey(), householdForBackup(exportPersistedState()), pass));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't make a backup.");
     } finally {
