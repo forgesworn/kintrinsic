@@ -320,6 +320,78 @@ cd ../linux && cargo run -q -p xtask -- deb
 
 **Variant:** repeat with a phone-held identity. **Expect:** the restore brings back the identity and family, makes a new day-to-day key, and the backup contains no PIN.
 
+## Gate 11: the Android ward shows nothing before the PIN
+
+**Devices:** phone A, phone B, Android ward with the guardian PIN already set (**123456**, gate 1 step 4). The ward APK and its native library must be built together from the same branch.
+
+1. Phone A: Invite phone B's identity (gate 2 step 1). **Do not confirm** anything.
+2. Android ward: About this device. **Expect:** no pending line.
+3. Android ward: About this device → Guardians → **Guardian presence**.
+   **Expect:** only the PIN field. No invitation, no names, no list.
+4. Enter **123456**.
+   **Expect:** the list shows "Add … (npub1…) as a guardian", who asked, and when it expires.
+5. Tap **Show a code for this**.
+   **Expect:** a QR code and the typed form appear. Phone B scans it (gate 2 step 5): the co-guardian is confirmed.
+6. Press Home, then reopen the screen.
+   **Expect:** it asks for the PIN again.
+7. Backoff: enter a wrong PIN five times, then **123456**.
+   **Expect:** "Too many wrong PINs" with a countdown, and no list. After the countdown, **123456** shows the list again.
+
+**Fail if** any name, invitation or count appears before the PIN is accepted.
+
+## Gate 12: a working key cannot change the relay list
+
+**Devices:** phone A (My Signet identity A, so its daily signing is by a working key), Android ward.
+
+**Needs:** a relay code for a new relay list that is signed by a working key, not by the identity. The Android build report lists the guardian app sending its working key to the carrier as not yet done; if the app cannot make such a code, record this gate as not run and say why.
+
+1. Make the relay code for a new relay list, signed by a working key.
+2. Android ward: About this device → **Change relays / battery** → paste the code.
+   **Expect:** the error "Only a parent's own identity can change this device's relays." The ward's relay list is unchanged.
+3. Repeat with a relay code signed by the identity (My Signet signs it).
+   **Expect:** it is accepted and About this device shows the new relays.
+
+## Gate 13: a ward that cannot read its guardian state (Android)
+
+**Devices:** a spare Android ward that can be sacrificed, paired as in gate 1. Do not use the family's real ward.
+
+1. Corrupt both of the ward's guardian state files (`guardian-state.json` and its `.2` fallback, in the ward app's private storage). If the debug-signed test APK does not allow `adb shell run-as`, record this gate as not run.
+2. Restart the ward app, then lock the ward.
+   **Expect:** the lock screen's first line, and About this device, say "Rules can't be changed on this phone. Ask a parent." The lock still holds: the ward stays locked and the existing rules still apply.
+3. Restore the files, or unpair and pair again, and confirm the notice goes away.
+
+## Gate 14: the Linux console confirms a change in person
+
+**Devices:** Linux ward with the Kintrinsic console and a polkit prompt, an administrator account, phone B (invited by phone A, gate 9 step 1, nothing confirmed). Test PIN is not used here; the administrator password is.
+
+1. Console, as administrator: **Connect** → **Confirm a change in person**. Enter the administrator password.
+   **Expect:** the list appears with the pending invitation. (The password may be asked a second time at step 2; that is expected unless polkit remembers the first.)
+2. Pick the invitation, enter the password.
+   **Expect:** a QR and a short code appear. Phone B scans it and the co-guardian is confirmed.
+3. Open the console as the child's (ward) account, not an administrator.
+   **Expect:** the card is not shown.
+4. Enter a wrong password or cancel the prompt.
+   **Expect:** a readable refusal; note whether the toast stays long enough to read (it lasts about 2.6 seconds).
+
+## Gate 15: the console shows who set each rule
+
+**Devices:** Linux ward with two guardians (the end state of gate 2 step 6), phones A and B.
+
+1. Phone A sets one rule and phone B sets a different one, both for this Linux ward.
+2. Console → **Limits**.
+   **Expect:** a "Who set these rules" section. Each rule names its setter: the label if there is one, otherwise the signing key's short npub beside its root's short npub.
+3. Compare with `charter status`.
+   **Expect:** the same setters; with no label, the command line shows the root alone.
+
+## Gate 16: the Linux ward cannot read its guardian state
+
+**Devices:** a Linux ward that can be sacrificed, with the console, the tray and the Mint tray.
+
+1. Copy `/var/lib/charter/guardian-state.json` and `guardian-state.json.2` somewhere safe. As root, corrupt both. Restart `charterd`.
+2. **Expect:** `/run/charter/guardians.json` has `"unavailable":true`. Every console page shows the banner "Rules can't be changed on this computer. Ask a parent." The tray menu and the Mint tray menu show the same notice, and the lock screen's first line says it. The lock still holds.
+3. Put the copies back and restart `charterd`.
+   **Expect:** the notice disappears everywhere within a minute.
+
 ## Known limits for these gates
 
 - The 72-hour removal can only be tested as far as the pending state and the
