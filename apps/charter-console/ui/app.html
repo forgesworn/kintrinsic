@@ -797,33 +797,61 @@ function guardianRoots(){
   if(!roots.length) return "";
   return `<p class="muted" style="margin-top:14px">${roots.length>1?"Guardians":"Guardian"}: ${roots.map(esc).join(", ")}</p>`;
 }
+// A pending change in plain words, with the short npub it names.
 function pendingText(p){
-  if(p.kind==="coguardian") return "Add "+p.key+" as a guardian";
-  if(p.kind==="removal") return "Remove the guardian "+p.key;
-  if(p.kind==="move") return "Move a guardian to the new identity "+p.key;
-  return p.kind+" "+p.key;
+  const key = p.key || "";
+  if(p.kind==="coguardian") return "Add a parent: "+key;
+  if(p.kind==="removal") return "Remove a parent: "+key;
+  if(p.kind==="move") return "Move a parent's identity to "+key;
+  return cap(p.kind)+": "+key;
+}
+// A day and a time: a notice period can run for days, so a clock time alone
+// would mislead.
+function fmtWhen(unix){
+  try { return new Date(unix*1000).toLocaleString([], {weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"}); }
+  catch(e){ return ""; }
+}
+function pendingWhen(p){
+  const now = Date.now()/1000;
+  const parts = [];
+  if(p.takesEffectAt!=null) parts.push((p.takesEffectAt>now?"Takes effect ":"Took effect ")+fmtWhen(p.takesEffectAt));
+  if(p.expiresAt!=null) parts.push("Expires "+fmtWhen(p.expiresAt));
+  return parts.join(" · ");
 }
 // "Confirm in person": a change to who manages this computer (another
-// parent, a removal, a new identity) waits until a guardian standing HERE
-// scans a one-time code. Only a parent can show the code (admin password).
+// parent, a removal, a new identity) waits until a parent standing HERE scans
+// a one-time code. What is waiting is a matter between the parents, so it is
+// never in the world-readable guardians view (contract rule 5): the
+// administrator asks for it with their password, picks one, and a second
+// password shows its code.
 function presenceCard(){
-  const pend = (S.guardians && Array.isArray(S.guardians.pending)) ? S.guardians.pending : [];
+  if(isWard()) return "";
   const pres = S.presence;
-  if(!pend.length && !pres) return "";
-  const body = pres
-    ? `<div class="qr-wrap">
+  const list = Array.isArray(S.presenceList) ? S.presenceList : null;
+  let body;
+  if(pres){
+    body = `<p style="margin-bottom:14px"><b>${esc(pendingText(pres))}</b></p>
+      <div class="qr-wrap">
         <div class="qr">${pres.qr||""}</div>
         <ol class="steps">
-          <li><span class="txt">${esc(pendingText(pres))}: the guardian opens <b>Kintrinsic</b> on their phone and scans this code.</span></li>
-          <li><span class="txt">Or types this code: <b>${esc(pres.short||"")}</b></span></li>
+          <li><span class="txt">A parent standing here opens <b>Kintrinsic</b> on their phone and scans this code.</span></li>
+          <li><span class="txt">Or types this code: <b style="user-select:all">${esc(pres.short||"")}</b></span></li>
         </ol>
       </div>
-      <p class="muted" style="margin-top:16px;text-align:center">The code works once and expires in ${fmtLeft(pres.secsLeft)}.</p>`
-    : pend.map(p=>`<div class="stack" style="margin-top:12px">
-        <span>${esc(pendingText(p))}</span>
+      <p class="muted" style="margin-top:16px;text-align:center">The code works once and expires in ${fmtLeft(pres.secsLeft)}.</p>`;
+  } else if(list && list.length){
+    body = list.map(p=>`<div class="stack" style="margin-top:12px">
+        <span><b>${esc(pendingText(p))}</b></span>
+        ${pendingWhen(p)?`<span class="muted">${esc(pendingWhen(p))}</span>`:""}
         <button class="btn btn-wax btn-block" data-presence="${esc(p.d)}">${busySpin("Show the code to confirm")}</button>
       </div>`).join("")
-      + `<p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password — only a parent can show this code.</p>`;
+      + `<p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password again.</p>`;
+  } else {
+    body = `${list?`<div class="banner info" style="margin-bottom:14px"><span>Nothing is waiting to be confirmed in person.</span></div>`:""}
+      <p class="muted">When a parent adds another parent, removes one, or moves to a new identity, the change waits until a parent standing at this computer confirms it.</p>
+      <button class="btn btn-soft btn-block" id="do-presence-list" style="margin-top:14px">${busySpin(list?"Check again":"Confirm a change in person")}</button>
+      <p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password — only a parent can see what is waiting.</p>`;
+  }
   return `<div class="card pad-lg" style="margin-top:18px">
       <p class="eyebrow">Confirm in person</p>
       ${body}
@@ -969,6 +997,8 @@ function wire(){
   };
   const inv=document.getElementById("do-invite");
   if(inv) inv.onclick=()=>{ act(); send({cmd:"invite"}); };
+  const plist=document.getElementById("do-presence-list");
+  if(plist) plist.onclick=()=>{ act(); send({cmd:"presenceList"}); };
   document.querySelectorAll("[data-presence]").forEach(b=>b.onclick=()=>{ act(); send({cmd:"presence", d:b.dataset.presence}); });
   const rec=document.getElementById("do-recovery"); if(rec) rec.onclick=()=>{ send({cmd:"recovery"}); showToast("Opening Recovery…"); };
   // Amount chooser + the give/take/ask verbs.
