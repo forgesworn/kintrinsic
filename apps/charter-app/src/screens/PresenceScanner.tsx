@@ -4,6 +4,7 @@ import { QRScanner } from "../components/QRScanner";
 import { useCharter } from "../store/store";
 import { parsePresenceCode, parsePresenceToken } from "../keys/presenceCode";
 import { familyWards, myRootOf, pendingTitle, presenceCodeFrom, typedPresenceItems } from "./guardiansView";
+import PhoneJoinNote from "./PhoneJoinNote";
 
 /** Where each kind of ward shows its presence code. */
 export function PresenceWhere() {
@@ -92,6 +93,7 @@ export default function PresenceScanner({ onBack }: { onBack?: () => void }) {
             : "It takes effect there as soon as the device has it."}{" "}
           The device's own screen shows it once it's done.
         </p>
+        {result.kind === "coguardian" && <PhoneJoinNote />}
         <div className="stack" style={{ marginTop: 12 }}>
           <Button
             block

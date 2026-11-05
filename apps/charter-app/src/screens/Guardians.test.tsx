@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { npubEncode } from "nostr-tools/nip19";
 import Guardians from "./Guardians";
 import {
   LAPTOP,
@@ -16,11 +17,14 @@ import {
   signetRoot,
   typeInto,
 } from "./guardiansTestKit";
+import { JOIN_WITH_PHONE, JOIN_WITH_SIGNET, PHONE_JOIN_DONE } from "./guardiansView";
 
 const store = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock("../store/store", () => ({ useCharter: () => store.current }));
 
 type Store = ReturnType<typeof mockStore>;
+
+const nip19Npub = (hex: string) => npubEncode(hex);
 
 describe("Guardians screens", () => {
   let container: HTMLDivElement;
@@ -226,6 +230,7 @@ describe("Guardians screens", () => {
   it("joins: connects My Signet, which approves this phone", async () => {
     const s = mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } });
     render(s, "join");
+    await act(async () => button(container, JOIN_WITH_SIGNET)!.click());
     await act(async () => button(container, "Connect My Signet")!.click());
     const { nip19 } = await import("nostr-tools");
     const [link, invited] = [...container.querySelectorAll("input")];
@@ -235,6 +240,100 @@ describe("Guardians screens", () => {
     act(() => typeInto(invited, nip19.npubEncode(OTHER)));
     await act(async () => button(container, "Connect")!.click());
     expect(s.pairSignet).toHaveBeenCalledWith("bunker://abc?relay=wss://one.example", { via: "signet", expectRoot: OTHER });
+  });
+
+  it("joins: offers My Signet or this phone only, in those words", () => {
+    render(mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } }), "join");
+    expect(JOIN_WITH_SIGNET).toBe("Join with My Signet (recommended: your identity survives losing this phone)");
+    expect(JOIN_WITH_PHONE).toBe(
+      "Join with this phone only (this phone's key becomes your identity for the family; back it up, and you can move it to My Signet later)",
+    );
+    expect(button(container, JOIN_WITH_SIGNET)).toBeDefined();
+    expect(button(container, JOIN_WITH_PHONE)).toBeDefined();
+  });
+
+  it("joins with this phone only: turns on this phone's key, then makes the identity and its day-to-day key", async () => {
+    const s = mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } });
+    const order: string[] = [];
+    s.enableLocalSigner = vi.fn(async () => {
+      order.push("local");
+    });
+    s.guardianKeys.joinWithThisPhone = vi.fn(async () => {
+      order.push("join");
+      return undefined;
+    });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_PHONE)!.click());
+    expect(order).toEqual(["local", "join"]);
+    expect(s.pairSignet).not.toHaveBeenCalled();
+  });
+
+  it("joins with this phone only on a phone already signing with its own key, devices none", async () => {
+    const s = mockStore({ children: [], signer: { connected: true, kind: "local", autoSign: false } });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_PHONE)!.click());
+    expect(s.enableLocalSigner).not.toHaveBeenCalled();
+    expect(s.guardianKeys.joinWithThisPhone).toHaveBeenCalled();
+    // My Signet on such a phone: its own key has to go first.
+    render(mockStore({ children: [], signer: { connected: true, kind: "local", autoSign: false } }), "join");
+    await act(async () => button(container, JOIN_WITH_SIGNET)!.click());
+    expect(container.textContent).toContain("turn off parent approval first");
+  });
+
+  it("shows why joining with this phone only was refused", async () => {
+    const s = mockStore({ children: [], signer: { connected: true, kind: "local", autoSign: false } });
+    s.guardianKeys.joinWithThisPhone = vi.fn(async () => {
+      throw new Error("This phone already looks after devices, so it can't join another parent's family.");
+    });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_PHONE)!.click());
+    expect(container.textContent).toContain("This phone already looks after devices");
+  });
+
+  it("refuses a phone that looks after devices it paired with its own key", () => {
+    render(
+      mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), signer: { connected: true, kind: "local", autoSign: false } }),
+      "join",
+    );
+    expect(container.textContent).toContain("This phone already looks after devices with a guardian key of its own");
+    expect(button(container, JOIN_WITH_PHONE)).toBeUndefined();
+  });
+
+  it("phone only: shows this phone's guardian ID to be invited, then asks for theirs; no second-phone shortcut", () => {
+    const phone = { ...signetRoot()!, via: "phone" as const };
+    render(mockStore({ children: [], keys: { root: phone }, signer: { connected: true, kind: "local", autoSign: false } }), "join");
+    expect(container.textContent).toContain("Swap guardian codes");
+    expect(container.textContent).toContain("This is your guardian ID for the family, kept on this phone.");
+    expect(container.textContent).toContain(nip19Npub(ME));
+    expect(button(container, "Scan the other parent's guardian code")).toBeDefined();
+    expect(button(container, "This is a second phone for my own identity")).toBeUndefined();
+  });
+
+  it("phone only, after scanning their code: says what was made and what to back up, and links the move", async () => {
+    const phone = { ...signetRoot()!, via: "phone" as const };
+    render(
+      mockStore({
+        children: [],
+        keys: { root: phone, anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } },
+        signer: { connected: true, kind: "local", autoSign: false },
+      }),
+      "join",
+    );
+    expect(container.textContent).toContain("Now confirm in person");
+    expect(container.textContent).toContain(PHONE_JOIN_DONE);
+    expect(container.textContent).not.toContain("Adding a second phone");
+    await act(async () => button(container, "Move my identity to My Signet")!.click());
+    expect(window.location.hash).toBe("#/settings/guardians/move");
+    await act(async () => button(container, "Back up my guardian identity")!.click());
+    expect(window.location.hash).toBe("#/settings/key-backup");
+  });
+
+  it("My Signet join: no phone-only note after approval", () => {
+    render(
+      mockStore({ children: [], keys: { root: signetRoot(), anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } } }),
+      "join",
+    );
+    expect(container.textContent).not.toContain(PHONE_JOIN_DONE);
   });
 
   it("joins on a connected My Signet with the invited identity as the expected root", async () => {

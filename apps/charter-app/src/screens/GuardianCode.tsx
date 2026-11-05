@@ -12,7 +12,7 @@ import { npubOf } from "./guardiansView";
  * machine (docs/guardian-keys-open-questions.md, "Anchoring a joining
  * parent's trust").
  */
-export function GuardianCodeCard() {
+export function GuardianCodeCard({ intro }: { intro?: string } = {}) {
   const { guardianKeys } = useCharter();
   const root = guardianKeys.state.root?.pubkey;
   const npub = root ? npubOf(root) : null;
@@ -44,8 +44,8 @@ export function GuardianCodeCard() {
   return (
     <div className="stack" style={{ gap: 8 }}>
       <p className="card-sub" style={{ margin: 0 }}>
-        The parent joining your family scans this with their phone (Join a family → Scan the other parent's guardian
-        code). Show it to them in person.
+        {intro ??
+          "The parent joining your family scans this with their phone (Join a family → Scan the other parent's guardian code). Show it to them in person."}
       </p>
       {src && (
         <img

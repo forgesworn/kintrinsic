@@ -87,7 +87,7 @@ function GuardiansCard() {
       <RemovalNotice />
       <p className="card-sub" style={{ marginTop: 0 }}>
         {wards.length === 0
-          ? "Another parent already uses Kintrinsic for your child? Join their family with your own My Signet."
+          ? "Another parent already uses Kintrinsic for your child? Join their family, with My Signet or with this phone only."
           : !reported
             ? "Your devices haven't said who their guardians are yet. They do once they have the latest Kintrinsic."
             : others === 0

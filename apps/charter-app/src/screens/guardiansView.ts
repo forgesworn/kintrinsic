@@ -76,6 +76,15 @@ export function myRootOf(keys: { state: GuardianKeysState; workingPubkey: string
 export const MINT_NOTICE =
   "This phone will now use a separate day-to-day key, vouched for by your identity. Your identity keeps setting the rules for now. The new key confirms things in person, carries the PIN, and speaks for you if the other parent asks to remove you.";
 
+/** The choice a joining parent makes (decision 1(b): a phone-held identity is supported). */
+export const JOIN_WITH_SIGNET = "Join with My Signet (recommended: your identity survives losing this phone)";
+export const JOIN_WITH_PHONE =
+  "Join with this phone only (this phone's key becomes your identity for the family; back it up, and you can move it to My Signet later)";
+
+/** Said once a parent has joined with this phone only. */
+export const PHONE_JOIN_DONE =
+  "This phone made your guardian identity for the family and a day-to-day key it vouches for: back up the guardian identity (Settings → Key backup), since the day-to-day key is never backed up and is simply made again.";
+
 /** The full npub for a hex key. */
 export function npubOf(hex: string): string {
   return nip19.npubEncode(hex);

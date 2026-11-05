@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PresenceScanner from "./PresenceScanner";
-import { presenceCodeFrom } from "./guardiansView";
+import { PHONE_JOIN_DONE, presenceCodeFrom } from "./guardiansView";
 import {
   LAPTOP,
   ME,
@@ -71,6 +71,28 @@ describe("presence scanner", () => {
     expect(s.guardianKeys.confirmPresence).toHaveBeenCalledWith(valid);
     expect(container.textContent).toContain("Confirmation sent");
     expect(container.textContent).toContain("Sent to Laptop.");
+  });
+
+  it("a parent who joined with this phone only is told what to back up, after confirming the invitation", async () => {
+    const invite = `kintrinsic/guardian/${ME}`;
+    const code = presenceCodeFrom(LAPTOP, TOKEN, invite, STATEMENT);
+    s.guardianKeys.state = { ...s.guardianKeys.state, root: { ...signetRoot()!, via: "phone" } };
+    act(() => root.render(<PresenceScanner key="phone" />));
+    await act(async () => button(container, "Scan the code")!.click());
+    await act(async () => {
+      scanner.onScan!(code);
+    });
+    expect(container.textContent).toContain("Confirmation sent");
+    expect(container.textContent).toContain(PHONE_JOIN_DONE);
+    expect(button(container, "Move my identity to My Signet")).toBeDefined();
+  });
+
+  it("a My Signet parent sees no phone-only note after confirming", async () => {
+    await act(async () => button(container, "Scan the code")!.click());
+    await act(async () => {
+      scanner.onScan!(valid);
+    });
+    expect(container.textContent).not.toContain(PHONE_JOIN_DONE);
   });
 
   it("keeps scanning past a QR that isn't a presence code", async () => {
