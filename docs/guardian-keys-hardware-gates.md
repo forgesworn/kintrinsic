@@ -1,7 +1,7 @@
 # Guardian keys: hardware gates
 
 Hardware tests for *Guardian roots and working keys (v1)* (`spec/contract.md`)
-on branch `feat/guardian-keys`. Run them in order: each gate assumes the one
+on branch `feat/guardian-keys-rebased`. Run them in order: each gate assumes the one
 before it passed. The test PIN is **123456** throughout.
 
 Record each step as pass or fail; for a failure, note what the screen showed
@@ -19,70 +19,123 @@ Android: `adb logcat -d | grep -i charter`).
 
 ## Gate 0: build, install, no regressions
 
+The branch carries main's version numbers (ward 0.7.4 (53), Linux 0.8.2) and
+takes no bump until release. The guardian app's versioning gate wants ward code
+54 and Linux code 803 or above (`docs/guardian-keys-open-questions.md`, "The
+versioning gate's thresholds before release"), and treats anything lower as a
+ward without this section. So build the wards from a throwaway branch that
+differs only in those numbers. Never merge it.
+
+```
+git switch -c test/guardian-keys-gates feat/guardian-keys-rebased
+# android/app/build.gradle.kts: versionCode = 54, versionName = "0.7.5"
+# linux/Cargo.toml:             version = "0.8.3"
+(cd linux && cargo update --workspace)
+git commit -am "test: gate build numbers for guardian keys"
+```
+
 Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
-0.6.18 (49), Linux `.deb` 0.7.13, `SHA256SUMS`).
+0.7.5 (54), Linux `.deb` 0.8.3, `SHA256SUMS`):
+
+```
+source ~/Android/env.sh
+cd android && CHARTER_ALPHA_DEBUG_SIGNING=1 ./scripts/build-apk.sh
+#   the APK is android/app/build/outputs/apk/release/app-release.apk
+cd ../linux && cargo run -q -p xtask -- deb
+#   the package is linux/target/deb/*.deb
+```
 
 1. Guardian app test build, served to the phones over USB (a `localhost`
    origin is a secure context, so the camera and service worker work):
 
    ```
-   cd apps/charter-app && npm run build && npx vite preview --host 127.0.0.1 --port 4173
+   cd apps/charter-app && npm ci && npm run build && npx vite preview --host 127.0.0.1 --port 4173
    adb -s <phone> reverse tcp:4173 tcp:4173
    ```
 
    Open `http://localhost:4173` on the phone. This is a separate origin from
    the production app, so it starts with an empty family.
 2. Upgrade an already-paired Android ward in place. The local test APK is
-   debug-signed, and fielded wards now carry the release certificate, so it
-   installs only on a fresh or reset ward (gates 1–3). The in-place upgrade
-   needs the CI-signed build: tag the branch head (`ward-v0.6.18`), let
-   `release-artifacts.yml` produce the draft release (never published), then
-   `adb install -r <that APK>`.
+   debug-signed, and fielded wards carry the release certificate with its
+   rotation lineage, so it installs only on a fresh or reset ward (gates 1–3).
+   The in-place upgrade needs the CI-signed build: push the throwaway branch,
+   tag it (`ward-v0.7.5`, which must match its `versionName`), let
+   `release-artifacts.yml` produce the draft release (it waits for the sysadmin
+   on the `release` environment, and is never published), then send the draft's
+   APK with `adb install -r`. A paired release build blocks local installs, so
+   if `adb` is refused use a maintenance window from the guardian app first.
+   Delete the tag and the draft after the gates, so they can't collide with the
+   real release.
    **Expect:** the ward keeps its pairing and every existing rule is still
    enforced. About this device → Guardians lists one guardian. The production guardian
    app still sees the ward's STATUS and can still change a rule (the ward
    treats the single pinned guardian exactly as before).
-3. Upgrade a paired Linux ward: `sudo apt install ./kintrinsic_0.7.13_*.deb`.
+3. Upgrade a paired Linux ward: `sudo apt install ./kintrinsic_0.8.3_*.deb`
+   (the apt source the package installs offers nothing newer than this).
    **Expect:** as step 2. `charter status` shows the guardian list, and
    `/var/lib/charter/guardian-state.json` exists with mode 0600.
 
 ## Gate 1: a Heartwood-first family from scratch
 
-1. Factory-reset the Android ward and provision the 0.6.18 test APK as Device
-   Owner (QR provisioning as usual).
-2. Guardian phone A, test build: Family → Parent approval → **Other ways (for
+1. Factory-reset the Android ward and provision the 0.7.5 test APK as Device
+   Owner with `android/scripts/charter-provision.sh <apk>`. QR provisioning
+   pins the published release APK by checksum, so it can't install a test
+   build.
+2. Guardian phone A, test build: Settings → Parent approval → **Other ways (for
    people who already use Signet or Heartwood)** → **Set up with Heartwood** →
    paste My Signet's connection link for identity A → **Connect**.
    **Expect:** My Signet asks once to sign a *kind 31120* event (this phone's
    approval). Approve it. **If My Signet refuses kind 31120**, stop and record
    it: that is a My Signet permission change, not a Kintrinsic bug.
-3. Family → add the child → on the child's card, **Set up a device** →
-   **📱 Phone**. Scan the pairing code with the Android ward and check the
+3. Settings → add the child → on the child's settings page (⚙), Devices →
+   **Set up a device** → **📱 Phone**. Scan the pairing code with the Android ward and check the
    six-digit code matches on both screens. Under a My Signet root the ward
    can't announce itself to phone A, so then tap **Type the device code** and
    type the code the ward shows (About this device), and name the device.
    **Expect:** the guardian app shows the ward. Ward About this device →
    Guardians lists one guardian (A's short npub) with one working key.
-4. Family → **Guardians** → **Set the guardian PIN**: **123456**, twice →
+4. Settings → **Guardians** → **Set the guardian PIN**: **123456**, twice →
    **Set guardian PIN**.
 5. Change a rule for the child (e.g. today's screen-time limit).
    **Expect:** the ward enforces it within a minute. Ward About this device
    shows A as the guardian who set it.
 6. Linux ward (optional in this gate): on the computer, Kintrinsic →
-   **Connect a phone** shows a code; on phone A, the child's card → **Set up
-   another device** → **💻 Computer** → scan it.
+   **Connect a phone** shows a code; on phone A, the child's settings page →
+   **Set up another device** → **💻 Computer** → scan it.
    **Expect:** `charter status` shows root A (not the phone's working key)
    and one working key.
+7. What main added, signed by phone A's working key (ward About this device
+   shows A as the guardian who set each rule):
+   - **Wi-Fi & Bluetooth:** the child's settings page → Rules → **Wi-Fi &
+     Bluetooth** → Wi-Fi to saved networks only, Bluetooth to paired devices
+     only → save. **Expect:** on the ward, joining a new network and pairing a
+     new Bluetooth device are refused within a minute; **Any** lifts it again.
+   - **Times:** the child's settings page → **Times** → add Learning time with
+     a window covering now → save. **Expect:** the ward enforces Learning
+     time's rules, and the child's **Now** card names Learning time within a
+     minute. Remove the window: it returns to Free time.
+   - **Battery codes:** the device's page → **Battery & responsiveness** →
+     pick a preset → **Create signed battery code** (My Signet signs it: the
+     code is signed by the root) → on the ward, within ten minutes, About this
+     device → **Change relays / battery** → paste. **Expect:** the code is
+     accepted and About shows the new battery line. A second paste of the same
+     code is refused.
+   - **Locked Settings row:** lock the ward (a schedule or a used-up limit),
+     then open **Settings** from the lock screen. **Expect:** Wi-Fi and
+     Bluetooth open and obey the tiers above. Accounts, app controls (force
+     stop, disable, clear) and default apps are restricted, and lifted again on
+     unlock. The default dialer still works past the lock, and a call from the
+     lock screen connects, exactly as on ward 0.7.4.
 
 ## Gate 2: a second parent joins, then leaves
 
-1. Phone A: Family → **Guardians** → **Invite a parent** → **Scan their QR
+1. Phone A: Settings → **Guardians** → **Invite a parent** → **Scan their QR
    code** (or paste B's npub) → **Next** → **Send the invitation**.
    **Expect:** the ward's About this device → Guardians says "1 change is
    waiting for a guardian to confirm it at this device." The **Invitation
    sent** screen shows *Your guardian code*: a QR and A's npub. (It is also
-   at Family → Guardians → **Show my guardian code**.) Keep it on screen.
-2. Phone B, test build (its own `adb reverse`): Family → **Join a family** →
+   at Settings → Guardians → **Show my guardian code**.) Keep it on screen.
+2. Phone B, test build (its own `adb reverse`): Settings → **Join a family** →
    **Connect My Signet** → paste identity B's connection link and B's npub
    (*The guardian ID you were invited as*, required) → **Connect**. My Signet
    signs once (this phone's kind-31120 approval).
@@ -102,14 +155,14 @@ Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
    - A wrong PIN 5 times in a row, then a 6th try: **expect** a 1-minute wait
      that survives a reboot.
    - Rotate the screen: it returns to the list (known; mint again).
-5. Phone B: **Confirm in person** (on the join screen, or Family →
+5. Phone B: **Confirm in person** (on the join screen, or Settings →
    Guardians) → scan the ward's QR.
    **Expect:** within a minute, ward About this device lists two guardians
    (A and B). Phone A's Guardians screen lists B as "Other parent".
    Phone B's Guardians screen lists the ward as "Device …" marked
    *unconfirmed*, and says it is waiting for A's family list (A's short
    npub) and sends it nothing meanwhile. Open Kintrinsic on phone A: within a
-   minute phone B's Family shows the child and its devices, the ward ready
+   minute phone B shows the child and its devices, the ward ready
    and any device B hasn't confirmed at marked *unconfirmed*. **Invite a
    parent** on phone B isn't held back by a device B hasn't confirmed at.
 6. Linux ward: as administrator, Kintrinsic → **Connect a phone** → under
@@ -126,8 +179,8 @@ Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
    **Start removing them**. Confirm it in person at the Android ward
    (presence code, PIN 123456, phone A → Guardians → **Confirm in person**).
    **Expect:** STATUS shows a pending removal with "takes effect" 72 hours
-   out. Phone B's Family shows "The other parent has asked to remove you as
-   a guardian", and its Guardians screen an **Object** button. Tap it (My
+   out. Phone B's child page and Settings show "The other parent has asked to
+   remove you as a guardian", and its Guardians screen an **Object** button. Tap it (My
    Signet signs and seals it). **Expect:** the pending removal disappears on
    the ward; both guardians remain.
 9. Phone B: Guardians → **Leave the family**, then **Leave the family**
@@ -141,16 +194,17 @@ Artefacts are built locally into `/var/tmp/kintrinsic-test/` (ward APK
 ## Gate 3: a lost phone
 
 1. Give identity A a second install: a second browser on phone A (or phone
-   B), test build → Family → **Join a family** → **Connect My Signet** →
+   B), test build → Settings → **Join a family** → **Connect My Signet** →
    identity A's connection link and A's own npub → **Connect**. On **Scan
    the other parent's guardian code**, tap **This is a second phone for my
    own identity** (no scan: the same identity trusts itself; scanning A's
    own code is refused as "your own guardian code"). Nothing is pending for
    a second install of the same identity, so it connects one device by its
-   device code: Family → add the child → **Set up a device** →
-   **📱 Phone** → **Type the device code** → the ward's code → name it.
+   device code: Settings → add the child → on the child's settings page,
+   **Set up a device** → **📱 Phone** → **Type the device code** → the ward's
+   code → name it.
    **Expect:** ward About this device shows root A with two working keys.
-   With phone A's Kintrinsic open, the second install's Family then shows
+   With phone A's Kintrinsic open, the second install then shows
    the whole family, with one child (not two).
 2. From the second install: Guardians → **Lost a phone?** → **Withdraw** next
    to the first install's phone → **Withdraw that phone for good**.

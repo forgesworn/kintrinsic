@@ -1028,7 +1028,7 @@ R until the approval lands, so the app can't tell which is which first.
 paired ward that doesn't list W under R: at once on connecting the root, and
 again at most every 6 hours while the ward doesn't list it. W signs a ward's
 events only once that ward's STATUS lists W under R and every ward of the
-child passes the versioning gate (thresholds Android 49, Linux 713, keyed on
+child passes the versioning gate (thresholds Android 54, Linux 803, keyed on
 the platform the device was paired as); until then R signs, so W never signs
 before its approval has landed.
 
@@ -1490,3 +1490,47 @@ The residual risk is recorded here, not fixed; both effects need the guardian
 to scan an attacker's code in person.
 
 **Raised by:** batch 3 final re-review (N3-L1, N3-L2).
+
+## The versioning gate's thresholds before release
+
+**Where:** *Versioning*; guardian app `keys/versionGate.ts`
+`GUARDIAN_KEYS_MIN_VERSION`.
+
+**Question:** this work now sits on main's version numbers (ward 0.7.4, code
+53; Linux 0.8.2, code 802) and takes no version bump until release. The earlier
+thresholds, Android 49 and Linux 713, were "the build's own numbers", but main
+has since released ward codes 49 to 53 and Linux 0.8.0 to 0.8.2 without this
+section. Those wards would pass the gate, the app would sign for them with a
+working key, and they would refuse it. What are the thresholds until the
+release numbers are known?
+
+**Build's interim reading:** Android 54, Linux 803: one above the last build
+released without the section, so no released ward counts as ready. A build at
+main's numbers doesn't pass either, so the hardware gates build with those
+numbers on a throwaway branch (`docs/guardian-keys-hardware-gates.md`, Gate 0).
+Any further release from main before this ships moves the thresholds up with
+it. The real numbers go in the contract's *Versioning* paragraph at release.
+
+**Raised by:** bringing the branch up to main.
+
+## Battery settings in a RELAYS change
+
+**Where:** *Android battery scheduling in signed device configuration*; rule
+11 and *Other places that name the guardian*; `relay_config.rs`
+`check_relays_event`; Android `Warden::reload_relays`.
+
+**Question:** the battery section says "the existing guardian signature" and
+"the existing offline signed-code transfer", and was written for one pinned
+guardian. The field sits in the same kind 31118 body as the relay list. On a
+ward with this section, who may set it, and may it arrive gift-wrapped?
+
+**Build's interim reading:** it follows the event. Any key in the signer set
+may set it, pasted or gift-wrapped, under the same checks and replay floor, and
+an invalid value refuses the whole change. A departed key's is refused like any
+of its events. A ward with no guardian-keys state still takes a pasted code from
+the pinned guardian only. A battery change grants nothing a RELAYS author could
+not already do. The guardian app itself only ever issues a pasted code, signed
+by the root (so My Signet is asked), and never wraps one, so a working-key code
+is accepted by the ward but not yet produced by the app.
+
+**Raised by:** bringing the branch up to main.
