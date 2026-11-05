@@ -362,12 +362,20 @@ function render(){
   const navigated = render._route !== route;
   render._route = route;
   const keep = navigated ? 0 : main.scrollTop;
-  v.innerHTML = ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery, about:vAbout}[route]||vToday)();
+  v.innerHTML = stuckBanner() + ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery, about:vAbout}[route]||vToday)();
   wire();
   main.scrollTop = keep;
 }
 
 function isWard(){ return !!(S.viewer && S.viewer.isWard); }
+// The warden cannot read its guardian-keys state (contract rule 10): the
+// rules it holds still apply, but nothing a guardian signs is accepted until
+// an administrator unpairs and pairs again. Every page, and the popup, says
+// so first, in the same words as the lock and the tray.
+function stuckBanner(){
+  if(!(S.guardians && S.guardians.unavailable)) return "";
+  return `<div class="banner warn" role="alert" style="margin-bottom:22px;font-size:1rem"><svg class="bi" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span><b>Rules can't be changed on this computer. Ask a parent.</b></span></div>`;
+}
 function live(c){ return (c && c.live) || null; }
 
 // ------- Today -------
