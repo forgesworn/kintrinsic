@@ -1521,16 +1521,22 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(kept([{ event: fam, machine: PHONE }, { event: dev }]).sort()).toEqual([[dev.id, undefined], [fam.id, PHONE]].sort());
   });
 
-  it("seeds each received rule once: a tie keeps this install's own, a later local edit wins", async () => {
+  it("seeds each received rule once: a tie goes to the lower event id, a later local edit wins", async () => {
     const subject = "aa".repeat(32);
     const h = harness([]);
     const other = generateSecretKey();
     const mine = clause(wSk, "schedule", T, { mine: 1 });
+    const same = clause(other, "schedule", T, { theirs: 1 });
     expect(h.gk.recordRules(subject, [{ event: mine }], { local: true })).toEqual(["schedule"]);
-    // A received rule of the same second doesn't replace this install's own, whatever its id.
-    expect(h.gk.recordRules(subject, [{ event: clause(other, "schedule", T, { theirs: 1 }) }])).toEqual([]);
-    expect(h.gk.ruleInForce(subject, "schedule")).toMatchObject({ local: true, event: { id: mine.id } });
-    expect(h.gk.rulesToApply(subject)).toEqual({});
+    // A received rule of the same second wins only with the lower id, as on the wards.
+    expect(h.gk.recordRules(subject, [{ event: same }])).toEqual(same.id < mine.id ? ["schedule"] : []);
+    const low = same.id < mine.id ? same : mine;
+    expect(h.gk.ruleInForce(subject, "schedule")).toMatchObject({ local: low === mine, event: { id: low.id } });
+    // The other order settles the same way.
+    const h2 = harness([]);
+    h2.gk.recordRules(subject, [{ event: same }]);
+    h2.gk.recordRules(subject, [{ event: mine }], { local: true });
+    expect(h2.gk.ruleInForce(subject, "schedule")!.event.id).toBe(low.id);
 
     // A newer received one wins, and is to be put on the screens once.
     const theirs = clause(other, "schedule", T + 5);

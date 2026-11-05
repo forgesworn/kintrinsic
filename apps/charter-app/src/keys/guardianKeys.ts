@@ -1451,9 +1451,9 @@ export class GuardianKeys {
    * Keep signed inner CLAUSE events as the rules in force for the child with
    * roster subject `subject`, keyed by `(kind, device)`: a family-wide rule
    * (no `machine`) went the same to every device, a device rule to that
-   * device only. Per key the newest `issuedAt` wins. On a tie this install's
-   * own rule stays (decision 3); between two received ones the lower event
-   * id wins, as on the wards. A ward holds one rule per kind, so a family-wide
+   * device only. Per key the newest `issuedAt` wins; a tie goes to the lower
+   * event id, whether this install signed it or not, so both phones and the
+   * wards agree. A ward holds one rule per kind, so a family-wide
    * rule replaces that kind's device rules it beats, and a device rule the
    * family-wide one beats is already replaced: newer `issuedAt` wins, a tie
    * goes to the lower event id, whichever arrives first. `local`
@@ -1467,7 +1467,6 @@ export class GuardianKeys {
     const local = { ...(state.localRules?.[subject] ?? {}) };
     const changed = new Set<string>();
     const issuedAtOf = (key: string) => (held[key] ? (clauseOf(held[key])?.issuedAt ?? -1) : -1);
-    const isLocal = (key: string) => !!held[key] && local[key] === held[key].id;
     for (const { event: e, machine } of entries) {
       const c = clauseOf(e);
       if (!c || (machine !== undefined && !HEX64.test(machine))) continue;
@@ -1475,11 +1474,8 @@ export class GuardianKeys {
       const cur = held[key] ? clauseOf(held[key]) : null;
       if (cur) {
         if (cur.issuedAt > c.issuedAt) continue;
-        if (cur.issuedAt === c.issuedAt) {
-          const mine = isLocal(key);
-          if (mine && !opts.local) continue;
-          if (mine === !!opts.local && held[key].id <= e.id) continue;
-        }
+        // A tie goes to the lower event id, local or received, as on the wards.
+        if (cur.issuedAt === c.issuedAt && held[key].id <= e.id) continue;
       }
       // Family-wide against device rules: newer issuedAt wins, a tie goes to the lower event id.
       if (machine !== undefined && held[c.kind] && !beats(c.issuedAt, e.id, issuedAtOf(c.kind), held[c.kind].id)) continue;
