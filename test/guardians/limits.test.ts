@@ -130,7 +130,7 @@ describe('Statement replay floors per slot', () => {
     const far = cg(T0 + DAY)
     s = send(s, far, T0 + 100).state
     s = send(s, cg(T0 + DAY + 1), T0 + 200).state
-    expect(s.statementFloors.filter((f) => f.slot === d)).toEqual([{ slot: d, signer: R1.pk, issuedAt: T0 + DAY + 1 }])
+    expect(s.statementFloors.filter((f) => f.slot === d)).toEqual([{ slot: d, seal: W1.pk, issuedAt: T0 + DAY + 1 }])
     const replay = send(s, far, T0 + 300)
     expect(replay.outcome).toMatchObject({ result: 'dropped', reason: 'replay' })
     expect(replay.state.pending.map((p) => p.issuedAt)).toEqual([T0 + DAY + 1])

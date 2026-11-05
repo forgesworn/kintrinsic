@@ -2656,32 +2656,45 @@ A root is never asked to decrypt ward traffic.
     Only a departure lowers a bar (rule 4). A statement slot's newest
     effective time never falls either: a statement whose effective time is
     below it is stale (rule 2).
-  - **Each signer has a replay floor per slot:** the highest `issuedAt` the
-    ward has accepted from that signer for that `(subject, kind)`, or for
-    that statement slot (its `d`, as rule 2 defines the slot). A CLAUSE or
-    statement whose `issuedAt` is at or below its signer's floor is refused
-    as a replay. One exception keeps rule 2's tie: a statement from the same
-    signer, with the same `issuedAt` as the statement the slot holds, is
-    ordered by event id. A statement whose `id` the slot holds is ignored as
-    a duplicate. Without the floor, a relay could re-deliver a superseded
-    far-future clause or statement, whose real `issuedAt` beats the clamped
-    bar.
-  - The floor rests on one assumption: **a signer's `issuedAt` only ever
-    rises.** A guardian install persists the last `issuedAt` it signed with
-    and dates each new event at least a second after it, whatever its clock
-    says, and a working key is one install. A signer that breaks this (two
-    installs sharing a key, or a root asked to sign by installs whose clocks
-    differ) has its lower-dated events refused in that slot until its
-    `issuedAt` passes the floor.
-  - Why a floor per signer: there is no quota to exhaust. The floors grow
-    with the signers, not with the edits, so a flood of far-future events
-    from a stolen key fills nothing. A signer that can never sign again (a
-    withdrawn working key, or a working key of a removed root) has its
+  - **Each seal author has a replay floor per slot:** the highest `issuedAt`
+    the ward has accepted under that key's seal for that `(subject, kind)`,
+    or for that statement slot (its `d`, as rule 2 defines the slot). A
+    CLAUSE's seal author is its signer. A statement's is the key that sealed
+    it: the W that carried a root-signed statement (seal exception 2), or
+    the signer when it seals its own. A CLAUSE or statement whose `issuedAt`
+    is at or below its seal author's floor is refused as a replay. One
+    exception keeps rule 2's tie: a statement with the same seal author and
+    the same `issuedAt` as the statement the slot holds is ordered by event
+    id. A statement whose `id` the slot holds is ignored as a duplicate.
+    Without the floor, a relay could re-deliver a superseded far-future
+    clause or statement, whose real `issuedAt` beats the clamped bar. A
+    relay re-delivers the seal too, so keying the floor by the seal author
+    blocks every such replay.
+  - The floor rests on one assumption: **`issuedAt` only ever rises per
+    install.** A guardian install persists the last `issuedAt` it signed
+    with and dates each new event at least a second after it, whatever its
+    clock says, and a working key is one install. For statements the floor
+    follows the install, through its seal, so a root asked to sign by two
+    installs whose clocks differ is never held back in one slot by the
+    other. A key that breaks the assumption (two installs sharing a working
+    key, or a root sealing its own events from two installs) has its
+    lower-dated events refused in that slot until its `issuedAt` passes the
+    floor.
+  - Known limit: a root that signs clauses directly, before the ward lists
+    its install's working key, from two installs whose clocks differ can
+    have one install's far-future clause hold the other back in that slot
+    until the ward's clock passes it. It is bounded: the guardian app signs
+    with its working key once the ward lists it.
+  - Why a floor per seal author: there is no quota to exhaust. The floors
+    grow with the keys, not with the edits, so a flood of far-future events
+    from a stolen key fills nothing. A key that can never sign or seal again
+    (a withdrawn working key, or a working key of a removed root) has its
     floors dropped when it departs. A departed root, which a co-guardian may
     pin again, and a working key departed by a move, which the new root may
     re-bind, keep theirs.
-  - A ward upgrading from a state without floors takes each held clause and
-    each stored statement as its signer's floor, at its real `issuedAt`.
+  - A ward upgrading from a state without floors takes each held clause as
+    its signer's floor, and each stored statement as its seal author's
+    floor, at its real `issuedAt`.
   - STATUS `guardians.clamped` counts the accepted events whose time was
     clamped, so a parent can see that a clock is adrift.
   - Why: a far-future rule from one signer must not pin a slot against the
@@ -2751,7 +2764,7 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
    still counts.
    - Among statements with the same `d`, the newest effective time wins.
    - A withdrawal, removal or cancel wins a same-second tie.
-   - A statement at or below its signer's replay floor for its slot is
+   - A statement at or below its seal author's replay floor for its slot is
      refused as a replay (*Who may sign what*).
 3. **Withdrawal is permanent and checked against the binding root.**
    - A withdrawal counts only if signed by W's binding root.

@@ -303,14 +303,17 @@ time min(`issuedAt`, `now`) with the stored one's: the same event id is
 `duplicate`; a lower effective time is `stale`; the same effective time with
 a higher event id (compared as lowercase hex) is `tie_not_newer`, and with a
 lower event id it wins and replaces the stored one. Each stored statement keeps the ward time it
-was accepted. Each signer also has a replay floor per slot: the highest
-`issuedAt` accepted from it for that slot, or the stored statement's
-`issuedAt` if it is the signer's and higher (the same rule as for clauses,
-and the same dropping on departure). So **slot order** is: the stored event
-id is `duplicate` → `stale` → `tie_not_newer` → `replay` (`issuedAt` below
-the signer's floor, or equal to it unless the stored statement is the same
-signer's with the same `issuedAt`, which the tie rule has already ordered).
-The floors are not in the projected state. A cancel or objection stored without acting is "held" and counts
+was accepted and the key that sealed it. Each **seal author**,
+not signer, has a replay floor per slot: the highest `issuedAt` accepted
+under its seal for that slot, or the stored statement's `issuedAt` if it
+sealed it and that is higher (the same dropping on departure as for
+clauses). A root-signed statement carried by a W counts for that W, so two
+installs of one root never hold each other back. So **slot order** is: the
+stored event id is `duplicate` → `stale` → `tie_not_newer` → `replay`
+(`issuedAt` below the seal author's floor, or equal to it unless the stored
+statement has the same seal author and the same `issuedAt`, which the tie
+rule has already ordered). Scenario `statement_floor_per_install`. The
+floors are not in the projected state. A cancel or objection stored without acting is "held" and counts
 toward a root's 64: a cancel toward its signer, an objection toward the
 objecting root (the root its removal `d` names), whichever key signed it.
 

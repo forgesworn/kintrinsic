@@ -212,7 +212,7 @@ fn legacy_statement_without_floors_still_reads() {
     }
     let old: GuardianState = serde_json::from_value(j).unwrap();
     assert!(old.statement_floors.is_empty());
-    // The stored statement is its signer's floor at its real issuedAt.
+    // The stored statement is its seal author's floor at its real issuedAt.
     assert_eq!(
         apply_inbound(&old, &w1, &coguardian(&v, T0 + 20), T0 + 20)
             .outcome

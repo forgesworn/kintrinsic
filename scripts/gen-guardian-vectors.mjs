@@ -540,6 +540,18 @@ scenario("statement_replay_after_cancel", ["who may sign what", "2", "pending"],
   c.inbound(W1, far, T0 + 150, D("replay"));
 });
 
+scenario("statement_floor_per_install", ["who may sign what", "2", "seal exception 2"], "A statement's replay floor belongs to the install that sealed it. Two installs of one root each carry a root-signed co-guardian for the same slot, dated by their own clocks: the second, dated before the first's real issuedAt but after its effective time, is accepted. A relay re-delivers the seal too, so the first install's far-future statement is still a replay.", (c) => {
+  twoRoots(c);
+  c.inbound(W1b, st.approval(R1, W1b, { issuedAt: T0 + 40 }), T0 + 50, A("approval_applied"));
+  const far = st.coguardian(R1, R3, { issuedAt: T0 + DAY });
+  c.inbound(W1, far, T0 + 100, A("coguardian_pending"));
+  const mine = st.coguardian(R1, R3, { issuedAt: T0 + 500 });
+  c.inbound(W1b, mine, T0 + 200, A("coguardian_pending"));
+  c.inbound(W1, far, T0 + 300, D("replay"));
+  c.inbound(W1, st.coguardian(R1, R3, { issuedAt: T0 + DAY - 1 }), T0 + 300, D("replay"));
+  c.inbound(W1b, mine, T0 + 300, D("duplicate"));
+});
+
 scenario("pair_approval_clamped",["scan-to-pair", "who may sign what"], "A pair offer's approval dated ahead of the ward clock still pairs; it counts as clamped.", (c) => {
   c.pair(W1, T0, { approval: st.approval(R1, W1, { issuedAt: T0 + DAY }) });
 });

@@ -187,12 +187,15 @@ pub struct SignerFloor {
     pub issued_at: i64,
 }
 
-/// A statement slot's floor for one signer (the slot as rule 2 defines it).
+/// A statement slot's floor for one seal author (the slot as rule 2 defines
+/// it): the highest real `issuedAt` accepted under that key's seal. Keyed by
+/// the install that sealed it, not the signer, since a root signs for each of
+/// its installs at that install's clock (seal exception 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatementFloor {
     pub slot: String,
-    pub signer: String,
+    pub seal: String,
     pub issued_at: i64,
 }
 
@@ -263,9 +266,9 @@ pub struct GuardianState {
     pub roots: Vec<PinnedRoot>,
     pub keys: Vec<WorkingKeyRecord>,
     pub statements: Vec<StoredStatement>,
-    /// Each signer's floor per statement slot, sorted by slot then signer.
-    /// The stored statement also counts for its own signer. Absent in a
-    /// state persisted before this rule: empty.
+    /// Each seal author's floor per statement slot, sorted by slot then seal
+    /// author. The stored statement also counts for its own seal author.
+    /// Absent in a state persisted before this rule: empty.
     #[serde(default)]
     pub statement_floors: Vec<StatementFloor>,
     pub pending: Vec<PendingRecord>,
@@ -354,7 +357,7 @@ fn normalise(s: &mut GuardianState) {
     s.keys.sort_by(|a, b| cmp_str(&a.key, &b.key));
     s.statements.sort_by(|a, b| cmp_str(&a.slot, &b.slot));
     s.statement_floors
-        .sort_by(|a, b| cmp_str(&a.slot, &b.slot).then_with(|| cmp_str(&a.signer, &b.signer)));
+        .sort_by(|a, b| cmp_str(&a.slot, &b.slot).then_with(|| cmp_str(&a.seal, &b.seal)));
     s.pending.sort_by(|a, b| cmp_str(&a.d, &b.d));
     s.held_withdrawals
         .sort_by(|a, b| cmp_str(&a.d, &b.d).then_with(|| cmp_str(&a.signer, &b.signer)));
@@ -561,30 +564,41 @@ fn raise_floor(list: &mut Vec<SignerFloor>, signer: &str, issued_at: i64) {
     list.sort_by(|a, b| cmp_str(&a.signer, &b.signer));
 }
 
-/// `signer`'s floor in a statement slot, if it has one: its highest accepted
-/// `issuedAt` there, the stored statement counting for its own signer.
-fn statement_floor(s: &GuardianState, slot: &str, signer: &str) -> Option<i64> {
+/// A stored statement's seal author; a statement stored before seals were
+/// recorded reads as sealed by its signer.
+fn sealed_by(st: &StoredStatement) -> &str {
+    if st.seal.is_empty() {
+        &st.signer
+    } else {
+        &st.seal
+    }
+}
+
+/// `seal`'s floor in a statement slot, if it has one: the highest `issuedAt`
+/// accepted there under its seal, the stored statement counting for its own
+/// seal author.
+fn statement_floor(s: &GuardianState, slot: &str, seal: &str) -> Option<i64> {
     let own = stored_for(s, slot)
-        .filter(|st| st.signer == signer)
+        .filter(|st| sealed_by(st) == seal)
         .map(|st| st.issued_at);
     let listed = s
         .statement_floors
         .iter()
-        .find(|f| f.slot == slot && f.signer == signer)
+        .find(|f| f.slot == slot && f.seal == seal)
         .map(|f| f.issued_at);
     own.max(listed)
 }
 
-fn raise_statement_floor(s: &mut GuardianState, slot: &str, signer: &str, issued_at: i64) {
+fn raise_statement_floor(s: &mut GuardianState, slot: &str, seal: &str, issued_at: i64) {
     match s
         .statement_floors
         .iter_mut()
-        .find(|f| f.slot == slot && f.signer == signer)
+        .find(|f| f.slot == slot && f.seal == seal)
     {
         Some(f) => f.issued_at = f.issued_at.max(issued_at),
         None => s.statement_floors.push(StatementFloor {
             slot: slot.to_owned(),
-            signer: signer.to_owned(),
+            seal: seal.to_owned(),
             issued_at,
         }),
     }
@@ -599,7 +613,7 @@ fn forget_floors(s: &mut GuardianState, keys: &[String]) {
     for c in &mut s.clauses {
         c.signer_floors.retain(|f| !gone.contains(&f.signer));
     }
-    s.statement_floors.retain(|f| !gone.contains(&f.signer));
+    s.statement_floors.retain(|f| !gone.contains(&f.seal));
     s.pin_floors.retain(|f| !gone.contains(&f.signer));
 }
 
@@ -608,15 +622,16 @@ fn put_statement(s: &mut GuardianState, st: &Statement, seal: &str, now: i64, he
         return;
     }
     let slot = slot_of(st);
-    // The statement it replaces keeps its signer's floor (it may have been
-    // stored before floors were kept).
-    if let Some((signer, issued_at)) = stored_for(s, &slot).map(|p| (p.signer.clone(), p.issued_at))
+    // The statement it replaces keeps its seal author's floor (it may have
+    // been stored before floors were kept).
+    if let Some((sealer, issued_at)) =
+        stored_for(s, &slot).map(|p| (sealed_by(p).to_owned(), p.issued_at))
     {
-        if !gone_for_good(s, &signer) {
-            raise_statement_floor(s, &slot, &signer, issued_at);
+        if !gone_for_good(s, &sealer) {
+            raise_statement_floor(s, &slot, &sealer, issued_at);
         }
     }
-    raise_statement_floor(s, &slot, &st.signer, st.issued_at);
+    raise_statement_floor(s, &slot, seal, st.issued_at);
     s.statements.retain(|x| x.slot != slot);
     s.statements.push(StoredStatement {
         slot,
@@ -637,12 +652,15 @@ fn put_statement(s: &mut GuardianState, st: &Statement, seal: &str, now: i64, he
 /// Rule 2 within one slot: the newest effective time wins. Re-delivery of
 /// the stored event is `duplicate`; an older one `stale`; at the same
 /// effective time the lower event id wins (`tie_not_newer`). Otherwise a
-/// statement whose `issuedAt` is at or below its signer's floor for the slot
-/// is `replay`: without it, a relay could re-deliver a superseded far-future
-/// statement, whose effective time would beat the slot's. Run before any
-/// change to the state, so a statement that fails here leaves no trace.
+/// statement whose `issuedAt` is at or below its seal author's floor for the
+/// slot is `replay`: without it, a relay could re-deliver a superseded
+/// far-future statement, whose effective time would beat the slot's. A relay
+/// re-delivers the seal too, so keying the floor by the install that sealed
+/// it blocks replays while two installs of one root, asking it to sign at
+/// their own clocks, never hold each other back. Run before any change to the
+/// state, so a statement that fails here leaves no trace.
 /// OQ: Same d, same issuedAt, different content.
-fn order_against(s: &GuardianState, st: &Statement, now: i64) -> Option<Reason> {
+fn order_against(s: &GuardianState, st: &Statement, seal: &str, now: i64) -> Option<Reason> {
     let slot = slot_of(st);
     let stored = stored_for(s, &slot);
     if let Some(stored) = stored {
@@ -658,10 +676,10 @@ fn order_against(s: &GuardianState, st: &Statement, now: i64) -> Option<Reason> 
             return Some(Reason::TieNotNewer);
         }
     }
-    // A same-second sibling of the stored statement from the same signer is
+    // A same-second sibling of the stored statement under the same seal is
     // left to the tie rule above, so every ward converges on the lower id.
-    let sibling = stored.is_some_and(|x| x.signer == st.signer && x.issued_at == st.issued_at);
-    match statement_floor(s, &slot, &st.signer) {
+    let sibling = stored.is_some_and(|x| sealed_by(x) == seal && x.issued_at == st.issued_at);
+    match statement_floor(s, &slot, seal) {
         Some(f) if st.issued_at < f || (st.issued_at == f && !sibling) => Some(Reason::Replay),
         _ => None,
     }
@@ -1033,7 +1051,7 @@ fn process_approval(s: &mut GuardianState, st: &Statement, seal: &str, now: i64)
             KeyStatus::Active => mode = Mode::Update,
         }
     }
-    if let Some(reason) = order_against(s, st, now) {
+    if let Some(reason) = order_against(s, st, seal, now) {
         return drop(reason);
     }
     if mode != Mode::Update {
@@ -1185,7 +1203,7 @@ fn process_coguardian_or_move(
     if departed_at_or_after(s, r2, effective) {
         return drop(Reason::NotNewerThanDeparture);
     }
-    if let Some(reason) = order_against(s, st, now) {
+    if let Some(reason) = order_against(s, st, seal, now) {
         return drop(reason);
     }
     let expires_at = pending_expiry(effective, st.expires_at);
@@ -1218,7 +1236,7 @@ fn process_removal(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) 
     if !is_pinned(s, r2) {
         return drop(Reason::TargetNotPinned);
     }
-    if let Some(reason) = order_against(s, st, now) {
+    if let Some(reason) = order_against(s, st, seal, now) {
         return drop(reason);
     }
     if st.signer == r2 {
@@ -1270,7 +1288,7 @@ fn hold_or_drop(
 }
 
 fn process_cancel(s: &mut GuardianState, st: &Statement, seal: &str, now: i64) -> Judged {
-    if let Some(reason) = order_against(s, st, now) {
+    if let Some(reason) = order_against(s, st, seal, now) {
         return drop(reason);
     }
     let target = st.target.as_deref().unwrap_or_default();
@@ -1300,7 +1318,7 @@ fn process_objection(s: &mut GuardianState, st: &Statement, seal: &str, now: i64
     {
         return drop(Reason::ObjectionMismatch);
     }
-    if let Some(reason) = order_against(s, st, now) {
+    if let Some(reason) = order_against(s, st, seal, now) {
         return drop(reason);
     }
     let target = st.target.as_deref().unwrap_or_default();
@@ -1533,7 +1551,7 @@ pub fn apply_presence_confirm(
                 return drop(Reason::BoundElsewhere);
             }
         }
-        if let Some(reason) = order_against(s, &ap, now) {
+        if let Some(reason) = order_against(s, &ap, w, now) {
             return drop(reason);
         }
         if root_at_quota(s, r2) {
