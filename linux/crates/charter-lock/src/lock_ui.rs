@@ -13,22 +13,46 @@ pub enum Action {
     /// §Times: cycle which kind of time "Ask for more" names (offered only
     /// when the child has a named time — Free time plus at least one more).
     NextAskTime,
+    /// Cycle how much "Ask for more" asks for (10 min, 20 min, 1 hour). The
+    /// fixed 30 the panel used to send also fixed what the guardian could
+    /// answer with, so the amount is the child's call before the ask goes.
+    NextAskMinutes,
 }
 
-/// The "Ask for more" row: the primary's label, and whether a second button
-/// to change the kind of time sits beside it (§Times).
+/// The "Ask for more" rows: the primary's label, whether a second button to
+/// change the kind of time sits beside it (§Times), and the "How much" row's
+/// label above it (the amount the ask will carry, tapped to cycle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AskRow {
     pub label: &'static str,
     pub can_change: bool,
+    pub amount: &'static str,
 }
 
+/// The "How much" labels, in cycling order, and the minutes each asks for.
+pub const ASK_AMOUNTS: [(u32, &str); 3] = [
+    (10, "How much: 10 min"),
+    (20, "How much: 20 min"),
+    (60, "How much: 1 hour"),
+];
+/// Which of [`ASK_AMOUNTS`] a fresh lock opens on.
+pub const ASK_AMOUNT_DEFAULT: usize = 1;
+
 impl AskRow {
-    /// The untyped ask every lock offered before times.
+    /// The untyped ask every lock offered before times, at the default amount.
     pub const PLAIN: AskRow = AskRow {
         label: "Ask for more time",
         can_change: false,
+        amount: ASK_AMOUNTS[ASK_AMOUNT_DEFAULT].1,
     };
+
+    /// The same row with the "How much" label for the amount at `i`.
+    pub fn with_amount(self, i: usize) -> AskRow {
+        AskRow {
+            amount: ASK_AMOUNTS[i % ASK_AMOUNTS.len()].1,
+            ..self
+        }
+    }
 }
 
 /// A screen rectangle (X11 coordinates: origin top-left, pixels).
@@ -67,8 +91,11 @@ pub const CARD_W: u16 = 680;
 pub const CARD_H: u16 = 300;
 /// Vertical room each extra info line (schedule/usage) adds to the card.
 pub const LINE_STEP: u16 = 26;
-/// Vertical room the "Ask for more time" primary button adds when offered.
+/// Vertical room each ask row adds when offered: the "How much" row and the
+/// "Ask for more time" primary below it.
 pub const ASK_STEP: u16 = BTN_H + 20;
+/// The ask rows the card grows by when the ask is offered.
+pub const ASK_ROWS: u16 = 2;
 /// Bottom padding between the button row and the card's lower edge.
 const CARD_BTN_INSET: u16 = 36;
 
@@ -76,7 +103,7 @@ const CARD_BTN_INSET: u16 = 36;
 /// for `extra_lines` schedule/usage lines and (when a guardian is paired to
 /// hear it) the "Ask for more time" primary button.
 pub fn card_rect(screen_w: u16, screen_h: u16, extra_lines: u16, can_ask: bool) -> Rect {
-    let h = CARD_H + extra_lines * LINE_STEP + if can_ask { ASK_STEP } else { 0 };
+    let h = CARD_H + extra_lines * LINE_STEP + if can_ask { ASK_ROWS * ASK_STEP } else { 0 };
     Rect {
         x: (((screen_w as i32) - (CARD_W as i32)) / 2).max(0) as i16,
         y: (((screen_h as i32) - (h as i32)) / 2).max(0) as i16,
@@ -99,9 +126,11 @@ pub fn button_layout(screen_w: u16, screen_h: u16, extra_lines: u16, can_ask: bo
     )
 }
 
-/// [`button_layout`] with the ask row spelled out (§Times): when the kind of
-/// time can be changed, the primary narrows and a "Other time" button sits at
-/// the row's right end, so the whole row still spans the escapes below it.
+/// [`button_layout`] with the ask rows spelled out: the "How much" amount
+/// button (full row width, tapped to cycle) sits above the ask row; in the ask
+/// row, when the kind of time can be changed (§Times), the primary narrows and
+/// a "Other time" button sits at its right end, so every row still spans the
+/// escapes below it.
 pub fn button_layout_with(
     screen_w: u16,
     screen_h: u16,
@@ -119,7 +148,7 @@ pub fn button_layout_with(
     let total_w = n * BTN_W + (n - 1) * BTN_GAP;
     let start_x = card.x + (((card.width as i32) - (total_w as i32)) / 2).max(0) as i16;
     let y = card.y + (card.height - BTN_H - CARD_BTN_INSET) as i16;
-    let mut buttons = Vec::with_capacity(4);
+    let mut buttons = Vec::with_capacity(6);
     if let Some(row) = ask {
         let primary_w = if row.can_change {
             total_w - BTN_W - BTN_GAP
@@ -148,6 +177,18 @@ pub fn button_layout_with(
                 action: Action::NextAskTime,
             });
         }
+        // "How much" above the ask: read first, so the amount is chosen
+        // before the primary is pressed.
+        buttons.push(Button {
+            rect: Rect {
+                x: start_x,
+                y: y - (ASK_ROWS * ASK_STEP) as i16,
+                width: total_w,
+                height: BTN_H,
+            },
+            label: row.amount,
+            action: Action::NextAskMinutes,
+        });
     }
     buttons.extend(specs.iter().enumerate().map(|(i, (label, action))| {
         let x = start_x + (i as i16) * (BTN_W + BTN_GAP) as i16;
@@ -216,6 +257,7 @@ mod tests {
         let row = AskRow {
             label: "Ask for more Learning time",
             can_change: true,
+            amount: AskRow::PLAIN.amount,
         };
         let b = button_layout_with(1920, 1080, 2, Some(row));
         let card = card_rect(1920, 1080, 2, true);
@@ -224,6 +266,7 @@ mod tests {
             vec![
                 Action::AskMoreTime,
                 Action::NextAskTime,
+                Action::NextAskMinutes,
                 Action::Logout,
                 Action::Shutdown,
                 Action::Suspend
@@ -236,16 +279,37 @@ mod tests {
         // The row ends where the escape row ends, inside the card.
         assert_eq!(
             b[1].rect.x as i32 + b[1].rect.width as i32,
-            b[4].rect.x as i32 + b[4].rect.width as i32
+            b[5].rect.x as i32 + b[5].rect.width as i32
         );
         assert!(
             (b[1].rect.x as i32 + b[1].rect.width as i32) <= (card.x as i32 + card.width as i32)
         );
+        // "How much" sits in its own row above the ask, spanning it, inside
+        // the card, and reads the default amount until it is tapped.
+        assert_eq!(b[2].label, "How much: 20 min");
+        assert_eq!(b[2].rect.x, b[0].rect.x);
+        assert_eq!(
+            b[2].rect.x as i32 + b[2].rect.width as i32,
+            b[1].rect.x as i32 + b[1].rect.width as i32
+        );
+        assert!(b[2].rect.y as i32 + b[2].rect.height as i32 <= b[0].rect.y as i32);
+        assert!(b[2].rect.y >= card.y);
         // A plain ask is exactly the pre-times layout.
         assert_eq!(
             button_layout_with(1920, 1080, 2, Some(AskRow::PLAIN)),
             button_layout(1920, 1080, 2, true)
         );
+    }
+
+    #[test]
+    fn the_amount_cycles_through_ten_twenty_and_an_hour() {
+        assert_eq!(ASK_AMOUNTS.map(|(m, _)| m), [10, 20, 60]);
+        assert_eq!(AskRow::PLAIN.with_amount(0).amount, "How much: 10 min");
+        assert_eq!(AskRow::PLAIN.with_amount(2).amount, "How much: 1 hour");
+        // Past the end wraps, so a cycling index never panics.
+        assert_eq!(AskRow::PLAIN.with_amount(3), AskRow::PLAIN.with_amount(0));
+        // The label changes nothing else about the row.
+        assert_eq!(AskRow::PLAIN.with_amount(1), AskRow::PLAIN);
     }
 
     #[test]

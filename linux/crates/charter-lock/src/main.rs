@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 mod lock_ui;
 mod render;
-use lock_ui::{button_layout_with, hit_test, Action, AskRow, Button};
+use lock_ui::{
+    button_layout_with, hit_test, Action, AskRow, Button, ASK_AMOUNTS, ASK_AMOUNT_DEFAULT,
+};
 
 /// Vendored faces (Bitstream Vera license, embedding permitted — see
 /// assets/DEJAVU-LICENSE). Compiled in so the panel renders identically on any
@@ -69,9 +71,12 @@ impl LockText {
 
 use std::process::Command;
 
-/// Minutes a panel "Ask for more time" requests. The guardian chooses what to
+/// Minutes the panel's "Ask for more time" requests: the "How much" row's
+/// current pick (`lock_ui::ASK_AMOUNTS`). The guardian still chooses what to
 /// actually grant in Kintrinsic — this is the opening ask, not the outcome.
-const ASK_MINUTES: u32 = 30;
+fn ask_minutes(amount_idx: usize) -> u32 {
+    ASK_AMOUNTS[amount_idx % ASK_AMOUNTS.len()].0
+}
 
 /// The sanctioned command for an action. `Logout` needs the managed uid; if it
 /// is unknown the button is not offered (returns `None`), never a wrong target.
@@ -148,6 +153,7 @@ impl AskPicker {
             Some((_, label)) => AskRow {
                 label,
                 can_change: self.choices.len() > 1,
+                amount: AskRow::PLAIN.amount,
             },
             None => AskRow::PLAIN,
         }
@@ -167,7 +173,12 @@ impl AskPicker {
     }
 }
 
-fn action_argv(action: Action, uid: Option<u32>, ask_time: Option<&str>) -> Option<Vec<String>> {
+fn action_argv(
+    action: Action,
+    uid: Option<u32>,
+    ask_time: Option<&str>,
+    ask_minutes: u32,
+) -> Option<Vec<String>> {
     match action {
         Action::Logout => uid.map(|u| {
             vec![
@@ -194,7 +205,7 @@ fn action_argv(action: Action, uid: Option<u32>, ask_time: Option<&str>) -> Opti
                 "--".to_string(),
                 "charter".to_string(),
                 "ask-for-more".to_string(),
-                ASK_MINUTES.to_string(),
+                ask_minutes.to_string(),
             ];
             if let Some(t) = ask_time {
                 argv.push("--time".to_string());
@@ -202,8 +213,8 @@ fn action_argv(action: Action, uid: Option<u32>, ask_time: Option<&str>) -> Opti
             }
             argv
         }),
-        // Handled inside the panel (it changes the ask, it runs nothing).
-        Action::NextAskTime => None,
+        // Handled inside the panel (they change the ask, they run nothing).
+        Action::NextAskTime | Action::NextAskMinutes => None,
     }
 }
 
@@ -538,8 +549,14 @@ fn unlock_panel_text(u: &UnlockState, now: Instant) -> LockText {
 /// journal is the only forensic trail for "why did the box shut down").
 /// `CHARTER_LOCK_DRYRUN=1` logs the action without executing it, so the panel
 /// can be exercised on a live desktop session.
-fn perform(action: Action, uid: Option<u32>, ask_time: Option<&str>, dry_run: bool) {
-    if let Some(argv) = action_argv(action, uid, ask_time) {
+fn perform(
+    action: Action,
+    uid: Option<u32>,
+    ask_time: Option<&str>,
+    ask_minutes: u32,
+    dry_run: bool,
+) {
+    if let Some(argv) = action_argv(action, uid, ask_time, ask_minutes) {
         eprintln!(
             "charter-lock: click -> {action:?} ({argv:?}){}",
             if dry_run { " [dry-run]" } else { "" }
@@ -616,7 +633,7 @@ fn render_preview(text: &LockText, path: &str) -> Result<(), Box<dyn Error>> {
                 text.lines.len() as u16,
                 std::env::var("CHARTER_LOCK_CAN_ASK")
                     .is_ok_and(|v| v == "1")
-                    .then(|| picker.row(idx)),
+                    .then(|| picker.row(idx).with_amount(ASK_AMOUNT_DEFAULT)),
             )
         },
         &title_font,
@@ -937,8 +954,15 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
     // §Times: which kind of time the ask names, cycled by "Other time".
     let (picker, ask_idx) = AskPicker::from_env();
     let ask_sel: Cell<usize> = Cell::new(ask_idx);
+    // How much it asks for, cycled by the "How much" row.
+    let amount_sel: Cell<usize> = Cell::new(ASK_AMOUNT_DEFAULT);
     let layout = |w: u16, h: u16, lines: u16, can_ask: bool| -> Vec<Button> {
-        button_layout_with(w, h, lines, can_ask.then(|| picker.row(ask_sel.get())))
+        button_layout_with(
+            w,
+            h,
+            lines,
+            can_ask.then(|| picker.row(ask_sel.get()).with_amount(amount_sel.get())),
+        )
     };
     // One place composes the whole panel — the normal card or the unlock-entry
     // card — so both paths render identically. Reads `dims` (not `w`/`h`)
@@ -1010,11 +1034,19 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                 Event::Expose(_) => paint(&canvas, false)?,
                 Event::ButtonPress(ev) => {
                     if let Some(action) = hit_test(&buttons, ev.event_x, ev.event_y) {
-                        if matches!(action, Action::AskMoreTime | Action::NextAskTime) && !can_ask {
+                        if matches!(
+                            action,
+                            Action::AskMoreTime | Action::NextAskTime | Action::NextAskMinutes
+                        ) && !can_ask
+                        {
                             continue; // already asked this lock
                         }
-                        if action == Action::NextAskTime {
-                            ask_sel.set(picker.next(ask_sel.get()));
+                        if matches!(action, Action::NextAskTime | Action::NextAskMinutes) {
+                            if action == Action::NextAskTime {
+                                ask_sel.set(picker.next(ask_sel.get()));
+                            } else {
+                                amount_sel.set((amount_sel.get() + 1) % ASK_AMOUNTS.len());
+                            }
                             buttons = layout(
                                 dims.get().0,
                                 dims.get().1,
@@ -1025,7 +1057,13 @@ fn run_lock(text: &LockText) -> Result<(), Box<dyn Error>> {
                             paint(&canvas, true)?;
                             continue;
                         }
-                        perform(action, uid, picker.time_arg(ask_sel.get()), dry_run);
+                        perform(
+                            action,
+                            uid,
+                            picker.time_arg(ask_sel.get()),
+                            ask_minutes(amount_sel.get()),
+                            dry_run,
+                        );
                         if action == Action::AskMoreTime {
                             // One-shot: swap the primary for a confirmation
                             // line so the child knows the ask is on its way.
@@ -1320,21 +1358,21 @@ mod tests {
     fn action_argv_is_the_expected_sanctioned_command() {
         // Logout: thaw the child's slice FIRST (SIGTERM never lands on frozen
         // tasks — the half-dead session can wedge logind), then terminate.
-        let logout = action_argv(Action::Logout, Some(1002), None).expect("offered with a uid");
+        let logout = action_argv(Action::Logout, Some(1002), None, 20).expect("offered with a uid");
         assert_eq!(logout[..2], ["/bin/sh".to_string(), "-c".to_string()]);
         assert!(logout[2].contains("user-1002.slice/cgroup.freeze"));
         assert!(logout[2].contains("loginctl terminate-user 1002"));
         assert!(logout[2].find("cgroup.freeze") < logout[2].find("terminate-user"));
         assert_eq!(
-            action_argv(Action::Shutdown, Some(1002), None),
+            action_argv(Action::Shutdown, Some(1002), None, 20),
             Some(vec!["systemctl".to_string(), "poweroff".to_string()])
         );
         assert_eq!(
-            action_argv(Action::Suspend, None, None),
+            action_argv(Action::Suspend, None, None, 20),
             Some(vec!["systemctl".to_string(), "suspend".to_string()])
         );
         // Logout needs a uid; without one it is not offered.
-        assert_eq!(action_argv(Action::Logout, None, None), None);
+        assert_eq!(action_argv(Action::Logout, None, None, 20), None);
     }
 
     #[test]
@@ -1359,14 +1397,33 @@ mod tests {
     #[test]
     fn a_typed_ask_runs_charter_with_the_time() {
         std::env::set_var("CHARTER_LOCK_USER", "robin");
-        let argv = action_argv(Action::AskMoreTime, Some(1002), Some("learning")).unwrap();
+        let argv = action_argv(Action::AskMoreTime, Some(1002), Some("learning"), 20).unwrap();
         assert_eq!(
             &argv[argv.len() - 2..],
             ["--time".to_string(), "learning".to_string()]
         );
-        let plain = action_argv(Action::AskMoreTime, Some(1002), None).unwrap();
+        let plain = action_argv(Action::AskMoreTime, Some(1002), None, 20).unwrap();
         assert!(!plain.contains(&"--time".to_string()));
-        assert_eq!(action_argv(Action::NextAskTime, Some(1002), None), None);
+        assert_eq!(action_argv(Action::NextAskTime, Some(1002), None, 20), None);
+        assert_eq!(
+            action_argv(Action::NextAskMinutes, Some(1002), None, 20),
+            None
+        );
+    }
+
+    #[test]
+    fn the_ask_carries_the_amount_the_how_much_row_is_on() {
+        std::env::set_var("CHARTER_LOCK_USER", "robin");
+        // A fresh lock opens on 20 minutes; each tap cycles 10 → 20 → 1 hour.
+        assert_eq!(ask_minutes(ASK_AMOUNT_DEFAULT), 20);
+        assert_eq!(
+            [ask_minutes(0), ask_minutes(1), ask_minutes(2)],
+            [10, 20, 60]
+        );
+        assert_eq!(ask_minutes(3), 10, "wraps");
+        let argv = action_argv(Action::AskMoreTime, Some(1002), None, ask_minutes(2)).unwrap();
+        let i = argv.iter().position(|a| a == "ask-for-more").unwrap();
+        assert_eq!(argv[i + 1], "60");
     }
 
     #[test]

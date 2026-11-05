@@ -1551,9 +1551,15 @@ interface TimeExtendGrantParams   { minutesGranted: number   /* u16, 0..=1440 */
   ignored (a bucket pool is already a pool).
 
 - `MAX_EXTEND_MINUTES = 1440` (24h); minutes are **`u16`** on both sides.
-- The guardian may grant **less** than requested; `minutesGranted: 0` is a
-  no-op. The **grant echoes `limitHit`** so the device's params-echo check is
-  exact.
+- `minutesRequested` is the ward's **opening bid, not a ceiling**: the device
+  validates a grant's `minutesGranted` against `0..=MAX_EXTEND_MINUTES` only,
+  never against the request, so the guardian may grant **less or more** than
+  asked; `minutesGranted: 0` is a no-op. The **grant echoes `limitHit`** so the
+  device's params-echo check is exact. Ward surfaces offer the ward a choice of
+  amount — 10 min, 20 min, 1 hour, and (where a keyboard is to hand) a typed
+  amount in `1..=1440` — rather than a fixed figure, since a fixed opening ask
+  paired with a guardian surface that only stepped *down* from it made that
+  figure the most a child could ever be given in one answer.
 - The grant `exp` is **today-only additive** and idempotent by `reqId`; the
   device discards it on the day roll. The extension offsets only the
   dimension named by `limitHit`. The device's actual validity cap is

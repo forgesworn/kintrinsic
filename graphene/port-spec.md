@@ -517,7 +517,8 @@ overlay + VT lock).** Humane-lockout semantics preserved exactly
   Show is idempotent while shown (effects.rs:1405-1409); show/hide are best-effort from the
   tick, re-asserted level-triggered.
 - **Never trapped**: sanctioned actions always on screen — "Ask for more time" (paired
-  only, **one-shot per lock**, fixed 30-minute opening ask, immediate "Asked! Your guardian
+  only, **one-shot per lock**, the ward picks the opening ask — 10 min, 20 min, 1 hour, or a
+  typed amount in 1..=1440 — immediate "Asked! Your guardian
   will see it shortly." confirmation, charter-lock/main.rs:71-73, 503-525), power off, and
   Android's mandatory emergency-call affordance. The ask composes `time.extend` with **M7
   limitHit routing**: authoritative `reason` → sole-zero heuristic (`schedule==0 &&
