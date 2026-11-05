@@ -12,7 +12,8 @@ data class CarrierKey(val skHex: String, val pubkeyHex: String)
  * (never a partial parse; a bad hand-off must not half-provision).
  *
  * `guardianSkHex` / `guardianPubkeyHex` is the primary key (the one the
- * relays' NIP-42 AUTH and the local link use). A phone-held root that has
+ * local link uses; each relay socket answers NIP-42 AUTH with its own key,
+ * see RelayRoute). A phone-held root that has
  * minted a working key (D5) is written to on both: wards write to the
  * working key once they list it, and to the root before then. The page then
  * also sends `keys: [{skHex, pubkeyHex}, …]`, the further keys to listen on;
@@ -37,6 +38,11 @@ data class ProvisionPayload(
      *  wrap names none of ours (or names none at all). */
     fun secretFor(pubkeyHex: String?): String =
         keys.firstOrNull { it.pubkeyHex == pubkeyHex }?.skHex ?: guardianSkHex
+
+    /** The secret of exactly [pubkeyHex], or null when it is not one of ours.
+     *  What a relay socket signs its NIP-42 AUTH with: never another key's. */
+    fun secretOf(pubkeyHex: String): String? =
+        keys.firstOrNull { it.pubkeyHex == pubkeyHex }?.skHex
 
     companion object {
         private val HEX64 = Regex("^[0-9a-f]{64}$")

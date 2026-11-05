@@ -2,13 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
 import { provisionCarrier, pushCarrierRoster, resetProvisionedForTests } from "./bridge";
 import { resetGuardianKeyCacheForTests } from "../signer/guardianKey";
+import { clearPhoneWorkingKey, resetPhoneWorkingKeyForTests } from "../signer/phoneWorkingKey";
 import type { Child } from "../domain/types";
 
 const KEY = "charter.guardian.key.v1";
+const WORKING = "charter.guardian.working.v1";
+
+const bytesHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+const hexBytes = (h: string) => Uint8Array.from(h.match(/../g)!.map((x) => parseInt(x, 16)));
 
 beforeEach(() => {
   resetProvisionedForTests();
   resetGuardianKeyCacheForTests();
+  resetPhoneWorkingKeyForTests();
 });
 
 afterEach(() => {
@@ -88,6 +94,79 @@ describe("provisionCarrier", () => {
     expect(JSON.parse(provision.mock.calls[1][0]).guardianPubkeyHex).toBe(
       getPublicKey(restored),
     );
+  });
+
+  it("lists the guardian key alone in keys when this phone has no working key", () => {
+    const sk = generateSecretKey();
+    localStorage.setItem(KEY, nip19.nsecEncode(sk));
+    const provision = vi.fn();
+    window.CharterCarrier = { provision, isCarrier: () => true };
+    provisionCarrier();
+    const payload = JSON.parse(provision.mock.calls[0][0]);
+    expect(payload.keys).toEqual([{ skHex: bytesHex(sk), pubkeyHex: getPublicKey(sk) }]);
+  });
+
+  /*
+   * D5: a phone-held root R that minted a working key W gets ward traffic on
+   * both until every ward has taken W, so the carrier is handed both — and
+   * handed again whenever W is minted or goes.
+   */
+  it("hands over the working key beside the guardian key, and again when it is minted or cleared", () => {
+    const r = generateSecretKey();
+    localStorage.setItem(KEY, nip19.nsecEncode(r));
+    const provision = vi.fn();
+    window.CharterCarrier = { provision, isCarrier: () => true };
+    provisionCarrier();
+    expect(JSON.parse(provision.mock.calls[0][0]).keys).toHaveLength(1);
+
+    const w = generateSecretKey();
+    localStorage.setItem(WORKING, nip19.nsecEncode(w));
+    resetPhoneWorkingKeyForTests();
+    provisionCarrier();
+    provisionCarrier();
+    expect(provision).toHaveBeenCalledTimes(2);
+    const both = JSON.parse(provision.mock.calls[1][0]);
+    // No device lists W yet: the primary is still R.
+    expect(both.guardianPubkeyHex).toBe(getPublicKey(r));
+    expect(both.keys).toEqual([
+      { skHex: bytesHex(r), pubkeyHex: getPublicKey(r) },
+      { skHex: bytesHex(w), pubkeyHex: getPublicKey(w) },
+    ]);
+    for (const k of both.keys) expect(getPublicKey(hexBytes(k.skHex))).toBe(k.pubkeyHex);
+
+    // W promoted into the guardian key slot and its own slot cleared
+    // (retirePhoneKey): W alone.
+    localStorage.setItem(KEY, nip19.nsecEncode(w));
+    resetGuardianKeyCacheForTests();
+    clearPhoneWorkingKey();
+    provisionCarrier();
+    expect(provision).toHaveBeenCalledTimes(3);
+    const promoted = JSON.parse(provision.mock.calls[2][0]);
+    expect(promoted.guardianPubkeyHex).toBe(getPublicKey(w));
+    expect(promoted.keys).toEqual([{ skHex: bytesHex(w), pubkeyHex: getPublicKey(w) }]);
+  });
+
+  it("makes W the primary once a device lists it, still listing both, and moves back when no device does", () => {
+    const r = generateSecretKey();
+    const w = generateSecretKey();
+    localStorage.setItem(KEY, nip19.nsecEncode(r));
+    localStorage.setItem(WORKING, nip19.nsecEncode(w));
+    const provision = vi.fn();
+    window.CharterCarrier = { provision, isCarrier: () => true };
+    const device = { id: "d", label: "phone", platform: "android" as const, pairing: "paired" as const };
+    const listing = (keys: string[]): Child[] => [{ id: "c", name: "Robin", color: "#abc", dependantPubkey: null, policies: [],
+      devices: [{ ...device, guardians: { roots: [{ root: getPublicKey(r), keys }], pending: [], relays: [] } as unknown as Child["devices"][number]["guardians"] }] }];
+
+    provisionCarrier(listing([getPublicKey(w)]));
+    const first = JSON.parse(provision.mock.calls[0][0]);
+    expect(first.guardianPubkeyHex).toBe(getPublicKey(w));
+    expect(first.guardianSkHex).toBe(bytesHex(w));
+    expect(first.keys.map((k: { pubkeyHex: string }) => k.pubkeyHex)).toEqual([getPublicKey(r), getPublicKey(w)]);
+
+    // W withdrawn: the devices stop listing it, and the primary goes back to R.
+    provisionCarrier(listing([]));
+    expect(provision).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(provision.mock.calls[1][0]).guardianPubkeyHex).toBe(getPublicKey(r));
   });
 
   it("does not hand off when no key exists yet (absent) or the key is corrupt", () => {

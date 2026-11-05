@@ -80,6 +80,11 @@ class LocalLink(
         synchronized(EVENTS) { current = this }
         watchNetworks()
         val p = store.provision() ?: return
+        // The link's handshake key is the primary key alone, even when the
+        // provision carries further keys (a phone-held root and its working
+        // key, D5): a ward that reaches this phone over the home network
+        // expecting the other key is not answered here; only the relays
+        // listen on every key. Serving every key on the link is a later batch.
         val sk = hexToKeyBytes(p.guardianSkHex) ?: return
         val raw = try {
             stateDir.mkdirs()
