@@ -175,7 +175,10 @@ pub struct RelaysChange<'a> {
     pub seal_author: PubKey,
     /// The event's `created_at`.
     pub ts: u64,
-    pub relays: &'a [String],
+    /// The relay list as the change leaves it, or `None` when the body had
+    /// no `relays` (a PIN-only or battery-only RELAYS, rule 11), which
+    /// changes no list.
+    pub relays: Option<&'a [String]>,
     /// The guardian PIN record it carried, if any. The port keeps it in its
     /// own `0600` state; the pairing record never holds it (review 2a, L2).
     pub pin: Option<&'a GuardianPin>,

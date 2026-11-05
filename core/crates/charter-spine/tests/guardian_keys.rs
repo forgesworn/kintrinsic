@@ -797,6 +797,55 @@ async fn a_gift_wrapped_relays_change_keeps_its_pin_out_of_the_pairing_record() 
     assert_eq!(out.result, AckResult::Refused);
 }
 
+/// Rule 11 (D3, D4): a working key's gift-wrapped RELAYS may carry the PIN
+/// with no relay list, however long it waited, and leaves the list and the
+/// previous-relays window alone; it may not change the list.
+#[tokio::test]
+async fn a_working_keys_pin_only_relays_applies_late_but_a_list_change_is_refused() {
+    let w = Ward::new();
+    let (b, keys) = w.broker();
+    approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+    let before = b.sys().pairing().load().unwrap();
+
+    let change = relays_event(
+        WORKING_SEED,
+        NOW - 10,
+        json!({"machine": machine_pk(), "relays": default_relays()}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&change, WORKING_SEED, 2), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Refused);
+    assert_eq!(b.sys().pairing().load().unwrap(), before);
+
+    // Signed 900 s ago, past the 600-second rule.
+    let pin_only = relays_event(
+        WORKING_SEED,
+        NOW - 900,
+        json!({"machine": machine_pk(), "guardianPin": pin_record()}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&pin_only, WORKING_SEED, 3), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert!(keys.has_guardian_pin());
+    let g = keys.status_guardians(NOW).unwrap();
+    assert!(g.pin_set);
+    assert_eq!(g.relays, vec!["wss://r".to_string()]);
+    let stored: serde_json::Value =
+        serde_json::from_str(&b.sys().pairing().load().unwrap().unwrap()).unwrap();
+    assert_eq!(stored["relays"], json!(["wss://r"]));
+    assert_eq!(stored["relays_updated_at"], NOW - 900);
+    let state: serde_json::Value = serde_json::from_str(&w.store.raw().unwrap()).unwrap();
+    assert_eq!(state["state"]["previousRelays"], json!([]));
+
+    // The replay floor holds for it.
+    let out = b
+        .ingest_local(&w.sealed(&pin_only, WORKING_SEED, 4), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Unchanged);
+}
+
 #[tokio::test]
 async fn a_relays_change_the_state_cannot_record_leaves_the_pairing_alone() {
     let w = Ward::new();
@@ -1413,7 +1462,7 @@ fn a_relays_change_for_another_pairing_record_is_refused() {
         author: pk(ROOT_SEED),
         seal_author: pk(ROOT_SEED),
         ts: NOW,
-        relays: &relays,
+        relays: Some(&relays),
         pin: None,
         paired_at,
     };

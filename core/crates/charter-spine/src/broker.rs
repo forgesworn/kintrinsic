@@ -1901,7 +1901,7 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
             author: event.pubkey,
             seal_author: *seal_author,
             ts: event.created_at,
-            relays: &pairing.relays,
+            relays: applied.had_relays.then_some(&pairing.relays[..]),
             pin: applied.pin.as_ref(),
             paired_at: pairing.paired_at,
         };
