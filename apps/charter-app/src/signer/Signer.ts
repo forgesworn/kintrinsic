@@ -154,17 +154,6 @@ export interface SignOutcomeAt extends SignOutcome {
   issuedAt: number;
 }
 
-/** How `signClause` treats the policy it is given. */
-export interface SignClauseOptions {
-  /**
-   * The child's standing rules going out again (a newly set-up phone), not
-   * a fresh decision: a kind whose rule in force was set on another phone,
-   * and that this phone's screen can't hold, is sent as that phone set it
-   * (decision 3).
-   */
-  resend?: boolean;
-}
-
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
   signRelayConfig?(machine: string, relays: string[], label: string, battery?: import("../domain/battery").BatterySettings): Promise<string>;
@@ -181,7 +170,18 @@ export interface Signer {
   setAutoSign(on: boolean): Promise<void>;
 
   /** Sign a rule change (a new/updated policy) for a child. */
-  signClause(childId: string, policy: Policy, opts?: SignClauseOptions): Promise<SignOutcome>;
+  signClause(childId: string, policy: Policy): Promise<SignOutcome>;
+
+  /**
+   * A device just claimed for a child has received nothing: send it this
+   * install's own rules in force for the child, to that device only and each
+   * with its original `issuedAt`, so no other device's rules change and no
+   * newer rule is beaten by a re-send dated now. Rules another guardian set
+   * are left to their app and the roster. A kind of `policies` for which no
+   * rule at all is held for the device goes as a fresh rule. Optional: the
+   * store skips it when absent.
+   */
+  resendRulesTo?(childId: string, machine: string, policies: Policy[]): Promise<SignOutcome>;
 
   /**
    * Publish each device its consolidated cross-device usage view

@@ -6,8 +6,9 @@
 //   - lossless (it reads back exactly, see `readClause`): it becomes this
 //     phone's own rule for that kind, so the screen simply shows it;
 //   - lossy: nothing here changes. The received clause stays the rule in
-//     force, the screen shows it as set elsewhere (read-only, with Replace),
-//     and a re-send of that kind sends the stored clause (`inForceToResend`).
+//     force, and the screen shows it as set elsewhere (read-only, with
+//     Replace). It is the other guardian's to send: a newly claimed device
+//     gets only this install's own rules from here (`resendRulesTo`).
 //
 // Seeding never sends anything to a ward: it changes what this install shows
 // and what it would send next.
@@ -201,17 +202,3 @@ export function setElsewhere(child: Child, kinds: readonly string[], inForce: In
   return out;
 }
 
-/**
- * For a re-send of this child's rules (a newly set-up phone gets the whole
- * charter): the received clause to send for `kind` on `machine` instead of
- * this phone's own copy, when the rule in force there was set elsewhere and
- * this phone's screen can't hold it. Undefined otherwise.
- */
-export function inForceToResend(child: Child, kind: string, machine: string, inForce: InForceLookup): HeldRule | undefined {
-  const r = inForce(kind, machine);
-  if (!r || r.local) return undefined;
-  const base = child.policies.find((p) => p.scope.kind === "device");
-  const device = child.devices.find((d) => d.devicePubkey === machine);
-  const prior = base && device ? effectivePolicyForDevice(base, device.id) : base;
-  return lossy(r.event, prior) ? r.event : undefined;
-}

@@ -60,7 +60,7 @@ import {
   type ReleaseManifest,
 } from "../release/releaseEvent";
 import { SignerCancelled, type ConfirmGate } from "../signer/mockSigner";
-import type { DecisionContext, GiftOptions, InstallDecision, SignClauseOptions, Signer } from "../signer/Signer";
+import type { DecisionContext, GiftOptions, InstallDecision, Signer } from "../signer/Signer";
 import { catalogLookup } from "../data/appCatalog";
 import {
   guardianPubkeyHex,
@@ -2437,14 +2437,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * clause that has nowhere to go.
    */
   const signClauseIfConnected = useCallback(
-    async (childId: string, policy: Policy, opts?: SignClauseOptions): Promise<ClauseDelivery> => {
+    async (childId: string, policy: Policy): Promise<ClauseDelivery> => {
       const blocked = clauseDeliveryPrecheck(
         signer.current!.status().connected,
         resolveChild(childId)?.devices.length ?? 0,
       );
       if (blocked) return blocked;
       try {
-        const signed = await signer.current!.signClause(childId, policy, opts);
+        const signed = await signer.current!.signClause(childId, policy);
         return signed.wraps && signed.wraps.length > 0 ? { outcome: "sent", wraps: signed.wraps } : { outcome: "sent" };
       } catch (err) {
         if (err instanceof SignerCancelled) return { outcome: "cancelled" };
@@ -2461,6 +2461,26 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // Close the claim loop: a just-claimed phone has never been a target of any
   // rule save, so the guardian's standing charter goes to it by itself the
   // moment the claim is committed — instead of an instruction to re-save.
+  // Only to that phone, and only this install's own rules with their
+  // original dates (`resendRulesTo`): the child's other devices keep what
+  // they have, and the other parent's rules come from their app.
+  const resendRulesIfConnected = useCallback(
+    async (childId: string, machine: string, policies: Policy[]): Promise<ClauseDelivery> => {
+      const s = signer.current!;
+      const blocked = clauseDeliveryPrecheck(s.status().connected, resolveChild(childId)?.devices.length ?? 0);
+      if (blocked) return blocked;
+      if (!s.resendRulesTo) return { outcome: "sent" };
+      try {
+        const sent = await s.resendRulesTo(childId, machine, policies);
+        return sent.wraps && sent.wraps.length > 0 ? { outcome: "sent", wraps: sent.wraps } : { outcome: "sent" };
+      } catch (err) {
+        if (err instanceof SignerCancelled) return { outcome: "cancelled" };
+        if (err instanceof QueuedForHomeNetworkError) return queuedDelivery(err);
+        throw err;
+      }
+    },
+    [resolveChild, queuedDelivery],
+  );
   const pendingResends = useRef<PendingResend[]>([]);
   useEffect(() => {
     const ready = readyResends(pendingResends.current, state.children);
@@ -2472,15 +2492,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       if (policies.length === 0) continue; // nothing to send is not a failure
       void (async () => {
         let allSent = true;
-        for (const policy of policies) {
-          try {
-            // The standing rules, re-sent: one set on another phone that
-            // this phone can't show goes as that phone set it (decision 3).
-            const d = await signClauseIfConnected(p.childId, policy, { resend: true });
-            if (d.outcome !== "sent") allSent = false;
-          } catch {
-            allSent = false;
-          }
+        try {
+          const d = await resendRulesIfConnected(p.childId, p.machine, policies);
+          if (d.outcome !== "sent") allSent = false;
+        } catch {
+          allSent = false;
         }
         addActivity(
           p.childId,
@@ -2491,7 +2507,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
         );
       })();
     }
-  }, [state.children, signClauseIfConnected, addActivity]);
+  }, [state.children, resendRulesIfConnected, addActivity]);
 
   const setSchedule = useCallback(
     async (childId: string, scopeId: string, schedule: Schedule) => {

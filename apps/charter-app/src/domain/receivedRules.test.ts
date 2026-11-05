@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inForceToResend, seedChild, setElsewhere, type HeldRule, type InForceLookup } from "./receivedRules";
+import { seedChild, setElsewhere, type HeldRule, type InForceLookup } from "./receivedRules";
 import type { Child, Policy } from "./types";
 import { appRulesToGrant, debuggingToGrant, scheduleToGrant, budgetToGrant } from "../wire/clause";
 
@@ -95,15 +95,12 @@ describe("seeding received rules onto this phone's screens (decision 3)", () => 
     expect(out.debugging).toEqual([{ deviceId: "d-laptop", debugging: { allow: true, until: T + 60, issuedAt: T } }]);
   });
 
-  it("names a lossy rule in force as set elsewhere, and re-sends it as it is; a local or lossless one stays this phone's", () => {
+  it("names a lossy rule in force as set elsewhere; a local or lossless one stays this phone's", () => {
     const lossy = rule("budget", { v: 1, tz, revoked: true, issuedAt: T });
     const fine = rule("schedule", scheduleToGrant(base.schedule!, T));
     const lookup = (local: boolean): InForceLookup => (kind) =>
       kind === "budget" ? { event: lossy, local } : kind === "schedule" ? { event: fine, local: false } : undefined;
     expect(setElsewhere(child(), ["schedule", "budget"], lookup(false))).toEqual([{ kind: "budget", author: OTHER, issuedAt: T }]);
     expect(setElsewhere(child(), ["schedule", "budget"], lookup(true))).toEqual([]);
-    expect(inForceToResend(child(), "budget", PHONE, lookup(false))).toBe(lossy);
-    expect(inForceToResend(child(), "schedule", PHONE, lookup(false))).toBeUndefined();
-    expect(inForceToResend(child(), "budget", PHONE, lookup(true))).toBeUndefined();
   });
 });

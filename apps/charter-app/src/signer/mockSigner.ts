@@ -112,6 +112,11 @@ export class MockSigner implements Signer {
     return { ok: true };
   }
 
+  async resendRulesTo(childId: string): Promise<{ ok: true }> {
+    await this.authorize("clause", `Send ${childId}'s rules to their new device`);
+    return { ok: true };
+  }
+
   // `url` is omitted deliberately: the mock signs nothing, so it has no use
   // for the download location. TypeScript allows an implementation to take
   // fewer parameters than its interface declares.

@@ -41,8 +41,8 @@ export interface SignetSignerConfig {
   pickOps?: RealSignerDeps["pickOps"];
   /** Keep a rule change's signed clauses for the family roster (Q3). */
   onRulesSigned?: RealSignerDeps["onRulesSigned"];
-  /** A rule set on another phone to re-send as it is (decision 3). */
-  inForce?: RealSignerDeps["inForce"];
+  /** The rules in force held for a device, for a newly claimed one. */
+  heldRules?: RealSignerDeps["heldRules"];
 }
 
 /**
@@ -141,6 +141,6 @@ export function createSignetSigner(config: SignetSignerConfig): RealSigner {
     now: config.now ?? (() => Math.floor(Date.now() / 1000)),
     pickOps: config.pickOps,
     onRulesSigned: config.onRulesSigned,
-    inForce: config.inForce,
+    heldRules: config.heldRules,
   });
 }
