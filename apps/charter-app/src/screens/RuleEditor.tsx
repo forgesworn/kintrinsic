@@ -7,7 +7,7 @@ import { AppRuleEditor, DeviceLimits, SECTION_TITLE, type SectionId } from "./Li
 import { ruleSummaries } from "./ruleSummaries";
 import { namesList } from "./guardiansView";
 import { SetElsewhereGate } from "./SetElsewhere";
-import { ALL_RULE_KINDS, APP_RULE_KINDS, SECTION_KINDS, useSetElsewhere } from "./setElsewhereView";
+import { ALL_RULE_KINDS, APP_RULE_KINDS, SECTION_KINDS, useOtherSetters, useSetElsewhere } from "./setElsewhereView";
 
 // A child's rules. On the child page they are one list in three plain groups:
 // each row shows what the rule currently says and opens its own editor page
@@ -41,6 +41,7 @@ export function ChildRules({ child }: { child: Child }) {
   );
   // A rule set on another phone that this screen can't show reads as set there.
   const elsewhere = useSetElsewhere(child, ALL_RULE_KINDS);
+  const otherSetters = useOtherSetters(child);
   const setFrom = (id: SectionId): string | null => {
     const names = [...new Set(elsewhere.rules.filter((r) => SECTION_KINDS[id].includes(r.kind)).map((r) => r.name))];
     return names.length > 0 ? `Set from ${namesList(names)}` : null;
@@ -66,6 +67,13 @@ export function ChildRules({ child }: { child: Child }) {
               Set up a device
             </button>
           </span>
+        </Banner>
+      )}
+      {/* The other parent's rules arrive with the family list (decision 5). */}
+      {otherSetters.length > 0 && (
+        <Banner tone="info">
+          Rules set by {namesList(otherSetters)} appear here too. Whoever changed a rule most recently wins, on every
+          device.
         </Banner>
       )}
       {!devicePolicy && (

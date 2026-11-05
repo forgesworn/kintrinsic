@@ -499,6 +499,7 @@ describe("rule editors as pages", () => {
         );
       });
       expect(text()).toContain("Set from Robin");
+      expect(text()).toContain("Rules set by Robin appear here too. Whoever changed a rule most recently wins, on every device.");
       act(() => {
         root.render(
           <CharterProvider>

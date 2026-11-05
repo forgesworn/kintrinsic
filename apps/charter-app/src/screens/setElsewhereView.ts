@@ -49,3 +49,22 @@ export const APP_RULE_KINDS: readonly string[] = ["apprules"];
 
 /** Every kind a rule page signs, for the rules list. */
 export const ALL_RULE_KINDS: readonly string[] = [...new Set([...Object.values(SECTION_KINDS).flat(), ...TIME_KINDS, ...APP_RULE_KINDS])];
+
+/**
+ * Who, besides this phone, set rules held for this child (the rules in
+ * force another phone's roster carried): names for "Rules set by … appear
+ * here too". Empty when every rule held is this phone's own.
+ */
+export function useOtherSetters(child: Child): string[] {
+  const { state, guardianKeys } = useCharter();
+  const keys = guardianKeys.state;
+  const me = myRootOf(guardianKeys);
+  return useMemo(() => {
+    const subject = child.rosterId;
+    if (!subject) return [];
+    const held = keys.rules?.[subject] ?? {};
+    const local = keys.localRules?.[subject] ?? {};
+    const authors = new Set(Object.entries(held).filter(([key, e]) => local[key] !== e.id).map(([, e]) => e.pubkey));
+    return [...new Set([...authors].map((a) => ruleSetterName(a, keys, state.children, me)))];
+  }, [child, keys, state.children, me]);
+}
