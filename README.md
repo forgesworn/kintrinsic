@@ -74,6 +74,8 @@ accountable, time-limited authority that grants scoped powers trending toward
 | **Charter** | The agreement a family writes — the set of clauses in force. |
 | **Warden** | The on-device enforcer (`charterd` on Linux; the Device Owner service on Android). |
 | **Clause / grant** | How a guardian acts — you *grant* clauses, you don't *set controls*. |
+| **Identity** | The key a ward trusts as "the guardian": kept on a phone, in My Signet or on a Heartwood. It signs rarely (vouching for phones, adding or removing a parent, moving itself). |
+| **Day-to-day key** | A guardian phone's or browser's own key, vouched for by the identity. It does the daily signing and is never backed up. See [`docs/guardian-keys.md`](docs/guardian-keys.md). |
 
 In one sentence: **a guardian holds wardship over a ward; the charter defines it;
 the warden enforces it.**
@@ -116,6 +118,7 @@ protocol semantics.
 - `android/` — the ward enforcer (`app`) and guardian carrier (`carrier`) modules.
 - `apps/charter-app/` — the guardian PWA bundled into the carrier APK.
 - `src/` + `docs/` — the consumer SDK and its integration docs.
+- `docs/guardian-keys.md` — a parent's guide to guardian keys: two parents, a lost phone, backups, and moving your identity to My Signet or a Heartwood.
 
 ## Known limitations
 
