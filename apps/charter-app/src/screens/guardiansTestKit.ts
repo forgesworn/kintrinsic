@@ -73,6 +73,7 @@ export function mockStore(opts: {
       signer: opts.signer ?? { connected: true, kind: "signet", autoSign: false, bunkerUri: "bunker://x" },
     },
     pairSignet: vi.fn(async () => ({ approved: true })),
+    enableLocalSigner: vi.fn(async () => {}),
     disconnectSigner: vi.fn(async () => {}),
     guardianKeys: {
       state: keys,
@@ -84,6 +85,7 @@ export function mockStore(opts: {
         children: opts.children.map((c) => ({ childId: c.id, readiness: childReadiness })),
       }),
       approveInstall: vi.fn(),
+      joinWithThisPhone: vi.fn(async () => keys.root),
       restoreFollowUp: vi.fn(() => null),
       forgetRestore: vi.fn(),
       phoneKeyRetirable: vi.fn(() => false),

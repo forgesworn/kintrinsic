@@ -429,6 +429,38 @@ export class GuardianKeys {
   }
 
   /**
+   * A parent joins another parent's family with this phone only (design
+   * note, "Two parents", decision 1(b)): this phone's own key becomes their
+   * guardian identity R2, exactly as for a parent who starts phone-first,
+   * and it mints a fresh working key W approved by R2. The inviting parent
+   * then invites R2 (this phone's guardian code), and W confirms in person
+   * at each device with R2's approval inline (rule 6).
+   *
+   * Refused on a phone that already looks after devices, and on one whose
+   * identity is My Signet or a Heartwood. A My Signet identity remembered
+   * from an earlier, disconnected connection names nothing when no device
+   * is known here at all, so it is dropped rather than block the join.
+   */
+  async joinWithThisPhone(): Promise<InstallRoot> {
+    const root = this.signetRoot();
+    if (root && root.via !== "phone") {
+      throw new Error("This phone already uses My Signet as your guardian identity. Join with My Signet instead.");
+    }
+    if (root) return root;
+    if (this.allDevices().length > 0) {
+      throw new Error("This phone already looks after devices, so it can't join another parent's family. Use Kintrinsic on another phone to join.");
+    }
+    if (this.deps.read().keys.forgottenRoot !== undefined) {
+      this.deps.write((k) => {
+        const { forgottenRoot: _f, ...rest } = k;
+        void _f;
+        return rest;
+      });
+    }
+    return this.mintPhoneWorkingKey("join a family");
+  }
+
+  /**
    * A phone-held root R mints a fresh working key W on this phone and signs
    * its approval, then sends the approval to every ward (sealed by W, as any
    * approval). Never W === R: the reference refuses a key that is its own

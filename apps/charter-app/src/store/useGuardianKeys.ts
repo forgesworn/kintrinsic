@@ -46,6 +46,13 @@ export interface GuardianKeysApi {
    * joining parent's side passes `expectRoot` (their own identity, R2).
    */
   approveInstall(opts?: { expectRoot?: string; label?: string }): Promise<InstallRoot>;
+  /**
+   * Join another parent's family with this phone only: this phone's own key
+   * becomes the guardian identity (the local signer must be on), and it
+   * approves a fresh day-to-day key. Refused on a phone that already looks
+   * after devices.
+   */
+  joinWithThisPhone(): Promise<InstallRoot>;
   /** Invite another parent (npub or hex): R signs a co-guardian statement to every ward. */
   inviteCoGuardian(r2: string, opts?: { label?: string; expiresAt?: number }): Promise<SendReport>;
   /** Confirm a pending co-guardian, removal or move at a ward, from its presence code. */
@@ -344,6 +351,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       childReadiness: (id) => keys.childReadiness(id),
       familyReadiness: () => keys.familyReadiness(),
       approveInstall,
+      joinWithThisPhone: () => keys.joinWithThisPhone(),
       inviteCoGuardian: (r2, opts) => keys.inviteCoGuardian(r2, opts),
       confirmPresence: (code) => keys.confirmPresence(code),
       leaveFamily: () => keys.leaveFamily(),
