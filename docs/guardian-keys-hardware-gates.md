@@ -132,14 +132,16 @@ cd ../linux && cargo run -q -p xtask -- deb
 
 1. Phone A: Settings → **Guardians** → **Invite a parent** → **Scan their QR
    code** (or paste B's npub) → **Next** → **Send the invitation**.
-   **Expect:** the ward's About this device → Guardians says "1 change is
-   waiting for a guardian to confirm it at this device." The **Invitation
-   sent** screen shows *Your guardian code*: a QR and A's npub. (It is also
-   at Settings → Guardians → **Show my guardian code**.) Keep it on screen.
+   **Expect:** the **Invitation sent** screen shows *Your guardian code*: a
+   QR and A's npub. (It is also at Settings → Guardians → **Show my guardian
+   code**.) Keep it on screen. The ward does not show the waiting invitation
+   to anyone who has not entered the guardian PIN (gate 9).
 2. Phone B, test build (its own `adb reverse`): Settings → **Join a family** →
    **Connect My Signet** → paste identity B's connection link and B's npub
    (*The guardian ID you were invited as*, required) → **Connect**. My Signet
-   signs once (this phone's kind-31120 approval).
+   signs once (this phone's kind-31120 approval). (Phone B can instead join
+   with **Join with this phone only**, which needs no My Signet; gate 7 covers
+   that route.)
    **Expect:** if B connects with an identity other than the npub given, the
    app refuses with a readable error, disconnects and signs nothing.
 3. Phone B now shows **Scan the other parent's guardian code**. First the
@@ -173,17 +175,17 @@ cd ../linux && cargo run -q -p xtask -- deb
    **Expect:** `charter status` lists roots A and B, and phone B no longer
    marks the computer *unconfirmed*.
 7. Phone B changes a rule. **Expect:** the ward enforces it and shows B as
-   the guardian who set it. Phone A sees what the ward now enforces in the
-   ward's own report within a minute (rosters carry names and devices, not
-   rules).
+   the guardian who set it. Phone A sees the new rule within a
+   minute, both in the ward's own report and in the family list, because the
+   list carries the rules in force (gate 6 relies on this).
 8. Objection: phone A → Guardians → **Remove the other parent (npub1…)** →
    **Start removing them**. Confirm it in person at the Android ward
    (presence code, PIN 123456, phone A → Guardians → **Confirm in person**).
    **Expect:** STATUS shows a pending removal with "takes effect" 72 hours
-   out. Phone B's child page and Settings show "The other parent has asked to
-   remove you as a guardian", and its Guardians screen an **Object** button. Tap it (My
-   Signet signs and seals it). **Expect:** the pending removal disappears on
-   the ward; both guardians remain.
+   out. Leave phone B's Kintrinsic open and online and do not touch it: its
+   app objects on its own, with no **Object** button to tap (gate 6 checks
+   the wording). **Expect:** within 5 minutes the pending removal
+   disappears on the ward; both guardians remain.
 9. Phone B: Guardians → **Leave the family**, then **Leave the family**
    again in the warning.
    **Expect:** B disappears from the ward at once. Phone B shows "This phone
@@ -218,14 +220,11 @@ cd ../linux && cargo run -q -p xtask -- deb
 
 ## Known limits for these gates
 
-- A family whose root is the phone's own key (no My Signet) can't move to
-  My Signet without re-pairing. That decision is for a design session
-  (`docs/guardian-keys-open-questions.md`, "Moving a phone-held root").
 - The 72-hour removal can only be tested as far as the pending state and the
   objection; letting one run its course takes three days.
-- A parent who joins starts with no rules of their own for the child: a rule
-  they set replaces only that kind of rule
-  (`docs/guardian-keys-open-questions.md`, "Rules a joining parent doesn't
-  know").
+- A parent who joins starts from the family's rules, not a blank slate. A
+  rule that can't be shown as a setting appears as "Set from <name>" with a
+  **Replace** button (`docs/guardian-keys-open-questions.md`, "Rules a joining
+  parent doesn't know").
 - A second install of the same identity needs one device code before the
   family reaches it ("A second install of the same identity").
