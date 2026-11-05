@@ -421,7 +421,7 @@ mod tests {
     fn a_wrap_to_a_departed_key_is_dropped_and_its_audit_rebuilt_for_who_is_left() {
         let base = tmp("departed");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
         let to = |n: u8, p: &str| {
             let mut w = fake_wrap(n);
             w.tags = vec![vec!["p".into(), p.into()]];
@@ -437,7 +437,7 @@ mod tests {
         bg.drop_wraps_not_to(&["cc".to_string()]);
         let rebuilt = bg.wraps_to_publish(T0 + 2, |_| vec![to(3, "cc")], |_| {});
         assert_eq!(rebuilt, vec![to(3, "cc")]);
-        assert_eq!(bg.pending_audits(), vec![audit_tags(SCOPE_FULL, 600)]);
+        assert_eq!(bg.pending_audits(), vec![audit_tags(SCOPE_FULL, 600, T0)]);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -466,7 +466,8 @@ mod tests {
     fn a_journal_holding_one_wrap_from_an_earlier_build_keeps_it() {
         let base = tmp("onewrap");
         let bg = BreakGlass::new(&base);
-        let old = serde_json::json!([{"tags": audit_tags(SCOPE_FULL, 600), "wrap": fake_wrap(3)}]);
+        let old =
+            serde_json::json!([{"tags": audit_tags(SCOPE_FULL, 600, T0), "wrap": fake_wrap(3)}]);
         std::fs::write(bg.spool_path(), old.to_string()).unwrap();
         let wraps = bg.wraps_to_publish(T0, |_| panic!("not rebuilt"), |_| {});
         assert_eq!(wraps, vec![fake_wrap(3)]);
@@ -481,7 +482,7 @@ mod tests {
     fn an_audit_for_two_recipients_leaves_only_when_both_are_sent() {
         let base = tmp("two");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
         let mut offered = 0;
         let wraps = bg.wraps_to_publish(T0, |_| vec![fake_wrap(1), fake_wrap(2)], |_| offered += 1);
         assert_eq!(wraps.len(), 2);

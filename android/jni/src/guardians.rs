@@ -88,6 +88,7 @@ impl Warden {
             audit_transparency: false,
             paired_at: self.paired_at,
             relays_updated_at: None,
+            battery: None,
         });
         let store = Arc::new(FileGuardianStateStore::in_dir(&self.base));
         self.guardian_keys = Some(GuardianKeys::load(store, &pairing, now));
@@ -104,11 +105,14 @@ impl Warden {
     }
 
     /// A gift-wrapped RELAYS change rewrote the pairing record: take up its
-    /// relay list and rebuild the transports on it.
+    /// relay list and battery settings, and rebuild the transports on the
+    /// list. The two are one signed configuration (contract, *Android battery
+    /// scheduling*), so a change of battery settings alone is taken up too.
     pub(super) fn reload_relays(&mut self) {
         self.relays_reload_due = false;
         match super::load_pairing(&self.pairing) {
             Ok((guardian, _, relays, _)) if guardian.is_some() && guardian == self.guardian => {
+                self.battery_settings = super::load_battery(&self.pairing);
                 if relays != self.relays {
                     self.relays = relays;
                     self.last_status = None;
@@ -965,7 +969,10 @@ mod tests {
 
         // AUDIT (break-glass) goes to both working keys, one wrap each.
         let relay = ward.w.relay.clone().unwrap();
-        let audits = relay.build_audit_wraps(crate::breakglass::audit_tags("full", 60), ward.now);
+        let audits = relay.build_audit_wraps(
+            crate::breakglass::audit_tags("full", 60, ward.now),
+            ward.now,
+        );
         let mut to: Vec<String> = audits.iter().filter_map(wrap_p).collect();
         to.sort();
         let mut want = vec![pk(W1).to_hex(), pk(W2).to_hex()];
