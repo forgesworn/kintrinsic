@@ -1622,3 +1622,24 @@ root until the ward's clock passes it; any other current signer can still
 replace it.
 
 **Raised by:** build 2026-11-05.
+
+## A guardian install's clock counter left ahead after a clock correction
+
+**Where:** the guardian app's rising issue-time counter (one per install,
+persisted); stand-down validity (`issuedAt < expiresAt <= issuedAt + 36h`);
+app holds (`until <= issuedAt + MAX_APP_HOLD_SECS`).
+
+**Question:** a guardian phone whose clock ran ahead and was then corrected
+keeps dating what it signs from the counter, which stays ahead until real
+time catches up. Expiry is now worked out from the real clock, so a gift
+can't be stretched. But a stand-down whose real expiry falls before the
+counter's `issuedAt` reads as a lift, and an app hold ending before it is
+dropped.
+
+**Build's reading:** accepted, documented. It needs a phone clock that was
+wrong by hours and then corrected, and it fails towards the child's normal
+rules rather than locking anyone out. The guardian app shows the clock notice
+when a ward reports clamped events. A later batch may cap how far the counter
+may lead real time before the app warns the parent.
+
+**Raised by:** build 2026-11-06.
