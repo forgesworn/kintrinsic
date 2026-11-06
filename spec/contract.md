@@ -2673,7 +2673,11 @@ A root is never asked to decrypt ward traffic.
   - The floor rests on one assumption: **`issuedAt` only ever rises per
     install.** A guardian install persists the last `issuedAt` it signed
     with and dates each new event at least a second after it, whatever its
-    clock says, and a working key is one install. For statements the floor
+    clock says, and a working key is one install. It keeps one such counter
+    for everything it signs or asks its root to sign: clauses, statements,
+    the guardian PIN's `created_at` (rule 11), presence confirmations and
+    rosters. Only a relay-list RELAYS keeps the raw clock, since a ward
+    refuses one dated ahead of its own. For statements the floor
     follows the install, through its seal, so a root asked to sign by two
     installs whose clocks differ is never held back in one slot by the
     other. A key that breaks the assumption (two installs sharing a working

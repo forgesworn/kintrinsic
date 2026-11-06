@@ -11,8 +11,12 @@ import { emptyGuardianKeys, PIN_RESEND_LIMIT, type GuardianKeysState } from "./s
 import { guardianPinHash } from "./pin";
 import { familyRosterTemplate, parseStatement, CHARTER_PRESENCE_CONFIRM, CHARTER_FAMILY_ROSTER, type SignedEvent } from "./sdk";
 import type { GuardianOps } from "../wire/giftwrap";
+import { IssuedAtClock } from "../signer/issuedAtClock";
 
 const T = 1_800_000_000;
+
+// The install's rising clock lives in storage (`issuedAtClock.ts`): each test starts with none.
+beforeEach(() => localStorage.clear());
 
 function opsOf(sk: Uint8Array): GuardianOps {
   return {
@@ -445,6 +449,31 @@ describe("statements", () => {
     h.setRoot(opsOf(r2Sk));
     await expect(h.gk.cancelPending(`kintrinsic/guardian/${R2}`)).rejects.toThrow(/isn't this family's/);
   });
+
+  it("dates every statement from the install's rising clock: a clock once ahead, then corrected, still signs above it in the same slot (SF1)", async () => {
+    const d = `kintrinsic/guardian/${R2}`;
+    const issuedAtOf = (e: SignedEvent) => (JSON.parse(e.content) as { issuedAt: number }).issuedAt;
+    // The phone's clock runs a day ahead, and a cancel is signed.
+    h.setNow(T + 86_400);
+    const ahead = await h.gk.cancelPending(d);
+    expect(issuedAtOf(ahead.event)).toBe(T + 86_400);
+    // The clock is corrected. The ward's floor for W in this slot is now
+    // T + 86 400: the next cancel is dated above it, not at the raw clock.
+    h.setNow(T + 10);
+    const again = await h.gk.cancelPending(d);
+    expect(issuedAtOf(again.event)).toBe(T + 86_401);
+    // Every kind of statement draws from the one counter.
+    const invite = await h.gk.inviteCoGuardian(nip19.npubEncode(R2));
+    expect(issuedAtOf(invite.event)).toBe(T + 86_402);
+  });
+
+  it("shares its clock with the clause signer through storage: one counter per install (SF1)", async () => {
+    // The clause signer (its own instance) signed far ahead.
+    new IssuedAtClock().next(T + 5_000);
+    const report = await h.gk.cancelPending(`kintrinsic/guardian/${R2}`);
+    expect((JSON.parse(report.event.content) as { issuedAt: number }).issuedAt).toBe(T + 5_001);
+    expect(new IssuedAtClock().last()).toBe(T + 5_001);
+  });
 });
 
 describe("presence confirmation", () => {
@@ -660,10 +689,11 @@ describe("root move", () => {
     });
 
     it("by expiry, from the move's own 7 days once no ward lists it", () => {
-      h.setNow(T + 7 * 24 * 3600 - 1);
+      // The move is dated T + 1: the install's rising clock gave T to W's approval.
+      h.setNow(T + 1 + 7 * 24 * 3600 - 1);
       h.gk.settleRootMove();
       expect(h.keys().nextRoot).toBeDefined();
-      h.setNow(T + 7 * 24 * 3600);
+      h.setNow(T + 1 + 7 * 24 * 3600);
       h.gk.settleRootMove();
       expect(h.keys().nextRoot).toBeUndefined();
     });
@@ -818,7 +848,8 @@ describe("guardian PIN", () => {
     // PIN-only: no relay list, so it can't change or revert the ward's relays (D4).
     expect("relays" in body).toBe(false);
     expect(await guardianPinHash("123456", body.guardianPin.salt)).toBe(body.guardianPin.hash);
-    expect(h.keys().pins).toEqual({ [PHONE]: { state: "sending", record: body.guardianPin, sentAt: T } });
+    // Dated from the install's rising clock: W's approval took T.
+    expect(h.keys().pins).toEqual({ [PHONE]: { state: "sending", record: body.guardianPin, sentAt: T + 1 } });
     // Only the phones named, when the screen names them (L4).
     h.published.length = 0;
     const named = await h.gk.setGuardianPin("123456", { machines: [old] });
@@ -842,7 +873,7 @@ describe("guardian PIN", () => {
     expect(h.published).toHaveLength(1);
     const again = open(h.published[0].wrap, phoneSk).inner;
     expect(JSON.parse(again.content)).toEqual({ machine: PHONE, guardianPin: first });
-    expect(again.created_at).toBe(T + 1);
+    expect(again.created_at).toBe(T + 2);
     // The same STATUS polled again, or an older one: nothing more.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g(false) });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 5, guardians: g() });
@@ -855,7 +886,7 @@ describe("guardian PIN", () => {
     // The ward says it holds one: set, the record dropped, nothing sent.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 30, guardians: g(true) });
     expect(h.published).toHaveLength(2);
-    expect(h.keys().pins[PHONE]).toEqual({ state: "set", sentAt: T + 2, statusTs: T + 30 });
+    expect(h.keys().pins[PHONE]).toEqual({ state: "set", sentAt: T + 3, statusTs: T + 30 });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 40, guardians: g(false) });
     expect(h.published).toHaveLength(2);
   }, 30_000);
@@ -874,7 +905,7 @@ describe("guardian PIN", () => {
     // The 21st: nothing sent, and the guardian is told.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 1000, guardians: g });
     expect(h.published).toHaveLength(20);
-    expect(h.keys().pins[PHONE]).toEqual({ state: "unconfirmed", sentAt: T + 20, statusTs: T + 1000 });
+    expect(h.keys().pins[PHONE]).toEqual({ state: "unconfirmed", sentAt: T + 21, statusTs: T + 1000 });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 2000, guardians: g });
     expect(h.published).toHaveLength(20);
     // Trying again starts over.

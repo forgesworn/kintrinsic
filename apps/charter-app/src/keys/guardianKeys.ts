@@ -74,6 +74,7 @@ import { childReadiness, wardReadiness, type ChildReadiness, type GateDevice } f
 import { keyStanding, type StatusGuardians } from "./statusGuardians";
 import { parsePresenceCode, type PresenceCode } from "./presenceCode";
 import { makeGuardianPinRecord, pinOnlyRelaysTemplate } from "./pin";
+import { IssuedAtClock } from "../signer/issuedAtClock";
 import { phoneHeldRoot, PIN_RESEND_LIMIT, type AnchoredRoot, type GuardianKeysState, type HeldRoster, type InstallRoot, type NextRoot, type PresenceWard, type RootVia } from "./state";
 
 /** One paired ward, as this module sees it. */
@@ -215,7 +216,22 @@ function truncateLabel(label: string): string {
 }
 
 export class GuardianKeys {
+  /** The install's one rising clock, shared through storage with the clause signer. */
+  private readonly clock = new IssuedAtClock();
+
   constructor(private readonly deps: GuardianKeysDeps) {}
+
+  /**
+   * The time for the next event this install signs or asks its root to sign
+   * (a statement, the PIN, a presence confirmation, a roster): now, strictly
+   * above every time it signed with before (`issuedAtClock.ts`). A ward's
+   * replay floor is per seal author and slot, so a clock once ahead and then
+   * corrected would otherwise shut this install out of a slot it reuses (a
+   * move's approval, an objection to a re-issued removal).
+   */
+  private stamp(): number {
+    return this.clock.next(this.deps.now());
+  }
 
   // ---------------------------------------------------------------------
   // Keys and the per-ward choice
@@ -490,7 +506,7 @@ export class GuardianKeys {
     }
     if (w === local.pubkey) throw new Error("This phone's own key can't approve itself.");
     const label = truncateLabel(keys.installLabel ?? "") || "Kintrinsic";
-    const approval = await buildApproval(signerOf(local), w, { issuedAt: this.deps.now(), label });
+    const approval = await buildApproval(signerOf(local), w, { issuedAt: this.stamp(), label });
     this.requireApproval(approval, local.pubkey, w);
     const root: InstallRoot = { pubkey: local.pubkey, approval: plain(approval), via: "phone" };
     this.deps.write((k) => {
@@ -553,7 +569,7 @@ export class GuardianKeys {
       throw differentIdentity();
     }
     const label = truncateLabel(opts.label) || "Kintrinsic";
-    const approval = await buildApproval(signerOf(ops), w, { issuedAt: this.deps.now(), label });
+    const approval = await buildApproval(signerOf(ops), w, { issuedAt: this.stamp(), label });
     this.requireApproval(approval, ops.pubkey, w);
     const root: InstallRoot = { pubkey: ops.pubkey, approval: plain(approval), via: opts.via };
     this.deps.write((k) => {
@@ -775,7 +791,7 @@ export class GuardianKeys {
     await this.ensureRoot("invite another parent");
     const event = await this.signAsRoot((s) =>
       buildCoGuardian(s, key, {
-        issuedAt: this.deps.now(),
+        issuedAt: this.stamp(),
         ...(opts.label ? { label: truncateLabel(opts.label) } : {}),
         ...(opts.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
       }),
@@ -824,7 +840,7 @@ export class GuardianKeys {
       throw new Error(`You're the only guardian on ${[...new Set(alone.map((d) => d.name))].join(", ")}. Unpair it instead.`);
     }
     this.requireNoMovedWards("leave");
-    const event = await this.signAsRoot((s) => buildRootRemoval(s, me, { issuedAt: this.deps.now() }));
+    const event = await this.signAsRoot((s) => buildRootRemoval(s, me, { issuedAt: this.stamp() }));
     const report = await this.fanOut(event, "working-or-root");
     this.remember(event);
     return report;
@@ -847,7 +863,7 @@ export class GuardianKeys {
     await this.ensureRoot("remove the other parent");
     const event = await this.signAsRoot((s) =>
       buildRootRemoval(s, key, {
-        issuedAt: this.deps.now(),
+        issuedAt: this.stamp(),
         ...(opts.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
       }),
     );
@@ -886,7 +902,7 @@ export class GuardianKeys {
       p = [...others][0];
     }
     const remov = p;
-    const event = await this.signAsRoot((s) => buildObjection(s, d, remov, { issuedAt: this.deps.now() }));
+    const event = await this.signAsRoot((s) => buildObjection(s, d, remov, { issuedAt: this.stamp() }));
     const report = await this.fanOut(event, "root");
     this.remember(event);
     return report;
@@ -895,7 +911,7 @@ export class GuardianKeys {
   /** Cancel a pending co-guardian, removal or move this install's root signed. */
   async cancelPending(d: string): Promise<SendReport> {
     if (!splitPendingD(d)) throw new Error("That isn't a pending co-guardian, removal or move.");
-    const event = await this.signAsRoot((s) => buildCancel(s, d, { issuedAt: this.deps.now() }));
+    const event = await this.signAsRoot((s) => buildCancel(s, d, { issuedAt: this.stamp() }));
     const report = await this.fanOut(event, "working-or-root");
     this.remember(event);
     if (this.deps.read().keys.nextRoot?.moveD === d) {
@@ -925,7 +941,7 @@ export class GuardianKeys {
     }
     this.requireNoMovedWards("withdraw that phone");
     const own = key === this.workingPubkey();
-    const event = await this.signAsRoot((s) => buildWithdrawal(s, key, { issuedAt: this.deps.now() }));
+    const event = await this.signAsRoot((s) => buildWithdrawal(s, key, { issuedAt: this.stamp() }));
     const report = await this.fanOut(event, own ? "root" : "working-or-root");
     this.remember(event);
     return report;
@@ -956,11 +972,11 @@ export class GuardianKeys {
     this.requireFamilyReady("move your guardian identity");
     await this.ensureRoot("move your guardian identity");
     if (next.ops.pubkey === this.workingPubkey()) throw new Error("This phone's own key can't be the new identity.");
-    const issuedAt = this.deps.now();
+    const issuedAt = this.stamp();
     const event = await this.signAsRoot((s) => buildRootMove(s, next.ops.pubkey, { issuedAt }));
     const w = this.workingPubkey();
     const approval = await buildApproval(signerOf(next.ops), w, {
-      issuedAt: this.deps.now(),
+      issuedAt: this.stamp(),
       label: this.deps.read().keys.installLabel ?? "Kintrinsic",
     });
     this.requireApproval(approval, next.ops.pubkey, w);
@@ -1191,7 +1207,7 @@ export class GuardianKeys {
       token: code.token,
       statement: code.statement,
       ...(approval ? { approval } : {}),
-      createdAt: this.deps.now(),
+      createdAt: this.stamp(),
     });
     // A joining install may not know this ward yet: its own defaults, plus
     // anything it does know. OQ: "Presence code carries no relays".
@@ -1304,7 +1320,9 @@ export class GuardianKeys {
     );
     if (wards.length === 0) throw new Error("No Android device to set a PIN on.");
     const report: Omit<SendReport, "event"> = { sent: [], held: [], failed: [] };
-    const now = this.deps.now();
+    // From the install's rising clock, so a clock that was once ahead can't
+    // leave this PIN at or below a floor an earlier one of this install set.
+    const now = this.stamp();
     for (const d of wards) {
       if (!wardReadiness(d.platform, d.appVersionCode, d.statusSeen).ready) {
         report.failed.push({ to: d.machine, error: `Update Kintrinsic on ${d.name} first.` });
@@ -1406,7 +1424,7 @@ export class GuardianKeys {
       const remover = removerOn(g, me, p);
       if (done.includes(mark) || !remover || !ops) continue;
       try {
-        const event = await buildObjection(signerOf(ops), p.d, remover, { issuedAt: now });
+        const event = await buildObjection(signerOf(ops), p.d, remover, { issuedAt: this.stamp() });
         const wrap = await giftWrapSigned(event, m, ops, now);
         try {
           await this.deps.publish(this.relaysFor(d), wrap);
@@ -1477,8 +1495,9 @@ export class GuardianKeys {
     if (!wardReadiness(d.platform, d.appVersionCode, d.statusSeen).ready) return;
     // A My Signet root would prompt; a phone-held root signs unattended.
     if (!phoneHeldRoot(this.deps.read().keys) && this.keyFor(m) !== "working") return;
-    // Strictly after the last one, so the ward's RELAYS replay floor takes it.
-    const createdAt = Math.max(this.deps.now(), cur.sentAt + 1);
+    // Strictly after the last one, so the ward's RELAYS replay floor takes it,
+    // and from the install's rising clock.
+    const createdAt = this.clock.next(Math.max(this.deps.now(), cur.sentAt + 1));
     try {
       await this.sendPin(d, cur.record, createdAt, this.opsFor(m));
     } catch (e) {
@@ -1725,7 +1744,7 @@ export class GuardianKeys {
     const relays = [...new Set(this.allDevices().flatMap((d) => this.relaysFor(d)).concat(this.deps.defaultRelays))];
     const sent = new Set<string>();
     for (const { subject, issuedAt, name, colour, devices } of children) {
-      const createdAt = this.deps.now();
+      const createdAt = this.stamp();
       // The child also carries the rules in force (Q3), outside the record's
       // own `issuedAt`: rules merge per (kind, device), records per child.
       const fitted = fitRoster(

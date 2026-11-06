@@ -36,6 +36,7 @@ import { FREE_TIME_ID, isValidTimeId } from "../wire/times";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
 import { localRouteAvailable } from "../carrier/localLink";
+import { IssuedAtClock } from "./issuedAtClock";
 import {
   QueuedForHomeNetworkError,
   failedDeviceText,
@@ -235,42 +236,26 @@ export class RealSigner implements Signer {
   }
   private state: SignerState;
   private guardian: GuardianOps | null = null;
-  /** The last clause `issuedAt` this signer handed out — see `nextIssuedAt`. */
-  private lastIssuedAt = RealSigner.loadLastIssuedAt();
-
-  private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
-  private static loadLastIssuedAt(): number {
-    try {
-      const n = Number(localStorage.getItem(RealSigner.ISSUED_AT_KEY));
-      return Number.isFinite(n) && n > 0 ? n : 0;
-    } catch {
-      return 0;
-    }
-  }
+  /** The install's one rising clock (`issuedAtClock.ts`), shared through storage with the guardian keys. */
+  private clock = new IssuedAtClock();
 
   /**
-   * The `issuedAt` for the next clause: now, but STRICTLY above every one
-   * signed before. The device's per-(subject, kind) rollback floor DROPS a
-   * clause whose `issuedAt` does not exceed the standing one's, and `now()` is
-   * whole seconds — so two clauses of a kind inside one second silently lost
-   * the second: a lift that left the ward locked till midnight, a second
-   * "give 5 minutes" the log said had landed, the `apps` clause that actually
-   * opens an approved app. Stand-down used to carry its own per-session bump;
-   * one clock for every clause covers them all, and it is persisted so a
-   * reload inside the same second can't step back under it. It only ever runs
-   * ahead by as many seconds as clauses were signed in a burst, and a ward
-   * treats a claimed time ahead of its own clock as its own clock (it clamps,
-   * it doesn't refuse), so carrying the last issue time forward costs nothing.
+   * The `issuedAt` for the next clause: now, but STRICTLY above every time
+   * this install signed with before (clauses, statements, the PIN). The
+   * device's per-(subject, kind) rollback floor DROPS a clause whose
+   * `issuedAt` does not exceed the standing one's, and `now()` is whole
+   * seconds — so two clauses of a kind inside one second silently lost the
+   * second: a lift that left the ward locked till midnight, a second "give 5
+   * minutes" the log said had landed, the `apps` clause that actually opens
+   * an approved app. One clock for everything this install signs covers them
+   * all, and it is persisted so a reload inside the same second can't step
+   * back under it. It only ever runs ahead by as many seconds as events were
+   * signed in a burst, and a ward treats a claimed time ahead of its own
+   * clock as its own clock (it clamps, it doesn't refuse), so carrying the
+   * last issue time forward costs nothing.
    */
   private nextIssuedAt(): number {
-    const issuedAt = Math.max(this.deps.now(), this.lastIssuedAt + 1);
-    this.lastIssuedAt = issuedAt;
-    try {
-      localStorage.setItem(RealSigner.ISSUED_AT_KEY, String(issuedAt));
-    } catch {
-      // Private mode / quota — the in-memory floor still holds this session.
-    }
-    return issuedAt;
+    return this.clock.next(this.deps.now());
   }
 
   constructor(private deps: RealSignerDeps) {
