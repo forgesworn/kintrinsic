@@ -7,6 +7,7 @@ import org.forgesworn.charter.service.CharterService.Companion.TICK_MS
 import org.forgesworn.charter.service.LivenessPolicy.ALARM_MS
 import org.forgesworn.charter.service.LivenessPolicy.DARK_KICK_GAP_MS
 import org.forgesworn.charter.service.LivenessPolicy.WEDGED_MS
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -74,5 +75,42 @@ class LivenessPolicyTest {
         assertTrue(ALARM_MS < 300_000L / 2)
         assertTrue(DARK_TICK_MS < 300_000L / 2)
         assertTrue(DARK_KICK_GAP_MS < ALARM_MS)
+    }
+
+    private val five = LivenessPolicy.LONGER_BATTERY_ALARM_MS
+
+    @Test
+    fun `longer battery with the screen off waits five minutes when no boundary is near`() {
+        assertEquals(five, LivenessPolicy.nextAlarmDelayMs(true, false, t0, null))
+        assertEquals(five, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + 3_600_000L))
+        assertEquals(five, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + five))
+    }
+
+    @Test
+    fun `a boundary sooner than five minutes pulls the alarm forward to it`() {
+        assertEquals(90_000L, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + 90_000L))
+        assertEquals(1_000L, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + 1_000L))
+    }
+
+    @Test
+    fun `every other mode, and a lit screen, keep the minute alarm`() {
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(false, false, t0, null))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(false, false, t0, t0 + 10_000L))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, true, t0, null))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, true, t0, t0 + 10_000L))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(false, true, t0, null))
+    }
+
+    @Test
+    fun `a boundary that has already passed is stale and keeps the minute alarm`() {
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 - 5_000L))
+    }
+
+    @Test
+    fun `the stretched alarm is never later than five minutes`() {
+        for (b in listOf(null, t0 - 1, t0, t0 + 1, t0 + five, Long.MAX_VALUE)) {
+            assertTrue(LivenessPolicy.nextAlarmDelayMs(true, false, t0, b) <= five)
+        }
     }
 }

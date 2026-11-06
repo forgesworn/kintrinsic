@@ -10,13 +10,16 @@ data class BatterySettings(
     val openingBoost: Boolean = true,
     val boostSecs: Long = 120,
 ) {
+    /** The guardian's "Longer battery" preset exactly (and nothing near it). */
+    val isLongerBattery: Boolean get() = this == LONGER_BATTERY
     val mode: String get() = when (this) {
-        BatterySettings(600,120,true,false,60) -> "Longer battery life"
+        LONGER_BATTERY -> "Longer battery life"
         BatterySettings() -> "Balanced (recommended)"
         BatterySettings(120,30,true,true,180) -> "Faster responses"
         else -> "Custom"
     }
     companion object {
+        val LONGER_BATTERY = BatterySettings(600, 120, true, false, 60)
         fun parse(o: JSONObject?): BatterySettings = BatterySettings(
             screenOffSecs = o?.optLong("screenOffSecs")?.takeIf { it in listOf(120L, 300L, 600L) } ?: 300,
             ordinarySecs = o?.optLong("ordinarySecs")?.takeIf { it in listOf(30L, 60L, 120L) } ?: 60,
@@ -62,6 +65,9 @@ internal object RelayPollPace {
     private val policy = RelaySchedule()
     private val attention = RelayAttention()
     @Volatile var onChange: (() -> Unit)? = null
+    /** Called (outside the lock) when the guardian's setting moves into or out
+     *  of "Longer battery", so the liveness alarm can be re-timed at once. */
+    @Volatile var onModeChange: (() -> Unit)? = null
     @Synchronized fun show(owner: Any) {
         val now = SystemClock.elapsedRealtime()
         val opening = !attention.visible()
@@ -74,7 +80,15 @@ internal object RelayPollPace {
         onChange?.invoke()
     }
     @Synchronized fun reconcile(states: Map<String, String>) { policy.reconcile(states) }
-    @Synchronized fun configure(settings: BatterySettings) { policy.settings = settings }
+    fun configure(settings: BatterySettings) {
+        val flipped = synchronized(this) {
+            val was = policy.settings.isLongerBattery
+            policy.settings = settings
+            was != settings.isLongerBattery
+        }
+        if (flipped) onModeChange?.invoke()
+    }
+    @Synchronized fun longerBattery(): Boolean = policy.settings.isLongerBattery
     @Synchronized fun interval(interactive: Boolean) = policy.interval(interactive, SystemClock.elapsedRealtime())
     @Synchronized fun waiting() = policy.waiting(SystemClock.elapsedRealtime())
     @Synchronized fun status(): String = "${policy.settings.mode}. Relay fallback: ${policy.settings.ordinarySecs}s in use / ${policy.settings.screenOffSecs}s screen off. " +
