@@ -1102,6 +1102,56 @@ async fn a_working_keys_pin_only_relays_applies_late_but_a_list_change_is_refuse
     assert_eq!(out.result, AckResult::Applied);
 }
 
+/// Rule 11: a RELAYS carrying a relay list and a PIN is judged whole. Its PIN
+/// at or below the bar refuses it, and its relay list goes nowhere: not into
+/// the pairing record, not into the state.
+#[tokio::test]
+async fn a_relays_whose_pin_is_below_the_bar_leaves_the_relay_list_unchanged() {
+    let w = Ward::new();
+    let (b, keys) = w.broker();
+    approve(&w, &b, ROOT_SEED, WORKING_SEED, 1).await;
+    // A PIN from a phone two minutes ahead: the bar is the ward's clock.
+    let pin = relays_event(
+        WORKING_SEED,
+        NOW + 120,
+        json!({"machine": machine_pk(), "guardianPin": pin_record()}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&pin, WORKING_SEED, 2), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Applied);
+    let pairing_before = b.sys().pairing().load().unwrap();
+    let state_before = w.store.raw().unwrap();
+
+    // The root's relay list with a PIN signed before that bar.
+    let combined = relays_event(
+        ROOT_SEED,
+        NOW - 5,
+        json!({"machine": machine_pk(), "relays": default_relays(), "guardianPin": pin_record()}),
+    );
+    let out = b
+        .ingest_local(&w.sealed(&combined, ROOT_SEED, 3), LOCAL)
+        .await;
+    assert_eq!(out.result, AckResult::Refused);
+    assert!(!out.relays_changed);
+    assert_eq!(b.sys().pairing().load().unwrap(), pairing_before);
+    assert_eq!(w.store.raw().unwrap(), state_before);
+    assert_eq!(
+        keys.status_guardians(NOW).unwrap().relays,
+        vec!["wss://r".to_string()]
+    );
+
+    // The same relay list alone still applies.
+    let list = relays_event(
+        ROOT_SEED,
+        NOW - 4,
+        json!({"machine": machine_pk(), "relays": default_relays()}),
+    );
+    let out = b.ingest_local(&w.sealed(&list, ROOT_SEED, 4), LOCAL).await;
+    assert_eq!(out.result, AckResult::Applied);
+    assert_eq!(keys.status_guardians(NOW).unwrap().relays, default_relays());
+}
+
 #[tokio::test]
 async fn a_relays_change_the_state_cannot_record_leaves_the_pairing_alone() {
     let w = Ward::new();

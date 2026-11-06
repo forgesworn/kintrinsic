@@ -1415,11 +1415,21 @@ impl GuardianStatements for GuardianKeys {
             relays: change.relays,
             guardian_pin: pin.as_ref(),
         };
+        // The whole RELAYS is judged before anything is applied: the pairing
+        // record is saved only on `Recorded` or `AlreadyHeld`. A RELAYS with
+        // a relay list is already held only when the state has recorded one
+        // at its time (a save of the pairing record that failed after it): a
+        // `not_newer` above that is its PIN at or below the bar or its
+        // author's PIN floor, which refuses it whole, relay list included.
         let recorded = self.commit(|d| {
             let step = cg::apply_relays(&d.state, &input, secs(now));
             match (step.outcome.result, step.outcome.reason) {
                 (Verdict::Accepted, _) => (Some(with_state(d, step.state)), RelaysRecord::Recorded),
-                (_, Reason::NotNewer) => (None, RelaysRecord::AlreadyHeld),
+                (_, Reason::NotNewer)
+                    if input.relays.is_none() || input.ts <= d.state.relays_updated_at =>
+                {
+                    (None, RelaysRecord::AlreadyHeld)
+                }
                 _ => (None, RelaysRecord::Refused),
             }
         });
