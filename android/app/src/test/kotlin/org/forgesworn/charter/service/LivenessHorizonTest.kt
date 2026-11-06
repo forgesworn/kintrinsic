@@ -39,4 +39,46 @@ class LivenessHorizonTest {
         first(137, calls)
         assertTrue(calls.size <= 12)
     }
+
+    @Test
+    fun `a listening grace ending soon is a boundary one second after it runs out`() {
+        assertEquals(31L, LivenessHorizon.earliest(null, null, null, listeningSecs = 30))
+        // The earliest of everything wins, including the probe.
+        assertEquals(11L, LivenessHorizon.earliest(probe = 90, scheduleSecs = null, debuggingSecs = null, listeningSecs = 10))
+        assertEquals(31L, LivenessHorizon.earliest(probe = 90, scheduleSecs = 200, debuggingSecs = null, listeningSecs = 30))
+    }
+
+    @Test
+    fun `a grace beyond the horizon, or none, adds nothing`() {
+        assertNull(LivenessHorizon.earliest(null, null, null, listeningSecs = 301))
+        assertNull(LivenessHorizon.earliest(null, null, null, listeningSecs = null))
+        assertNull(LivenessHorizon.earliest(null, null, null, listeningSecs = -1))
+    }
+
+    @Test
+    fun `the schedule allowance is a boundary but an unbounded one is not`() {
+        assertEquals(121L, LivenessHorizon.earliest(null, scheduleSecs = 120, debuggingSecs = null, listeningSecs = null))
+        assertNull(LivenessHorizon.earliest(null, scheduleSecs = -1, debuggingSecs = null, listeningSecs = null))
+        assertNull(LivenessHorizon.earliest(null, scheduleSecs = 4_000, debuggingSecs = null, listeningSecs = null))
+    }
+
+    @Test
+    fun `a low budget alone adds no boundary`() {
+        // The budget is not an input at all: with the schedule unbounded (-1)
+        // and nothing else due, a ward with 2 minutes of budget left and the
+        // screen dark has no boundary, so the alarm is not woken for it.
+        val tl = org.forgesworn.charter.native.CharterCore.parseTimeLeft(
+            """{"known":true,"locked":false,"reason":"none","effectiveSecs":120,"scheduleSecs":-1,"budgetSecs":120,"extensionSecs":0}""",
+        )
+        assertEquals(-1L, tl.scheduleSecs)
+        assertNull(LivenessHorizon.earliest(null, tl.scheduleSecs, null, null))
+    }
+
+    @Test
+    fun `an extension running out while the schedule is closed is read from the schedule allowance`() {
+        val tl = org.forgesworn.charter.native.CharterCore.parseTimeLeft(
+            """{"known":true,"locked":false,"reason":"none","effectiveSecs":90,"scheduleSecs":90,"budgetSecs":-1,"extensionSecs":90}""",
+        )
+        assertEquals(91L, LivenessHorizon.earliest(null, tl.scheduleSecs, null, null))
+    }
 }

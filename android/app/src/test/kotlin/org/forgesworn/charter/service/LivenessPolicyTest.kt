@@ -113,4 +113,27 @@ class LivenessPolicyTest {
             assertTrue(LivenessPolicy.nextAlarmDelayMs(true, false, t0, b) <= five)
         }
     }
+
+    @Test
+    fun `a boundary since the last tick makes a dark alarm tick inside the kick gap`() {
+        val last = t0
+        val now = t0 + 4_000L // inside DARK_KICK_GAP_MS, and under three lit beats
+        assertFalse(LivenessPolicy.tickDue(now, last, interactive = false, tickMs = TICK_MS))
+        assertTrue(LivenessPolicy.tickDue(now, last, interactive = false, tickMs = TICK_MS, boundaryPassed = true))
+        // Lit, the handler loop does the work and the alarm stays a watchdog.
+        assertFalse(LivenessPolicy.tickDue(now, last, interactive = true, tickMs = TICK_MS, boundaryPassed = true))
+    }
+
+    @Test
+    fun `boundaryPassed is true only for a noted boundary in the gap since the last tick`() {
+        LivenessAlarm.noteBoundary(t0 + 10_000L)
+        assertTrue(LivenessAlarm.boundaryPassed(t0, t0 + 10_000L))
+        assertTrue(LivenessAlarm.boundaryPassed(t0, t0 + 11_000L))
+        assertFalse(LivenessAlarm.boundaryPassed(t0, t0 + 9_999L))      // not yet
+        assertFalse(LivenessAlarm.boundaryPassed(t0 + 10_000L, t0 + 20_000L)) // already ticked after it
+        LivenessAlarm.noteBoundary(null)
+        assertFalse(LivenessAlarm.boundaryPassed(t0, t0 + 400_000L))
+        LivenessAlarm.noteBoundary(null, unknown = true)
+        assertFalse(LivenessAlarm.boundaryPassed(t0, t0 + 400_000L))
+    }
 }

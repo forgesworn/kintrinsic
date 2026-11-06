@@ -23,9 +23,10 @@ internal object LivenessPolicy {
     /**
      * The alarm's period on "Longer battery" while the screen is off. The
      * guardian has accepted that a rule change sent to a sleeping phone can
-     * take this long to arrive; scheduled times still start on time because
-     * the alarm is pulled forward to the next known boundary (see
-     * [nextAlarmDelayMs]), and waking the screen checks at once.
+     * take longer to arrive (the relay is polled every 10 minutes then, and a
+     * poll now waits for a wake-up); scheduled times still start within about
+     * a minute because the alarm is pulled forward to the next known boundary
+     * (see [nextAlarmDelayMs]), and waking the screen checks at once.
      */
     const val LONGER_BATTERY_ALARM_MS = 5 * 60_000L
 
@@ -33,7 +34,8 @@ internal object LivenessPolicy {
      * How long until the next liveness alarm. Every mode but "Longer battery"
      * with the screen off keeps [ALARM_MS]. In that one case it is the
      * earlier of [LONGER_BATTERY_ALARM_MS] and the next rule boundary the ward
-     * already knows about, so a scheduled lock is never later than it was.
+     * already knows about, so a scheduled lock still starts within about a
+     * minute of its time.
      *
      * [nowMs] and [nextBoundaryMs] are on the same clock (`elapsedRealtime`).
      * `null` means no boundary lies ahead. A boundary at or before [nowMs] is
@@ -73,10 +75,20 @@ internal object LivenessPolicy {
      * Whether the alarm should run an enforcement tick now. While lit, the
      * alarm is only a watchdog (the handler ticks every [tickMs]), so it acts
      * when the loop has missed three beats. While dark, the alarm IS the
-     * cadence. A tick that never ran is always due.
+     * cadence. A tick that never ran is always due, and so is one when a noted
+     * rule boundary has fallen since the last tick (dark only).
      */
-    fun tickDue(nowMs: Long, lastTickMs: Long, interactive: Boolean, tickMs: Long): Boolean {
+    fun tickDue(
+        nowMs: Long,
+        lastTickMs: Long,
+        interactive: Boolean,
+        tickMs: Long,
+        boundaryPassed: Boolean = false,
+    ): Boolean {
         if (lastTickMs == 0L) return true
+        // An alarm pulled forward to a rule boundary must tick even when the
+        // last tick was only seconds ago, or the boundary slips a whole minute.
+        if (boundaryPassed && !interactive) return true
         val gap = nowMs - lastTickMs
         return gap >= if (interactive) 3 * tickMs else DARK_KICK_GAP_MS
     }
@@ -137,6 +149,12 @@ object LivenessAlarm {
      *  enforcement tick; a process restart forgets it, which only means one
      *  minute-paced alarm until the next tick has read the rules again. */
     @Volatile private var boundaryAtMs = BOUNDARY_UNKNOWN
+
+    /** Whether a boundary noted by a tick fell after [lastTickMs] and by [nowMs]. */
+    fun boundaryPassed(lastTickMs: Long, nowMs: Long): Boolean {
+        val b = boundaryAtMs
+        return b != BOUNDARY_UNKNOWN && b != BOUNDARY_NONE && b > lastTickMs && b <= nowMs
+    }
 
     /** Record the boundary the last tick found: `null` = none ahead,
      *  `unknown` = it could not be worked out (minute cadence). */

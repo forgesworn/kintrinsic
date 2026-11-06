@@ -15,8 +15,8 @@ import org.forgesworn.charter.native.CharterCore
  * caught this way, with no list of rule types to keep in step.
  *
  * Two things a "what would it be later" question cannot see are read directly:
- * the seconds left on an out-of-hours extension (it burns wall-clock), and the
- * end of a debugging window.
+ * the seconds left on an out-of-hours extension (it burns wall-clock), the
+ * end of a debugging window, and the end of a listening grace.
  */
 internal object LivenessHorizon {
     /** How far ahead to look: the stretched alarm period. */
@@ -90,16 +90,38 @@ internal object LivenessHorizon {
      * horizon, or null when none is in reach. Throws if the core cannot be
      * read; the caller then keeps the minute cadence.
      */
-    fun nextChangeSecs(nowUnix: Long): Long? {
-        val candidates = mutableListOf<Long>()
-        firstChangeSecs(HORIZON_SECS, STEP_SECS, RESOLUTION_SECS) { snapshotAt(nowUnix + it) }
-            ?.let { candidates += it }
-        // An out-of-hours extension burns wall-clock and ends when it runs out.
+    fun nextChangeSecs(nowUnix: Long, listeningSecsLeft: Long? = null): Long? {
+        val probe = firstChangeSecs(HORIZON_SECS, STEP_SECS, RESOLUTION_SECS) { snapshotAt(nowUnix + it) }
         val tl = CharterCore.timeLeft(null, nowUnix)
-        if (tl.known && !tl.locked && tl.effectiveSecs in 0..HORIZON_SECS) candidates += tl.effectiveSecs + 1
-        // A debugging window ends at a stated second.
         val dbg = CharterCore.debuggingUntil(nowUnix)
-        if (dbg > nowUnix && dbg - nowUnix <= HORIZON_SECS) candidates += dbg - nowUnix + 1
+        return earliest(
+            probe = probe,
+            scheduleSecs = tl.scheduleSecs.takeIf { tl.known && !tl.locked },
+            debuggingSecs = (dbg - nowUnix).takeIf { dbg > nowUnix },
+            listeningSecs = listeningSecsLeft,
+        )
+    }
+
+    /**
+     * The earliest of the boundaries, in seconds from now, within the horizon.
+     * Pure. [probe] is already an instant the answer HAS changed. The others
+     * are "this many seconds are left", so the change is one second after:
+     *  - [scheduleSecs]: the schedule's own allowance (window close, or the
+     *    out-of-hours extension running out). NOT the effective figure, which
+     *    folds in the screen-time budget: that does not burn while the screen
+     *    is dark, so using it would wake the phone every few seconds all night
+     *    once a budget ran low. -1 or null = none.
+     *  - [debuggingSecs]: a debugging window's end.
+     *  - [listeningSecs]: the listening grace running out, when the music that
+     *    was allowed to finish must stop. The core cannot be probed for it.
+     */
+    fun earliest(probe: Long?, scheduleSecs: Long?, debuggingSecs: Long?, listeningSecs: Long?): Long? {
+        val candidates = listOfNotNull(
+            probe,
+            scheduleSecs?.takeIf { it in 0..HORIZON_SECS }?.plus(1),
+            debuggingSecs?.takeIf { it in 0..HORIZON_SECS }?.plus(1),
+            listeningSecs?.takeIf { it in 0..HORIZON_SECS }?.plus(1),
+        )
         return candidates.minOrNull()
     }
 }

@@ -23,19 +23,22 @@ phone → Battery & responsiveness. Advanced controls start collapsed.
 
 The ward keeps a wake-up alarm that makes sure it is still running and has
 checked its rules. It normally goes off every minute, day and night, and on a
-child's phone that is the most frequent thing waking it. On Longer battery
+ward's phone that is the most frequent thing waking it. On Longer battery
 life, **while the screen is off**, the alarm goes off every 5 minutes instead.
 Every other preset, and any time the screen is on, keeps the one-minute alarm.
 
-In plain terms for a parent:
+In plain terms for a guardian:
 
-- While your child's phone is asleep, a rule change you send can take up to
-  5 minutes to arrive and take effect.
+- While the ward's phone is asleep, a change you send can take up to about 10
+  minutes to arrive and take effect. The relay is only checked every 10 minutes
+  with the screen off, and that check now waits for the next wake-up, which can
+  be 5 minutes apart. On your home Wi-Fi (the local link) it is a few minutes.
 - Times you have already set (bedtime, school hours, the end of extra time you
-  granted) still start on time. The phone knows when the next one is due and
-  sets its alarm for that moment, so a scheduled lock is never later than it was.
+  granted, the end of music allowed to finish) still start within about a
+  minute of when they should. The phone knows when the next one is due and sets
+  its wake-up for that moment.
 - When the screen comes on, or the phone is unlocked, it checks the rules
-  straight away and goes back to the one-minute alarm.
+  straight away and goes back to the one-minute wake-up.
 - Changing the setting takes effect at once; there is nothing to restart.
 
 How it works: with the screen off, the next alarm is due at the earlier of 5
@@ -43,8 +46,11 @@ minutes and the next moment the rules change. The ward finds that moment by
 asking its rule engine what it would enforce one, two, up to five minutes from
 now (lock state, named time, app lists and per-app hours, buckets, tethering,
 install window) and narrowing any difference down to about two seconds. It also
-reads the end of an out-of-hours extension and of a debugging window directly.
-If the rules cannot be read, the alarm stays at one minute. This does not change
+reads the end of an out-of-hours extension (not the screen-time budget, which
+does not run down while the screen is off), of a debugging window and of a
+listening grace directly. An alarm pulled forward to such a moment always runs
+a check, even if one ran a few seconds earlier. If the rules cannot be read, or
+a check fails, the alarm stays at one minute. This does not change
 Doze allow-listing, the foreground service or relay pacing.
 
 Two consequences to know about. The stuck-tick watchdog runs from the alarm, so a

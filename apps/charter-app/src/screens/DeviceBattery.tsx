@@ -13,7 +13,7 @@ export default function DeviceBattery({ child, device }: { child: Child; device:
   const [busy, setBusy] = useState(false);
   return <details className="card device-section"><summary>Battery &amp; responsiveness — {device.label}</summary>
     <p className="card-sub">For this ward phone only. Your guardian phone has separate settings. These are proposed values until the ward confirms applying the signed code. Requires an updated ward APK.</p>
-    <p className="card-sub">On Longer battery life, while your child&rsquo;s phone is asleep, a change you send can take up to 5 minutes to arrive. Times you have already set, such as bedtime, still start on time. The phone also checks straight away when the screen comes on.</p>
+    <p className="card-sub">On Longer battery life, while the ward&rsquo;s phone is asleep, a change you send can take up to about 10 minutes to arrive (a few minutes if you are on the same home Wi-Fi). Times you have already set, such as bedtime, still start within about a minute of when they should. The phone also checks straight away when the screen comes on.</p>
     <BatteryControls value={value} onChange={(v) => { setValue(v); setCode(""); }} />
     <p className="card-sub">This code also confirms the relay list. Check it matches the phone before signing: {(device.relays ?? DEFAULT_RELAYS).join(", ")}. If its relay list differs, update that list in Relays first.</p>
     <button className="btn" disabled={busy || device.pairing !== "paired"} onClick={async () => {
