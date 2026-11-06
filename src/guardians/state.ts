@@ -226,7 +226,8 @@ export interface GuardianState {
    * The PIN's bar, across signers: the effective time, `min(created_at, the
    * ward clock)`, of the PIN in force, never falling. A RELAYS carrying a PIN
    * is taken only above it, so an older PIN from another install processed
-   * later can't roll back a newer one (rule 11). 0 before any PIN.
+   * later can't roll back a newer one (rule 11). 0 before any PIN. Absent
+   * in a state saved before this rule: `loadState` seeds it.
    */
   pinBar: number
   /** The `created_at` of the RELAYS that set the PIN in force; null before any. STATUS `guardians.pinSetAt`. */
@@ -269,8 +270,30 @@ function cmp(a: string, b: string): number {
 }
 
 function clone(s: GuardianState): GuardianState {
-  return JSON.parse(JSON.stringify(s)) as GuardianState
+  return loadState(JSON.parse(JSON.stringify(s)) as GuardianState)
 }
+
+/**
+ * A saved state, with the members a state saved before their rule lacks
+ * filled in as the Rust reference reads them: no statement or PIN floors,
+ * nothing clamped, no `pinSetAt`, and the PIN bar at the saved `pinSetAt`
+ * if any, else 0. Every step does this to the state it is given. Changes
+ * `saved` in place and returns it.
+ */
+export function loadState(saved: SavedGuardianState): GuardianState {
+  saved.statementFloors ??= []
+  saved.pinFloors ??= []
+  saved.clamped ??= 0
+  saved.pinSetAt ??= null
+  saved.pinBar ??= saved.pinSetAt ?? 0
+  return saved as GuardianState
+}
+
+/** The members a state saved before their rule lacks. */
+type LaterMembers = 'statementFloors' | 'pinFloors' | 'clamped' | 'pinSetAt' | 'pinBar'
+
+/** A saved `GuardianState`, which may predate some of its members. */
+export type SavedGuardianState = Omit<GuardianState, LaterMembers> & Partial<Pick<GuardianState, LaterMembers>>
 
 /** Sort every list whose order carries no meaning, so JSON is stable. */
 function normalise(s: GuardianState): GuardianState {

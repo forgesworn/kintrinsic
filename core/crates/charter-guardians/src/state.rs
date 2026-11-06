@@ -258,8 +258,11 @@ pub struct PreviousRelays {
 }
 
 /// The whole ward-side guardian-keys state of one pairing.
+///
+/// Its serde impls are the derived ones, but for `pin_bar`, which a state
+/// persisted before the PIN bar loads at its `pin_set_at` if any, else 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", remote = "Self")]
 pub struct GuardianState {
     pub v: u8,
     pub paired_at: i64,
@@ -293,8 +296,9 @@ pub struct GuardianState {
     /// the ward clock)`, of the PIN in force, never falling. A RELAYS
     /// carrying a PIN is taken only above it, so an older PIN from another
     /// install processed later can't roll back a newer one (rule 11). 0
-    /// before any PIN, and in a state persisted before this rule.
-    #[serde(default)]
+    /// before any PIN. Absent in a state persisted before this rule: its
+    /// `pin_set_at` if any, else 0.
+    #[serde(default = "pin_bar_absent")]
     pub pin_bar: i64,
     /// The `created_at` of the RELAYS that set the PIN in force: STATUS
     /// `guardians.pinSetAt`. None before any PIN, and in a state persisted
@@ -308,6 +312,27 @@ pub struct GuardianState {
     /// `guardians.clamped`.
     #[serde(default)]
     pub clamped: u64,
+}
+
+/// `pin_bar` as read when the field is absent, before it is seeded.
+fn pin_bar_absent() -> i64 {
+    i64::MIN
+}
+
+impl Serialize for GuardianState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        GuardianState::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GuardianState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut s = GuardianState::deserialize(deserializer)?;
+        if s.pin_bar == pin_bar_absent() {
+            s.pin_bar = s.pin_set_at.unwrap_or(0);
+        }
+        Ok(s)
+    }
 }
 
 /// One pending statement resolved by the timer advance.

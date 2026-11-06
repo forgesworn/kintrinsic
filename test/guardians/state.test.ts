@@ -19,7 +19,9 @@ import {
   projectState,
   heldClause,
   pendingExpiry,
+  loadState,
   type GuardianState,
+  type SavedGuardianState,
   type SignedEvent,
   type StepResult,
 } from '../../src/guardians/index.js'
@@ -646,6 +648,28 @@ describe('rule 11: relay lists, the guardian PIN', () => {
     // Another signer's PIN dated above the bar is taken: newest by arrival, as clauses.
     s = ok(applyRelays(s, wrapped(R1, T0 + 50, { guardianPin: pin }), T0 + 60), 'relays_applied')
     expect(statusGuardians(s).pinSetAt).toBe(T0 + 50)
+  })
+
+  test('a state saved before the PIN bar loads with the bar at its pinSetAt if any, else 0', () => {
+    // W1's PIN, dated ahead of the ward clock: the bar is the clock, T0 + 100.
+    const s = ok(applyRelays(pairedR1W1(), wrapped(W1, T0 + 500, { guardianPin: pin }), T0 + 100), 'relays_applied')
+    expect([s.pinBar, s.pinSetAt]).toEqual([T0 + 100, T0 + 500])
+
+    // Saved with no bar: it loads at pinSetAt, so R1's older PIN is refused.
+    const noBar: SavedGuardianState = JSON.parse(JSON.stringify(s)) as GuardianState
+    delete noBar.pinBar
+    expect(loadState(structuredClone(noBar)).pinBar).toBe(T0 + 500)
+    dropped(applyRelays(noBar as GuardianState, wrapped(R1, T0 + 300, { guardianPin: pin }), T0 + 300), 'not_newer')
+    ok(applyRelays(noBar as GuardianState, wrapped(R1, T0 + 501, { guardianPin: pin }), T0 + 600), 'relays_applied')
+
+    // Saved with neither: 0, and R1's PIN is judged only on its own floor.
+    const neither = structuredClone(noBar)
+    delete neither.pinSetAt
+    expect(loadState(structuredClone(neither))).toMatchObject({ pinBar: 0, pinSetAt: null })
+    ok(applyRelays(neither as GuardianState, wrapped(R1, T0 + 300, { guardianPin: pin }), T0 + 300), 'relays_applied')
+
+    // A bar that is present is kept.
+    expect(loadState(structuredClone(s))).toEqual(s)
   })
 })
 

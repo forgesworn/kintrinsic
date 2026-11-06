@@ -1,7 +1,7 @@
 //! The per-signer replay floors of the clock clamp, beyond what the golden
 //! vectors cover: far more clamped events than any old quota, and states
-//! persisted before the floors. Mirrors the TS test in
-//! `test/guardians/limits.test.ts`.
+//! persisted before the floors or the PIN bar. Mirrors the TS tests in
+//! `test/guardians/limits.test.ts` and `test/guardians/state.test.ts`.
 mod common;
 
 use charter_guardians::*;
@@ -221,4 +221,68 @@ fn legacy_statement_without_floors_still_reads() {
     );
     let next = apply_inbound(&old, &w1, &coguardian(&v, T0 + DAY + 1), T0 + 20);
     assert_eq!(next.outcome.reason, Reason::CoguardianPending);
+}
+
+/// A PIN-only RELAYS from `author`, as a gift-wrapped one reaches the ward.
+fn pin(s: &GuardianState, author: &str, ts: i64, now: i64) -> Step {
+    let hash = pin_hash("4821", &[0x5a; 16]);
+    let rec = serde_json::json!({
+        "v": 1,
+        "salt": "5a".repeat(16),
+        "hash": hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    });
+    apply_relays(
+        s,
+        &RelaysInput {
+            author,
+            channel: RelaysChannel::Wrapped {
+                seal_author: author,
+            },
+            ts,
+            relays: None,
+            guardian_pin: Some(&rec),
+        },
+        now,
+    )
+}
+
+#[test]
+fn a_state_saved_before_the_pin_bar_seeds_it_from_pin_set_at() {
+    let (s, w1) = paired();
+    let r1 = common::load("scenarios.json")["keys"]["R1"]["pubkey"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // W1's PIN, dated ahead of the ward clock: the bar is the clock, T0 + 100.
+    let s = pin(&s, &w1, T0 + 500, T0 + 100);
+    assert_eq!(s.outcome.reason, Reason::RelaysApplied);
+    let s = s.state;
+    assert_eq!((s.pin_bar, s.pin_set_at), (T0 + 100, Some(T0 + 500)));
+
+    // Saved with no bar: it loads at pinSetAt, so R1's older PIN is refused.
+    let mut v = serde_json::to_value(&s).unwrap();
+    v.as_object_mut().unwrap().remove("pinBar");
+    let old: GuardianState = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(old.pin_bar, T0 + 500);
+    assert_eq!(
+        pin(&old, &r1, T0 + 300, T0 + 300).outcome.reason,
+        Reason::NotNewer
+    );
+    assert_eq!(
+        pin(&old, &r1, T0 + 501, T0 + 600).outcome.reason,
+        Reason::RelaysApplied
+    );
+
+    // Saved with neither: 0, and R1's PIN is judged only on its own floor.
+    v.as_object_mut().unwrap().remove("pinSetAt");
+    let older: GuardianState = serde_json::from_value(v).unwrap();
+    assert_eq!((older.pin_bar, older.pin_set_at), (0, None));
+    assert_eq!(
+        pin(&older, &r1, T0 + 300, T0 + 300).outcome.reason,
+        Reason::RelaysApplied
+    );
+
+    // A bar that is present is kept, and round-trips.
+    let back: GuardianState = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+    assert_eq!(back, s);
 }
