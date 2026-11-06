@@ -10,6 +10,7 @@ import {
 import type { Policy } from "../domain/types";
 import { appRulesToGrant } from "../wire/clause";
 import type { GrantAppRules } from "../wire/types";
+import { endOfDayUnix } from "../wire/grant";
 import { unwrapClause, unwrapGrant, type GuardianOps } from "../wire/giftwrap";
 import type { DecisionContext } from "./Signer";
 import { RealSigner, type ChildTarget, type SignedRule } from "./realSigner";
@@ -1224,6 +1225,35 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
       const opened = unwrapClause(w, w.tags.find((t) => t[0] === "p")![1] === DPK1 ? DEV1 : DEV2, GUARDIAN);
       expect(opened.payload.issuedAt).toBe(1_700_000_000 + 3 * 86_400 + 1);
     }
+  });
+
+  it("counts a gift's, a stand-down's and an install window's expiry from the raw clock, not a rising clock left ahead", async () => {
+    // Once three days ahead, now corrected: the rising clock is still there.
+    const now = 1_700_000_000;
+    const ahead = now + 3 * 86_400;
+    localStorage.setItem("charter.signer.lastIssuedAt", String(ahead));
+    const { signer, published } = setup([]);
+    await signer.connect("local");
+    const sent = async (sign: () => Promise<unknown>) => {
+      published.length = 0;
+      await sign();
+      const opened = published.map((w) => unwrapClause(w, w.tags.find((t) => t[0] === "p")![1] === DPK1 ? DEV1 : DEV2, GUARDIAN));
+      expect(opened.length).toBeGreaterThan(0);
+      for (const o of opened) expect(o.payload.issuedAt).toBeGreaterThan(ahead);
+      return opened[0].payload.body as { expiresAt?: number; untilUnix?: number; issuedAt: number };
+    };
+    // A gift dies at the end of the child's day as the raw clock reads it.
+    const gift = await sent(() => signer.signGiftClause!("child_sam", 30, "Europe/London"));
+    expect(gift.expiresAt).toBe(endOfDayUnix(now, "Europe/London"));
+    // A stand-down likewise; a lift is a day before the raw clock, so before
+    // both the ward's clock and its own issuedAt.
+    const call = await sent(() => signer.signStandDownClause!("child_sam", { tz: "Europe/London" }));
+    expect(call.expiresAt).toBe(endOfDayUnix(now, "Europe/London"));
+    const lift = await sent(() => signer.signStandDownClause!("child_sam", { lift: true, tz: "Europe/London" }));
+    expect(lift.expiresAt).toBe(now - 86_400);
+    // A 30-minute install window is 30 minutes of real time.
+    const window = await sent(() => signer.signMaintenanceClause("child_sam", 30));
+    expect(window.untilUnix).toBe(now + 30 * 60);
   });
 
   it("sends a kind with no rule held for the device as a fresh rule, to that device alone", async () => {

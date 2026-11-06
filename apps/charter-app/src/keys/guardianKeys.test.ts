@@ -566,6 +566,18 @@ describe("root move", () => {
     expect(h.keys().nextRoot).toBeUndefined();
   });
 
+  it("counts the move's expiry from the raw clock, as the ward does, not a rising clock left ahead", async () => {
+    const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", devices: [readyWard(PHONE, "android")] };
+    const h = harness([child]);
+    await connectSignetRoot(h);
+    // Once two days ahead, now corrected: the rising clock is still there.
+    new IssuedAtClock().next(T + 2 * 86_400);
+    await h.gk.moveRoot({ ops: opsOf(r2Sk), bunkerUri: "bunker://r2", via: "signet" });
+    const st = parseStatement(open(h.published[0].wrap, phoneSk).inner);
+    expect(st.ok && st.statement.issuedAt).toBeGreaterThan(T + 2 * 86_400);
+    expect(h.keys().nextRoot?.expiresAt).toBe(T + 7 * 86_400);
+  });
+
   it("is refused while a ward isn't ready", async () => {
     const child: KeysChild = { id: "c1", name: "Sam", colour: "#000", devices: [device(PHONE, "android")] };
     const h = harness([child]);
@@ -689,11 +701,12 @@ describe("root move", () => {
     });
 
     it("by expiry, from the move's own 7 days once no ward lists it", () => {
-      // The move is dated T + 1: the install's rising clock gave T to W's approval.
-      h.setNow(T + 1 + 7 * 24 * 3600 - 1);
+      // The move is dated T + 1 (the install's rising clock gave T to W's
+      // approval), but its 7 days count from the raw clock, T, as a ward's do.
+      h.setNow(T + 7 * 24 * 3600 - 1);
       h.gk.settleRootMove();
       expect(h.keys().nextRoot).toBeDefined();
-      h.setNow(T + 1 + 7 * 24 * 3600);
+      h.setNow(T + 7 * 24 * 3600);
       h.gk.settleRootMove();
       expect(h.keys().nextRoot).toBeUndefined();
     });

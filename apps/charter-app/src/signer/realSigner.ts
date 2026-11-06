@@ -660,7 +660,9 @@ export class RealSigner implements Signer {
     );
     const issuedAt = this.nextIssuedAt();
     // Absolute expiry, computed once: a duration would restart on every
-    // re-read of the stored clause and the window would never shut.
+    // re-read of the stored clause and the window would never shut. It counts
+    // from the raw clock, not `issuedAt`: the rising clock can be left ahead
+    // after a clock correction, and would stretch the window by that much.
     //
     // `minutes <= 0` is how a guardian CLOSES a window early: the expiry lands
     // at (or before) issue, so the ward's `is_open` — which shuts on
@@ -669,7 +671,7 @@ export class RealSigner implements Signer {
     // open one. The same shape lifting a stand-down uses. Nothing special is
     // needed on the phone, which is exactly why it is safe: a guardian ending
     // a loosening early must never depend on new ward code.
-    const body = { v: 1 as const, untilUnix: issuedAt + minutes * 60, issuedAt };
+    const body = { v: 1 as const, untilUnix: this.deps.now() + minutes * 60, issuedAt };
     const clause: ClausePayload = { v: 1, kind: "maintenance", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     const signed = new RulesSigned();
@@ -777,8 +779,10 @@ export class RealSigner implements Signer {
       minutes: clampGrantMinutes(g.minutes),
       // End of day in the CHILD's tz, exactly like a granted ask's exp — never
       // the guardian phone's midnight, which can land on the wrong side of the
-      // device's own day roll.
-      expiresAt: endOfDayUnix(issuedAt, g.tz),
+      // device's own day roll. The day is the raw clock's, not `issuedAt`'s:
+      // a rising clock left ahead after a correction must not move the gift
+      // into a later day.
+      expiresAt: endOfDayUnix(this.deps.now(), g.tz),
       groupId: g.groupId,
       time: g.time,
     });
@@ -904,7 +908,12 @@ export class RealSigner implements Signer {
       // a ward whose device ran behind the guardian's. (Wardens with the
       // clock-independent `expiresAt <= issuedAt` rule don't need this; the
       // ones already shipped do.)
-      expiresAt: lift ? issuedAt - 86_400 : endOfDayUnix(issuedAt, opts?.tz),
+      //
+      // Both count from the raw clock, not `issuedAt`: the rising clock can be
+      // left ahead after a clock correction, and would carry a stand-down
+      // into a later day (or a lift into the ward's future). `issuedAt` is
+      // never below the raw clock, so a lift still has `expiresAt <= issuedAt`.
+      expiresAt: lift ? this.deps.now() - 86_400 : endOfDayUnix(this.deps.now(), opts?.tz),
       graceSecs: opts?.graceSecs ?? DEFAULT_STANDDOWN_GRACE_SECS,
     };
     const clause: ClausePayload = { v: 1, kind: "standdown", issuedAt, body };

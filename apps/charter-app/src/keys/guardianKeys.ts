@@ -1001,7 +1001,9 @@ export class GuardianKeys {
       bunkerUri: next.bunkerUri,
       moveD: event.tags.find((t) => t[0] === "d")?.[1] ?? "",
       moveId: event.id,
-      expiresAt: issuedAt + PENDING_LIFETIME_SECONDS,
+      // As the ward counts it: from min(issuedAt, received), the raw clock,
+      // since the rising clock may be ahead after a clock correction.
+      expiresAt: this.deps.now() + PENDING_LIFETIME_SECONDS,
     };
     this.deps.write((k) => ({ ...k, nextRoot }));
     this.remember(event);
