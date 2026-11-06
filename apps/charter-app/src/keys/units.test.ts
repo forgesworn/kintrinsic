@@ -124,6 +124,13 @@ describe("STATUS guardians", () => {
     expect(parseStatusGuardians({ ...g, pending: [{ ...g.pending[0], signer: "nope" }] })).toBeUndefined();
   });
 
+  it("keeps pinSetAt, the created_at of the PIN the ward holds, and refuses a malformed one (SF2)", () => {
+    const withPin = { ...g, pinSet: true, pinSetAt: 1_800_000_001 };
+    expect(parseStatusGuardians(withPin)).toEqual(withPin);
+    expect(parseStatusGuardians({ ...withPin, pinSetAt: -1 })).toBeUndefined();
+    expect(parseStatusGuardians({ ...withPin, pinSetAt: "1" })).toBeUndefined();
+  });
+
   it("keeps the pending statement's signer where the ward reports it", () => {
     const withSigner = { ...g, pending: [{ ...g.pending[0], signer: W }] };
     expect(parseStatusGuardians(withSigner)).toEqual(withSigner);

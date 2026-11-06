@@ -222,6 +222,15 @@ export interface GuardianState {
    * `relaysUpdatedAt`, so a PIN never makes a later relay code look used.
    */
   pinFloors: SignerFloor[]
+  /**
+   * The PIN's bar, across signers: the effective time, `min(created_at, the
+   * ward clock)`, of the PIN in force, never falling. A RELAYS carrying a PIN
+   * is taken only above it, so an older PIN from another install processed
+   * later can't roll back a newer one (rule 11). 0 before any PIN.
+   */
+  pinBar: number
+  /** The `created_at` of the RELAYS that set the PIN in force; null before any. STATUS `guardians.pinSetAt`. */
+  pinSetAt: number | null
   /** Departed keys owed one last STATUS showing their departure. */
   farewell: string[]
   /**
@@ -1253,6 +1262,12 @@ function sameRelays(a: readonly string[], b: readonly string[]): boolean {
  *   asleep still takes the PIN) nor for being ahead of the ward clock (a
  *   guardian phone a few minutes fast still sets it); it keeps the pairing
  *   floor. Battery settings in it are ignored by the ward.
+ * - Any PIN is ordered like a clause: it is taken only if its `created_at`
+ *   is above the PIN's bar, the effective time `min(created_at, now)` of the
+ *   PIN in force, which never falls. So an older PIN from another install,
+ *   processed later, can't roll back a newer one. A RELAYS with a relay
+ *   list and a PIN at or below the bar or its author's PIN floor is refused
+ *   whole.
  * - Only a pinned root may change the relay list. A working key's RELAYS must
  *   leave it as it is (no list, or the same set): it may carry the PIN and
  *   battery settings. A stolen phone can't steer a ward away from the relays
@@ -1271,10 +1286,10 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
       if (ev.ts < s.pairedAt) return drop('pairing_floor')
       const floor = s.pinFloors.find((f) => f.signer === ev.author)
       if (floor && ev.ts <= floor.issuedAt) return drop('not_newer')
+      if (ev.ts <= s.pinBar) return drop('not_newer')
       const v = validateGuardianPinRecord(ev.guardianPin)
       if (!v.ok) return drop('bad_pin_record')
-      s.guardianPin = v.record
-      s.pinFloors = raiseFloor(s.pinFloors, ev.author, ev.ts)
+      setPin(s, v.record, ev.author, ev.ts, now)
       return accept('relays_applied')
     }
     if (ev.ts > now) return drop('future')
@@ -1288,6 +1303,8 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
       if (ev.channel !== 'wrapped') return drop('pin_not_wrapped')
       const v = validateGuardianPinRecord(ev.guardianPin)
       if (!v.ok) return drop('bad_pin_record')
+      const floor = s.pinFloors.find((f) => f.signer === ev.author)
+      if ((floor && ev.ts <= floor.issuedAt) || ev.ts <= s.pinBar) return drop('not_newer')
       pin = v.record
     }
     if (changes && ev.relays) {
@@ -1296,12 +1313,17 @@ export function applyRelays(state: GuardianState, ev: RelaysInput, now: number):
       s.relays = [...ev.relays]
     }
     s.relaysUpdatedAt = ev.ts
-    if (pin) {
-      s.guardianPin = pin
-      s.pinFloors = raiseFloor(s.pinFloors, ev.author, ev.ts)
-    }
+    if (pin) setPin(s, pin, ev.author, ev.ts, now)
     return accept('relays_applied')
   })
+}
+
+/** Apply an accepted PIN: the record, its author's floor, the bar (never falling) and `pinSetAt`. */
+function setPin(s: GuardianState, record: GuardianPinRecord, author: string, ts: number, now: number): void {
+  s.guardianPin = record
+  s.pinFloors = raiseFloor(s.pinFloors, author, ts)
+  s.pinBar = Math.max(s.pinBar, Math.min(ts, now))
+  s.pinSetAt = ts
 }
 
 /** The ward has sent STATUS: departed keys have had their last one. */
@@ -1380,6 +1402,8 @@ export function pairFromOffer(inbound: Inbound, token: PairToken, now: number): 
     previousRelays: [],
     guardianPin: null,
     pinFloors: [],
+    pinBar: 0,
+    pinSetAt: null,
     farewell: [],
     clamped: 0,
   }
@@ -1416,6 +1440,12 @@ export interface StatusGuardians {
   relays: string[]
   /** A guardian PIN is set (Android presence confirmation needs one). */
   pinSet: boolean
+  /**
+   * The `created_at` of the RELAYS that set the PIN in force; absent when
+   * none is set. A guardian install marks its PIN set only when this is the
+   * `created_at` it sent.
+   */
+  pinSetAt?: number
   /** Accepted clauses and statements whose claimed time was clamped to the ward clock, since pairing. */
   clamped: number
 }
@@ -1441,6 +1471,7 @@ export function statusGuardians(state: GuardianState): StatusGuardians {
     tombstones: state.tombstones.length,
     relays: [...state.relays],
     pinSet: state.guardianPin !== null,
+    ...(state.guardianPin !== null && state.pinSetAt !== null ? { pinSetAt: state.pinSetAt } : {}),
     clamped: state.clamped,
   }
 }
@@ -1469,6 +1500,8 @@ export interface ProjectedState {
   relays: string[]
   statusRelays: string[]
   guardianPin: GuardianPinRecord | null
+  pinSetAt: number | null
+  pinBar: number
   clamped: number
 }
 
@@ -1499,6 +1532,8 @@ export function projectState(state: GuardianState, now: number): ProjectedState 
     relays: [...state.relays],
     statusRelays: statusRelays(state, now),
     guardianPin: state.guardianPin ? { ...state.guardianPin } : null,
+    pinSetAt: state.pinSetAt,
+    pinBar: state.pinBar,
     clamped: state.clamped,
   }
 }

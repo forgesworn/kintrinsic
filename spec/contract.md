@@ -2911,6 +2911,19 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
       PIN accepted from that signer. It never touches the relay list's
       floor, so a PIN resent after a relay code was signed doesn't make that
       code look already used.
+      - **The PIN is ordered like a clause.** The ward keeps a **PIN bar**
+        across signers: the effective time, `min(created_at, the ward's
+        clock when it arrived)`, of the PIN in force, never falling
+        (`max(the old bar, …)`, as a clause slot's bar). A RELAYS carrying a
+        PIN is accepted only if its `created_at` is above the bar **and**
+        above its seal author's PIN floor. So when two installs set PINs
+        while a ward is offline, the order the ward processes them in
+        doesn't matter: an older PIN processed after a newer one is refused,
+        and can't roll it back. A guardian install dates each PIN from its
+        rising counter (*Who may sign what*), so a PIN it sends after its
+        clock was corrected is still above the floor its earlier one set.
+        A RELAYS with a relay list and a PIN at or below either is refused
+        whole.
       - It is not refused for its age (the 600-second rule), so a ward that
         was asleep still takes the PIN.
       - It is not refused for a `created_at` ahead of the ward's clock, as a
@@ -2957,9 +2970,15 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
     clock, so a phone a few minutes fast still sets it; and a replay floor of
     its own per signer, so resending it never blocks a relay code. A pasted
     relay code never carries it.
-  - STATUS `guardians.pinSet` says whether a PIN is set. The guardian app
-    keeps a PIN marked as sending until a STATUS shows `pinSet`, and sends it
-    again on each STATUS without it.
+  - STATUS `guardians.pinSet` says whether a PIN is set, and
+    `guardians.pinSetAt` is the `created_at` of the RELAYS that set the PIN
+    in force. `pinSet` alone doesn't confirm a send: the ward may hold an
+    older PIN. The guardian app keeps a PIN marked as sending until a STATUS
+    shows `pinSetAt` equal to the `created_at` it sent, and sends the same
+    event again (the same `created_at`) on each STATUS without it. A
+    `pinSetAt` above it is another install's newer PIN: the app stops, and
+    tells the guardian that the other parent changed the PIN. A ward that
+    sends no `pinSetAt` predates it, and is taken at its `pinSet`.
   - A ward with no PIN set can't mint a token. The guardian app sets one
     before it offers anything that needs presence.
   - The guardian app asks for at least **6 digits**. The ward never sees the
@@ -3058,6 +3077,8 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
 - `relays`: the ward's current relay list;
 - `pinSet`: `true` when a guardian PIN is set (rule 11, *Presence
   confirmation*), else `false`;
+- `pinSetAt`: the `created_at` of the RELAYS that set the PIN in force,
+  present only while `pinSet` is `true` (rule 11, *Presence confirmation*);
 - `clamped`: a count, since pairing, of accepted clauses and statements whose
   `issuedAt` was ahead of the ward's clock (*Who may sign what*).
 

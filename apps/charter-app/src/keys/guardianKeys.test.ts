@@ -859,21 +859,28 @@ describe("guardian PIN", () => {
     expect(JSON.stringify(h.keys())).not.toContain("123456");
   }, 30_000);
 
-  it("stays sending until a STATUS shows pinSet, resending the same record once per newer STATUS", async () => {
+  it("stays sending until a STATUS names its created_at in pinSetAt, resending the same event once per newer STATUS (SF2)", async () => {
     const ward = readyWard(PHONE, "android");
     const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
     await connectSignetRoot(h);
     await h.gk.setGuardianPin("123456");
-    const first = JSON.parse(open(h.published[0].wrap, phoneSk).inner.content).guardianPin;
+    const sent = open(h.published[0].wrap, phoneSk).inner;
+    const first = JSON.parse(sent.content).guardianPin;
+    expect(sent.created_at).toBe(T + 1);
     h.published.length = 0;
-    const g = (pinSet?: boolean) => ({ ...ward.guardians!, ...(pinSet !== undefined ? { pinSet } : {}) });
+    const g = (pinSet?: boolean, pinSetAt?: number) => ({
+      ...ward.guardians!,
+      ...(pinSet !== undefined ? { pinSet } : {}),
+      ...(pinSetAt !== undefined ? { pinSetAt } : {}),
+    });
 
-    // A STATUS without pinSet: one resend of the same record, newer created_at.
+    // A STATUS without pinSet: one resend of the same record at the same
+    // created_at, so a STATUS naming it confirms whichever copy landed.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g(false) });
     expect(h.published).toHaveLength(1);
     const again = open(h.published[0].wrap, phoneSk).inner;
     expect(JSON.parse(again.content)).toEqual({ machine: PHONE, guardianPin: first });
-    expect(again.created_at).toBe(T + 2);
+    expect(again.created_at).toBe(T + 1);
     // The same STATUS polled again, or an older one: nothing more.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: g(false) });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 5, guardians: g() });
@@ -881,14 +888,55 @@ describe("guardian PIN", () => {
     // A newer one that doesn't say: once more.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 20, guardians: g() });
     expect(h.published).toHaveLength(2);
+    // The ward holds a PIN, but an older one: pinSet alone isn't this PIN.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 25, guardians: g(true, T - 500) });
+    expect(h.published).toHaveLength(3);
     expect(h.keys().pins[PHONE].state).toBe("sending");
 
-    // The ward says it holds one: set, the record dropped, nothing sent.
-    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 30, guardians: g(true) });
-    expect(h.published).toHaveLength(2);
-    expect(h.keys().pins[PHONE]).toEqual({ state: "set", sentAt: T + 3, statusTs: T + 30 });
+    // The ward names this PIN: set, the record dropped, nothing sent.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 30, guardians: g(true, T + 1) });
+    expect(h.published).toHaveLength(3);
+    expect(h.keys().pins[PHONE]).toEqual({ state: "set", sentAt: T + 1, statusTs: T + 30 });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 40, guardians: g(false) });
-    expect(h.published).toHaveLength(2);
+    expect(h.published).toHaveLength(3);
+  }, 30_000);
+
+  it("a newer PIN from another install is reported as replaced, and this one is not sent over it (SF2)", async () => {
+    const ward = readyWard(PHONE, "android");
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    await h.gk.setGuardianPin("123456");
+    h.published.length = 0;
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: { ...ward.guardians!, pinSet: true, pinSetAt: T + 50 } });
+    expect(h.published).toHaveLength(0);
+    expect(h.keys().pins[PHONE]).toEqual({ state: "replaced", sentAt: T + 1, statusTs: T + 10 });
+    // Nothing more is sent, whatever later reports say.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 20, guardians: { ...ward.guardians!, pinSet: false } });
+    expect(h.published).toHaveLength(0);
+  }, 30_000);
+
+  it("takes a ward that predates pinSetAt at its pinSet (SF2)", async () => {
+    const ward = readyWard(PHONE, "android");
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    await h.gk.setGuardianPin("123456");
+    h.published.length = 0;
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 10, guardians: { ...ward.guardians!, pinSet: true } });
+    expect(h.published).toHaveLength(0);
+    expect(h.keys().pins[PHONE].state).toBe("set");
+  }, 30_000);
+
+  it("dates a PIN from the install's rising clock, so one sent after the clock was corrected is above the floor the earlier one set (SF2)", async () => {
+    const ward = readyWard(PHONE, "android");
+    const h = harness([{ id: "c1", name: "Sam", colour: "#000", devices: [ward] }]);
+    await connectSignetRoot(h);
+    h.setNow(T + 86_400);
+    await h.gk.setGuardianPin("123456");
+    expect(open(h.published[0].wrap, phoneSk).inner.created_at).toBe(T + 86_400);
+    h.setNow(T + 60);
+    await h.gk.setGuardianPin("654321");
+    expect(open(h.published[1].wrap, phoneSk).inner.created_at).toBe(T + 86_401);
+    expect(h.keys().pins[PHONE].sentAt).toBe(T + 86_401);
   }, 30_000);
 
   it("stops resending after PIN_RESEND_LIMIT reports without pinSet, until the guardian tries again", async () => {
@@ -905,8 +953,12 @@ describe("guardian PIN", () => {
     // The 21st: nothing sent, and the guardian is told.
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 1000, guardians: g });
     expect(h.published).toHaveLength(20);
-    expect(h.keys().pins[PHONE]).toEqual({ state: "unconfirmed", sentAt: T + 21, statusTs: T + 1000 });
+    expect(h.keys().pins[PHONE]).toEqual({ state: "unconfirmed", sentAt: T + 1, statusTs: T + 1000 });
     await h.gk.noteWardStatus({ machine: PHONE, ts: T + 2000, guardians: g });
+    expect(h.published).toHaveLength(20);
+    // A late report that names it still confirms it.
+    await h.gk.noteWardStatus({ machine: PHONE, ts: T + 2500, guardians: { ...g, pinSet: true, pinSetAt: T + 1 } });
+    expect(h.keys().pins[PHONE].state).toBe("set");
     expect(h.published).toHaveLength(20);
     // Trying again starts over.
     await h.gk.setGuardianPin("123456");

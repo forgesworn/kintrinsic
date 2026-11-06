@@ -92,19 +92,28 @@ export interface HeldRoster {
 
 /**
  * The guardian PIN on one Android ward, as this install sent it (decision D4):
- * "sending" from the send until a STATUS from that ward shows `pinSet`, then
- * "set". "unconfirmed" once `PIN_RESEND_LIMIT` STATUS reports in a row came
- * without `pinSet`: nothing more is sent until the guardian sets the PIN
- * again. The PIN itself is never kept.
+ * "sending" from the send until a STATUS from that ward shows `pinSetAt`
+ * equal to the `created_at` it sent (`sentAt`), then "set". A ward orders
+ * PINs (rule 11), so a `pinSetAt` above `sentAt` is a newer PIN from another
+ * install: "replaced", and nothing more is sent. `pinSet` alone is not
+ * enough: the ward may hold an older PIN. Only a ward that predates
+ * `pinSetAt` is taken at its `pinSet`. "unconfirmed" once `PIN_RESEND_LIMIT`
+ * STATUS reports in a row came without it: nothing more is sent until the
+ * guardian sets the PIN again. The PIN itself is never kept.
  */
 export interface PinDelivery {
-  state: "sending" | "set" | "unconfirmed";
+  state: "sending" | "set" | "unconfirmed" | "replaced";
   /**
-   * While "sending": the record (salt and scrypt hash) that was sent, resent
-   * unchanged on each STATUS that doesn't yet show `pinSet`. Dropped once set.
+   * While "sending" or "unconfirmed": the record (salt and scrypt hash) that
+   * was sent, resent unchanged on each STATUS that doesn't yet show it.
+   * Dropped once set or replaced.
    */
   record?: GuardianPinRecord;
-  /** `created_at` of the last RELAYS that carried it (unix s). */
+  /**
+   * `created_at` of the RELAYS that carried it (unix s), from the install's
+   * rising clock. A resend carries the same, so a STATUS naming it confirms
+   * any copy.
+   */
   sentAt: number;
   /** `ts` of the last STATUS from the ward acted on, so one STATUS triggers one resend at most. */
   statusTs?: number;
@@ -254,7 +263,7 @@ export function reviveGuardianKeys(x: unknown): GuardianKeysState {
     approvalSentAt: rec(o.approvalSentAt) as Record<string, number>,
     pins: Object.fromEntries(
       Object.entries(rec(o.pins) as Record<string, PinDelivery>).filter(
-        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set" || v.state === "unconfirmed") && typeof v.sentAt === "number",
+        ([, v]) => typeof v === "object" && v !== null && (v.state === "sending" || v.state === "set" || v.state === "unconfirmed" || v.state === "replaced") && typeof v.sentAt === "number",
       ),
     ),
     objected: Object.fromEntries(

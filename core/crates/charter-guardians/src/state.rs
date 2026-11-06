@@ -289,6 +289,18 @@ pub struct GuardianState {
     /// used. Absent in a state persisted before this rule: empty.
     #[serde(default)]
     pub pin_floors: Vec<SignerFloor>,
+    /// The PIN's bar, across signers: the effective time, `min(created_at,
+    /// the ward clock)`, of the PIN in force, never falling. A RELAYS
+    /// carrying a PIN is taken only above it, so an older PIN from another
+    /// install processed later can't roll back a newer one (rule 11). 0
+    /// before any PIN, and in a state persisted before this rule.
+    #[serde(default)]
+    pub pin_bar: i64,
+    /// The `created_at` of the RELAYS that set the PIN in force: STATUS
+    /// `guardians.pinSetAt`. None before any PIN, and in a state persisted
+    /// before this rule.
+    #[serde(default)]
+    pub pin_set_at: Option<i64>,
     /// Departed keys owed one last STATUS showing their departure.
     pub farewell: Vec<String>,
     /// Accepted clauses and statements whose `issuedAt` was ahead of the
@@ -1777,6 +1789,12 @@ fn same_relays(a: &[String], b: &[String]) -> bool {
 ///   ward asleep still takes the PIN) nor for being ahead of the ward clock
 ///   (a guardian phone a few minutes fast still sets it); it keeps the
 ///   pairing floor. Battery settings in it are ignored by the ward.
+/// - Any PIN is ordered like a clause: it is taken only if its `created_at`
+///   is above the PIN's bar, the effective time `min(created_at, now)` of the
+///   PIN in force, which never falls. So an older PIN from another install,
+///   processed later, can't roll back a newer one. A RELAYS with a relay
+///   list and a PIN at or below the bar or its author's PIN floor is refused
+///   whole.
 /// - Only a pinned root may change the relay list (`relays_root_only`). A
 ///   working key's RELAYS must leave it as it is (no list, or the same set):
 ///   it may carry the PIN and battery settings.
@@ -1801,14 +1819,13 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
                 return drop(Reason::PairingFloor);
             }
             let floor = s.pin_floors.iter().find(|f| f.signer == ev.author);
-            if floor.is_some_and(|f| ev.ts <= f.issued_at) {
+            if floor.is_some_and(|f| ev.ts <= f.issued_at) || ev.ts <= s.pin_bar {
                 return drop(Reason::NotNewer);
             }
             let Some(rec) = ev.guardian_pin.and_then(validate_pin_record) else {
                 return drop(Reason::BadPinRecord);
             };
-            s.guardian_pin = Some(rec);
-            raise_floor(&mut s.pin_floors, ev.author, ev.ts);
+            set_pin(s, rec, ev.author, ev.ts, now);
             return accept(Reason::RelaysApplied);
         }
         if ev.ts > now {
@@ -1836,6 +1853,10 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
                 Some(rec) => pin = Some(rec),
                 None => return drop(Reason::BadPinRecord),
             }
+            let floor = s.pin_floors.iter().find(|f| f.signer == ev.author);
+            if floor.is_some_and(|f| ev.ts <= f.issued_at) || ev.ts <= s.pin_bar {
+                return drop(Reason::NotNewer);
+            }
         }
         if let Some(relays) = change {
             let old = std::mem::replace(&mut s.relays, relays.to_vec());
@@ -1849,12 +1870,20 @@ pub fn apply_relays(state: &GuardianState, ev: &RelaysInput<'_>, now: i64) -> St
             }
         }
         s.relays_updated_at = ev.ts;
-        if pin.is_some() {
-            s.guardian_pin = pin;
-            raise_floor(&mut s.pin_floors, ev.author, ev.ts);
+        if let Some(rec) = pin {
+            set_pin(s, rec, ev.author, ev.ts, now);
         }
         accept(Reason::RelaysApplied)
     })
+}
+
+/// Apply an accepted PIN: the record, its author's floor, the bar (never
+/// falling) and `pin_set_at`.
+fn set_pin(s: &mut GuardianState, rec: GuardianPinRecord, author: &str, ts: i64, now: i64) {
+    s.guardian_pin = Some(rec);
+    raise_floor(&mut s.pin_floors, author, ts);
+    s.pin_bar = s.pin_bar.max(ts.min(now));
+    s.pin_set_at = Some(ts);
 }
 
 /// The ward has sent STATUS: departed keys have had their last one.
@@ -1989,6 +2018,8 @@ pub fn pair_from_seal(
         previous_relays: Vec::new(),
         guardian_pin: None,
         pin_floors: Vec::new(),
+        pin_bar: 0,
+        pin_set_at: None,
         farewell: Vec::new(),
         clamped: 0,
     };
@@ -2072,6 +2103,11 @@ pub struct StatusGuardians {
     pub relays: Vec<String>,
     /// A guardian PIN is set (Android presence confirmation needs one).
     pub pin_set: bool,
+    /// The `created_at` of the RELAYS that set the PIN in force; absent when
+    /// none is set. A guardian install marks its PIN set only when this is
+    /// the `created_at` it sent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub pin_set_at: Option<i64>,
     /// Accepted clauses and statements whose claimed time was clamped to the
     /// ward clock, since pairing.
     pub clamped: u64,
@@ -2115,6 +2151,7 @@ pub fn status_guardians(s: &GuardianState) -> StatusGuardians {
         tombstones: s.tombstones.len(),
         relays: s.relays.clone(),
         pin_set: s.guardian_pin.is_some(),
+        pin_set_at: s.guardian_pin.as_ref().and(s.pin_set_at),
         clamped: s.clamped,
     }
 }
@@ -2157,6 +2194,8 @@ pub struct ProjectedState {
     pub relays: Vec<String>,
     pub status_relays: Vec<String>,
     pub guardian_pin: Option<GuardianPinRecord>,
+    pub pin_set_at: Option<i64>,
+    pub pin_bar: i64,
     pub clamped: u64,
 }
 
@@ -2203,6 +2242,8 @@ pub fn project_state(s: &GuardianState, now: i64) -> ProjectedState {
         relays: s.relays.clone(),
         status_relays: status_relays(s, now),
         guardian_pin: s.guardian_pin.clone(),
+        pin_set_at: s.pin_set_at,
+        pin_bar: s.pin_bar,
         clamped: s.clamped,
     }
 }

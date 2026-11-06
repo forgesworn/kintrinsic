@@ -3,12 +3,14 @@ import { emptyGuardianKeys } from "../keys/state";
 import { parsePresenceCode } from "../keys/presenceCode";
 import {
   androidWardsSettingPin,
+  androidWardsPinReplaced,
   androidWardsPinUnconfirmed,
   androidWardsWithoutPin,
   clockBehindLine,
   clockBehindWards,
   CLOCK_NOTICE_SECONDS,
   pinStateOf,
+  pinReplacedLine,
   pinUnconfirmedLine,
   durationWords,
   familyWards,
@@ -177,7 +179,8 @@ describe("guardians view", () => {
     const sending = { ...none, pins: { [PHONE]: { state: "sending" as const, sentAt: 1 } } };
     expect(androidWardsWithoutPin(wardsWith(false), sending)).toEqual([]);
     expect(androidWardsSettingPin(wardsWith(false), sending).map((w) => w.device.label)).toEqual(["Phone"]);
-    expect(pinStateOf(wardsWith(true)[1], sending)).toBe("set");
+    // The ward's pinSet alone may be an older PIN: still sending until it names this one (SF2).
+    expect(pinStateOf(wardsWith(true)[1], sending)).toBe("sending");
     const set = { ...none, pins: { [PHONE]: { state: "set" as const, sentAt: 1 } } };
     expect(androidWardsWithoutPin(wardsWith(false), set).map((w) => w.device.label)).toEqual(["Phone"]);
     // Resent as often as it will be and never confirmed: asked again, and said.
@@ -187,6 +190,13 @@ describe("guardians view", () => {
     expect(androidWardsPinUnconfirmed(wardsWith(false), gaveUp).map((w) => w.device.label)).toEqual(["Phone"]);
     expect(androidWardsPinUnconfirmed(wardsWith(false), sending)).toEqual([]);
     expect(pinUnconfirmedLine("Sam's phone")).toBe("Couldn't confirm the guardian PIN on Sam's phone. Open the PIN screen to try again.");
+    // Another install's newer PIN took the ward: it holds one, and the guardian is told.
+    const replaced = { ...none, pins: { [PHONE]: { state: "replaced" as const, sentAt: 1 } } };
+    expect(pinStateOf(wardsWith(true)[1], replaced)).toBe("set");
+    expect(androidWardsWithoutPin(wardsWith(true), replaced)).toEqual([]);
+    expect(androidWardsPinReplaced(wardsWith(true), replaced).map((w) => w.device.label)).toEqual(["Phone"]);
+    expect(androidWardsPinReplaced(wardsWith(true), sending)).toEqual([]);
+    expect(pinReplacedLine("Sam's phone")).toBe("The other parent changed the PIN on Sam's phone.");
   });
 
   it("checks a guardian PIN draft", () => {

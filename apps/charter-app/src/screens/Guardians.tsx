@@ -15,6 +15,7 @@ import { familyGateReason } from "../keys/guardianKeys";
 import { phoneHeldRoot } from "../keys/state";
 import { SendSummary, type ReportLike } from "./GuardianSendSummary";
 import {
+  androidWardsPinReplaced,
   androidWardsPinUnconfirmed,
   androidWardsWithoutPin,
   clockBehindLine,
@@ -32,6 +33,7 @@ import {
   pendingFor,
   pendingTitle,
   pinStateOf,
+  pinReplacedLine,
   pinUnconfirmedLine,
   readinessLine,
   removeGate,
@@ -378,6 +380,11 @@ function Overview({ leaving = false }: { leaving?: boolean }) {
           {androidWardsPinUnconfirmed(wards, keys).map((w) => (
             <p key={w.device.devicePubkey} className="card-sub" role="status" style={{ margin: 0 }}>
               {pinUnconfirmedLine(w.device.label)}
+            </p>
+          ))}
+          {androidWardsPinReplaced(wards, keys).map((w) => (
+            <p key={`replaced-${w.device.devicePubkey}`} className="card-sub" role="status" style={{ margin: 0 }}>
+              {pinReplacedLine(w.device.label)}
             </p>
           ))}
           {wards.some((w) => w.device.platform === "android") && (

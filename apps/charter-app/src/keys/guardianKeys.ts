@@ -215,6 +215,19 @@ function truncateLabel(label: string): string {
   return out;
 }
 
+/**
+ * What a ward's STATUS says of a PIN this install sent at `sentAt`: "set"
+ * when it holds that one (`pinSetAt` is `sentAt`), "replaced" when it holds a
+ * newer one from another install, else "older" (none, or an older one: keep
+ * sending). A ward that predates `pinSetAt` is taken at its `pinSet`.
+ */
+function pinHeld(g: StatusGuardians | undefined, sentAt: number): "set" | "replaced" | "older" {
+  if (g?.pinSet !== true) return "older";
+  if (g.pinSetAt === undefined) return "set";
+  if (g.pinSetAt === sentAt) return "set";
+  return g.pinSetAt > sentAt ? "replaced" : "older";
+}
+
 export class GuardianKeys {
   /** The install's one rising clock, shared through storage with the clause signer. */
   private readonly clock = new IssuedAtClock();
@@ -1308,7 +1321,8 @@ export class GuardianKeys {
    * ward's usual key and gift-wrapped — never a pasted code. A ward below the
    * versioning threshold is skipped (it refuses an unknown RELAYS field
    * outright) and reported as failed. Each ward it reached is "sending" until
-   * its STATUS shows `pinSet` (`noteWardStatus`).
+   * its STATUS shows `pinSetAt` equal to this send's `created_at`
+   * (`noteWardStatus`).
    */
   async setGuardianPin(pin: string, opts: { childId?: string; machines?: readonly string[] } = {}): Promise<Omit<SendReport, "event">> {
     const record = await makeGuardianPinRecord(pin);
@@ -1361,11 +1375,13 @@ export class GuardianKeys {
    * ones again, and replying to those would resend on every poll.
    *
    * The guardian PIN: a ward this install is sending a PIN to becomes "set"
-   * once its STATUS shows `pinSet`; until then each newer STATUS resends the
-   * same record, once, up to `PIN_RESEND_LIMIT` times, after which it is
-   * "unconfirmed" and nothing more is sent until the guardian tries again.
-   * Only where no approval prompt is needed (W, or a local-only family's own
-   * key): a resend runs unattended.
+   * once its STATUS shows `pinSetAt` equal to the `created_at` sent, and
+   * "replaced" once it shows a later one (another install's newer PIN: the
+   * ward orders PINs, rule 11); `pinSet` alone may be an older PIN. Until
+   * then each newer STATUS resends the same event, once, up to
+   * `PIN_RESEND_LIMIT` times, after which it is "unconfirmed" and nothing more
+   * is sent until the guardian tries again. Only where no approval prompt is
+   * needed (W, or a local-only family's own key): a resend runs unattended.
    */
   async noteWardStatus(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
     const m = status.machine;
@@ -1473,12 +1489,14 @@ export class GuardianKeys {
   private async resendPin(status: { machine: string; ts: number; guardians?: StatusGuardians }): Promise<void> {
     const m = status.machine;
     const cur = this.deps.read().keys.pins[m];
-    if (!cur || cur.state !== "sending") return;
+    if (!cur || (cur.state !== "sending" && cur.state !== "unconfirmed")) return;
     if (cur.statusTs !== undefined && status.ts <= cur.statusTs) return;
-    if (status.guardians?.pinSet === true) {
-      this.deps.write((k) => ({ ...k, pins: { ...k.pins, [m]: { state: "set", sentAt: cur.sentAt, statusTs: status.ts } } }));
+    const held = pinHeld(status.guardians, cur.sentAt);
+    if (held !== "older") {
+      this.deps.write((k) => ({ ...k, pins: { ...k.pins, [m]: { state: held, sentAt: cur.sentAt, statusTs: status.ts } } }));
       return;
     }
+    if (cur.state !== "sending") return;
     // Enough resends: stop, and leave it to the guardian to try again.
     const resends = cur.resends ?? 0;
     if (resends >= PIN_RESEND_LIMIT) {
@@ -1495,18 +1513,15 @@ export class GuardianKeys {
     if (!wardReadiness(d.platform, d.appVersionCode, d.statusSeen).ready) return;
     // A My Signet root would prompt; a phone-held root signs unattended.
     if (!phoneHeldRoot(this.deps.read().keys) && this.keyFor(m) !== "working") return;
-    // Strictly after the last one, so the ward's RELAYS replay floor takes it,
-    // and from the install's rising clock.
-    const createdAt = this.clock.next(Math.max(this.deps.now(), cur.sentAt + 1));
+    // The same `created_at` as the send: a ward that took it already refuses
+    // the copy as not newer (its own floor), and a STATUS naming that time
+    // confirms whichever copy landed. A newer time would make each copy a
+    // new PIN to confirm, and could set it over another install's newer one.
     try {
-      await this.sendPin(d, cur.record, createdAt, this.opsFor(m));
-    } catch (e) {
-      if (!(e instanceof QueuedForHomeNetworkError)) return;
+      await this.sendPin(d, cur.record, cur.sentAt, this.opsFor(m));
+    } catch {
+      // Offline, or no relay took it: the next newer STATUS tries again.
     }
-    this.deps.write((k) => {
-      const p = k.pins[m];
-      return p && p.state === "sending" ? { ...k, pins: { ...k.pins, [m]: { ...p, sentAt: createdAt } } } : k;
-    });
   }
 
   // ---------------------------------------------------------------------

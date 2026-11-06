@@ -2,12 +2,12 @@
 // who the ward trusts, as it sees it.
 //
 //   { roots: [{ root, keys: [W…] }], pending: [{ d, id?, signer?, kind, takesEffectAt?, expiresAt }],
-//     tombstones, relays, pinSet?, clamped? }
+//     tombstones, relays, pinSet?, pinSetAt?, clamped? }
 //
 // Parsed strictly: anything malformed drops the WHOLE object (undefined), so a
 // half-read view never says a key is or isn't trusted when it can't be sure.
 // Absent means a ward that predates the section. `pending[].id`,
-// `pending[].signer`, `pinSet` and `clamped` are newer than the rest, so a ward that doesn't send them yet
+// `pending[].signer`, `pinSet`, `pinSetAt` and `clamped` are newer than the rest, so a ward that doesn't send them yet
 // still parses; each is checked when present.
 
 import { splitPendingD, type PendingType, type StatusGuardians as RefStatusGuardians } from "./sdk";
@@ -21,10 +21,16 @@ import { splitPendingD, type PendingType, type StatusGuardians as RefStatusGuard
 export type StatusPending = Omit<RefStatusGuardians["pending"][number], "id" | "signer"> & { id?: string; signer?: string };
 
 /** STATUS `guardians` as this app reads it: the reference's shape plus the newer fields. */
-export interface StatusGuardians extends Omit<RefStatusGuardians, "pending" | "pinSet" | "clamped"> {
+export interface StatusGuardians extends Omit<RefStatusGuardians, "pending" | "pinSet" | "pinSetAt" | "clamped"> {
   pending: StatusPending[];
   /** Android: whether the ward holds a guardian PIN. Absent = the ward doesn't say. */
   pinSet?: boolean;
+  /**
+   * Android: the `created_at` of the RELAYS that set the PIN it holds, so an
+   * install can tell its own PIN from an older one or another install's.
+   * Absent = no PIN, or a ward that predates it.
+   */
+  pinSetAt?: number;
   /** Events whose claimed time was ahead of the ward's clock and was clamped to it. */
   clamped?: number;
 }
@@ -84,6 +90,7 @@ export function parseStatusGuardians(
     return undefined;
   }
   if (o.pinSet !== undefined && typeof o.pinSet !== "boolean") return undefined;
+  if (o.pinSetAt !== undefined && !isUint(o.pinSetAt)) return undefined;
   if (o.clamped !== undefined && !isUint(o.clamped)) return undefined;
   return {
     roots,
@@ -91,6 +98,7 @@ export function parseStatusGuardians(
     tombstones: o.tombstones,
     relays: [...o.relays],
     ...(o.pinSet !== undefined ? { pinSet: o.pinSet } : {}),
+    ...(o.pinSetAt !== undefined ? { pinSetAt: o.pinSetAt } : {}),
     ...(o.clamped !== undefined ? { clamped: o.clamped } : {}),
   };
 }

@@ -603,12 +603,49 @@ describe('rule 11: relay lists, the guardian PIN', () => {
     expect(t.relaysUpdatedAt).toBe(0)
     expect(t.pinFloors).toEqual([{ signer: W1.pk, issuedAt: T0 + 100 }])
     dropped(applyRelays(t, wrapped(W1, T0 + 100, { guardianPin: pin }), T0 + 100 + DAY), 'not_newer')
-    ok(applyRelays(t, wrapped(R1, T0 + 50, { guardianPin: pin }), T0 + 100 + DAY), 'relays_applied')
+    // Another signer's PIN has its own floor, but every PIN is held to the PIN's bar.
+    dropped(applyRelays(t, wrapped(R1, T0 + 50, { guardianPin: pin }), T0 + 100 + DAY), 'not_newer')
+    ok(applyRelays(t, wrapped(R1, T0 + 150, { guardianPin: pin }), T0 + 100 + DAY), 'relays_applied')
     dropped(applyRelays(s, { author: W1.pk, sealAuthor: null, channel: 'pasted', ts: T0 + 100, guardianPin: pin }, T0 + 100), 'pin_not_wrapped')
     ok(applyRelays(s, wrapped(W1, T0 + 400, { guardianPin: pin }), T0 + 100), 'relays_applied')
     dropped(applyRelays(s, wrapped(W1, T0 - 1, { guardianPin: pin }), T0 + 100), 'pairing_floor')
     // A RELAYS with a list is still held to 600 s.
     dropped(applyRelays(s, wrapped(W1, T0 + 100, { relays: AB, guardianPin: pin }), T0 + 701), 'stale')
+  })
+
+  test('the PIN is ordered like a clause: an older PIN from another signer, processed later, does not roll back a newer one (SF2)', () => {
+    const pin2 = { ...pin, hash: 'cd'.repeat(32) }
+    let s = pairedR1W1()
+    // R1 sets P1 at T0 + 100 and W1 sets P2 at T0 + 200 while the ward is
+    // offline. It takes P2 first.
+    s = ok(applyRelays(s, wrapped(W1, T0 + 200, { guardianPin: pin2 }), T0 + 300), 'relays_applied')
+    expect(statusGuardians(s)).toMatchObject({ pinSet: true, pinSetAt: T0 + 200 })
+    expect(s.pinBar).toBe(T0 + 200)
+    // P1 next: above R1's own floor (it has none), but below the PIN's bar.
+    dropped(applyRelays(s, wrapped(R1, T0 + 100, { guardianPin: pin }), T0 + 310), 'not_newer')
+    // Nor can a RELAYS with a relay list carry it in.
+    dropped(applyRelays(s, wrapped(R1, T0 + 150, { relays: AB, guardianPin: pin }), T0 + 320), 'not_newer')
+    // A newer PIN from R1 still takes it.
+    s = ok(applyRelays(s, wrapped(R1, T0 + 301, { guardianPin: pin }), T0 + 330), 'relays_applied')
+    expect(statusGuardians(s).pinSetAt).toBe(T0 + 301)
+    expect(s.guardianPin).toEqual(pin)
+  })
+
+  test('a PIN ahead of the ward clock sets a bar at the ward clock; after the guardian clock is corrected, its rising counter still sets the next PIN (SF2)', () => {
+    const pin2 = { ...pin, hash: 'cd'.repeat(32) }
+    let s = pairedR1W1()
+    s = ok(applyRelays(s, wrapped(W1, T0 + 1000, { guardianPin: pin }), T0 + 20), 'relays_applied')
+    expect(s.pinBar).toBe(T0 + 20)
+    expect(statusGuardians(s).pinSetAt).toBe(T0 + 1000)
+    // The raw clock, once corrected, is at or below W1's own floor.
+    dropped(applyRelays(s, wrapped(W1, T0 + 40, { guardianPin: pin2 }), T0 + 40), 'not_newer')
+    // The install's rising counter dates it above: taken, and the bar never falls.
+    s = ok(applyRelays(s, wrapped(W1, T0 + 1001, { guardianPin: pin2 }), T0 + 40), 'relays_applied')
+    expect(s.pinBar).toBe(T0 + 40)
+    expect(statusGuardians(s).pinSetAt).toBe(T0 + 1001)
+    // Another signer's PIN dated above the bar is taken: newest by arrival, as clauses.
+    s = ok(applyRelays(s, wrapped(R1, T0 + 50, { guardianPin: pin }), T0 + 60), 'relays_applied')
+    expect(statusGuardians(s).pinSetAt).toBe(T0 + 50)
   })
 })
 

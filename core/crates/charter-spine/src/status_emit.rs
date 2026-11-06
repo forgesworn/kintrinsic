@@ -494,6 +494,7 @@ mod tests {
             tombstones: 1,
             relays: vec![],
             pin_set: false,
+            pin_set_at: None,
             clamped: 0,
         });
         assert!(should_emit_status(Some(&prev), &cur, 300));

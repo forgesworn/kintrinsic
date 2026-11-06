@@ -4,7 +4,8 @@
 // - the guardian PIN record (salt and scrypt hash) kept while a PIN is still
 //   being sent to a device: a six-digit PIN's hash is cheap to search
 //   offline, and the PIN is the only lock on presence at an Android ward.
-//   Once every device reports `pinSet` the record is gone anyway.
+//   Once every device reports the PIN in `pinSetAt` (or a newer one) the
+//   record is gone anyway.
 
 /** The persisted state JSON as a backup should carry it; unusable JSON is passed through unchanged. */
 export function householdForBackup(stateJson: string | null): string | null {

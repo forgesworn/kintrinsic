@@ -325,6 +325,13 @@ pub struct StatusGuardians {
     /// Read as `false` from a ward that predates it.
     #[serde(default)]
     pub pin_set: bool,
+    /// The `created_at` of the RELAYS that set the PIN in force (rule 11).
+    /// The guardian app marks a PIN it sent as set only when this is the
+    /// `created_at` it sent, so an older PIN of its own, or another
+    /// install's, is never taken for it. Absent when no PIN is set, and from
+    /// a ward that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_set_at: Option<u64>,
     /// Accepted clauses and statements, since pairing, whose `issuedAt` was
     /// ahead of the ward's clock and so clamped to it: a parent's clock is
     /// adrift. Read as 0 from a ward that predates it.
@@ -607,6 +614,7 @@ mod tests {
             tombstones: 3,
             relays: vec!["wss://nos.lol".into()],
             pin_set: true,
+            pin_set_at: Some(1_700_000_000),
             clamped: 2,
         });
         let json = s.to_json();
@@ -622,6 +630,7 @@ mod tests {
         assert_eq!(g["pending"][0]["id"], "0a".repeat(32));
         assert_eq!(g["pending"][0]["signer"], root.to_hex());
         assert_eq!(g["pinSet"], true);
+        assert_eq!(g["pinSetAt"], 1_700_000_000);
         assert_eq!(g["clamped"], 2);
         assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
     }
@@ -645,6 +654,7 @@ mod tests {
             tombstones: 0,
             relays: vec![],
             pin_set: false,
+            pin_set_at: None,
             clamped: 0,
         };
         let v = serde_json::to_value(&g).unwrap();

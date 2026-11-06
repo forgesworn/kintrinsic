@@ -400,16 +400,28 @@ export function moveGate(keys: GuardianKeysState, familyReady: boolean, progress
 
 /**
  * Where an Android ward's guardian PIN stands (decision D4):
- * - "set": its STATUS says it holds one (whoever set it);
- * - "sending": this install sent one and the ward hasn't said it holds it yet;
+ * - "sending": this install sent one and the ward hasn't said it holds that
+ *   one yet (it may still hold an older PIN: `pinSet` alone isn't enough);
  * - "unconfirmed": this install sent one, resent it as often as it will, and
  *   the ward never said it holds it;
+ * - "set": its STATUS says it holds one (whoever set it), and this install
+ *   isn't waiting on its own;
  * - "none": it says it has none, or has never said.
  */
 export function pinStateOf(w: WardRef, keys: GuardianKeysState): "set" | "sending" | "unconfirmed" | "none" {
-  if (w.device.guardians?.pinSet === true) return "set";
   const s = keys.pins[w.device.devicePubkey]?.state;
-  return s === "sending" || s === "unconfirmed" ? s : "none";
+  if (s === "sending" || s === "unconfirmed") return s;
+  return w.device.guardians?.pinSet === true ? "set" : "none";
+}
+
+/** Android wards where another install set a newer guardian PIN over the one this install sent. */
+export function androidWardsPinReplaced(wards: readonly WardRef[], keys: GuardianKeysState): WardRef[] {
+  return wards.filter((w) => w.device.platform === "android" && keys.pins[w.device.devicePubkey]?.state === "replaced");
+}
+
+/** The line for a ward whose guardian PIN the other parent changed after this install sent one. */
+export function pinReplacedLine(label: string): string {
+  return `The other parent changed the PIN on ${label}.`;
 }
 
 /**

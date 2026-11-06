@@ -188,6 +188,8 @@ that.
   "relays": ["<url>", ...],
   "statusRelays": ["<url>", ...],
   "guardianPin": { "v": 1, "salt": "<hex>", "hash": "<hex>" } | null,
+  "pinSetAt": <int> | null,
+  "pinBar": <int>,
   "clamped": <int>
 }
 ```
@@ -204,7 +206,8 @@ that.
   removal: max(confirmation `now`, `receivedAt` + 259200). STATUS
   `guardians.pending` is `{ id, d, kind, signer, takesEffectAt?, expiresAt }`
   from this (`id` is `statement`). STATUS `guardians` also carries `pinSet`
-  (`guardianPin` is not null) and `clamped`.
+  (`guardianPin` is not null), `pinSetAt` (only while `guardianPin` is not
+  null) and `clamped`.
 - `tombstones`: applied withdrawals plus applied removals, for the life of the
   pairing (STATUS `guardians.tombstones`).
 - `held`: held early withdrawals plus held cancels and objections (stored
@@ -236,6 +239,9 @@ that.
   At most the **8** most recent replaced lists are kept: when a 9th would be
   added, the oldest is dropped (scenario `relays_previous_cap`).
 - `guardianPin`: the last PIN record set by a wrapped RELAYS, or null.
+- `pinSetAt`: the `ts` of the RELAYS that set `guardianPin`, or null.
+- `pinBar`: the PIN's bar, across signers: max(the old bar, min(`ts`,
+  `now`)) at each accepted PIN, so it never falls; 0 before any PIN.
 - `clamped`: since pairing, the accepted clauses and statements (an
   `inbound` statement, a confirmation's inline approval, a pair offer's
   approval) whose `issuedAt` was greater than the ward's `now`. STATUS
@@ -418,18 +424,22 @@ none.
 `not_signer` → then, for a **PIN-only RELAYS** (`wrapped`, a `guardianPin`
 and no `relays`): `pairing_floor` (`ts` < the pairing time) → `not_newer`
 (`ts` ≤ the author's own PIN floor: the highest `ts` of a RELAYS carrying a
-PIN accepted from it, initially none) → `bad_pin_record` → `relays_applied`,
-which replaces the PIN, raises the author's PIN floor to `ts`, and leaves
-the last applied `ts` alone; neither `future` nor `stale` applies to it.
+PIN accepted from it, initially none; or `ts` ≤ `pinBar`) →
+`bad_pin_record` → `relays_applied`, which replaces the PIN, raises the
+author's PIN floor to `ts`, sets `pinSetAt` and `pinBar`, and leaves the last
+applied `ts` alone; neither `future` nor `stale` applies to it.
 Any other RELAYS: `future` (`ts` > `now`) → `stale` (`now` − `ts` > 600) →
 `pairing_floor` → `not_newer` (`ts` ≤ the last applied `ts`, initially 0) →
 `relays_root_only` (`relays` present, not the same set as the current list,
 and the author is not a pinned root) → with a `guardianPin`:
 `pin_not_wrapped` (channel `pasted`) → `bad_pin_record` (not a valid
-record, see `pin.json`) → `relays_applied`. It sets the last applied `ts`;
+record, see `pin.json`) → `not_newer` (`ts` ≤ the author's PIN floor or
+`pinBar`: refused whole) → `relays_applied`. It sets the last applied `ts`;
 only one whose `relays` is a different set replaces the list (and records
-the old one for `statusRelays`); a valid `guardianPin` replaces the PIN and
-raises the author's PIN floor. Scenario `pin_ahead_then_relay_code`. Relay-list
+the old one for `statusRelays`); a valid `guardianPin` replaces the PIN,
+raises the author's PIN floor and sets `pinSetAt` and `pinBar`. Scenarios
+`pin_ahead_then_relay_code`, `pin_older_after_newer`,
+`pin_after_clock_corrected`. Relay-list
 validation (2–10 distinct secure endpoints) and battery settings are
 existing checks outside these vectors; validation runs first in a ward.
 

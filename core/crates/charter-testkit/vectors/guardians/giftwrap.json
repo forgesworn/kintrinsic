@@ -467,6 +467,8 @@
             "wss://relay.two.example"
           ],
           "guardianPin": null,
+          "pinSetAt": null,
+          "pinBar": 0,
           "clamped": 0
         }
       }
@@ -567,6 +569,8 @@
             "wss://relay.two.example"
           ],
           "guardianPin": null,
+          "pinSetAt": null,
+          "pinBar": 0,
           "clamped": 0
         }
       }
@@ -661,6 +665,8 @@
             "wss://relay.two.example"
           ],
           "guardianPin": null,
+          "pinSetAt": null,
+          "pinBar": 0,
           "clamped": 0
         }
       }
@@ -767,6 +773,8 @@
             "wss://relay.two.example"
           ],
           "guardianPin": null,
+          "pinSetAt": null,
+          "pinBar": 0,
           "clamped": 0
         }
       }

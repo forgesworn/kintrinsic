@@ -1050,6 +1050,7 @@ fn status_guardians_of(state: &GuardianState) -> StatusGuardians {
         tombstones: u32::try_from(g.tombstones).unwrap_or(u32::MAX),
         relays: g.relays,
         pin_set: g.pin_set,
+        pin_set_at: g.pin_set_at.map(|t| t.max(0) as u64),
         clamped: g.clamped,
     }
 }

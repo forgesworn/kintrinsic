@@ -911,6 +911,27 @@ scenario("pin_ahead_then_relay_code", ["11", "presence confirmation"], "A PIN-on
   c.relays(W1, T0 + 99, null, T0 + 210, D("not_newer"), { guardianPin: pin });
 });
 
+scenario("pin_older_after_newer", ["11", "presence confirmation"], "The PIN is ordered like a clause, across signers: a PIN is taken only above the PIN's bar, the effective time min(created_at, now) of the PIN in force, which never falls. An older PIN from another signer, processed after a newer one, is refused, and a RELAYS with a relay list can't carry it in either; a newer one from that signer is taken.", (c) => {
+  pairW1(c);
+  const older = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.3").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash4")) };
+  const newer = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.4").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash5")) };
+  const RELAYS2 = ["wss://relay.three.example", "wss://relay.four.example"];
+  c.relays(W1, T0 + 200, null, T0 + 300, A("relays_applied"), { guardianPin: newer });
+  c.relays(R1, T0 + 100, null, T0 + 310, D("not_newer"), { guardianPin: older });
+  c.relays(R1, T0 + 150, RELAYS2, T0 + 320, D("not_newer"), { guardianPin: older });
+  c.relays(R1, T0 + 301, null, T0 + 330, A("relays_applied"), { guardianPin: older });
+});
+
+scenario("pin_after_clock_corrected", ["11", "presence confirmation"], "A PIN from a guardian phone ahead of the ward clock sets the bar at the ward clock and its signer's floor at its created_at. Once the phone's clock is corrected, a PIN dated by the raw clock is at or below that floor and refused; the install's rising counter dates it above, so it is taken, and the bar never falls.", (c) => {
+  pairW1(c);
+  const first = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.5").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash6")) };
+  const second = { v: 1, salt: bytesToHex(seedBytes("guardians.pin.salt.6").slice(0, 16)), hash: bytesToHex(seedBytes("guardians.pin.scenario.hash7")) };
+  c.relays(W1, T0 + 1000, null, T0 + 20, A("relays_applied"), { guardianPin: first });
+  c.relays(W1, T0 + 40, null, T0 + 40, D("not_newer"), { guardianPin: second });
+  c.relays(W1, T0 + 1001, null, T0 + 40, A("relays_applied"), { guardianPin: second });
+  c.relays(R1, T0 + 30, null, T0 + 50, D("not_newer"), { guardianPin: first });
+});
+
 scenario("coguardian_and_move_same_root", ["6", "8", "7"], "A co-guardian and a move naming the same R2: once one pins R2 the other is dropped, so R2 is never pinned twice and a later self-removal can't empty the ward.", (c) => {
   pairW1(c);
   const cg = st.coguardian(R1, R2, { issuedAt: T0 + 10 });
