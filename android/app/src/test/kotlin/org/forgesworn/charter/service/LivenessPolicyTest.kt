@@ -7,6 +7,7 @@ import org.forgesworn.charter.service.CharterService.Companion.TICK_MS
 import org.forgesworn.charter.service.LivenessPolicy.ALARM_MS
 import org.forgesworn.charter.service.LivenessPolicy.DARK_KICK_GAP_MS
 import org.forgesworn.charter.service.LivenessPolicy.WEDGED_MS
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -74,5 +75,65 @@ class LivenessPolicyTest {
         assertTrue(ALARM_MS < 300_000L / 2)
         assertTrue(DARK_TICK_MS < 300_000L / 2)
         assertTrue(DARK_KICK_GAP_MS < ALARM_MS)
+    }
+
+    private val five = LivenessPolicy.LONGER_BATTERY_ALARM_MS
+
+    @Test
+    fun `longer battery with the screen off waits five minutes when no boundary is near`() {
+        assertEquals(five, LivenessPolicy.nextAlarmDelayMs(true, false, t0, null))
+        assertEquals(five, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + 3_600_000L))
+        assertEquals(five, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + five))
+    }
+
+    @Test
+    fun `a boundary sooner than five minutes pulls the alarm forward to it`() {
+        assertEquals(90_000L, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + 90_000L))
+        assertEquals(1_000L, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 + 1_000L))
+    }
+
+    @Test
+    fun `every other mode, and a lit screen, keep the minute alarm`() {
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(false, false, t0, null))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(false, false, t0, t0 + 10_000L))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, true, t0, null))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, true, t0, t0 + 10_000L))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(false, true, t0, null))
+    }
+
+    @Test
+    fun `a boundary that has already passed is stale and keeps the minute alarm`() {
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0))
+        assertEquals(ALARM_MS, LivenessPolicy.nextAlarmDelayMs(true, false, t0, t0 - 5_000L))
+    }
+
+    @Test
+    fun `the stretched alarm is never later than five minutes`() {
+        for (b in listOf(null, t0 - 1, t0, t0 + 1, t0 + five, Long.MAX_VALUE)) {
+            assertTrue(LivenessPolicy.nextAlarmDelayMs(true, false, t0, b) <= five)
+        }
+    }
+
+    @Test
+    fun `a boundary since the last tick makes a dark alarm tick inside the kick gap`() {
+        val last = t0
+        val now = t0 + 4_000L // inside DARK_KICK_GAP_MS, and under three lit beats
+        assertFalse(LivenessPolicy.tickDue(now, last, interactive = false, tickMs = TICK_MS))
+        assertTrue(LivenessPolicy.tickDue(now, last, interactive = false, tickMs = TICK_MS, boundaryPassed = true))
+        // Lit, the handler loop does the work and the alarm stays a watchdog.
+        assertFalse(LivenessPolicy.tickDue(now, last, interactive = true, tickMs = TICK_MS, boundaryPassed = true))
+    }
+
+    @Test
+    fun `boundaryPassed is true only for a noted boundary in the gap since the last tick`() {
+        LivenessAlarm.noteBoundary(t0 + 10_000L)
+        assertTrue(LivenessAlarm.boundaryPassed(t0, t0 + 10_000L))
+        assertTrue(LivenessAlarm.boundaryPassed(t0, t0 + 11_000L))
+        assertFalse(LivenessAlarm.boundaryPassed(t0, t0 + 9_999L))      // not yet
+        assertFalse(LivenessAlarm.boundaryPassed(t0 + 10_000L, t0 + 20_000L)) // already ticked after it
+        LivenessAlarm.noteBoundary(null)
+        assertFalse(LivenessAlarm.boundaryPassed(t0, t0 + 400_000L))
+        LivenessAlarm.noteBoundary(null, unknown = true)
+        assertFalse(LivenessAlarm.boundaryPassed(t0, t0 + 400_000L))
     }
 }

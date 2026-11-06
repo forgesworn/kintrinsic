@@ -544,6 +544,11 @@ class WardenController(
      *  unrelated reason (fix round 1, 2026-08-04). */
     @Volatile private var lastLockTaskPackages: List<String>? = null
 
+    /** When the listening grace last reported runs out (`elapsedRealtime` ms), or
+     *  null with none running. Read by the service for the dark alarm. */
+    @Volatile var listeningGraceEndsAtMs: Long? = null
+        private set
+
     /** The settings package(s) behind the shade's Wi-Fi / Bluetooth buttons. */
     @Volatile private var connectionPackages: List<String>? = null
 
@@ -643,6 +648,11 @@ class WardenController(
             val listening = runCatching {
                 CharterCore.listeningView(nowUnix, d.locked, audioPlaying)
             }.getOrNull()
+            // Remembered for the dark liveness alarm: the grace ending is a
+            // moment the core cannot be probed for (the view latches state).
+            listeningGraceEndsAtMs = listening?.secsLeft?.let {
+                android.os.SystemClock.elapsedRealtime() + it * 1000
+            }
             // Apps the family agreed are open at ANY hour (spec 2026-08-03).
             // Takes the lock REASON, not just `locked`: a stand-down and a
             // malformed charter must take everything, so the clause is asked

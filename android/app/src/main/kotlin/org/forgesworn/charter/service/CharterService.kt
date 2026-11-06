@@ -47,7 +47,9 @@ import org.forgesworn.charter.admin.QrSetup
  * A `Handler` timer runs on the uptime clock, which stops while the CPU
  * sleeps, so in Doze the dark tick and the dark poll did not happen for hours
  * (05-B2), and nothing brought the warden back if the process was killed
- * (05-G1). [LivenessAlarm] fires through Doze every minute and [kick]s the
+ * (05-G1). [LivenessAlarm] fires through Doze every minute (every five on the
+ * guardian's "Longer battery" setting while the screen is off, pulled forward
+ * to the next known rule boundary) and [kick]s the
  * loops: it runs a tick or a poll that is overdue, holding a wake lock only
  * for as long as that takes, and restarts the service if it had died. It is
  * also the watchdog the port-spec names: a tick wedged for
@@ -99,12 +101,38 @@ class CharterService : Service() {
             // level-triggered inside push(), so unchanged minutes are free.
             // Avoid widget JNI and launcher IPC while the display is off.
             if (screenWas == null && interactive) org.forgesworn.charter.ui.TimeLeftWidget.push(this)
+            refreshAlarmBoundary()
         } catch (t: Throwable) {
             Log.e(TAG, "tick failed", t)
+            // Whatever boundary was noted is now stale: keep the minute alarm
+            // until a tick gets through (a stale "none" would hold five minutes).
+            LivenessAlarm.noteBoundary(null, unknown = true)
+            if (!interactive) LivenessAlarm.arm(this)
         } finally {
             tickStartedAt = 0L
             lastTickAt = SystemClock.elapsedRealtime()
         }
+    }
+
+    /**
+     * "Longer battery" with the screen off stretches the liveness alarm to five
+     * minutes, so after each such tick find the next moment the rules change
+     * and re-time the alarm to land on it (see [LivenessHorizon]). Only in that
+     * state: every other mode and a lit screen keep the minute alarm untouched.
+     * If the rules cannot be read the alarm stays at a minute. Worker thread.
+     */
+    private fun refreshAlarmBoundary() {
+        if (interactive || !RelayPollPace.longerBattery()) return
+        runCatching {
+            val nowMs = SystemClock.elapsedRealtime()
+            val graceSecs = controller.listeningGraceEndsAtMs?.takeIf { it > nowMs }?.let { (it - nowMs) / 1000 }
+            val secs = LivenessHorizon.nextChangeSecs(System.currentTimeMillis() / 1000, graceSecs)
+            LivenessAlarm.noteBoundary(secs?.let { nowMs + it * 1000 })
+        }.onFailure {
+            Log.w(TAG, "could not read the next rule boundary: keeping the minute alarm", it)
+            LivenessAlarm.noteBoundary(null, unknown = true)
+        }
+        LivenessAlarm.arm(this)
     }
 
     /** One relay round plus the install drain. Slow worker only. */
@@ -213,6 +241,9 @@ class CharterService : Service() {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON -> repace(nowInteractive = true)
                 Intent.ACTION_SCREEN_OFF -> repace(nowInteractive = false)
+                // Unlocked by the ward: the same check, in case the screen-on
+                // edge was missed (e.g. an always-on display).
+                Intent.ACTION_USER_PRESENT -> userPresent()
             }
         }
     }
@@ -226,6 +257,9 @@ class CharterService : Service() {
     private fun repace(nowInteractive: Boolean) {
         val wasInteractive = interactive
         interactive = nowInteractive
+        // Screen on: back to the minute alarm at once (and the enforcement tick
+        // below is the immediate check). Screen off: re-time it for the dark.
+        LivenessAlarm.arm(this)
         // Before the loops are armed there is nothing to re-pace and nothing to
         // bank — and re-posting `tick` here would race onCreate's own arming
         // into TWO self-perpetuating chains, doubling the drain this change
@@ -240,6 +274,19 @@ class CharterService : Service() {
         handler.post(tick)
         if (nowInteractive) kickLink()
         refreshRelay(prompt = nowInteractive)
+    }
+
+    /** The ward unlocked the phone: arm the minute alarm and check straight away. */
+    private fun userPresent() {
+        // Normally SCREEN_ON came first and this is just one more check. If it
+        // was missed, take the same path as screen on: bank the dark interval
+        // as dark, re-pace both loops and refresh the relay.
+        if (!interactive) {
+            repace(nowInteractive = true)
+        } else {
+            LivenessAlarm.arm(this)
+            if (running && armed) handler.post { runTick() }
+        }
     }
 
     // The slow (network) tick on its OWN thread: charterPollOnce blocks for
@@ -270,6 +317,8 @@ class CharterService : Service() {
         RelayPollPace.onChange = {
             refreshRelay(prompt = true)
         }
+        // The guardian moved the battery setting: re-time the alarm now.
+        RelayPollPace.onModeChange = { LivenessAlarm.arm(this) }
         linkWorker = HandlerThread("charter-link-worker").apply { start() }
         linkHandler = Handler(linkWorker.looper)
         linkDiscovery = LinkDiscovery(this, linkHandler) { kickLink() }
@@ -285,6 +334,7 @@ class CharterService : Service() {
             IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
             },
             Context.RECEIVER_NOT_EXPORTED,
         )
@@ -363,7 +413,9 @@ class CharterService : Service() {
                 return
             }
             if (!running || !armed) return
-            val tickDue = LivenessPolicy.tickDue(now, lastTickAt, interactive, TICK_MS)
+            val tickDue = LivenessPolicy.tickDue(
+                now, lastTickAt, interactive, TICK_MS, LivenessAlarm.boundaryPassed(lastTickAt, now),
+            )
             val pollDue = LivenessPolicy.pollDue(now, lastPollAt, interactive, pollInterval(), pollInterval())
             Log.i(TAG, "liveness kick: tick due=$tickDue poll due=$pollDue screen=${if (interactive) "on" else "off"}")
             kickLink(rediscover = false)
@@ -373,7 +425,10 @@ class CharterService : Service() {
                 val posted = handler.post {
                     try {
                         val n = SystemClock.elapsedRealtime()
-                        if (LivenessPolicy.tickDue(n, lastTickAt, interactive, TICK_MS)) runTick()
+                        if (LivenessPolicy.tickDue(
+                                n, lastTickAt, interactive, TICK_MS, LivenessAlarm.boundaryPassed(lastTickAt, n),
+                            )
+                        ) runTick()
                     } finally {
                         runCatching { wl?.takeIf { it.isHeld }?.release() }
                     }
@@ -402,6 +457,7 @@ class CharterService : Service() {
 
     override fun onDestroy() {
         RelayPollPace.onChange = null
+        RelayPollPace.onModeChange = null
         running = false
         armed = false
         runCatching { unregisterReceiver(screenReceiver) }

@@ -459,15 +459,49 @@ private fun resolveDefaultLauncher(pm: PackageManager): String? {
 }
 
 /** Enumerate launchable packages in this user (live, never a stale list, I23). */
-fun launchablePackages(context: Context): List<String> {
+fun launchablePackages(context: Context): List<String> = launchableSuspension(context).keys.toList()
+
+/**
+ * Launchable packages in this user, in query order, each with whether the
+ * platform reports it suspended right now. Read from the same launcher query
+ * ([android.content.pm.ApplicationInfo.FLAG_SUSPENDED]), so knowing costs no
+ * extra calls. A package whose flags are missing reads as not suspended, which
+ * only ever makes [suspendWrites] write more, never less.
+ */
+fun launchableSuspension(context: Context): Map<String, Boolean> {
     val pm = context.packageManager
     val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
         addCategory(android.content.Intent.CATEGORY_LAUNCHER)
     }
-    return pm.queryIntentActivities(intent, 0)
-        .map { it.activityInfo.packageName }
-        .distinct()
+    val out = LinkedHashMap<String, Boolean>()
+    for (ri in pm.queryIntentActivities(intent, 0)) {
+        val ai = ri.activityInfo ?: continue
+        val flags = ai.applicationInfo?.flags ?: 0
+        val suspended = flags and android.content.pm.ApplicationInfo.FLAG_SUSPENDED != 0
+        out[ai.packageName] = (out[ai.packageName] ?: false) || suspended
+    }
+    return out
 }
+
+/**
+ * The packages a reconcile must actually suspend: the ones in [suspendSet] the
+ * platform does not already report as suspended ([alreadySuspended]).
+ *
+ * Suspending an app that is already suspended with the same parameters is not
+ * a free no-op. The platform keeps its old behaviour of announcing it as a
+ * change anyway (`ACTION_PACKAGES_SUSPENDED` to the launcher and every other
+ * listener), so a locked phone that re-suspended its whole app list on every
+ * tick woke the launcher once a minute all night with the screen off, and
+ * every two seconds with it on. The difference discipline of
+ * [restrictionWrites] and [syncOnChange], applied to the heaviest call the
+ * tick makes. Unsuspending is left as it was: lifting a suspension that is not
+ * there announces nothing, and it is the half that must never be skipped.
+ */
+internal fun suspendWrites(
+    launchable: List<String>,
+    suspendSet: Set<String>,
+    alreadySuspended: (String) -> Boolean,
+): List<String> = launchable.filter { it in suspendSet && !alreadySuspended(it) }
 
 /**
  * What the warden has HIDDEN, remembered across ticks and reboots.
@@ -715,7 +749,8 @@ class DpmAppGateOps(
         suspendOnly: Boolean,
     ): List<String> {
         val deny = denyListPackages(context)
-        val launchable = launchablePackages(context).filter { it !in deny }
+        val suspendedNow = launchableSuspension(context)
+        val launchable = suspendedNow.keys.filter { it !in deny }
         if (launchable.isEmpty()) return emptyList()
         // The set to suspend: the UNION of the whole-device lock, the standing
         // per-app policy (blocklist ⇒ its blocked apps; allowlist ⇒ everything
@@ -731,7 +766,8 @@ class DpmAppGateOps(
             bucketSuspensions,
             alwaysAvailable,
         )
-        val toSuspend = launchable.filter { it in suspendSet }.toTypedArray()
+        // Only what is not suspended already: see [suspendWrites].
+        val toSuspend = suspendWrites(launchable, suspendSet) { suspendedNow[it] == true }.toTypedArray()
         // Degraded (F1): never lift a suspension on a tick that could not read
         // every per-app input — the previous state is the stricter answer.
         val toUnsuspend =

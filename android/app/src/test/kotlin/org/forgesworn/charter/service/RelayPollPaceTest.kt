@@ -59,4 +59,10 @@ class RelayPollPaceTest {
         val valid = JSONObject("""{"screenOffSecs":600,"ordinarySecs":120,"boostSecs":60,"requestBoost":false,"openingBoost":false}""")
         assertEquals(BatterySettings(600,120,false,false,60), BatterySettings.parse(valid))
     }
+    @Test fun `only the exact longer-battery preset counts as longer battery`() {
+        assertTrue(BatterySettings(600, 120, true, false, 60).isLongerBattery)
+        assertFalse(BatterySettings().isLongerBattery)
+        assertFalse(BatterySettings(120, 30, true, true, 180).isLongerBattery)
+        assertFalse(BatterySettings(600, 120, true, true, 60).isLongerBattery)
+    }
 }

@@ -99,6 +99,11 @@ object CharterCore {
         val nextOpenSecs: Long?,
         /** The named time in force (§Times); null in Free time and when locked. */
         val activeTime: String? = null,
+        /** Seconds the SCHEDULE allows from now: to the window's close, or, while
+         *  the window is closed, the out-of-hours extension left (it burns wall
+         *  clock). -1 = no schedule wall. Unlike [effectiveSecs] it ignores the
+         *  budget, which does not burn while the screen is dark. */
+        val scheduleSecs: Long = -1,
     )
 
     data class LockInfo(
@@ -649,6 +654,7 @@ object CharterCore {
             effectiveSecs = o.optLong("effectiveSecs", 0),
             nextOpenSecs = if (o.isNull("nextOpenSecs")) null else o.optLong("nextOpenSecs"),
             activeTime = o.optStringOrNull("activeTime"),
+            scheduleSecs = o.optLong("scheduleSecs", -1),
         )
     }
 
