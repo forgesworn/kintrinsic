@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import { getPublicKey, SimplePool, type NostrEvent } from "nostr-tools";
 import type { Child, SignerState } from "../domain/types";
-import { GuardianKeys, kindOfRuleKey, type SendReport } from "../keys/guardianKeys";
+import { GuardianKeys, type SendReport } from "../keys/guardianKeys";
 import type { SignedEvent } from "../keys/sdk";
 import { reviveGuardianKeys, type GuardianKeysState, type InstallRoot, type RootVia } from "../keys/state";
 import type { ChildReadiness } from "../keys/versionGate";
@@ -216,12 +216,7 @@ export function useGuardianKeys(deps: UseGuardianKeysDeps, children: Child[], ke
       heldRules: (childId, machine) => {
         const child = depsRef.current.stateRef.current.children.find((c) => c.id === childId);
         if (!child?.rosterId) return [];
-        const subject = child.rosterId;
-        const kinds = new Set(Object.keys(keysRef.current.rules?.[subject] ?? {}).map(kindOfRuleKey));
-        return [...kinds].flatMap((kind) => {
-          const r = keys.ruleInForce(subject, kind, machine);
-          return r ? [{ kind, event: r.event as NostrEvent, local: r.local }] : [];
-        });
+        return keys.rulesForDevice(child.rosterId, machine).map((r) => ({ ...r, event: r.event as NostrEvent }));
       },
     }),
     [keys],

@@ -7,8 +7,9 @@
 //     phone's own rule for that kind, so the screen simply shows it;
 //   - lossy: nothing here changes. The received clause stays the rule in
 //     force, and the screen shows it as set elsewhere (read-only, with
-//     Replace). It is the other guardian's to send: a newly claimed device
-//     gets only this install's own rules from here (`resendRulesTo`).
+//     Replace). A device this install claims gets it too, re-signed here
+//     with the same body (`resendRulesTo`), since the other guardian can't
+//     reach that device until they join it.
 //
 // Seeding never sends anything to a ward: it changes what this install shows
 // and what it would send next.

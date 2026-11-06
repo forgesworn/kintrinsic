@@ -135,8 +135,9 @@ export interface RealSignerDeps {
   /**
    * For `resendRulesTo`: the rules in force held for one child as they apply
    * to one device, one per kind (the device's own rule where it has one,
-   * else the family-wide one), and whether this install signed each.
-   * Absent = none held.
+   * else the family-wide one, as this install's merge ranks them), whether
+   * this install signed each, and whether its signer is a current signer of
+   * the family. Absent = none held.
    */
   heldRules?: (childId: string, machine: string) => HeldRuleFor[];
 }
@@ -148,6 +149,12 @@ export interface HeldRuleFor {
   event: NostrEvent;
   /** This install signed it. */
   local: boolean;
+  /**
+   * Its signer is a current signer of the family: a key the family's wards
+   * report. Absent = not known, and another guardian's rule is then not
+   * re-sent.
+   */
+  current?: boolean;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -523,15 +530,25 @@ export class RealSigner implements Signer {
     const ops = this.sealerFor(machine, guardian);
     const batch = new SendBatch();
     const held = this.deps.heldRules?.(childId, machine) ?? [];
-    // This install's own rules, re-signed as they are: same payload, same
-    // issuedAt (a ward has no pairing floor for clauses, decision D6), and
-    // to this device alone. The wrap is dated now, for relay reads. The
-    // signer's clock doesn't move: these are not new rules.
+    const now = this.deps.now();
+    // The rule in force for each kind, once, to this device alone; the wrap
+    // is dated now, for relay reads. The install's rising clock doesn't move:
+    // these are not new rules.
+    // - This install's own: re-signed as it is, same payload and issuedAt (a
+    //   ward has no pairing floor for clauses, decision D6).
+    // - Another current signer's (the other parent's): nothing else would
+    //   send it, since the new device pins only this install's root until
+    //   the other parent joins it. Re-signed by this install with the same
+    //   body, dated min(their issuedAt, now): a far-future date would sit on
+    //   this install's own floor for the kind there and shut it out, and the
+    //   other parent's next edit, dated above theirs, still wins. It is not
+    //   recorded as this install's rule.
     for (const r of held) {
-      if (!r.local) continue; // another guardian's: their app and the roster bring it
+      if (!r.local && !r.current) continue; // a departed signer's: left to a current signer
       const payload = JSON.parse(r.event.content) as ClausePayload;
-      const inner = await signClauseInner(payload, ops, r.event.created_at);
-      await this.send(target.relays, await giftWrapSigned(inner, machine, ops, this.deps.now()), CLAUSE_META, batch);
+      const issuedAt = r.local ? r.event.created_at : Math.min(payload.issuedAt, now);
+      const inner = await signClauseInner(r.local ? payload : { ...payload, issuedAt }, ops, issuedAt);
+      await this.send(target.relays, await giftWrapSigned(inner, machine, ops, now), CLAUSE_META, batch);
     }
     // A kind of this install's charter with no rule held for this device at
     // all (signed before rules were kept, or split per device) goes as a

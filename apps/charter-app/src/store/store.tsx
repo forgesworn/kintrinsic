@@ -2461,9 +2461,11 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   // Close the claim loop: a just-claimed phone has never been a target of any
   // rule save, so the guardian's standing charter goes to it by itself the
   // moment the claim is committed — instead of an instruction to re-save.
-  // Only to that phone, and only this install's own rules with their
-  // original dates (`resendRulesTo`): the child's other devices keep what
-  // they have, and the other parent's rules come from their app.
+  // Only to that phone (`resendRulesTo`): this install's own rules with their
+  // original dates, and the other parent's rules in force, re-signed here
+  // with the same body, since the new phone pins only this install's root
+  // until the other parent joins it. The child's other devices keep what
+  // they have.
   const resendRulesIfConnected = useCallback(
     async (childId: string, machine: string, policies: Policy[]): Promise<ClauseDelivery> => {
       const s = signer.current!;

@@ -1612,6 +1612,21 @@ export class GuardianKeys {
   }
 
   /**
+   * The rules in force for one device of a child, one per kind, as this
+   * install's merge ranks them (`ruleInForce`), for a newly claimed device
+   * (`resendRulesTo`): whether this install signed each, and whether its
+   * signer is current, a key a ward this install vouches for reports.
+   */
+  rulesForDevice(subject: string, machine: string): { kind: string; event: SignedEvent; local: boolean; current: boolean }[] {
+    const kinds = new Set(Object.keys(this.deps.read().keys.rules?.[subject] ?? {}).map(kindOfRuleKey));
+    const current = new Set(this.vouchedRoots({ presenceWards: false }).flatMap((r) => [r.root, ...r.keys]));
+    return [...kinds].sort().flatMap((kind) => {
+      const r = this.ruleInForce(subject, kind, machine);
+      return r ? [{ kind, event: r.event, local: r.local, current: current.has(r.event.pubkey) }] : [];
+    });
+  }
+
+  /**
    * Received rules this install has not put on its own screens yet (decision
    * 3, seeding): held, not signed here, and not marked by `markRulesApplied`
    * since they arrived. By key.

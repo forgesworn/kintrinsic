@@ -1520,6 +1520,38 @@ describe("the roster carries the rules in force (decision Q3)", () => {
     expect(other.rulesFor(subject).map((r) => r.event.id)).toEqual([held.budget.id, held.schedule.id]);
   });
 
+  it("lists the rules in force for a newly claimed device, once per kind, marking this install's own and those from a current signer (SF3)", async () => {
+    const W2sk = generateSecretKey();
+    const W2 = getPublicKey(W2sk);
+    const subject = "aa".repeat(32);
+    const guardians = { roots: [{ root: R, keys: [W] }, { root: R2, keys: [W2] }], pending: [], tombstones: 0, relays: [] };
+    const child: KeysChild = {
+      id: "c1",
+      name: "Sam",
+      colour: "#000",
+      rosterId: subject,
+      devices: [{ ...readyWard(PHONE, "android"), guardians }, { ...readyWard(LAPTOP, "linux"), guardians }],
+    };
+    const h = harness([child]);
+    await connectSignetRoot(h);
+    h.gk.recordRules(subject, [{ event: clause(wSk, "schedule", T - 10) }], { local: true });
+    h.gk.recordRules(subject, [
+      { event: clause(W2sk, "budget", T - 5) },
+      // A device rule for the phone only, from the other parent.
+      { event: clause(W2sk, "debugging", T - 4), machine: PHONE },
+      // From a key no ward reports: a signer that has departed.
+      { event: clause(generateSecretKey(), "apps", T - 3) },
+    ]);
+    const view = (m: string) => h.gk.rulesForDevice(subject, m).map((r) => [r.kind, r.event.pubkey === W2 ? "W2" : r.event.pubkey === W ? "W" : "?", r.local, r.current]);
+    expect(view(PHONE)).toEqual([
+      ["apps", "?", false, false],
+      ["budget", "W2", false, true],
+      ["debugging", "W2", false, true],
+      ["schedule", "W", true, true],
+    ]);
+    expect(view(LAPTOP).map((r) => r[0])).toEqual(["apps", "budget", "schedule"]);
+  });
+
   it("a rule dated far ahead counts from when it arrived, so a later rule from the other parent still wins", async () => {
     const W2sk = generateSecretKey();
     const subject = "aa".repeat(32);

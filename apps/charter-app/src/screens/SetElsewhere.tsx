@@ -7,7 +7,8 @@ import { useSetElsewhere } from "./setElsewhereView";
 // A rule another guardian's phone set that this phone's screen can't show as
 // it is (decision 3, lossy seeding). The screen stays read-only, says who set
 // it, and offers Replace: this parent sets the kind afresh. Until then the
-// other phone's clause stays the rule in force, and a re-send sends it as is.
+// other phone's clause stays the rule in force, and a device this phone
+// claims gets it too: re-signed here with the same body (`resendRulesTo`).
 
 /** "Set from Robin": the read-only stand-in for a rule page, with Replace. */
 export function SetElsewhereCard({ child, names, onReplace }: { child: Child; names: string[]; onReplace: () => void }) {
