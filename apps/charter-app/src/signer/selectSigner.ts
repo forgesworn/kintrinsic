@@ -23,8 +23,8 @@ export interface SelectSignerDeps {
     /** Keep a rule change's signed clauses for the family roster (Q3). */
     onRulesSigned?: RealSignerDeps["onRulesSigned"];
     /**
-     * The rules in force for a newly claimed device, this install's and the
-     * other parent's, for `resendRulesTo` to send it (decision 3, SF3).
+     * The rules in force for a newly claimed device, whoever signed them,
+     * for `resendRulesTo` to send it (decision 3, SF3).
      */
     heldRules?: RealSignerDeps["heldRules"];
   };

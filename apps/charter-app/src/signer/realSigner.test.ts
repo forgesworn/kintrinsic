@@ -1124,7 +1124,7 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
       sk,
     );
   const target = { subject: SUBJECT, devices: [{ id: "dev1", pubkey: DPK1 }, { id: "dev2", pubkey: DPK2 }], relays: RELAYS };
-  const setup = (held: { kind: string; event: NostrEvent; local: boolean; current?: boolean }[]) => {
+  const setup = (held: { kind: string; event: NostrEvent; local: boolean }[]) => {
     const published: NostrEvent[] = [];
     const kept: SignedRule[] = [];
     const asked: string[] = [];
@@ -1148,17 +1148,16 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
     // This install once ran ahead: its clock is past the held rule's date.
     localStorage.setItem("charter.signer.lastIssuedAt", "1700000500");
     const mine = heldClause(GSK, "schedule", T0);
-    // A rule from a signer that has since departed (no ward reports it).
-    const departed = heldClause(generateSecretKey(), "budget", T0 + 10);
+    const myBudget = heldClause(GSK, "budget", T0 + 5);
     const { signer, published, kept, asked } = setup([
       { kind: "schedule", event: mine, local: true },
-      { kind: "budget", event: departed, local: false, current: false },
+      { kind: "budget", event: myBudget, local: true },
     ]);
     await signer.connect("local");
     await signer.resendRulesTo("child_sam", DPK2, [devicePolicy]);
     expect(asked).toEqual([DPK2]);
-    // Device A gets nothing; B gets this install's schedule only (the budget's signer departed).
-    expect(published).toHaveLength(1);
+    // Device A gets nothing; B gets this install's two rules.
+    expect(published).toHaveLength(2);
     for (const w of published) expect(w.tags.filter((t) => t[0] === "p").map((t) => t[1])).toEqual([DPK2]);
     const { payload, inner, valid } = unwrapClause(published[0], DEV2, GUARDIAN);
     expect(valid).toBe(true);
@@ -1166,6 +1165,7 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
     expect(payload.issuedAt).toBe(T0);
     expect(inner.created_at).toBe(T0);
     expect(published[0].created_at).toBeGreaterThan(T0);
+    expect(unwrapClause(published[1], DEV2, GUARDIAN).payload).toEqual(JSON.parse(myBudget.content));
     expect(localStorage.getItem("charter.signer.lastIssuedAt")).toBe("1700000500");
     expect(kept).toEqual([]);
   });
@@ -1177,7 +1177,7 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
     const theirs = heldClause(otherSk, "budget", T0 + 10);
     const { signer, published, kept } = setup([
       { kind: "schedule", event: mine, local: true },
-      { kind: "budget", event: theirs, local: false, current: true },
+      { kind: "budget", event: theirs, local: false },
     ]);
     await signer.connect("local");
     await signer.resendRulesTo("child_sam", DPK2, [devicePolicy]);
@@ -1199,10 +1199,28 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
     expect(kept).toEqual([]);
   });
 
+  it("re-signs a departed signer's rule in force too, since the child's other devices still enforce it (rule 4)", async () => {
+    localStorage.setItem("charter.signer.lastIssuedAt", "1700000500");
+    // A rule from a signer that has since departed (no ward reports it).
+    const departed = heldClause(generateSecretKey(), "budget", T0 + 10);
+    const { signer, published, kept } = setup([{ kind: "budget", event: departed, local: false }]);
+    await signer.connect("local");
+    await signer.resendRulesTo("child_sam", DPK2, [devicePolicy]);
+    const got = published.map((w) => unwrapClause(w, DEV2, GUARDIAN));
+    const budget = got.find((g) => g.payload.kind === "budget")!;
+    expect(budget.valid).toBe(true);
+    expect(budget.inner.pubkey).toBe(getPublicKey(GSK));
+    expect(budget.payload).toEqual(JSON.parse(departed.content));
+    expect(budget.inner.created_at).toBe(T0 + 10);
+    for (const w of published) expect(w.tags.filter((t) => t[0] === "p").map((t) => t[1])).toEqual([DPK2]);
+    // Not kept as this install's rule (only the schedule, sent fresh, is).
+    expect(kept.map((r) => JSON.parse(r.inner.content).kind)).toEqual(["schedule"]);
+  });
+
   it("dates the other parent's far-future rule at now, so it never sits on the claimer's floor above its next rule (SF3)", async () => {
     const ahead = 1_700_000_000 + 86_400;
     const theirs = heldClause(generateSecretKey(), "budget", ahead);
-    const { signer, published } = setup([{ kind: "budget", event: theirs, local: false, current: true }]);
+    const { signer, published } = setup([{ kind: "budget", event: theirs, local: false }]);
     await signer.connect("local");
     await signer.resendRulesTo("child_sam", DPK2, [devicePolicy]);
     const budget = published.map((w) => unwrapClause(w, DEV2, GUARDIAN)).find((g) => g.payload.kind === "budget")!;
@@ -1263,8 +1281,10 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
     await signer.connect("local");
     await signer.resendRulesTo("child_sam", DPK2, [devicePolicy]);
     const kinds = published.map((w) => unwrapClause(w, DEV2, GUARDIAN).payload);
-    expect(kinds.map((p) => p.kind)).toEqual(["schedule"]);
-    expect(kinds[0].issuedAt).toBe(1_700_000_501);
+    // Their budget as it is held; the schedule, held for no one, fresh.
+    expect(kinds.map((p) => p.kind)).toEqual(["budget", "schedule"]);
+    expect(kinds[0]).toEqual(JSON.parse(theirs.content));
+    expect(kinds[1].issuedAt).toBe(1_700_000_501);
     for (const w of published) expect(w.tags.filter((t) => t[0] === "p").map((t) => t[1])).toEqual([DPK2]);
     // Kept for the roster as this device's rule, not a family-wide one.
     expect(kept.map((r) => [JSON.parse(r.inner.content).kind, r.machine])).toEqual([["schedule", DPK2]]);

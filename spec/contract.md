@@ -3046,12 +3046,14 @@ A guardian's signer grants kind 31120 to Kintrinsic alone.
     that parent's root, so until the other parent joins it nothing from the
     other parent's installs is accepted there. The pairing install sends it,
     to that device only, the rule its merge ranks as in force for each kind:
-    its own as signed (the same payload and `issuedAt`), and a current
-    signer's re-signed with its own key, the same body, and `issuedAt` =
-    `min(theirs, now)`. A far-future `issuedAt` would otherwise sit on the
-    pairing install's own floor for that kind there. Neither advances its
-    rising counter, and the other parent's later edit, dated above theirs,
-    still wins.
+    its own as signed (the same payload and `issuedAt`), and anyone else's
+    re-signed with its own key, the same body, and `issuedAt` =
+    `min(theirs, now)`. That includes a departed key's rule, which stays
+    enforced on the child's other devices until a current signer replaces
+    it (rule 4), so the new device enforces it too. A far-future
+    `issuedAt` would otherwise sit on the pairing install's own floor for
+    that kind there. Neither advances its rising counter, and a current
+    signer's later edit, dated above theirs, still wins.
   - A receiving install takes a rule only if it verifies and its author is a
     key the family's wards report as a current signer (the roster's own trust
     rule); any other rule, or a device rule without a valid `machine`, is

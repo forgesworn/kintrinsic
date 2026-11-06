@@ -1615,16 +1615,16 @@ export class GuardianKeys {
 
   /**
    * The rules in force for one device of a child, one per kind, as this
-   * install's merge ranks them (`ruleInForce`), for a newly claimed device
-   * (`resendRulesTo`): whether this install signed each, and whether its
-   * signer is current, a key a ward this install vouches for reports.
+   * install's merge ranks them (`ruleInForce`), whoever signed them, for a
+   * newly claimed device (`resendRulesTo`), and whether this install signed
+   * each. A departed key's rule is among them: it stays enforced on the
+   * child's other devices until a current signer replaces it (rule 4).
    */
-  rulesForDevice(subject: string, machine: string): { kind: string; event: SignedEvent; local: boolean; current: boolean }[] {
+  rulesForDevice(subject: string, machine: string): { kind: string; event: SignedEvent; local: boolean }[] {
     const kinds = new Set(Object.keys(this.deps.read().keys.rules?.[subject] ?? {}).map(kindOfRuleKey));
-    const current = new Set(this.vouchedRoots({ presenceWards: false }).flatMap((r) => [r.root, ...r.keys]));
     return [...kinds].sort().flatMap((kind) => {
       const r = this.ruleInForce(subject, kind, machine);
-      return r ? [{ kind, event: r.event, local: r.local, current: current.has(r.event.pubkey) }] : [];
+      return r ? [{ kind, event: r.event, local: r.local }] : [];
     });
   }
 
