@@ -49,6 +49,7 @@ import {
   GIFT_MAX,
   GIFT_MIN,
   GIFT_STEP,
+  GIFT_STEP_BIG,
   useGiveSupport,
   useStopState,
 } from "./leverState";
@@ -64,6 +65,15 @@ const PRESETS: { minutes: number; label: string }[] = [
   { minutes: 15, label: "+15 min" },
   { minutes: 30, label: "+30 min" },
   { minutes: 60, label: "+1 hour" },
+];
+
+/** The amounts an ask may be answered with outright (they SET the amount, the
+ *  stepper then fine-tunes): the ward's own chooser's 10 / 20 / 1 hour, and 30. */
+const APPROVE_PRESETS: { minutes: number; label: string }[] = [
+  { minutes: 10, label: "10 min" },
+  { minutes: 20, label: "20 min" },
+  { minutes: 30, label: "30 min" },
+  { minutes: 60, label: "1 hour" },
 ];
 
 const WARN = { color: "var(--warn, #b45309)" } as const;
@@ -117,7 +127,12 @@ function SheetFrame({
   );
 }
 
-/** `(−) 45 min (+)`, centred, with nothing beside it. */
+/**
+ * `(−20) (−5) 45 min (+5) (+20)`, centred, with nothing beside it. Fives for
+ * fine-tuning, twenties so going from a 10-minute ask to an hour is a few
+ * taps rather than ten; both clamp to `min..=max`, and every button on a
+ * side disables together at its bound.
+ */
 function Stepper({
   minutes,
   min,
@@ -136,11 +151,20 @@ function Stepper({
       <Button
         variant="secondary"
         className="lever-step"
-        aria-label="5 minutes less"
+        aria-label={`${GIFT_STEP_BIG} minutes less`}
+        disabled={disabled || minutes <= min}
+        onClick={() => onStep(-GIFT_STEP_BIG)}
+      >
+        −{GIFT_STEP_BIG}
+      </Button>
+      <Button
+        variant="secondary"
+        className="lever-step"
+        aria-label={`${GIFT_STEP} minutes less`}
         disabled={disabled || minutes <= min}
         onClick={() => onStep(-GIFT_STEP)}
       >
-        −
+        −{GIFT_STEP}
       </Button>
       <span className="lever-amount" aria-live="polite">
         {minutes} min
@@ -148,11 +172,20 @@ function Stepper({
       <Button
         variant="secondary"
         className="lever-step"
-        aria-label="5 minutes more"
+        aria-label={`${GIFT_STEP} minutes more`}
         disabled={disabled || minutes >= max}
         onClick={() => onStep(GIFT_STEP)}
       >
-        +
+        +{GIFT_STEP}
+      </Button>
+      <Button
+        variant="secondary"
+        className="lever-step"
+        aria-label={`${GIFT_STEP_BIG} minutes more`}
+        disabled={disabled || minutes >= max}
+        onClick={() => onStep(GIFT_STEP_BIG)}
+      >
+        +{GIFT_STEP_BIG}
       </Button>
     </div>
   );
@@ -475,6 +508,12 @@ function ApproveBody({
   // to the full amount on remount, which is exactly what a failed send does. A
   // guardian who had dialled 30 down to 5 got a retry that silently granted 30.
   const granted = request.chosenMinutes ?? asked;
+  // The ask is an opening bid, not a ceiling: the device enacts any grant in
+  // 0..=1440 (`MAX_EXTEND_MINUTES`), so a guardian may answer "ten minutes"
+  // with an hour. The sheet used to stop at what was asked, which with the
+  // ward's then-fixed 30-minute ask meant 30 was the most anyone could ever
+  // approve. The usual gift ceiling applies, or the ask itself when larger.
+  const ceiling = Math.max(GIFT_MAX, asked);
   // The ward's own broker ages an ask out after 24h and ignores a decision for
   // it, so neither answer is offered past that.
   const expired = isAskExpired(request.createdAt, Date.now());
@@ -485,7 +524,9 @@ function ApproveBody({
   );
 
   const step = (delta: number) =>
-    setRequestChosenMinutes(request.id, Math.max(GIFT_MIN, Math.min(asked, granted + delta)));
+    setRequestChosenMinutes(request.id, Math.max(GIFT_MIN, Math.min(ceiling, granted + delta)));
+  const setTo = (minutes: number) =>
+    setRequestChosenMinutes(request.id, Math.max(GIFT_MIN, Math.min(ceiling, minutes)));
 
   const decide = async (action: "approve" | "deny") => {
     // Shares the one-decision-at-a-time lock with the ask cards.
@@ -528,14 +569,30 @@ function ApproveBody({
           .
         </p>
       )}
+      {/* The same amounts the ward's own chooser offers, plus the old 30, so
+          answering "give them the hour instead" is one tap, not eight. */}
+      <div className="lever-presets" role="group" aria-label="Approve a different amount">
+        {APPROVE_PRESETS.map((p) => (
+          <Button
+            key={p.minutes}
+            variant="secondary"
+            className="lever-preset"
+            aria-pressed={granted === p.minutes}
+            disabled={busy !== null || expired}
+            onClick={() => setTo(p.minutes)}
+          >
+            {p.label}
+          </Button>
+        ))}
+      </div>
       <Stepper
         minutes={granted}
         min={GIFT_MIN}
-        max={asked}
+        max={ceiling}
         disabled={busy !== null || expired}
         onStep={step}
       />
-      {granted < asked && (
+      {granted !== asked && (
         <p className="card-sub" style={{ marginTop: 8, textAlign: "center" }}>
           They asked for {asked} min.
         </p>
