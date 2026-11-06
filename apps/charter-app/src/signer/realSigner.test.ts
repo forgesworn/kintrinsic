@@ -1211,6 +1211,21 @@ describe("RealSigner sends a newly claimed device the rules in force: its own as
     expect(budget.payload.body).toEqual(JSON.parse(theirs.content).body);
   });
 
+  it("dates every clause wrap with the raw clock, so a rising clock days ahead after a correction still reaches the ward (SF1)", async () => {
+    // Once three days ahead, now corrected: the rising clock is still there.
+    localStorage.setItem("charter.signer.lastIssuedAt", String(1_700_000_000 + 3 * 86_400));
+    const { signer, published } = setup([]);
+    await signer.connect("local");
+    await signer.signClause("child_sam", devicePolicy);
+    expect(published.length).toBeGreaterThan(0);
+    for (const w of published) {
+      // The ward refuses a wrap more than two days from its clock (NIP-59 jitter).
+      expect(w.created_at).toBe(1_700_000_000);
+      const opened = unwrapClause(w, w.tags.find((t) => t[0] === "p")![1] === DPK1 ? DEV1 : DEV2, GUARDIAN);
+      expect(opened.payload.issuedAt).toBe(1_700_000_000 + 3 * 86_400 + 1);
+    }
+  });
+
   it("sends a kind with no rule held for the device as a fresh rule, to that device alone", async () => {
     localStorage.setItem("charter.signer.lastIssuedAt", "1700000500");
     const theirs = heldClause(generateSecretKey(), "budget", T0 + 10);

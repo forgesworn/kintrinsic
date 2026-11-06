@@ -13,7 +13,6 @@ import { appRulesToGrant, debUpdateToGrant, debuggingToGrant, giftToGrant, polic
 import { effectivePolicyForDevice } from "../domain/effectivePolicy";
 import type { ClausePayload, GrantStandDown, UpdateManifest } from "../wire/types";
 import {
-  giftWrapClause,
   giftWrapGrant,
   giftWrapPairOffer,
   giftWrapRelease,
@@ -463,7 +462,13 @@ export class RealSigner implements Signer {
     return `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`;
   }
 
-  /** Sign one clause for one device, keep its signed inner for the roster, and wrap it. */
+  /**
+   * Sign one clause for one device, keep its signed inner for the roster, and
+   * wrap it. The wrap is dated with the raw clock, never `issuedAt`: a ward
+   * refuses a wrap more than two days from its clock (the NIP-59 jitter
+   * bound), and the rising clock can run that far ahead after a clock that
+   * was once ahead is corrected.
+   */
   private async wrapRule(
     clause: ClausePayload,
     device: string,
@@ -474,7 +479,7 @@ export class RealSigner implements Signer {
     const ops = this.sealerFor(device, guardian);
     const inner = await signClauseInner(clause, ops, issuedAt);
     signed.add(clause.kind, device, inner);
-    return giftWrapSigned(inner, device, ops, issuedAt);
+    return giftWrapSigned(inner, device, ops, this.deps.now());
   }
 
   async signClause(childId: string, policy: Policy): Promise<SignOutcome> {
@@ -562,7 +567,7 @@ export class RealSigner implements Signer {
       for (const clause of this.charterClauses(target.subject, device.id, policies, issuedAt).filter((c) => kinds.has(c.kind))) {
         const inner = await signClauseInner(clause, ops, issuedAt);
         fresh.push({ inner, machine });
-        await this.send(target.relays, await giftWrapSigned(inner, machine, ops, issuedAt), CLAUSE_META, batch);
+        await this.send(target.relays, await giftWrapSigned(inner, machine, ops, now), CLAUSE_META, batch);
       }
     }
     const note = () => {
@@ -780,7 +785,8 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "gift", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+      const ops = this.sealerFor(device.pubkey, guardian);
+      const wrap = await giftWrapSigned(await signClauseInner(clause, ops, issuedAt), device.pubkey, ops, this.deps.now());
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return clause;
@@ -904,7 +910,8 @@ export class RealSigner implements Signer {
     const clause: ClausePayload = { v: 1, kind: "standdown", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, this.sealerFor(device.pubkey, guardian), issuedAt);
+      const ops = this.sealerFor(device.pubkey, guardian);
+      const wrap = await giftWrapSigned(await signClauseInner(clause, ops, issuedAt), device.pubkey, ops, this.deps.now());
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
