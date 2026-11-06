@@ -3,7 +3,8 @@
 Ward relay rounds open fresh connections; the guardian carrier holds WebSockets
 open. Settings affect network work only. Enforcement remains at 2 seconds while
 interactive and 60 seconds while dark; local-link monitoring remains at 3/30
-seconds and liveness alarms at 60 seconds (subject to Android Doze limits).
+seconds and liveness alarms at 60 seconds (subject to Android Doze limits),
+except on Longer battery life with the screen off (see below).
 Already received local changes still trigger enforcement promptly. Widgets
 refresh while interactive and catch up on wake.
 
@@ -17,6 +18,40 @@ phone → Battery & responsiveness. Advanced controls start collapsed.
 | Longer battery life | 600s | 120s | 60s | Off |
 | Balanced (recommended) | 300s | 60s | 120s | On |
 | Faster responses | 120s | 30s | 180s | On |
+
+### What Longer battery life also does while the phone is asleep
+
+The ward keeps a wake-up alarm that makes sure it is still running and has
+checked its rules. It normally goes off every minute, day and night, and on a
+child's phone that is the most frequent thing waking it. On Longer battery
+life, **while the screen is off**, the alarm goes off every 5 minutes instead.
+Every other preset, and any time the screen is on, keeps the one-minute alarm.
+
+In plain terms for a parent:
+
+- While your child's phone is asleep, a rule change you send can take up to
+  5 minutes to arrive and take effect.
+- Times you have already set (bedtime, school hours, the end of extra time you
+  granted) still start on time. The phone knows when the next one is due and
+  sets its alarm for that moment, so a scheduled lock is never later than it was.
+- When the screen comes on, or the phone is unlocked, it checks the rules
+  straight away and goes back to the one-minute alarm.
+- Changing the setting takes effect at once; there is nothing to restart.
+
+How it works: with the screen off, the next alarm is due at the earlier of 5
+minutes and the next moment the rules change. The ward finds that moment by
+asking its rule engine what it would enforce one, two, up to five minutes from
+now (lock state, named time, app lists and per-app hours, buckets, tethering,
+install window) and narrowing any difference down to about two seconds. It also
+reads the end of an out-of-hours extension and of a debugging window directly.
+If the rules cannot be read, the alarm stays at one minute. This does not change
+Doze allow-listing, the foreground service or relay pacing.
+
+Two consequences to know about. The stuck-tick watchdog runs from the alarm, so a
+wedged enforcement tick can take up to 5 minutes longer to be noticed. And the
+core credits at most 300 seconds of elapsed time per tick, so a dark gap that
+overshoots 5 minutes slightly under-counts an out-of-hours extension that is
+burning wall-clock time, by seconds, in the ward's favour.
 
 Fast checks wait 5 seconds **after a completed round**. Opening checks last
 15 seconds, with a one-minute cooldown and a 30-second absence requirement
