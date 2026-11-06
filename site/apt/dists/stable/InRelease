@@ -4,33 +4,33 @@ Hash: SHA512
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Tue, 03 Nov 2026 09:57:19 +0000
+Date: Fri, 06 Nov 2026 14:07:26 +0000
 Description: Kintrinsic Linux warden (charterd) — official releases
 Label: Kintrinsic
 Origin: Kintrinsic
 Suite: stable
 MD5Sum:
- aedc6aa914d1b98509b65ce610da531e             1305 main/binary-amd64/Packages
+ 893f1c840008c511f3d6524a3fb95575             1305 main/binary-amd64/Packages
  8f32e7709347f529e458075eb07f0ce6               89 main/binary-amd64/Release
 SHA256:
- 433c311303d26d4405ab962e235c15a403273dc65795c2ed6e1d390cff8060f1             1305 main/binary-amd64/Packages
+ ce0c6b0ad4b135886d3bdbce81fc66b5f37e633f7469edfc21ecab002c1183b5             1305 main/binary-amd64/Packages
  cdfdafd1b2049d40c735389f8ab6c7718c9ae2f7e3dc2f119e5192f6a2d1452e               89 main/binary-amd64/Release
 SHA512:
- e315dfacca4d1036530a18ef6e36304429827dcfcdb8b304c586cdaf017069b30b1c3ba4b7cc0cf024d8e0d687d3c041d11f60ec9212cac8d5f6ab0253f6aa60             1305 main/binary-amd64/Packages
+ c856e97f149b1da51714899ad1ee236a887dbfdc0fbb9150bb0b1dce1810801395a7de1b68ba66e8bf31543548d0808873e7dfee115c1b6d8047c0b9ce7bf957             1305 main/binary-amd64/Packages
  c5a890de50b9cfdfe420bf40742d514a654d250355a56cfbe77470352f3f2ebd0845f45bd88799c8cf8f07d3c278749bfcfeac3b328d7357cb13ccfdb4f9a89b               89 main/binary-amd64/Release
 -----BEGIN PGP SIGNATURE-----
 
-iQIzBAEBCgAdFiEE842ZYwlQjENL1KL2hTX2WG5QToAFAmrpr/8ACgkQhTX2WG5Q
-ToD/mRAAv1a+d9T2nWr/33LUFES9CH5eDHNq/tPtZftVe8tGDp7eBgLMq87Txh8M
-rlPfzPrgWaKiXY4u7m99eHL74UAzEv9/ip6S9DWJRNka0K7eGGc9pq6F+VYyFkKX
-NDwgTCHW4jW8cE3lOh6UuoRfPKgexzd9cSS0/R625VeIHOMJIGAzVrm24pPLvQuw
-KNGc2Ds6vjBaKjG5x4j/veKeywHGEYfEiER9qIoGSjEXAD8TGMzTAtMY7iqWj64n
-O1JDQAzfgwZaShgoOT3Jm0goy9Sza6T5jcaGl6t7tuR/dWQ6d2kDrHvL/F3k0X5v
-YU6e176F4Pd4kEODr+GSrXazAfpSbgqvDf3zfz23sWfKmp/G1a3b37Ew8ccRrfYD
-8qAVUuGryDdR+IgpHBE1O6/JaFtP+8lss9kZJ8YT7JRvc7eSNjMMVIyB2m85CTD2
-49VPA8apQ15TYqWJozyYDMJ1J6EO+voVzMTkWTtXYYZ4MC2s6Db1W7GOIdXHnEI9
-Rm5vbX/vU8hSDLDpbRFq+EzopaOKbt3PjsJyQ0A7bXgNCHFiqvFDPgFixFRCOo6K
-qabeYfZbS2uzGnqU3J/KwJq5XrJvxdrhKFjjKc0goVTWpJPFIoRLllFzkmBkfuDr
-2V0eqrIyCgkSA/CPK60fR4bFPZKspZJ8Vg7KRCtlHtUfI84xv2k=
-=yWmU
+iQIzBAEBCgAdFiEE842ZYwlQjENL1KL2hTX2WG5QToAFAmrt3x4ACgkQhTX2WG5Q
+ToA1Cw/8CMftMRVaF93Mv8930qQRURB5YqwaekhiZB+Y9Z5+PB6Zg7b4lk6Z/187
+XfzTshTwMqDtOHJy45TFlxS8BdXRvYyVBzAO39gPdQLkAKI94vkft/jKm7xVTamj
+us1jxPZ7tRzQfKkYiJM7JKsQhIAkPeSI3HDVKziQ2d0a51wwrpr2XcPxnXpBr58D
+PnVA5QNE9cmtuMdCHudGGcfhxknJulfiQu+z/yJuNNTFIFm8UedzyVCEPQ6s8IFy
+3el266/zIGPnRAM+2QahEK2DNMsSW6UHQs/1OO6Pvjl2q066FanvjvnjzuKBkTkp
+VllVinTWsKf1hzEoQmw3G5DWZi0dlZmQM/b14J9Pzq06fuh2qBgrkL4+aX2WjX6h
+wr192pC+IWmYVfAkpfmZSZuDgYD85uptPjTvbMa5yxbZqjAK8Z+aQCtmuuuoHO8B
+xTCFzcdrINr/p1ChykuW0CWIaLNs4dwaDzHkP1LOzPP5kfjVMVYO9fmLMVhA/T5L
+s3LmP6QbpJhiV8Xe/2eoV0q2NSKKitLjaW939c8DbWxbIyfkAndJVLsftPBG12N1
+arKWSPKgFb8FbhN8/nZWVgv/p/cq9khixTdk62p0lpyB553AkjAcF8/yROWRB3tc
+tsBW26voKk8W/LpSjpvRFphqwoYK6L/3V4Bdi6NOLbVQ8V7bUys=
+=zoBA
 -----END PGP SIGNATURE-----

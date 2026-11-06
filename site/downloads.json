@@ -1,9 +1,9 @@
 {
   "android": {
-    "version": "0.2.3",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.2.3/kintrinsic-0.2.3.apk",
-    "sha256": "4f756a04b6473fbb59036a004b603430a267dc13247c482de39de3a45751cc5f",
-    "mirror": "https://nostr.download/4f756a04b6473fbb59036a004b603430a267dc13247c482de39de3a45751cc5f.apk"
+    "version": "0.2.4",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.2.4/kintrinsic-0.2.4.apk",
+    "sha256": "e75aa2704a337441eaa491909bb284257207bdc4a671f0473dc30624e59ff212",
+    "mirror": "https://nostr.download/e75aa2704a337441eaa491909bb284257207bdc4a671f0473dc30624e59ff212.apk"
   },
   "ward": {
     "version": "0.7.6",
@@ -12,9 +12,9 @@
     "mirror": "https://nostr.download/ebe878161837a2a4bc455d1592d63cf57b8e84f9658ced45009718dfb3cc6549.apk"
   },
   "linux": {
-    "version": "0.8.2",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.2/kintrinsic_0.8.2_amd64.deb",
-    "sha256": "48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb",
-    "mirror": "https://nostr.download/48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb.deb"
+    "version": "0.8.3",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.3/kintrinsic_0.8.3_amd64.deb",
+    "sha256": "a12fdbd8a46d0c895d8c02443b1416092033df5f503005a788637510b6fe8891",
+    "mirror": "https://nostr.download/a12fdbd8a46d0c895d8c02443b1416092033df5f503005a788637510b6fe8891.deb"
   }
 }

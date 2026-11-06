@@ -1,10 +1,10 @@
 {
   "pool": [
     {
-      "filename": "pool/main/k/kintrinsic/kintrinsic_0.8.2_amd64.deb",
-      "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.2/kintrinsic_0.8.2_amd64.deb",
-      "sha256": "48b600c0dd77dce6ce45b8e5a8da639ca8f677ad2ea072757cc84a41448383cb",
-      "sizeBytes": 13205490
+      "filename": "pool/main/k/kintrinsic/kintrinsic_0.8.3_amd64.deb",
+      "url": "https://github.com/forgesworn/kintrinsic/releases/download/linux-v0.8.3/kintrinsic_0.8.3_amd64.deb",
+      "sha256": "a12fdbd8a46d0c895d8c02443b1416092033df5f503005a788637510b6fe8891",
+      "sizeBytes": 13237484
     }
   ]
 }
