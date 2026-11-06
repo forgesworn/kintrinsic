@@ -29,7 +29,7 @@ Every other preset, and any time the screen is on, keeps the one-minute alarm.
 
 In plain terms for a guardian:
 
-- While the ward's phone is asleep, a change you send can take up to about 10
+- While the ward's phone is asleep, a change you send can take up to about 15
   minutes to arrive and take effect. The relay is only checked every 10 minutes
   with the screen off, and that check now waits for the next wake-up, which can
   be 5 minutes apart. On your home Wi-Fi (the local link) it is a few minutes.

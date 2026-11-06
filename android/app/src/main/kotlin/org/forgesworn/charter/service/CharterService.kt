@@ -125,7 +125,7 @@ class CharterService : Service() {
         if (interactive || !RelayPollPace.longerBattery()) return
         runCatching {
             val nowMs = SystemClock.elapsedRealtime()
-            val graceSecs = controller.listeningGraceEndsAtMs?.let { (it - nowMs).coerceAtLeast(0) / 1000 }
+            val graceSecs = controller.listeningGraceEndsAtMs?.takeIf { it > nowMs }?.let { (it - nowMs) / 1000 }
             val secs = LivenessHorizon.nextChangeSecs(System.currentTimeMillis() / 1000, graceSecs)
             LivenessAlarm.noteBoundary(secs?.let { nowMs + it * 1000 })
         }.onFailure {

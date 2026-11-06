@@ -81,4 +81,17 @@ class LivenessHorizonTest {
         )
         assertEquals(91L, LivenessHorizon.earliest(null, tl.scheduleSecs, null, null))
     }
+
+    @Test
+    fun `an always-available entry expiring is a change the search finds`() {
+        fun snap(open: List<String>) = LivenessHorizon.Snapshot(
+            known = true, locked = true, reason = "schedule", activeTime = null, appPolicy = null,
+            appRules = emptyList(), buckets = emptyList(), tethering = "blocked",
+            maintenanceOpen = false, alwaysOpen = open,
+        )
+        val got = LivenessHorizon.firstChangeSecs(300, 60, 2) { t ->
+            if (t < 100) snap(listOf("com.example.calls")) else snap(emptyList())
+        }!!
+        assertTrue("got $got", got in 100..102)
+    }
 }

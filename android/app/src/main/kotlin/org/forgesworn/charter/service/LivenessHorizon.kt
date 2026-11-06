@@ -68,6 +68,8 @@ internal object LivenessHorizon {
         val buckets: List<String>,
         val tethering: String,
         val maintenanceOpen: Boolean,
+        /** Apps the family agreed are open at any hour; an entry can expire. */
+        val alwaysOpen: List<String> = emptyList(),
     )
 
     internal fun snapshotAt(unix: Long): Snapshot {
@@ -82,6 +84,7 @@ internal object LivenessHorizon {
             buckets = CharterCore.bucketSuspensions(unix).sorted(),
             tethering = CharterCore.tetheringMode(unix),
             maintenanceOpen = CharterCore.maintenanceOpen(unix),
+            alwaysOpen = CharterCore.alwaysAvailable(unix, tl.locked, tl.reason).sorted(),
         )
     }
 
