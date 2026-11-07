@@ -46,8 +46,8 @@ pub use release::ReleasePayload;
 pub use request::{RequestPayload, REQUEST_VERSION};
 pub use status::{
     AppRef, EnforcementGap, GroupSpent, InstallChange, InstallChangeKind, InstallWindowReport,
-    StatusLockReason, StatusPayload, StatusSource, MAX_STATUS_APPS, MAX_STATUS_GROUPS,
-    STATUS_VERSION,
+    PendingKind, StatusGuardianRoot, StatusGuardians, StatusLockReason, StatusPayload,
+    StatusPendingStatement, StatusSource, MAX_STATUS_APPS, MAX_STATUS_GROUPS, STATUS_VERSION,
 };
 pub use times::{
     compose_apps, compose_content, GrantTimes, NamedTime, TimePosture, FREE_TIME_ID,

@@ -8,7 +8,9 @@
 mod event;
 mod ids;
 pub mod kinds;
+mod signers;
 pub mod uri;
 
 pub use event::NostrEvent;
 pub use ids::{EventId, HexError, Nonce, PubKey, ReqId, Sha256Hex, Sig};
+pub use signers::{SignerSet, SinglePinned};

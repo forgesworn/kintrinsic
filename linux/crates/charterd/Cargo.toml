@@ -41,6 +41,9 @@ charter-ipc = { workspace = true, default-features = false }
 # carrier on the home network. `net` in every build — the mock integration
 # tests run a real WardLink against a real GuardianLink on loopback.
 charter-link = { workspace = true, features = ["net"] }
+# Guardian roots and working keys: the state machine's types the warden's
+# glue reads (pending statements, the pairing token shape).
+charter-guardians = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -57,10 +57,22 @@ describe("Settings", () => {
   it("lists the children, with the way to add one, then approval, help", () => {
     mount("");
     const headings = [...container.querySelectorAll(".section-label")].map((e) => e.textContent);
-    expect(headings.slice(0, 3)).toEqual(["Children and family devices", "Parent approval", "Help"]);
+    expect(headings.slice(0, 4)).toEqual(["Children and family devices", "Parent approval", "Guardians", "Help"]);
     expect(container.querySelector('button[aria-label="Sam"]')).not.toBeNull();
     expect(buttons()).toContain("Add a child");
     expect(text()).toContain("Setup guide");
+  });
+
+  it("opens the Guardians screens from its card, and back", () => {
+    mount("");
+    expect(text()).not.toContain("Invite a parent");
+    const open = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Guardians");
+    act(() => {
+      window.location.hash = "/settings/guardians";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(open).toBeDefined();
+    expect(buttons()).toContain("‹ Settings");
   });
 
   it("has a note on the order, and ↑ ↓ buttons that reorder the children, disabled at the ends", () => {

@@ -33,7 +33,7 @@ fn schnorr_verify_accepts_nostr_tools_triple_and_allow_params() {
     let v: GrantVector = charter_testkit::golden::load_json("nostr/grant_install_allow.json");
     let store = MockConsumedIdStore::new(MockDisk::new());
     let p = VerifyParams {
-        pinned_guardian: &v.guardian_pubkey,
+        signers: &v.guardian_pubkey,
         expected_req_id: &known_req_id(),
         expected_nonce: &known_nonce(),
         expected_op: OpType::InstallFlatpak,
@@ -53,7 +53,7 @@ fn nostr_tools_deny_grant_verifies_as_deny() {
     let v: GrantVector = charter_testkit::golden::load_json("nostr/grant_install_deny.json");
     let store = MockConsumedIdStore::new(MockDisk::new());
     let p = VerifyParams {
-        pinned_guardian: &v.guardian_pubkey,
+        signers: &v.guardian_pubkey,
         expected_req_id: &known_req_id(),
         expected_nonce: &known_nonce(),
         expected_op: OpType::InstallFlatpak,

@@ -138,7 +138,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 6
+    const val EXPECTED_ABI_VERSION = 8
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -1054,6 +1054,183 @@ object CharterCore {
     fun setInstallWindow(reportJson: String) {
         jni().charterSetInstallWindow(reportJson)
     }
+
+    // ---- guardian roots and working keys (ABI 5) ----------------------------
+
+    /** A pending co-guardian, removal or move, waiting for a guardian to
+     *  confirm it in person at this device. [key] is the key it names,
+     *  [signer] the root that asked, [statement] its event id. Only ever
+     *  read behind the guardian PIN ([confirmablePending]). */
+    data class PendingStatement(
+        val d: String,
+        /** `coguardian` | `removal` | `move`. */
+        val kind: String,
+        val signer: String,
+        val key: String,
+        val label: String?,
+        val issuedAt: Long,
+        val expiresAt: Long,
+        val takesEffectAt: Long?,
+        val statement: String = "",
+    )
+
+    /** The PIN-gated list: [pending] only when [ok]; otherwise [error]
+     *  (`noPin`, `wrongPin`, `wait`, `unavailable`, `failed`) with the
+     *  backoff, as a mint answers. */
+    data class Confirmable(
+        val ok: Boolean,
+        val pending: List<PendingStatement>,
+        val error: String?,
+        val failures: Long,
+        val waitSeconds: Long,
+    )
+
+    /** One pinned guardian root, for About and "who set this rule". */
+    data class GuardianRoot(
+        val root: String,
+        val label: String?,
+        val keys: Int,
+        val keyLabels: List<String>,
+        val rules: List<String>,
+    )
+
+    data class GuardiansSummary(
+        val available: Boolean,
+        val paired: Boolean,
+        val roots: List<GuardianRoot>,
+        val pinSet: Boolean,
+        val pinFailures: Long,
+        val pinWaitSeconds: Long,
+        /** Paired, but neither copy of the guardian-keys state reads: the
+         *  rules stay enforced and nothing can change them on this phone. */
+        val stuck: Boolean = false,
+    )
+
+    /** A presence token to show (never to tap): scan [code] or type
+     *  [shortForm]. [qrModules] is row-major, '1' dark, [qrSize] square. */
+    data class PresenceToken(
+        val code: String,
+        val shortForm: String,
+        val expiresAt: Long,
+        val qrSize: Int,
+        val qrModules: String,
+    )
+
+    /** A PIN check or a mint: [token] on success, else [error] (`noPin`,
+     *  `wrongPin`, `wait`, `notPending`, `unavailable`, `failed`). */
+    data class PresenceResult(
+        val ok: Boolean,
+        val token: PresenceToken?,
+        val error: String?,
+        val failures: Long,
+        val waitSeconds: Long,
+    )
+
+    private fun JSONObject.optLongOrNull(key: String): Long? =
+        if (!has(key) || isNull(key)) null else optLong(key)
+
+    fun parsePendingStatements(arr: org.json.JSONArray): List<PendingStatement> = runCatching {
+        (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            PendingStatement(
+                d = o.optString("d"),
+                kind = o.optString("kind"),
+                signer = o.optString("signer"),
+                key = o.optString("key"),
+                label = o.optStringOrNull("label"),
+                issuedAt = o.optLong("issuedAt"),
+                expiresAt = o.optLong("expiresAt"),
+                takesEffectAt = o.optLongOrNull("takesEffectAt"),
+                statement = o.optString("statement"),
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    /** The PIN-gated list. A list is never read out of a refusal. */
+    fun parseConfirmable(raw: String): Confirmable = runCatching {
+        val o = JSONObject(raw)
+        val ok = o.optBoolean("ok", false) && !o.has("error")
+        val arr = o.optJSONArray("pending")
+        if (ok && arr != null) {
+            Confirmable(true, parsePendingStatements(arr), null, 0, 0)
+        } else {
+            Confirmable(
+                ok = false,
+                pending = emptyList(),
+                error = o.optStringOrNull("error") ?: "failed",
+                failures = o.optLong("failures", 0),
+                waitSeconds = o.optLong("waitSeconds", 0),
+            )
+        }
+    }.getOrDefault(Confirmable(false, emptyList(), "failed", 0, 0))
+
+    fun parseGuardiansSummary(raw: String): GuardiansSummary? = runCatching {
+        val o = JSONObject(raw)
+        if (o.has("error")) return@runCatching null
+        val roots = o.optJSONArray("roots") ?: org.json.JSONArray()
+        val pin = o.optJSONObject("pin") ?: JSONObject()
+        GuardiansSummary(
+            available = o.optBoolean("available", false),
+            paired = o.optBoolean("paired", false),
+            roots = (0 until roots.length()).map { i ->
+                val r = roots.getJSONObject(i)
+                val labels = r.optJSONArray("keyLabels") ?: org.json.JSONArray()
+                val rules = r.optJSONArray("rules") ?: org.json.JSONArray()
+                GuardianRoot(
+                    root = r.optString("root"),
+                    label = r.optStringOrNull("label"),
+                    keys = r.optInt("keys", 0),
+                    keyLabels = (0 until labels.length()).map { labels.optString(it) },
+                    rules = (0 until rules.length()).map { rules.optString(it) },
+                )
+            },
+            pinSet = pin.optBoolean("set", false),
+            pinFailures = pin.optLong("failures", 0),
+            pinWaitSeconds = pin.optLong("waitSeconds", 0),
+            stuck = o.optBoolean("stuck", false),
+        )
+    }.getOrNull()
+
+    fun parsePresenceResult(raw: String): PresenceResult = runCatching {
+        val o = JSONObject(raw)
+        val code = o.optStringOrNull("code")
+        val qr = o.optJSONObject("qr")
+        val token = if (code != null && qr != null) {
+            PresenceToken(
+                code = code,
+                shortForm = o.optString("shortForm"),
+                expiresAt = o.optLong("expiresAt"),
+                qrSize = qr.optInt("size", 0),
+                qrModules = qr.optString("modules"),
+            )
+        } else null
+        PresenceResult(
+            ok = token != null || o.optBoolean("ok", false),
+            token = token,
+            error = if (token != null) null else
+                o.optStringOrNull("error") ?: if (o.optBoolean("ok", false)) null else "failed",
+            failures = o.optLong("failures", 0),
+            waitSeconds = o.optLong("waitSeconds", 0),
+        )
+    }.getOrDefault(PresenceResult(false, null, "failed", 0, 0))
+
+    fun hasGuardianPin(): Boolean = runCatching { jni().charterHasGuardianPin() == 1 }.getOrDefault(false)
+
+    /** Worker thread only (scrypt). */
+    fun verifyGuardianPin(pin: String, nowUnix: Long): PresenceResult =
+        parsePresenceResult(jni().charterVerifyGuardianPin(pin, nowUnix))
+
+    /** Worker thread only (scrypt). The PIN is checked in this same call;
+     *  nothing pending comes back without it. */
+    fun confirmablePending(pin: String, nowUnix: Long): Confirmable =
+        parseConfirmable(jni().charterConfirmablePending(pin, nowUnix))
+
+    /** Worker thread only (scrypt). The PIN is checked in this same call. */
+    fun mintPresenceToken(d: String?, pin: String, nowUnix: Long): PresenceResult =
+        parsePresenceResult(jni().charterMintPresenceToken(d, pin, nowUnix))
+
+    fun guardiansSummary(nowUnix: Long): GuardiansSummary? =
+        parseGuardiansSummary(jni().charterGuardiansSummary(nowUnix))
 }
 
 /** [CharterCore.SubmitResult.wardMessage] for a result that may not exist at

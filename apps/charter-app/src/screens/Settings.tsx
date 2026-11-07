@@ -9,6 +9,16 @@ import { CHILD_COLORS } from "./childColors";
 import { ColorChoice } from "./ColorChoice";
 import KeyBackupNudge, { KEY_BACKUP_ANCHOR } from "./KeyBackupNudge";
 import SignerCard from "./SignerCard";
+import Guardians from "./Guardians";
+import RemovalNotice from "./RemovalNotice";
+import {
+  familyWards,
+  goGuardians,
+  guardiansSubroute,
+  myRootOf,
+  removalsAgainstMe,
+  rootsView,
+} from "./guardiansView";
 import "./child-admin.css";
 
 // Settings: the household, rarely touched. The children (and adding one),
@@ -17,6 +27,7 @@ import "./child-admin.css";
 // Sub-routes (`#/settings/<sub>`):
 //   key-backup                     the page, scrolled to the key backup
 //   add-child                      the page, with the "add a child" form open
+//   guardians[/<sub>]              the Guardians screens
 
 /** The element id of the "Add a child" area. */
 const ADD_CHILD_ANCHOR = "setup-children";
@@ -39,7 +50,60 @@ export default function Settings({ sub }: { sub: string }) {
     if (sub === "add-child") scrollToWhenReady(ADD_CHILD_ANCHOR);
   }, [sub]);
 
+  const guardiansSub = useGuardiansSubroute();
+
+  // `#/settings/guardians/…`: the Guardians screens, inside Settings.
+  if (guardiansSub !== null) return <Guardians sub={guardiansSub} />;
+
   return <SettingsPage openAddChild={sub === "add-child"} />;
+}
+
+/** The Guardians sub-route, following the address as it changes. */
+function useGuardiansSubroute(): string | null {
+  const [sub, setSub] = useState(() => guardiansSubroute());
+  useEffect(() => {
+    const onHash = () => setSub(guardiansSubroute());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return sub;
+}
+
+/**
+ * Who looks after the family's devices, in one line, with the way into the
+ * Guardians screens. A pending removal of you is shown here too, so it can't
+ * go unseen behind a tap.
+ */
+function GuardiansCard() {
+  const { state, guardianKeys } = useCharter();
+  const wards = familyWards(state.children);
+  const me = myRootOf(guardianKeys);
+  const roots = rootsView(wards, me);
+  const againstMe = removalsAgainstMe(wards, guardianKeys.state, me, Math.floor(Date.now() / 1000));
+  const others = roots.filter((r) => !r.you).length;
+  const reported = wards.some((w) => w.device.guardians);
+  return (
+    <Card>
+      <RemovalNotice />
+      <p className="card-sub" style={{ marginTop: 0 }}>
+        {wards.length === 0
+          ? "Another parent already uses Kintrinsic for your child? Join their family, with My Signet or with this phone only."
+          : !reported
+            ? "Your devices haven't said who their guardians are yet. They do once they have the latest Kintrinsic."
+            : others === 0
+            ? "You're the only guardian. Invite the other parent so they can set limits and answer requests too."
+            : `You and ${others === 1 ? "one other parent" : `${others} other parents`} look after these devices.`}
+      </p>
+      <Button block variant={againstMe.length > 0 ? "primary" : "secondary"} onClick={() => goGuardians()}>
+        Guardians
+      </Button>
+      {wards.length === 0 && (
+        <Button block variant="ghost" onClick={() => goGuardians("join")} style={{ marginTop: 8 }}>
+          Join a family
+        </Button>
+      )}
+    </Card>
+  );
 }
 
 function SettingsPage({ openAddChild }: { openAddChild: boolean }) {
@@ -121,6 +185,11 @@ function SettingsPage({ openAddChild }: { openAddChild: boolean }) {
           signed by you. Connecting Signet instead of the built-in key is optional.
         </p>
         <SignerCard />
+      </section>
+
+      <section id="setup-guardians" className="scroll-anchor" aria-label="Guardians">
+        <SectionLabel>Guardians</SectionLabel>
+        <GuardiansCard />
       </section>
 
       <section id="setup-help" className="scroll-anchor" aria-label="Help">

@@ -4,7 +4,9 @@
 pub mod menu;
 pub mod model;
 
-pub use menu::{menu_rows, prefers_xapp_shell, MenuRow, ASK_MINUTES, BUCKET_ASK_MINUTES};
+pub use menu::{
+    menu_rows, prefers_xapp_shell, with_rules_notice, MenuRow, ASK_MINUTES, BUCKET_ASK_MINUTES,
+};
 pub use model::{
     app_open_params, ask_params, asked_notice_for, bucket_ask_params, notice_for, submit_for,
     view_for, IconState, Notice, TrayAsk, TrayView,

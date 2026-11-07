@@ -49,8 +49,8 @@ describe("approval set-up choices", () => {
     expect(button("Set up with Signet")!.closest("details")).toBe(details);
     expect(button("Set up with Heartwood")!.closest("details")).toBe(details);
     // One plain sentence on each.
-    expect(details.textContent).toMatch(/Signet is a separate app/);
-    expect(details.textContent).toMatch(/Heartwood is another key-keeping app/);
+    expect(details.textContent).toMatch(/My Signet is a separate app/);
+    expect(details.textContent).toMatch(/Heartwood keeps your guardian identity on a separate device,\s+reached through My Signet/);
   });
 
   it("keeps each button wired to its own action", () => {

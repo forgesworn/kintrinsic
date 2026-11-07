@@ -28,10 +28,21 @@ export default function GuardianRecovery({ onResolved }: { onResolved: () => voi
       const { recoverGuardianBackup } = await import("../signer/keyBackup");
       const { exportPersistedState, importPersistedState } = await import("../store/store");
       const backup = await recoverGuardianBackup(blob, pass, exportPersistedState());
+      const { withRestoreNote } = await import("../store/householdExport");
+      const note = (json: string) => withRestoreNote(json, backup.workingKeys ?? [], Math.floor(Date.now() / 1000));
+      if (!backup.secret) {
+        // A family whose identity is in My Signet: the unreadable key was only
+        // this phone's day-to-day key, never an identity. Clear it (a new one
+        // is made and approved in My Signet) and bring the family back.
+        clearGuardianKey();
+        importPersistedState(note(backup.stateJson!));
+        window.location.reload();
+        return;
+      }
       await restoreGuardianKey(backup.secret); // overwrites the corrupt value
       if (backup.stateJson) {
         // No household on this phone — install the backup's and boot from it.
-        importPersistedState(backup.stateJson);
+        importPersistedState(note(backup.stateJson));
         window.location.reload();
         return;
       }

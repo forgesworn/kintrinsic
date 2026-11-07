@@ -41,6 +41,20 @@ pub const CHARTER_DEVICE_PAIR_OFFER: u16 = 31117;
 /// Guardian-signed relay configuration, transferred locally for outage recovery.
 pub const CHARTER_DEVICE_RELAYS: u16 = 31118;
 
+/// Family roster (guardian install -> other guardian installs, gift-wrapped
+/// between working keys). Wards never receive or read it.
+pub const CHARTER_FAMILY_ROSTER: u16 = 31119;
+
+/// Guardian statement (addressable): approval, withdrawal, co-guardian, root
+/// removal, root move, cancel or objection. Gift-wrapped to each ward. Its
+/// seal author may differ from its signer (contract, *Delivery and the two
+/// seal exceptions*), so it never goes through the strict unwrap.
+pub const CHARTER_GUARDIAN_STATEMENT: u16 = 31120;
+
+/// Presence confirmation (working key -> ward): proof that a guardian install
+/// was physically at the ward, echoing a one-time token the ward showed.
+pub const CHARTER_PRESENCE_CONFIRM: u16 = 31121;
+
 /// Addressable (NIP-51-style) curator web-list: a curator's signed allow/deny
 /// entries; parents subscribe by pubkey. PROVISIONAL — final value is design
 /// open-question §10.1 (internal design spec 2026-06-28-charter-web-content-control-design).
@@ -97,6 +111,9 @@ mod tests {
         assert_eq!(CHARTER_DEVICE_RELEASE, 31116);
         assert_eq!(CHARTER_DEVICE_PAIR_OFFER, 31117);
         assert_eq!(CHARTER_DEVICE_RELAYS, 31118);
+        assert_eq!(CHARTER_FAMILY_ROSTER, 31119);
+        assert_eq!(CHARTER_GUARDIAN_STATEMENT, 31120);
+        assert_eq!(CHARTER_PRESENCE_CONFIRM, 31121);
         assert_eq!(CHARTER_CURATOR_WEB_LIST, 30100);
         assert_eq!(SOFTWARE_RELEASE, 30063);
     }

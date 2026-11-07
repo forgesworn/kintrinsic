@@ -303,6 +303,33 @@ let askMins = 20;    // the slider's amount, in 5-minute steps
 // slider — mirrors charter-tray's BUCKET_ASK_MINUTES exactly.
 const BUCKET_ASK_MINUTES = 15;
 
+// What is waiting to be confirmed in person is the parents' business, so the
+// page shows it only briefly. The host re-sends the list it holds with every
+// status, so the page takes it only once, straight after the administrator
+// asked for it with their password, and forgets it as soon as a code has
+// been minted, when the card is closed (Close, or leaving the page), or after
+// two minutes with no key press or click.
+const PRESENCE_IDLE_MS = 2*60*1000;
+let presenceAsk = "none";  // "pending" once asked, "ok" once the host said yes
+let presenceListAt = 0;    // when the list on screen arrived (0 = none shown)
+let lastInput = Date.now();
+function clearPresenceList(){ S.presenceList = null; presenceListAt = 0; presenceAsk = "none"; }
+function takePresenceList(incoming, now){
+  if(S.presence){ clearPresenceList(); return; }
+  if(presenceAsk === "ok" && Array.isArray(incoming)){
+    S.presenceList = incoming; presenceListAt = now; lastInput = now; presenceAsk = "none";
+    return;
+  }
+  // Not asked for just now: the host's held copy is not shown again.
+  if(!presenceListAt || !Array.isArray(incoming)) S.presenceList = null;
+}
+// True when the list was cleared for being left idle.
+function presenceIdle(now){
+  if(!presenceListAt || now - lastInput < PRESENCE_IDLE_MS) return false;
+  clearPresenceList();
+  return true;
+}
+
 // Host pushes status here.
 window.__charter = function(data){
   // The Rust host pushes an OBJECT (window.__charter({...})); the demo
@@ -311,14 +338,22 @@ window.__charter = function(data){
   // swallowed EVERY real status, so the app was permanently stuck on the
   // "not configured" screen even with a valid child on disk (found on-metal
   // 2026-07-24, once the paint fix made the screen visible).
+  const shown = S.presenceList;
   try { S = Object.assign(S, typeof data === "string" ? JSON.parse(data) : data); } catch(e){}
+  const incoming = S.presenceList;
+  S.presenceList = shown;
+  takePresenceList(incoming, Date.now());
   // Remember that a code was shown at least once, so "expired" is
   // distinguishable from "never asked" — they need different words.
   if (S.invited) S.invitedOnce = true;
   S.busy = false;
   render();
 };
-window.__toast = function(msg, kind){ showToast(msg, kind||"ok"); };
+window.__toast = function(msg, kind){
+  // The host's answer to "list what is waiting" comes just before its status.
+  if(presenceAsk === "pending") presenceAsk = (kind === "err") ? "none" : "ok";
+  showToast(msg, kind||"ok");
+};
 window.__busy = function(on){ S.busy = !!on; render(); };
 
 function showToast(msg, kind){
@@ -361,13 +396,23 @@ function render(){
   // NAVIGATION starts at the top.
   const navigated = render._route !== route;
   render._route = route;
+  // Leaving the Connect page closes the "Confirm in person" card.
+  if(route !== "connect" && (presenceListAt || S.presenceList)) clearPresenceList();
   const keep = navigated ? 0 : main.scrollTop;
-  v.innerHTML = ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery, about:vAbout}[route]||vToday)();
+  v.innerHTML = stuckBanner() + ({today:vToday, home:vHome, time:vTime, connect:vConnect, recovery:vRecovery, about:vAbout}[route]||vToday)();
   wire();
   main.scrollTop = keep;
 }
 
 function isWard(){ return !!(S.viewer && S.viewer.isWard); }
+// The warden cannot read its guardian-keys state (contract rule 10): the
+// rules it holds still apply, but nothing a guardian signs is accepted until
+// an administrator unpairs and pairs again. Every page, and the popup, says
+// so first, in the same words as the lock and the tray.
+function stuckBanner(){
+  if(!(S.guardians && S.guardians.unavailable)) return "";
+  return `<div class="banner warn" role="alert" style="margin-bottom:22px;font-size:1rem"><svg class="bi" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span><b>Rules can't be changed on this computer. Ask a parent.</b></span></div>`;
+}
 function live(c){ return (c && c.live) || null; }
 
 // ------- Today -------
@@ -700,6 +745,7 @@ function vTime(){
       </div>
       ${c.learningKhan?`<div class="banner ok" style="margin-top:18px"><span>Khan Academy is <b>time-free</b> — time you spend in it doesn't use up your screen time.</span></div>`:""}
     </div>
+    ${rulesSetBy(c)}
     <div class="card" style="margin-top:16px">
       <p class="muted">Think something here is wrong? Say so — Kintrinsic works best when it matches what you actually agreed.</p>
     </div>
@@ -741,6 +787,35 @@ function vTime(){
       </label>
       <p class="muted" style="font-size:.8rem">More learning apps, their own projects, and a daily learning cap are on the phone app (Connect a phone).</p>
       <button class="btn btn-soft btn-block" id="do-learning">${busySpin("Save learning time")}</button>
+    </div>
+    ${rulesSetBy(c)}`;
+}
+
+// Who set each rule this child holds, from the guardians view (contract
+// rule 5). A label is text a guardian chose, so it is never shown alone: it
+// always sits beside the short npub of its signer's ROOT. With no label, the
+// signing key's own short npub stands beside its root (or alone, when it is
+// the root). The machine-wide rule (subject "") is this computer's rule.
+const RULE_KINDS = {schedule:"Allowed hours", budget:"Time each day", content:"Websites",
+  apps:"Apps", apprules:"App rules", learning:"Learning time", buckets:"App groups",
+  times:"Times", connections:"Connections", tethering:"Tethering", update:"Updates",
+  lifeline:"Lifeline", maintenance:"Maintenance", gift:"Gifted time", listening:"Listening",
+  alwaysavailable:"Always available", debugging:"Debugging", standdown:"Stand down"};
+function ruleSetter(r){
+  const root = r.root || "";
+  if(r.label) return r.label+" ("+root+")";
+  if(r.signer && r.signer!==root) return r.signer+" ("+root+")";
+  return root;
+}
+function rulesSetBy(c){
+  const all = (S.guardians && Array.isArray(S.guardians.rules)) ? S.guardians.rules : [];
+  const mine = String((c && c.subject) || "").toLowerCase();
+  const rules = all.filter(r=>r && (r.subject==="" || (mine && String(r.subject||"").toLowerCase()===mine)));
+  if(!rules.length) return "";
+  const rows = rules.map(r=>`<div class="fact"><div class="k">${esc(RULE_KINDS[String(r.kind||"").toLowerCase()]||cap(r.kind))}${r.subject===""?" · this computer's rule":""}</div><div class="v" style="font-weight:500;font-size:.92rem;overflow-wrap:anywhere">${esc(ruleSetter(r))}</div></div>`).join("");
+  return `<div class="card pad-lg" style="margin-top:16px">
+      <div class="card-title">Who set these rules</div>
+      <div class="facts">${rows}</div>
     </div>`;
 }
 
@@ -752,6 +827,75 @@ function dailyStepper(min){
   return `<div class="stepper" style="max-width:280px"><button data-step="daily" data-d="-1">−</button><div class="val" id="v-daily">${esc(fmtDaily(min))}</div><button data-step="daily" data-d="1">+</button></div>`;
 }
 
+// Who this computer trusts, as charterd publishes it. Short npubs only: a
+// guardian's own label never stands alone (it can be spoofed).
+function guardianRoots(){
+  const roots = (S.guardians && Array.isArray(S.guardians.roots)) ? S.guardians.roots : [];
+  if(!roots.length) return "";
+  return `<p class="muted" style="margin-top:14px">${roots.length>1?"Guardians":"Guardian"}: ${roots.map(esc).join(", ")}</p>`;
+}
+// A pending change in plain words, with the short npub it names.
+function pendingText(p){
+  const key = p.key || "";
+  if(p.kind==="coguardian") return "Add a parent: "+key;
+  if(p.kind==="removal") return "Remove a parent: "+key;
+  if(p.kind==="move") return "Move a parent's identity to "+key;
+  return cap(p.kind)+": "+key;
+}
+// A day and a time: a notice period can run for days, so a clock time alone
+// would mislead.
+function fmtWhen(unix){
+  try { return new Date(unix*1000).toLocaleString([], {weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"}); }
+  catch(e){ return ""; }
+}
+function pendingWhen(p){
+  const now = Date.now()/1000;
+  const parts = [];
+  if(p.takesEffectAt!=null) parts.push((p.takesEffectAt>now?"Takes effect ":"Took effect ")+fmtWhen(p.takesEffectAt));
+  if(p.expiresAt!=null) parts.push("Expires "+fmtWhen(p.expiresAt));
+  return parts.join(" · ");
+}
+// "Confirm in person": a change to who manages this computer (another
+// parent, a removal, a new identity) waits until a parent standing HERE scans
+// a one-time code. What is waiting is a matter between the parents, so it is
+// never in the world-readable guardians view (contract rule 5): the
+// administrator asks for it with their password, picks one, and a second
+// password shows its code.
+function presenceCard(){
+  if(isWard()) return "";
+  const pres = S.presence;
+  const list = Array.isArray(S.presenceList) ? S.presenceList : null;
+  let body;
+  if(pres){
+    body = `<p style="margin-bottom:14px"><b>${esc(pendingText(pres))}</b></p>
+      <div class="qr-wrap">
+        <div class="qr">${pres.qr||""}</div>
+        <ol class="steps">
+          <li><span class="txt">A parent standing here opens <b>Kintrinsic</b> on their phone and scans this code.</span></li>
+          <li><span class="txt">Or types this code: <b style="user-select:all">${esc(pres.short||"")}</b></span></li>
+        </ol>
+      </div>
+      <p class="muted" style="margin-top:16px;text-align:center">The code works once and expires in ${fmtLeft(pres.secsLeft)}.</p>`;
+  } else if(list && list.length){
+    body = list.map(p=>`<div class="stack" style="margin-top:12px">
+        <span><b>${esc(pendingText(p))}</b></span>
+        ${pendingWhen(p)?`<span class="muted">${esc(pendingWhen(p))}</span>`:""}
+        <button class="btn btn-wax btn-block" data-presence="${esc(p.d)}">${busySpin("Show the code to confirm")}</button>
+      </div>`).join("")
+      + `<p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password again.</p>
+      <button class="btn btn-ghost btn-block" id="do-presence-close" style="margin-top:10px">Close</button>`;
+  } else {
+    body = `${list?`<div class="banner info" style="margin-bottom:14px"><span>Nothing is waiting to be confirmed in person.</span></div>`:""}
+      <p class="muted">When a parent adds another parent, removes one, or moves to a new identity, the change waits until a parent standing at this computer confirms it.</p>
+      <button class="btn btn-soft btn-block" id="do-presence-list" style="margin-top:14px">${busySpin(list?"Check again":"Confirm a change in person")}</button>
+      <p class="muted" style="margin-top:10px;text-align:center">Asks for your admin password — only a parent can see what is waiting.</p>`;
+  }
+  return `<div class="card pad-lg" style="margin-top:18px">
+      <p class="eyebrow">Confirm in person</p>
+      ${body}
+    </div>`;
+}
+
 function vConnect(){
   if(!S.configured) return notReady("Set up Kintrinsic first","Connect a phone once this computer is set up on the Home screen.");
   if(S.paired) return `
@@ -760,9 +904,11 @@ function vConnect(){
     <p class="lede">This computer takes its limits from your phone. You can set limits, see time used, and approve “more time” from Kintrinsic — anywhere.</p>
     <div class="card pad-lg" style="margin-top:26px">
       <div class="banner ok"><svg class="bi" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg><span>Your phone is connected.</span></div>
+      ${guardianRoots()}
       <button class="btn btn-ghost btn-block" id="do-invite" style="margin-top:18px">${busySpin("Connect a different phone")}</button>
       <p class="muted" style="margin-top:10px;text-align:center">Connecting another phone replaces this one.</p>
-    </div>`;
+    </div>
+    ${presenceCard()}`;
 
   // Waiting for the scan: the QR carries a one-time code, so the phone can
   // finish the pairing by itself. This page flips on its own when it lands.
@@ -889,6 +1035,11 @@ function wire(){
   };
   const inv=document.getElementById("do-invite");
   if(inv) inv.onclick=()=>{ act(); send({cmd:"invite"}); };
+  const plist=document.getElementById("do-presence-list");
+  if(plist) plist.onclick=()=>{ presenceAsk = "pending"; act(); send({cmd:"presenceList"}); };
+  const pclose=document.getElementById("do-presence-close");
+  if(pclose) pclose.onclick=()=>{ clearPresenceList(); render(); };
+  document.querySelectorAll("[data-presence]").forEach(b=>b.onclick=()=>{ act(); send({cmd:"presence", d:b.dataset.presence}); });
   const rec=document.getElementById("do-recovery"); if(rec) rec.onclick=()=>{ send({cmd:"recovery"}); showToast("Opening Recovery…"); };
   // Amount chooser + the give/take/ask verbs.
   document.querySelectorAll("[data-amt]").forEach(b=>b.onclick=()=>{ adjustMins=+b.dataset.amt; render(); });
@@ -937,6 +1088,9 @@ document.querySelectorAll("#nav .item").forEach(b=>b.onclick=()=>{ route=b.datas
 // ward was doing, and hunting for a close button to get back is friction the
 // full app doesn't have (there, Escape does nothing).
 document.addEventListener("keydown", e=>{ if(POPUP && e.key==="Escape") send({cmd:"close"}); });
+// Any key press or click counts as someone still at the list (see presenceIdle).
+document.addEventListener("keydown", ()=>{ lastInput = Date.now(); }, true);
+document.addEventListener("pointerdown", ()=>{ lastInput = Date.now(); }, true);
 
 // initial paint + ask host for status
 render();
@@ -944,7 +1098,9 @@ send({cmd:"refresh"});
 // While a pairing code is on screen the phone finishes the job over the
 // network, so nothing here would otherwise tell us it landed. Poll until it
 // does — then the Connect page flips to "Connected" unaided.
-setInterval(()=>{ if(route==="connect" && !S.paired && (S.invited||S.invitedOnce)) send({cmd:"refresh"}); }, 1000);
+setInterval(()=>{ if(route==="connect" && ((!S.paired && (S.invited||S.invitedOnce)) || (S.presence && !S.busy))) send({cmd:"refresh"}); }, 1000);
+// The pending list goes after two minutes with nobody at it.
+setInterval(()=>{ if(presenceIdle(Date.now())) render(); }, 5000);
 // Today is a LIVE panel: the numbers move on their own as time is used, and a
 // panel that only updates when you press something is how a ward ends up
 // staring at a figure that stopped being true ten minutes ago. Only while

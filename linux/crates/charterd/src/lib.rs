@@ -29,6 +29,7 @@ pub mod enforcer_runtime;
 pub mod exec_guard;
 #[cfg(feature = "real")]
 pub mod focus;
+pub mod guardians;
 pub mod local_adjust;
 pub mod local_link;
 pub mod managed_guard;

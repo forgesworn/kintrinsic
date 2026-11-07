@@ -81,7 +81,7 @@ async fn golden_grant_delivered_and_verified() {
     let store = MockConsumedIdStore::new(MockDisk::new());
     let gpk = guardian.pubkey();
     let vp = VerifyParams {
-        pinned_guardian: &gpk,
+        signers: &gpk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,
@@ -111,7 +111,7 @@ async fn loop_hostile_relay_cannot_forge_grant() {
     let store = MockConsumedIdStore::new(MockDisk::new());
     let gpk = guardian.pubkey();
     let vp = VerifyParams {
-        pinned_guardian: &gpk,
+        signers: &gpk,
         expected_req_id: &rid(),
         expected_nonce: &non(),
         expected_op: OpType::InstallFlatpak,

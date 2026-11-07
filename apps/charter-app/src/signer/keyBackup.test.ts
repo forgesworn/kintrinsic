@@ -73,7 +73,7 @@ describe("v2 household backup", () => {
     const blob = await encryptGuardianBackup(secret, state, "hunter22222");
     expect(blob.startsWith("CHARTER-KEYBAK.2.")).toBe(true);
     const back = await decryptGuardianBackup(blob, "hunter22222");
-    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(Array.from(back.secret!)).toEqual(Array.from(secret));
     expect(back.stateJson).toBe(state);
   });
 
@@ -89,7 +89,7 @@ describe("v2 household backup", () => {
     const v1 = await encryptGuardianKey(secret, "hunter22222");
     expect(v1.startsWith("CHARTER-KEYBAK.1.")).toBe(true);
     const back = await decryptGuardianBackup(v1, "hunter22222");
-    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(Array.from(back.secret!)).toEqual(Array.from(secret));
     expect(back.stateJson).toBeUndefined();
   });
 
@@ -107,7 +107,7 @@ describe("corrupt-key recovery restore", () => {
   it("reads the v2 blob the app actually produces", async () => {
     const blob = await encryptGuardianBackup(secret, backedUp, PASS2);
     const back = await recoverGuardianBackup(`  ${blob}\n`, PASS2, null);
-    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(Array.from(back.secret!)).toEqual(Array.from(secret));
     expect(back.stateJson).toBe(backedUp);
   });
 
@@ -122,13 +122,57 @@ describe("corrupt-key recovery restore", () => {
     const blob = await encryptGuardianBackup(secret, backedUp, PASS2);
     const local = JSON.stringify({ children: [{ id: "c1" }, { id: "c2" }] });
     const back = await recoverGuardianBackup(blob, PASS2, local);
-    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(Array.from(back.secret!)).toEqual(Array.from(secret));
     expect(back.stateJson).toBeUndefined();
   });
 
   it("still restores a v1 key-only blob", async () => {
     const v1 = await encryptGuardianKey(secret, PASS2);
     const back = await recoverGuardianBackup(v1, PASS2, null);
-    expect(Array.from(back.secret)).toEqual(Array.from(secret));
+    expect(Array.from(back.secret!)).toEqual(Array.from(secret));
+  });
+});
+
+describe("backups never carry a working key (decision D5)", () => {
+  const state = JSON.stringify({ children: [{ id: "c1", name: "Robin" }] });
+  const W = "ab".repeat(32);
+
+  it("an identity in My Signet backs up the family and its working keys' public keys, with no key", async () => {
+    const blob = await encryptGuardianBackup(null, state, "hunter22222", [{ pubkey: W, label: "Mum's phone" }]);
+    expect(blob.startsWith("CHARTER-KEYBAK.3.")).toBe(true);
+    const back = await decryptGuardianBackup(blob, "hunter22222");
+    expect(back.secret).toBeUndefined();
+    expect(back.stateJson).toBe(state);
+    expect(back.workingKeys).toEqual([{ pubkey: W, label: "Mum's phone" }]);
+    await expect(encryptGuardianBackup(null, null, "hunter22222")).rejects.toThrow(/must carry the family/);
+  });
+
+  it("an old v2 backup that carries a My Signet install's working key restores without it", async () => {
+    const w = new Uint8Array(32).fill(7);
+    const R = "cd".repeat(32);
+    const household = JSON.stringify({ children: [{ id: "c1", name: "Robin" }], guardianKeys: { v: 1, root: { pubkey: R, via: "signet" } } });
+    const blob = await encryptGuardianBackup(w, household, "hunter22222");
+    expect(blob.startsWith("CHARTER-KEYBAK.2.")).toBe(true);
+    const back = await decryptGuardianBackup(blob, "hunter22222");
+    expect(back.secret).toBeUndefined();
+    expect(back.stateJson).toBe(household);
+    // The corrupt-key screen takes the family-only path too, with the family to boot from.
+    const local = JSON.stringify({ children: [{ id: "c1" }] });
+    const recovered = await recoverGuardianBackup(blob, "hunter22222", local);
+    expect(recovered.secret).toBeUndefined();
+    expect(recovered.stateJson).toBe(household);
+    // Listed as a working key, whatever the household says: dropped as well.
+    const listed = await encryptGuardianBackup(w, state, "hunter22222", [{ pubkey: getPublicKey(w) }]);
+    expect((await decryptGuardianBackup(listed, "hunter22222")).secret).toBeUndefined();
+    // A phone-held identity's own key stays.
+    const phone = JSON.stringify({ children: [], guardianKeys: { v: 1, root: { pubkey: getPublicKey(w), via: "phone" } } });
+    expect(Array.from((await decryptGuardianBackup(await encryptGuardianBackup(w, phone, "hunter22222"), "hunter22222")).secret!)).toEqual(Array.from(w));
+  });
+
+  it("a phone-held identity backs up its own key and lists its working keys by public key", async () => {
+    const secret = new Uint8Array(32).fill(9);
+    const back = await decryptGuardianBackup(await encryptGuardianBackup(secret, state, "hunter22222", [{ pubkey: W }]), "hunter22222");
+    expect(Array.from(back.secret!)).toEqual(Array.from(secret));
+    expect(back.workingKeys).toEqual([{ pubkey: W }]);
   });
 });

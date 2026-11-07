@@ -6,7 +6,7 @@
 //! and not twice in two rendering shells.
 
 use crate::model::{detail_parts_for, humanize, view_for};
-use charter_ipc::dto::{BucketView, TimeLeftView};
+use charter_ipc::dto::{BucketView, GuardiansView, TimeLeftView};
 
 /// The minute offers on the menu. Fixed entries rather than a slider: a menu
 /// cannot hold a draggable one reliably on either shell.
@@ -243,6 +243,18 @@ pub fn prefers_xapp_shell(xdg_current_desktop: &str) -> bool {
         let d = d.trim().to_ascii_lowercase();
         matches!(d.as_str(), "cinnamon" | "x-cinnamon" | "mate" | "xfce")
     })
+}
+
+/// The menu with the stuck notice under its headline when the ward's
+/// guardian-keys state cannot be read (contract rule 10): rules can't be
+/// changed on this computer, though the ones it holds still apply. `g` is the
+/// warden's published guardians view, `None` when it has published none.
+pub fn with_rules_notice(mut rows: Vec<MenuRow>, g: Option<&GuardiansView>) -> Vec<MenuRow> {
+    if let Some(notice) = g.and_then(GuardiansView::notice) {
+        let at = usize::from(matches!(rows.first(), Some(MenuRow::Header { .. })));
+        rows.insert(at, MenuRow::Line(notice.to_string()));
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -724,5 +736,29 @@ mod tests {
         for d in ["GNOME", "KDE", "ubuntu:GNOME", "sway", ""] {
             assert!(!prefers_xapp_shell(d), "{d} should keep today's shell");
         }
+    }
+
+    /// Rule 10: a ward whose guardian-keys state cannot be read sees, under
+    /// the headline, that rules can't be changed here; a readable one, or no
+    /// published view, changes nothing.
+    #[test]
+    fn a_stuck_ward_is_told_rules_cant_be_changed() {
+        let t = day_only(3_600, None);
+        let plain = menu_rows(Some(&t));
+        assert_eq!(with_rules_notice(plain.clone(), None), plain);
+        assert_eq!(
+            with_rules_notice(plain.clone(), Some(&GuardiansView::default())),
+            plain
+        );
+        let stuck = with_rules_notice(plain.clone(), Some(&GuardiansView::stuck()));
+        assert!(matches!(stuck[0], MenuRow::Header { .. }));
+        assert_eq!(
+            stuck[1],
+            MenuRow::Line("Rules can't be changed on this computer. Ask a parent.".into())
+        );
+        assert_eq!(stuck.len(), plain.len() + 1);
+        // Unreachable daemon too: the notice still follows the headline.
+        let away = with_rules_notice(menu_rows(None), Some(&GuardiansView::stuck()));
+        assert!(matches!(away[1], MenuRow::Line(ref l) if l.starts_with("Rules can't")));
     }
 }

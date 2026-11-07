@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use charter_primitives::PubKey;
+use charter_primitives::{EventId, PubKey};
 
 use crate::error::ProtoError;
 
@@ -299,6 +299,80 @@ pub struct StatusPayload {
     /// byte-identical and a pre-times guardian simply never sees it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_time: Option<String>,
+    /// The ward's guardian roots, working keys, pending statements and relay
+    /// list (contract, *Guardian roots and working keys*, STATUS). Present
+    /// only on a ward that implements that section; absent keeps every
+    /// earlier payload byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardians: Option<StatusGuardians>,
+}
+
+/// STATUS `guardians`: who the ward trusts, as it sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusGuardians {
+    /// Each pinned root with its working keys in the signer set.
+    pub roots: Vec<StatusGuardianRoot>,
+    /// Pending co-guardian, removal and move statements.
+    pub pending: Vec<StatusPendingStatement>,
+    /// How many tombstones (applied withdrawals and removals) the ward holds,
+    /// so a dropped withdrawal shows up as a mismatch.
+    pub tombstones: u32,
+    /// The ward's current relay list.
+    pub relays: Vec<String>,
+    /// Whether a guardian PIN is set (rule 11, *Presence confirmation*): the
+    /// guardian app resends a PIN-only RELAYS until a STATUS shows `true`.
+    /// Read as `false` from a ward that predates it.
+    #[serde(default)]
+    pub pin_set: bool,
+    /// The `created_at` of the RELAYS that set the PIN in force (rule 11).
+    /// The guardian app marks a PIN it sent as set only when this is the
+    /// `created_at` it sent, so an older PIN of its own, or another
+    /// install's, is never taken for it. Absent when no PIN is set, and from
+    /// a ward that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_set_at: Option<u64>,
+    /// Accepted clauses and statements, since pairing, whose `issuedAt` was
+    /// ahead of the ward's clock and so clamped to it: a parent's clock is
+    /// adrift. Read as 0 from a ward that predates it.
+    #[serde(default)]
+    pub clamped: u64,
+}
+
+/// One pinned root and its working keys (64 lowercase hex each).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusGuardianRoot {
+    pub root: PubKey,
+    pub keys: Vec<PubKey>,
+}
+
+/// What kind of pending statement it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PendingKind {
+    Coguardian,
+    Removal,
+    Move,
+}
+
+/// One pending statement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusPendingStatement {
+    /// The pending statement's event id, so a typed presence code can name
+    /// any pending statement, not only one the guardian's install sent.
+    pub id: EventId,
+    /// The statement's `d` tag.
+    pub d: String,
+    pub kind: PendingKind,
+    /// The key that signed it (an objection names it as its `p`).
+    pub signer: PubKey,
+    /// When it takes effect, once that is known (a removal's notice period).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes_effect_at: Option<u64>,
+    /// When it expires if nothing settles it.
+    pub expires_at: u64,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -514,7 +588,110 @@ mod tests {
             app_lock_armed: None,
             debugging_open: None,
             active_time: None,
+            guardians: None,
         }
+    }
+
+    #[test]
+    fn guardians_omits_when_none_and_round_trips_in_contract_shape() {
+        let mut s = sample();
+        assert!(!s.to_json().contains("guardians"));
+        let root = PubKey::from_bytes([0x01; 32]);
+        let w = PubKey::from_bytes([0x02; 32]);
+        s.guardians = Some(StatusGuardians {
+            roots: vec![StatusGuardianRoot {
+                root,
+                keys: vec![w],
+            }],
+            pending: vec![StatusPendingStatement {
+                id: EventId::from_bytes([0x0a; 32]),
+                d: "kintrinsic/guardian/ab".into(),
+                kind: PendingKind::Coguardian,
+                signer: root,
+                takes_effect_at: None,
+                expires_at: 99,
+            }],
+            tombstones: 3,
+            relays: vec!["wss://nos.lol".into()],
+            pin_set: true,
+            pin_set_at: Some(1_700_000_000),
+            clamped: 2,
+        });
+        let json = s.to_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let g = &v["guardians"];
+        assert_eq!(g["roots"][0]["root"], root.to_hex());
+        assert_eq!(g["roots"][0]["keys"][0], w.to_hex());
+        assert_eq!(g["pending"][0]["kind"], "coguardian");
+        assert_eq!(g["pending"][0]["expiresAt"], 99);
+        assert!(g["pending"][0].get("takesEffectAt").is_none());
+        assert_eq!(g["tombstones"], 3);
+        assert_eq!(g["relays"][0], "wss://nos.lol");
+        assert_eq!(g["pending"][0]["id"], "0a".repeat(32));
+        assert_eq!(g["pending"][0]["signer"], root.to_hex());
+        assert_eq!(g["pinSet"], true);
+        assert_eq!(g["pinSetAt"], 1_700_000_000);
+        assert_eq!(g["clamped"], 2);
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
+    }
+
+    /// The contract's STATUS `guardians` shape, member for member, with every
+    /// earlier member unchanged; and a `guardians` from a ward that predates
+    /// `pinSet` and `clamped` still reads.
+    #[test]
+    fn guardians_serialise_pin_set_clamped_and_pending_ids_and_signers() {
+        let root = PubKey::from_bytes([0x01; 32]);
+        let g = StatusGuardians {
+            roots: vec![StatusGuardianRoot { root, keys: vec![] }],
+            pending: vec![StatusPendingStatement {
+                id: EventId::from_bytes([0x0b; 32]),
+                d: "kintrinsic/remove/x".into(),
+                kind: PendingKind::Removal,
+                signer: root,
+                takes_effect_at: Some(500),
+                expires_at: 900,
+            }],
+            tombstones: 0,
+            relays: vec![],
+            pin_set: false,
+            pin_set_at: None,
+            clamped: 0,
+        };
+        let v = serde_json::to_value(&g).unwrap();
+        let mut members: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        members.sort_unstable();
+        assert_eq!(
+            members,
+            [
+                "clamped",
+                "pending",
+                "pinSet",
+                "relays",
+                "roots",
+                "tombstones"
+            ]
+        );
+        let mut pending: Vec<&str> = v["pending"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        pending.sort_unstable();
+        assert_eq!(
+            pending,
+            ["d", "expiresAt", "id", "kind", "signer", "takesEffectAt"]
+        );
+        assert_eq!(v["pinSet"], false);
+        assert_eq!(v["clamped"], 0);
+        assert_eq!(v["pending"][0]["takesEffectAt"], 500);
+
+        let mut older = v.clone();
+        let o = older.as_object_mut().unwrap();
+        o.remove("pinSet");
+        o.remove("clamped");
+        let back: StatusGuardians = serde_json::from_value(older).unwrap();
+        assert_eq!(back, g);
     }
 
     #[test]

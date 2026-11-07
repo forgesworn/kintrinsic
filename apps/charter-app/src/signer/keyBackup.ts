@@ -21,6 +21,10 @@ const VERSION = 1;
  *  (children, devices, policies), so one paste brings a fresh install fully
  *  up to speed (decented, 2026-07-23). v1 (key-only) blobs restore forever. */
 const VERSION2 = 2;
+/** v3 payload = JSON {state, workingKeys} with NO key: a family whose identity
+ *  is in My Signet (decision D5). The only local key there is this phone's
+ *  working key, and a working key is never copied. */
+const VERSION3 = 3;
 const PBKDF2_ITERATIONS = 600_000;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
@@ -152,29 +156,50 @@ function hexToBytes(h: string): Uint8Array {
   return out;
 }
 
+/** A working key of this identity, by its PUBLIC key only: what a restore may offer to withdraw. */
+export interface BackedUpWorkingKey {
+  pubkey: string;
+  label?: string;
+}
+
 export interface GuardianBackup {
-  secret: Uint8Array;
+  /** The guardian identity's key. Absent from a v3 blob: the identity is in My Signet. */
+  secret?: Uint8Array;
   /** The persisted app-state JSON (children/devices/policies), when the blob carries it. */
   stateJson?: string;
+  /** This identity's working keys when the backup was made (public keys and labels, never secrets). */
+  workingKeys?: BackedUpWorkingKey[];
 }
 
 /**
- * Encrypt the guardian secret PLUS the household state under `passphrase`
- * (v2 blob). `stateJson` may be null for a key-only backup.
+ * Encrypt the household state under `passphrase`, with the guardian secret
+ * (v2 blob) or, for an identity held in My Signet, without one (v3). The
+ * secret is only ever the identity's own key, never a working key. `stateJson`
+ * may be null for a key-only backup. `workingKeys` lists this identity's
+ * working keys, public keys only.
  */
 export async function encryptGuardianBackup(
-  secret: Uint8Array,
+  secret: Uint8Array | null,
   stateJson: string | null,
   passphrase: string,
+  workingKeys: readonly BackedUpWorkingKey[] = [],
 ): Promise<string> {
-  if (secret.length !== 32) {
+  if (secret !== null && secret.length !== 32) {
     throw new KeyBackupError("guardian secret must be 32 bytes");
+  }
+  if (secret === null && !stateJson) {
+    throw new KeyBackupError("a backup with no key must carry the family");
   }
   if (passphrase.length < 8) {
     throw new KeyBackupError("passphrase must be at least 8 characters");
   }
+  const keys = workingKeys.filter((k) => /^[0-9a-f]{64}$/.test(k.pubkey)).map((k) => ({ pubkey: k.pubkey, ...(k.label ? { label: k.label } : {}) }));
   const payload = new TextEncoder().encode(
-    JSON.stringify({ secretHex: bytesToHex(secret), state: stateJson ?? undefined }),
+    JSON.stringify({
+      ...(secret !== null ? { secretHex: bytesToHex(secret) } : {}),
+      state: stateJson ?? undefined,
+      ...(keys.length > 0 ? { workingKeys: keys } : {}),
+    }),
   );
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
@@ -182,12 +207,13 @@ export async function encryptGuardianBackup(
   const ct = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv: buf(iv) }, key, buf(payload)),
   );
-  return [MAGIC, VERSION2, b64(salt), b64(iv), b64(ct)].join(".");
+  return [MAGIC, secret !== null ? VERSION2 : VERSION3, b64(salt), b64(iv), b64(ct)].join(".");
 }
 
 /**
- * Decrypt EITHER blob generation: v1 (key-only) or v2 (key + household).
- * The one restore entry point from here on.
+ * Decrypt any blob generation: v1 (key-only), v2 (key + household) or v3
+ * (household only, an identity in My Signet). The one restore entry point
+ * from here on.
  */
 export async function decryptGuardianBackup(
   blob: string,
@@ -200,9 +226,10 @@ export async function decryptGuardianBackup(
   if (parts[1] === String(VERSION)) {
     return { secret: await decryptGuardianKey(blob, passphrase) };
   }
-  if (parts[1] !== String(VERSION2)) {
+  if (parts[1] !== String(VERSION2) && parts[1] !== String(VERSION3)) {
     throw new KeyBackupError(`unsupported backup version ${parts[1]}`);
   }
+  const keyless = parts[1] === String(VERSION3);
   let salt: Uint8Array;
   let iv: Uint8Array;
   let ct: Uint8Array;
@@ -220,18 +247,53 @@ export async function decryptGuardianBackup(
   } catch {
     throw new KeyBackupError("wrong passphrase, or the backup is corrupted");
   }
-  let parsed: { secretHex?: string; state?: string };
+  let parsed: { secretHex?: string; state?: string; workingKeys?: unknown };
   try {
     parsed = JSON.parse(new TextDecoder().decode(pt));
   } catch {
     throw new KeyBackupError("the backup did not contain a valid payload");
   }
-  if (typeof parsed.secretHex !== "string" || !/^[0-9a-f]{64}$/.test(parsed.secretHex)) {
-    throw new KeyBackupError("the backup did not contain a valid key");
+  const out: GuardianBackup = {};
+  if (!keyless) {
+    if (typeof parsed.secretHex !== "string" || !/^[0-9a-f]{64}$/.test(parsed.secretHex)) {
+      throw new KeyBackupError("the backup did not contain a valid key");
+    }
+    out.secret = hexToBytes(parsed.secretHex);
   }
-  const out: GuardianBackup = { secret: hexToBytes(parsed.secretHex) };
   if (typeof parsed.state === "string" && parsed.state.length > 0) out.stateJson = parsed.state;
+  if (keyless && !out.stateJson) throw new KeyBackupError("the backup did not contain your family");
+  if (Array.isArray(parsed.workingKeys)) {
+    const keys = parsed.workingKeys.flatMap((k): BackedUpWorkingKey[] => {
+      if (typeof k !== "object" || k === null) return [];
+      const o = k as { pubkey?: unknown; label?: unknown };
+      if (typeof o.pubkey !== "string" || !/^[0-9a-f]{64}$/.test(o.pubkey)) return [];
+      return [{ pubkey: o.pubkey, ...(typeof o.label === "string" && o.label ? { label: o.label.slice(0, 64) } : {}) }];
+    });
+    if (keys.length > 0) out.workingKeys = keys;
+  }
+  // A v2 backup made on a My Signet install before backups left W out
+  // carries that install's working key as its `secret`. Restoring it would
+  // put one W on two phones, so the key is dropped and the backup restores
+  // as a family-only one: the new phone mints its own W.
+  if (out.secret && isWorkingKey(out.secret, out.stateJson, out.workingKeys)) delete out.secret;
   return out;
+}
+
+/**
+ * Is `secret` a working key rather than the guardian identity, by what the
+ * backup itself says: the identity it records is in My Signet (or another
+ * bunker) and is not this key, or the key is among the working keys it lists.
+ */
+function isWorkingKey(secret: Uint8Array, stateJson: string | undefined, workingKeys: readonly BackedUpWorkingKey[] | undefined): boolean {
+  if (!stateJson) return false;
+  const pubkey = getPublicKey(secret);
+  if (workingKeys?.some((k) => k.pubkey === pubkey)) return true;
+  try {
+    const root = (JSON.parse(stateJson) as { guardianKeys?: { root?: { pubkey?: unknown; via?: unknown } } }).guardianKeys?.root;
+    return !!root && typeof root.via === "string" && root.via !== "phone" && root.pubkey !== pubkey;
+  } catch {
+    return false;
+  }
 }
 
 /** True when `stateJson` (the persisted store) holds at least one child. */
@@ -258,6 +320,9 @@ export async function recoverGuardianBackup(
   localStateJson: string | null,
 ): Promise<GuardianBackup> {
   const backup = await decryptGuardianBackup(blob, passphrase);
-  if (backup.stateJson && hasHousehold(localStateJson)) return { secret: backup.secret };
+  // A keyless backup is all household: there is nothing else to bring back.
+  if (backup.secret && backup.stateJson && hasHousehold(localStateJson)) {
+    return { secret: backup.secret, ...(backup.workingKeys ? { workingKeys: backup.workingKeys } : {}) };
+  }
   return backup;
 }

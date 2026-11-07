@@ -26,6 +26,10 @@
       "types": "./dist/evaluator/index.d.ts",
       "import": "./dist/evaluator/index.js"
     },
+    "./guardians": {
+      "types": "./dist/guardians/index.d.ts",
+      "import": "./dist/guardians/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

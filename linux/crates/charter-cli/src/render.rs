@@ -1,6 +1,6 @@
 //! Pure rendering for the CLI (a table by default, JSON with `--json`).
 
-use charter_ipc::{RequestStatusView, TimeLeftView};
+use charter_ipc::{GuardiansView, RequestStatusView, TimeLeftView};
 
 /// Whether `--json` was passed.
 pub fn json_flag(args: &[String]) -> bool {
@@ -26,6 +26,42 @@ pub fn render_status(rows: &[RequestStatusView], json: bool) -> String {
         ));
     }
     out.trim_end().to_string()
+}
+
+/// Who this ward trusts and who set its rules (rule 5): each label next to
+/// its signer's root as a short npub, never alone. Labels are guardian-chosen
+/// text, so control characters are dropped before printing. The view has no
+/// pending statements (rule 5); a ward whose guardian-keys state cannot be
+/// read is told that rules can't be changed (rule 10).
+pub fn render_guardians(g: &GuardiansView) -> String {
+    let clean = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
+    if let Some(notice) = g.notice() {
+        return notice.to_string();
+    }
+    let mut out = format!("Guardians: {}", clean(&g.roots.join(", ")));
+    if !g.keys.is_empty() {
+        out.push_str("\nTheir devices:");
+        for k in &g.keys {
+            out.push_str(&format!("\n  {}", clean(&k.named())));
+        }
+    }
+    if !g.rules.is_empty() {
+        out.push_str("\nRules set by:");
+        for r in &g.rules {
+            let set_by = clean(&r.set_by());
+            let line = match r.applies_to() {
+                Some(whom) => format!("{set_by}, {whom}'s rule"),
+                None => set_by,
+            };
+            out.push_str(&format!("\n  {:<10} {line}", clean(&r.kind)));
+        }
+    }
+    out.push_str(if g.pin_set {
+        "\nGuardian PIN: set"
+    } else {
+        "\nGuardian PIN: not set"
+    });
+    out
 }
 
 /// Render the time-left breakdown.

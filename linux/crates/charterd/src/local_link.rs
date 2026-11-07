@@ -97,9 +97,14 @@ impl LocalSink for LateSink {
 /// `Broker::on_release`). This flag only carries the news to the loop, which
 /// restarts the daemon unpaired, and stops the poll task from starting
 /// another round in the meantime.
+///
+/// It also carries a gift-wrapped RELAYS change applied on either route
+/// (rule 11): the transports and the link were built on the old list, so the
+/// loop restarts the daemon, as `charter-pair --relay-code` does.
 #[derive(Debug, Default)]
 pub struct LinkControl {
     released: AtomicBool,
+    relays_changed: AtomicBool,
 }
 
 impl LinkControl {
@@ -114,6 +119,16 @@ impl LinkControl {
 
     pub fn mark_released(&self) {
         self.released.store(true, Ordering::SeqCst);
+    }
+
+    /// A gift-wrapped RELAYS change was applied to the stored pairing, on
+    /// either route.
+    pub fn relays_changed(&self) -> bool {
+        self.relays_changed.load(Ordering::SeqCst)
+    }
+
+    pub fn mark_relays_changed(&self) {
+        self.relays_changed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -147,6 +162,9 @@ where
             let (out, audits) = broker.ingest_local_deferred(&wrap, INGEST_OPTIONS).await;
             if out.released {
                 control.mark_released();
+            }
+            if out.relays_changed {
+                control.mark_relays_changed();
             }
             // The ACK goes out as soon as this returns; the audits are relay
             // IO (seconds when the relays are unreachable, the case the link
@@ -333,6 +351,9 @@ impl BrokerPoller {
                 };
                 if counts.released {
                     control.mark_released();
+                }
+                if counts.relays_changed {
+                    control.mark_relays_changed();
                 }
                 if tx.send(counts).is_err() || counts.released {
                     return;

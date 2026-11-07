@@ -21,9 +21,10 @@ const FEED = {
 const store = vi.hoisted(() => ({
   beginPhonePairing: vi.fn(),
   cancelPhonePairing: vi.fn(),
+  // The key the ward pins: the family's root (here, this phone's key).
+  guardianKeys: { rootPubkey: () => PK },
 }));
 vi.mock("../store/store", () => ({ useCharter: () => store }));
-vi.mock("../signer/guardianKey", () => ({ guardianPubkeyHex: () => PK }));
 vi.mock("../domain/pairingSas", () => ({ pairingSas: async () => "123 456" }));
 // jsdom has no canvas; the payload rides on the <img> as a data attribute.
 vi.mock("qrcode", () => ({ default: { toDataURL: async () => "data:image/png;base64,AAAA" } }));

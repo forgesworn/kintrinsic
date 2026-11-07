@@ -525,6 +525,11 @@ class LockActivity : Activity() {
                 .getOrNull()
                 .let { shadeInfo(it, standIn) }
             val paired = runCatching { CharterCore.pairingState().paired }.getOrDefault(false)
+            // D7: neither copy of the guardian-keys state reads. The rules
+            // stay enforced; the lock says first that they can't be changed.
+            val stuck = paired && runCatching {
+                CharterCore.guardiansSummary(System.currentTimeMillis() / 1000)?.stuck == true
+            }.getOrDefault(false)
             val lifeline = runCatching { CharterCore.lifelineView() }
                 .getOrDefault(CharterCore.LifelineView())
             val emergency = if (lifeline.emergencyServices) emergencyNumber() else null
@@ -533,7 +538,7 @@ class LockActivity : Activity() {
             readAskOutcome()
             val connections = CharterCore.connections()
             val closed = Connections.lockedSurfaceClosed(this)
-            runOnUiThread { renderViews(info, paired, lifeline, emergency, connections, closed) }
+            runOnUiThread { renderViews(info, paired, lifeline, emergency, connections, closed, stuck) }
         }
     }
 
@@ -686,6 +691,7 @@ class LockActivity : Activity() {
         emergencyNumber: String? = null,
         connections: CharterCore.Connections? = null,
         lockedSurfaceClosed: Boolean = false,
+        rulesStuck: Boolean = false,
     ) {
         val lifeline = lifelineView.numbers
         // Three deliberate zones rather than one centred blob: the clock owns
@@ -759,7 +765,12 @@ class LockActivity : Activity() {
             springAbove,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
         )
-        root.addView(text(info?.title ?: "Locked", CharterTheme.FS_TITLE, CharterTheme.INK_TEXT, 24))
+        if (rulesStuck) {
+            root.addView(text(GuardianCopy.STUCK, CharterTheme.FS_SECTION, CharterTheme.INK_TEXT, 24))
+        }
+        root.addView(
+            text(info?.title ?: "Locked", CharterTheme.FS_TITLE, CharterTheme.INK_TEXT, if (rulesStuck) 10 else 24),
+        )
         if (!info?.comeBack.isNullOrEmpty()) {
             root.addView(text(info!!.comeBack, CharterTheme.FS_SECTION, CharterTheme.INK_TEXT_2, 14))
         }

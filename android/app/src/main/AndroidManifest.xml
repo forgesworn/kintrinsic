@@ -171,6 +171,14 @@
             android:exported="false"
             android:theme="@style/Theme.Charter" />
 
+        <!-- Guardian presence: a guardian at the device shows a one-time code
+             for a pending co-guardian, removal or move (PIN-gated, reached
+             from About; FLAG_SECURE). -->
+        <activity
+            android:name=".ui.GuardianPresenceActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Charter" />
+
         <!-- Ward-facing "ask for an app" surface, launched from MainActivity. -->
         <activity
             android:name=".ui.RequestAppsActivity"

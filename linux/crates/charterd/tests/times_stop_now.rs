@@ -44,7 +44,9 @@ type B = Broker<MockSystem, MockTransport, ScriptedEntropy>;
 
 fn broker(g: &TestGuardian) -> B {
     Broker::new(
-        MockSystem::new(at(19, 0)),
+        // Later than every clause here but the last, which is within the five
+        // minutes a clause may be dated ahead of the ward's clock.
+        MockSystem::new(at(20, 1)),
         MockTransport::new(g.pubkey(), PubKey::from_bytes([0x42; 32])),
         ScriptedEntropy::new(1),
         EnactorRegistry::new(),

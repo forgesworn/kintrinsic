@@ -18,6 +18,7 @@ on:
       - 'src/**'
       - 'scripts/gen-schedule-vectors.mjs'
       - 'scripts/gen-nostr-vectors.mjs'
+      - 'scripts/gen-guardian-vectors.mjs'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/rust.yml'
@@ -29,6 +30,7 @@ on:
       - 'src/**'
       - 'scripts/gen-schedule-vectors.mjs'
       - 'scripts/gen-nostr-vectors.mjs'
+      - 'scripts/gen-guardian-vectors.mjs'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/rust.yml'
@@ -162,6 +164,7 @@ jobs:
           npm run build
           node scripts/gen-schedule-vectors.mjs
           node scripts/gen-nostr-vectors.mjs
+          node scripts/gen-guardian-vectors.mjs
       # Every generated vector is deterministic: the generators pin BIP-340 aux
       # data, NIP-59 ephemeral keys, timestamps and NIP-44 nonces to labelled
       # seeds, so a regeneration is byte-identical and the whole tree is guarded.

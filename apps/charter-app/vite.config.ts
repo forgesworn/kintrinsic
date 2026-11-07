@@ -1,9 +1,24 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { fileURLToPath } from "node:url";
 
 // Charter family-management PWA. Mobile-first, installable, no backend.
 export default defineConfig({
+  resolve: {
+    // The guardian-keys reference lives in the monorepo's SDK source; the app
+    // compiles it in rather than depending on a published package. `dedupe`
+    // makes its `nostr-tools` import resolve to this app's own copy (CI
+    // installs only apps/charter-app; the repo root has no node_modules).
+    alias: {
+      "@forgesworn/charter/guardians": fileURLToPath(new URL("../../src/guardians/index.ts", import.meta.url)),
+    },
+    dedupe: ["nostr-tools"],
+  },
+  // The dev server must also serve that source from outside this app.
+  server: {
+    fs: { allow: [fileURLToPath(new URL("../..", import.meta.url))] },
+  },
   plugins: [
     react(),
     VitePWA({

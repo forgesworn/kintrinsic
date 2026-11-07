@@ -367,8 +367,131 @@ impl TimeLeftView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingStateView {
     pub paired: bool,
+    /// The guardian pinned at pairing (the record's legacy field). On a ward
+    /// with guardian roots and working keys, `guardians` is who it trusts now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_short: Option<String>,
+    /// Who this ward trusts and who set its rules, as the warden publishes it
+    /// (contract, *Guardian roots and working keys*, rule 5). Absent when the
+    /// warden has published nothing (unpaired, an older warden, not running).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardians: Option<GuardiansView>,
+}
+
+/// The notice every ward surface shows when the guardian-keys state cannot be
+/// read (contract rule 10): the rules already held stay enforced, but nothing
+/// a guardian signs is accepted until an administrator unpairs and re-pairs.
+pub const RULES_STUCK_NOTICE: &str = "Rules can't be changed on this computer. Ask a parent.";
+
+/// The ward's guardians, world-readable by design: a ward can always see what
+/// is enforced against them and by whom. Keys appear only as short npubs.
+/// A label is text a guardian chose and can be spoofed, so it is always shown
+/// next to the short npub of its signer's ROOT, never alone (rule 5).
+///
+/// It never carries a pending statement: a pending removal is a dispute
+/// between the parents, not something enforced on the child, so pending
+/// statements are shown only inside the privileged confirm-in-person flow
+/// (rule 5; `charter-presence --list`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardiansView {
+    /// Each pinned root, as a short npub.
+    pub roots: Vec<String>,
+    /// Each root's active working keys.
+    #[serde(default)]
+    pub keys: Vec<WorkingKeyView>,
+    /// Who set each rule the ward holds.
+    #[serde(default)]
+    pub rules: Vec<RuleSetterView>,
+    /// Whether a guardian PIN is set on this ward.
+    #[serde(default)]
+    pub pin_set: bool,
+    /// The guardian-keys state cannot be read: rules can't be changed here
+    /// ([`RULES_STUCK_NOTICE`]). The lists are then empty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
+}
+
+impl GuardiansView {
+    /// The view of a ward whose guardian-keys state cannot be read.
+    pub fn stuck() -> Self {
+        GuardiansView {
+            unavailable: true,
+            ..Self::default()
+        }
+    }
+
+    /// What the ward is told when rules can't be changed, if they can't.
+    pub fn notice(&self) -> Option<&'static str> {
+        self.unavailable.then_some(RULES_STUCK_NOTICE)
+    }
+}
+
+/// One active working key (an install a root approved), for rule 5.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingKeyView {
+    /// Its root, as a short npub.
+    pub root: String,
+    /// The working key, as a short npub.
+    pub key: String,
+    /// The label its approval gave it, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl WorkingKeyView {
+    /// "Mum's phone (npub1abc…xyz)" with the ROOT's short npub, or the key's
+    /// own short npub and its root's.
+    pub fn named(&self) -> String {
+        match &self.label {
+            Some(l) => format!("{l} ({})", self.root),
+            None => format!("{} ({})", self.key, self.root),
+        }
+    }
+}
+
+/// Who set one rule (rule 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleSetterView {
+    /// The child the rule is for (64 hex, the subject in their limits file),
+    /// or `""` for this computer's machine-wide rule (the `content` clause).
+    pub subject: String,
+    /// The clause kind's wire name (`budget`, `schedule`, `apps`, …).
+    pub kind: String,
+    /// The signer's root, as a short npub (the signer's own when the ward
+    /// did not record its root).
+    pub root: String,
+    /// The key that signed it, as a short npub.
+    #[serde(default)]
+    pub signer: String,
+    /// The signing install's label, if its approval gave one. Only ever set
+    /// beside a recorded root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl RuleSetterView {
+    /// "Mum's phone (npub1abc…xyz)", or the short npub alone.
+    pub fn set_by(&self) -> String {
+        match &self.label {
+            Some(l) => format!("{l} ({})", self.root),
+            None => self.root.clone(),
+        }
+    }
+
+    /// Whether this is the computer's machine-wide rule (subject `""`), not
+    /// one child's.
+    pub fn is_machine_wide(&self) -> bool {
+        self.subject.is_empty()
+    }
+
+    /// Who the rule is for, in words: "this computer" for the machine-wide
+    /// rule, `None` for a child's (the ward knows who they are).
+    pub fn applies_to(&self) -> Option<&'static str> {
+        self.is_machine_wide().then_some("this computer")
+    }
 }
 
 /// Metadata for an exec candidate surfaced to the user surface.
@@ -402,6 +525,41 @@ pub enum DaemonEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rule 5: the world-readable guardians view has no field that could
+    /// carry a pending statement; rule 10: a stuck ward says so.
+    #[test]
+    fn the_guardians_view_carries_no_pending_and_says_when_it_is_stuck() {
+        let v = GuardiansView {
+            roots: vec!["npub1aaaa…zzzz".into()],
+            keys: vec![WorkingKeyView {
+                root: "npub1aaaa…zzzz".into(),
+                key: "npub1kkkk…yyyy".into(),
+                label: Some("Mum's phone".into()),
+            }],
+            rules: vec![RuleSetterView {
+                subject: String::new(),
+                kind: "content".into(),
+                root: "npub1aaaa…zzzz".into(),
+                signer: "npub1kkkk…yyyy".into(),
+                label: Some("Mum's phone".into()),
+            }],
+            pin_set: true,
+            unavailable: false,
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert!(json.get("pending").is_none());
+        assert!(json.get("unavailable").is_none());
+        assert_eq!(json["pinSet"], true);
+        assert_eq!(v.keys[0].named(), "Mum's phone (npub1aaaa…zzzz)");
+        assert_eq!(v.rules[0].applies_to(), Some("this computer"));
+        assert_eq!(v.notice(), None);
+        let stuck = serde_json::to_value(GuardiansView::stuck()).unwrap();
+        assert_eq!(stuck["unavailable"], true);
+        let back: GuardiansView = serde_json::from_value(stuck).unwrap();
+        assert_eq!(back.notice(), Some(RULES_STUCK_NOTICE));
+        assert!(back.roots.is_empty() && back.rules.is_empty());
+    }
 
     #[test]
     fn op_wire_strings() {

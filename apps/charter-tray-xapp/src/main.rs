@@ -13,11 +13,12 @@
 mod render;
 mod xapp;
 
-use charter_ipc::client::CharterdClient as _;
-use charter_ipc::dto::{DaemonEvent, TimeLeftView};
-use charter_ipc::real::RealCharterdClient;
+use charter_ipc::client::{CharterdClient as _, PairingSink as _};
+use charter_ipc::dto::{DaemonEvent, GuardiansView, TimeLeftView};
+use charter_ipc::real::{RealCharterdClient, RealPairingSink};
 use charter_tray::{
-    asked_notice_for, menu_rows, notice_for, submit_for, view_for, IconState, MenuRow, TrayAsk,
+    asked_notice_for, menu_rows, notice_for, submit_for, view_for, with_rules_notice, IconState,
+    MenuRow, TrayAsk,
 };
 use std::cell::RefCell;
 use std::os::unix::process::CommandExt as _;
@@ -28,8 +29,10 @@ const POLL_SECS: u64 = 30;
 
 /// What the panel thread hands the GTK thread.
 enum Update {
-    /// A fresh snapshot (or `None` — daemon unreachable).
-    View(Box<Option<TimeLeftView>>),
+    /// A fresh snapshot (or `None` — daemon unreachable), with the warden's
+    /// published guardians view (`None` when it has published none), which
+    /// carries the stuck notice (contract rule 10).
+    View(Box<(Option<TimeLeftView>, Option<GuardiansView>)>),
     /// Something worth telling the ward.
     Notice(charter_tray::Notice),
 }
@@ -115,6 +118,13 @@ fn sample() -> TimeLeftView {
     }
 }
 
+/// The warden's published guardians view (world-readable; never a pending
+/// statement), for the stuck notice (contract rule 10), exactly as
+/// `charter-tray` reads it.
+async fn current_guardians(sink: &RealPairingSink) -> Option<GuardiansView> {
+    sink.pairing_state().await.ok().and_then(|p| p.guardians)
+}
+
 /// The daemon side, on its own thread with its own runtime: subscribes, polls,
 /// relays asks. GTK objects never cross into here — only plain data goes back
 /// over the channel.
@@ -138,7 +148,13 @@ fn spawn_daemon_thread(
                 .await
                 .unwrap_or_else(|_| RealCharterdClient::new());
             let mut latest = client.time_left().await.ok();
-            let _ = updates.send(Update::View(Box::new(latest.clone()))).await;
+            // The world-readable guardians view, as `charter-tray` reads it:
+            // never a pending statement, only whether rules can be changed.
+            let guardians_sink = RealPairingSink::default();
+            let mut guardians = current_guardians(&guardians_sink).await;
+            let _ = updates
+                .send(Update::View(Box::new((latest.clone(), guardians.clone()))))
+                .await;
 
             let mut events = client.subscribe();
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(POLL_SECS));
@@ -146,6 +162,7 @@ fn spawn_daemon_thread(
                 tokio::select! {
                     _ = tick.tick() => {
                         latest = client.time_left().await.ok();
+                        guardians = current_guardians(&guardians_sink).await;
                     }
                     ev = events.recv() => {
                         // A lagged or closed stream falls back to the poll.
@@ -177,7 +194,7 @@ fn spawn_daemon_thread(
                     let _ = updates.send(Update::Notice(n)).await;
                 }
                 if updates
-                    .send(Update::View(Box::new(latest.clone())))
+                    .send(Update::View(Box::new((latest.clone(), guardians.clone()))))
                     .await
                     .is_err()
                 {
@@ -224,9 +241,9 @@ fn main() {
 
     let apply = {
         let (icon, held) = (icon.clone(), held.clone());
-        move |t: Option<&TimeLeftView>| {
+        move |t: Option<&TimeLeftView>, g: Option<&GuardiansView>| {
             let view = view_for(t);
-            let rows: Vec<MenuRow> = menu_rows(t);
+            let rows: Vec<MenuRow> = with_rules_notice(menu_rows(t), g);
             icon.set_icon_name(icon_name(view.icon));
             icon.set_tooltip_text(&if view.tooltip_detail.is_empty() {
                 view.title.clone()
@@ -256,15 +273,15 @@ fn main() {
     // its own words, and an icon that appears only once the daemon answers
     // looks exactly like the tray that used to die at login.
     if preview {
-        apply(Some(&sample()));
+        apply(Some(&sample()), None);
     } else {
-        apply(None);
+        apply(None, None);
     }
 
     gtk::glib::MainContext::default().spawn_local(async move {
         while let Ok(update) = rx.recv().await {
             match update {
-                Update::View(t) => apply(t.as_ref().as_ref()),
+                Update::View(v) => apply(v.0.as_ref(), v.1.as_ref()),
                 Update::Notice(n) => notify(&n),
             }
         }

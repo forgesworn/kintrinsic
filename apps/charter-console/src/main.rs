@@ -31,6 +31,31 @@ static INVITE: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::syn
 /// offer past it, so a QR shown any longer is a lie.
 const TOKEN_TTL_SECS: u64 = 600;
 
+/// The presence code on screen ("Confirm in person"): what `charter-presence
+/// --mint <d> --json` printed, and when. In memory only, like the invite; the
+/// token itself stays root-only on disk. A code lives as long as a pairing
+/// code (`charter_sys::presence_token::PRESENCE_TOKEN_TTL_SECS`).
+static PRESENCE: std::sync::Mutex<Option<(Value, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// What is waiting to be confirmed in person, as `charter-presence --list
+/// --json` printed it after the administrator's password, and when. In memory
+/// only and never written anywhere: a pending statement is a dispute between
+/// the parents, which the child must not see (contract rule 5), so the
+/// world-readable guardians view no longer carries it. Dropped once a code is
+/// shown for one of them, or after [`PRESENCE_LIST_TTL_SECS`].
+static PRESENCE_LIST: std::sync::Mutex<Option<(Vec<Value>, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// How long the pending list stays on screen: two minutes, matching the page.
+/// What is waiting is a dispute between the parents, so it is shown no longer
+/// than it takes to pick one.
+const PRESENCE_LIST_TTL_SECS: u64 = 120;
+
+/// Who the ward trusts and who set each rule, as charterd publishes it
+/// (world-readable, no secrets, never a pending statement).
+const GUARDIANS_VIEW: &str = "/run/charter/guardians.json";
+
 const LIMITS_DIR: &str = "/etc/charter/limits.d";
 const DEVICE_PUB: &str = "/var/lib/charter/device.pub";
 const PAIRING: &str = "/var/lib/charter/pairing.json";
@@ -269,6 +294,22 @@ fn handle_command(body: &str, proxy: &tao::event_loop::EventLoopProxy<UserEvent>
         // Mint a fresh scan-to-pair token and show its QR. Asks for the admin
         // password, which is the point: only the parent may invite a guardian.
         "invite" => Some(run_invite().map(|_| "Scan this with your phone.")),
+        // List what is waiting to be confirmed in person. Admin password: the
+        // list is the parents' business, not the child's.
+        "presenceList" => Some(run_presence_list().map(|n| {
+            if n == 0 {
+                "Nothing is waiting to be confirmed in person."
+            } else {
+                "Choose the change to confirm."
+            }
+        })),
+        // Show the one-time code a guardian standing here scans to confirm a
+        // pending co-guardian, removal or root move. Admin password, like the
+        // pairing code: only a parent can confirm anything in person.
+        "presence" => {
+            let d = msg.get("d").and_then(|v| v.as_str()).unwrap_or("");
+            Some(run_presence(d).map(|_| "Ask the guardian to scan this code."))
+        }
         "learning" => {
             let user = msg.get("user").and_then(|v| v.as_str()).unwrap_or("");
             let khan = msg.get("khan").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -393,6 +434,71 @@ fn run_invite() -> Result<(), String> {
         return Err("Couldn't prepare a pairing code. Please try again.".into());
     }
     *INVITE.lock().expect("invite lock") = Some((payload, std::time::Instant::now()));
+    Ok(())
+}
+
+/// The helper's own error, read as a sentence: `charter-presence` writes
+/// "the guardian state on this computer cannot be read, …" after its name.
+fn sentence(text: String) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Ask the privileged helper what is waiting to be confirmed in person, and
+/// hold the list for the page to choose from. `pkexec_output`, not
+/// `pkexec_capture`: the helper's own words ("this computer is not paired",
+/// "the guardian state … cannot be read") are the useful answer on failure.
+fn run_presence_list() -> Result<usize, String> {
+    let out = pkexec_output("charter-presence", &["--list", "--json"]).map_err(sentence)?;
+    let items: Vec<Value> = serde_json::from_str::<Value>(&out)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .ok_or_else(|| "Couldn't read what is waiting. Please try again.".to_string())?;
+    // Only what the page shows: the statement id stays with the helper.
+    let items: Vec<Value> = items
+        .iter()
+        .filter(|p| {
+            p.get("d")
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| !d.is_empty())
+        })
+        .map(|p| {
+            json!({
+                "d": p.get("d"),
+                "kind": p.get("kind"),
+                "key": p.get("key"),
+                "takesEffectAt": p.get("takesEffectAt"),
+                "expiresAt": p.get("expiresAt"),
+            })
+        })
+        .collect();
+    let n = items.len();
+    *PRESENCE_LIST.lock().expect("presence list lock") = Some((items, std::time::Instant::now()));
+    Ok(n)
+}
+
+/// Ask charterd (through the privileged helper) for a presence code bound to
+/// the pending statement `d`, and hold it for the QR.
+fn run_presence(d: &str) -> Result<(), String> {
+    if d.is_empty() {
+        return Err("Nothing to confirm.".into());
+    }
+    let out = pkexec_output("charter-presence", &["--mint", d, "--json"]).map_err(sentence)?;
+    let v: Value = serde_json::from_str(&out)
+        .map_err(|_| "Couldn't prepare a code. Please try again.".to_string())?;
+    if !v
+        .get("payload")
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| p.starts_with("charter://presence?"))
+    {
+        return Err("Couldn't prepare a code. Please try again.".into());
+    }
+    *PRESENCE.lock().expect("presence lock") = Some((v, std::time::Instant::now()));
+    // The choice is made; showing a new code means asking for the list again.
+    *PRESENCE_LIST.lock().expect("presence list lock") = None;
     Ok(())
 }
 
@@ -781,6 +887,36 @@ fn collect_status() -> String {
         .as_ref()
         .map(|(_, m)| TOKEN_TTL_SECS.saturating_sub(m.elapsed().as_secs()));
     let qr = invite.as_ref().and_then(|(p, _)| qr_svg(p));
+    // The presence code, dropped once expired, exactly like the invite.
+    let mut guard = PRESENCE.lock().expect("presence lock");
+    if let Some((_, minted)) = guard.as_ref() {
+        if minted.elapsed().as_secs() >= TOKEN_TTL_SECS {
+            *guard = None;
+        }
+    }
+    let presence = guard.as_ref().map(|(v, minted)| {
+        json!({
+            "qr": v.get("payload").and_then(|p| p.as_str()).and_then(qr_svg),
+            "short": v.get("short"),
+            "kind": v.get("kind"),
+            "key": v.get("key"),
+            "d": v.get("d"),
+            "secsLeft": TOKEN_TTL_SECS.saturating_sub(minted.elapsed().as_secs()),
+        })
+    });
+    drop(guard);
+    // The list to choose from, dropped after two minutes.
+    let mut guard = PRESENCE_LIST.lock().expect("presence list lock");
+    if let Some((_, listed)) = guard.as_ref() {
+        if listed.elapsed().as_secs() >= PRESENCE_LIST_TTL_SECS {
+            *guard = None;
+        }
+    }
+    let presence_list = guard.as_ref().map(|(items, _)| items.clone());
+    drop(guard);
+    let guardians = std::fs::read_to_string(GUARDIANS_VIEW)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
 
     let me = current_username();
     let viewer_is_ward = me.as_deref().is_some_and(is_managed_user);
@@ -802,6 +938,9 @@ fn collect_status() -> String {
         "version": option_env!("KINTRINSIC_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
         "qr": qr,
         "invited": invite.is_some(),
+        "presence": presence,
+        "presenceList": presence_list,
+        "guardians": guardians,
         "secsLeft": secs_left,
         // Who is sitting here. The ward gets the SAME numbers as the guardian
         // — Kintrinsic's standing rule is that a ward can always see what is
@@ -930,6 +1069,10 @@ fn read_children() -> Vec<Value> {
             "bedtime": bedtime,
             "daily": daily,
             "paired": subject.is_some(),
+            // The child's 64-hex subject, public like the rest of this file:
+            // the page matches it against `rules[].subject` in the guardians
+            // view to say who set each of this child's rules.
+            "subject": subject,
             "learningKhan": learning_khan,
             // The rule above is what was AGREED; this is what is actually
             // happening right now. Showing only the first is how the console

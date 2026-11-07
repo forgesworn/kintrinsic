@@ -12,8 +12,9 @@ pub mod relay_config;
 pub mod transport;
 
 pub use curator::{list_id, parse_curator_list};
+pub use nip59::{GuardianSealed, SEAL_EXEMPT_KINDS};
 pub use pairing::{pin_from_connect, validate_and_normalize, Pairing, PairingError};
 pub use transport::{
-    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant, ScriptedEntropy,
-    TransportError,
+    CharterTransport, Entropy, FetchedCuratorList, InboundEvent, ReceivedClause, ReceivedGrant,
+    ReceivedPairOffer, ScriptedEntropy, TransportError,
 };

@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use charter_primitives::{kinds, EventId, NostrEvent, PubKey};
+use charter_primitives::{kinds, EventId, NostrEvent, PubKey, SignerSet};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpSocket;
 use tokio::sync::{mpsc, watch, Notify};
@@ -66,8 +66,11 @@ pub type PrepareSocket = Arc<dyn Fn(RawFd) -> io::Result<()> + Send + Sync>;
 /// Configuration for [`WardLink::spawn`].
 pub struct WardLinkConfig {
     pub machine_sk: Zeroizing<[u8; 32]>,
-    /// The pinned guardian: the only key this ward will authenticate to.
-    pub guardian: PubKey,
+    /// Who this ward will authenticate to: any key in its signer set
+    /// (contract, *Other places that name the guardian*). Read at every
+    /// handshake, so a live set is followed as it changes. A ward that pins
+    /// one guardian passes `Arc::new(SinglePinned(guardian))`.
+    pub signers: Arc<dyn SignerSet>,
     pub state_dir: PathBuf,
     /// Accept loopback (127.0.0.0/8) guardian addresses. Tests only: the
     /// spec admits private and link-local addresses, and on a shared machine
@@ -81,7 +84,7 @@ impl std::fmt::Debug for WardLinkConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WardLinkConfig")
             .field("machine_sk", &"<redacted>")
-            .field("guardian", &self.guardian)
+            .field("roots", &self.signers.roots())
             .field("state_dir", &self.state_dir)
             .field("allow_loopback", &self.allow_loopback)
             .field("prepare_socket", &self.prepare_socket.is_some())
@@ -210,7 +213,7 @@ impl State {
 struct Inner {
     sk: Zeroizing<[u8; 32]>,
     machine: PubKey,
-    guardian: PubKey,
+    signers: Arc<dyn SignerSet>,
     dir: PathBuf,
     allow_loopback: bool,
     prepare_socket: Option<PrepareSocket>,
@@ -235,6 +238,28 @@ impl LocalSink for Outbox {
     fn offer(&self, offer: LocalOffer) {
         self.0.offer(offer);
     }
+}
+
+/// The single `p` tag a wrap names, if it names exactly one key.
+fn wrap_recipient(wrap: &NostrEvent) -> Option<PubKey> {
+    let mut p_tags = wrap
+        .tags
+        .iter()
+        .filter(|t| t.first().map(String::as_str) == Some("p"));
+    match (p_tags.next(), p_tags.next()) {
+        (Some(p), None) => p.get(1).and_then(|s| PubKey::from_hex(s).ok()),
+        _ => None,
+    }
+}
+
+/// Whether a guardian install holding a key the set trusts or sends to would
+/// accept this wrap: it names one such key, and passes that key's checks.
+fn deliverable(wrap: &NostrEvent, signers: &dyn SignerSet) -> Result<(), String> {
+    let recipient = wrap_recipient(wrap).ok_or("no single recipient")?;
+    if !signers.is_signer(&recipient) && !signers.recipients().contains(&recipient) {
+        return Err("recipient is not a guardian key of this ward".into());
+    }
+    validate_wrap_for(wrap, &recipient).map_err(|e| e.to_string())
 }
 
 /// Only addresses the guardian listener would itself accept a ward from:
@@ -275,7 +300,7 @@ impl WardLink {
         // An entry the guardian would refuse (too large for a frame, wrong
         // recipient) would block the outbox on every session: drop it.
         let stored = outbox.len();
-        outbox.retain(|e| validate_wrap_for(&e.wrap, &cfg.guardian).is_ok());
+        outbox.retain(|e| deliverable(&e.wrap, &*cfg.signers).is_ok());
         let mut dirty = outbox.len() != stored;
         if dirty {
             eprintln!(
@@ -293,14 +318,14 @@ impl WardLink {
         dirty |= outbox.len() != kept;
         let remembered = load::<PeerFile>(&dir.join(PEER_FILE))
             .value
-            .filter(|p| p.guardian == cfg.guardian)
+            .filter(|p| cfg.signers.is_signer(&p.guardian))
             .and_then(|p| p.addr.parse::<SocketAddrV4>().ok())
             .filter(|a| usable(a, cfg.allow_loopback));
 
         let inner = Arc::new(Inner {
             sk: cfg.machine_sk,
             machine,
-            guardian: cfg.guardian,
+            signers: cfg.signers,
             dir,
             allow_loopback: cfg.allow_loopback,
             prepare_socket: cfg.prepare_socket,
@@ -424,7 +449,7 @@ impl Inner {
     fn offer(&self, offer: LocalOffer) {
         // The guardian closes the session on a frame it cannot take, and the
         // entry would be pumped first on every session after: refuse it here.
-        if let Err(e) = validate_wrap_for(&offer.wrap, &self.guardian) {
+        if let Err(e) = deliverable(&offer.wrap, &*self.signers) {
             eprintln!("charter-link: not holding an outbox offer for the local link: {e}");
             return;
         }
@@ -548,9 +573,12 @@ async fn attempt(inner: Arc<Inner>, addr: SocketAddrV4) {
             r.unwrap_or_else(|_| Err("handshake timed out".to_owned()))
         }
     };
-    if let Err(e) = hs {
-        return inner.fail(addr, format!("handshake with {addr}: {e}"));
-    }
+    // The key that completed the handshake: this session's ACKs are signed to
+    // it, and only wraps addressed to it are pumped to it.
+    let peer = match hs {
+        Ok(peer) => peer,
+        Err(e) => return inner.fail(addr, format!("handshake with {addr}: {e}")),
+    };
 
     let closer = Arc::new(Closer::default());
     let id = {
@@ -580,7 +608,7 @@ async fn attempt(inner: Arc<Inner>, addr: SocketAddrV4) {
                 &inner.dir.join(PEER_FILE),
                 &PeerFile {
                     v: 1,
-                    guardian: inner.guardian,
+                    guardian: peer,
                     addr: addr.to_string(),
                 },
             );
@@ -591,13 +619,13 @@ async fn attempt(inner: Arc<Inner>, addr: SocketAddrV4) {
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>(SESSION_CHANNEL);
     let writer_task = tokio::spawn(writer(wr, rx, closer.clone()));
-    let pump_task = tokio::spawn(pump(inner.clone(), tx.clone(), closer.clone()));
+    let pump_task = tokio::spawn(pump(inner.clone(), tx.clone(), closer.clone(), peer));
     let ping_task = tokio::spawn(pinger(tx.clone()));
 
     tokio::select! {
         _ = inner.shutdown.closed() => {}
         _ = closer.closed() => {}
-        _ = session(&inner, &mut rd, &tx, &mut rate) => {}
+        _ = session(&inner, &mut rd, &tx, &mut rate, peer) => {}
     }
 
     closer.close();
@@ -620,13 +648,14 @@ async fn attempt(inner: Arc<Inner>, addr: SocketAddrV4) {
     inner.wake.notify_one();
 }
 
-/// HELLO → CHALLENGE (verify the pinned guardian) → AUTH → READY.
+/// HELLO → CHALLENGE (verify a key in the signer set) → AUTH → READY.
+/// Returns the guardian key that completed it.
 async fn handshake(
     inner: &Inner,
     rd: &mut tokio::net::tcp::OwnedReadHalf,
     wr: &mut tokio::net::tcp::OwnedWriteHalf,
     rate: &mut RateLimit,
-) -> Result<(), String> {
+) -> Result<PubKey, String> {
     let cw = challenge().map_err(|e| format!("no entropy: {e}"))?;
     write_frame(
         wr,
@@ -647,8 +676,8 @@ async fn handshake(
         _ => return Err("unexpected frame".into()),
     };
     rate.hit();
-    if guardian != inner.guardian {
-        return Err("not the pinned guardian".into());
+    if !inner.signers.is_signer(&guardian) {
+        return Err("not a guardian key of this ward".into());
     }
     if !guardian_proof_verify(&cw, &cg, &guardian, &sig) {
         return Err("guardian proof did not verify".into());
@@ -669,21 +698,29 @@ async fn handshake(
         _ => return Err("not admitted".into()),
     }
     rate.hit();
-    Ok(())
+    Ok(guardian)
 }
 
-/// Send every outbox entry oldest first, then each new offer as it lands.
-async fn pump(inner: Arc<Inner>, tx: mpsc::Sender<Vec<u8>>, closer: Arc<Closer>) {
+/// Send every outbox entry addressed to `peer` oldest first, then each new
+/// one as it lands. Entries for another guardian key wait for that key's
+/// session: a guardian refuses (and the ward then drops) a wrap it cannot open.
+async fn pump(inner: Arc<Inner>, tx: mpsc::Sender<Vec<u8>>, closer: Arc<Closer>, peer: PubKey) {
     let mut changed = inner.outbox_changed.subscribe();
     let mut cursor = 0u64;
     loop {
+        // A key that has left the signer set gets nothing more from this
+        // ward (rule 4; review 2a, Info 5): its session closes.
+        if !inner.signers.is_signer(&peer) {
+            closer.close();
+            return;
+        }
         let batch: Vec<(u64, NostrEvent)> = {
             let mut st = lock(&inner.state);
             prune_outbox(&mut st.outbox, now_unix());
             let mut v: Vec<(u64, NostrEvent)> = st
                 .outbox
                 .iter()
-                .filter(|e| e.seq > cursor)
+                .filter(|e| e.seq > cursor && wrap_recipient(&e.wrap) == Some(peer))
                 .map(|e| (e.seq, e.wrap.clone()))
                 .collect();
             v.sort_by_key(|(s, _)| *s);
@@ -721,6 +758,7 @@ async fn session(
     rd: &mut tokio::net::tcp::OwnedReadHalf,
     tx: &mpsc::Sender<Vec<u8>>,
     rate: &mut RateLimit,
+    peer: PubKey,
 ) {
     loop {
         let frame = match tokio::time::timeout(IDLE_TIMEOUT, read_frame(rd)).await {
@@ -729,6 +767,13 @@ async fn session(
         };
         if !rate.hit() {
             eprintln!("charter-link: guardian session over its frame rate; closing");
+            return;
+        }
+        // Checked per frame (the guardian answers every ping): a session
+        // whose key has departed since the handshake closes within one ping
+        // interval, and nothing it sends is ingested (review 2a, Info 5).
+        if !inner.signers.is_signer(&peer) {
+            eprintln!("charter-link: the guardian key of this session has left the signer set");
             return;
         }
         match frame {
@@ -767,7 +812,7 @@ async fn session(
                 // Awaiting it keeps ingest one at a time per session.
                 let job = tokio::spawn(inner.ingest.ingest(wrap));
                 let result = job.await.unwrap_or(AckResult::Failed);
-                let ack = sign_ack(&inner.sk, &inner.guardian, &id, result, now_unix());
+                let ack = sign_ack(&inner.sk, &peer, &id, result, now_unix());
                 if !send_frame(tx, &Frame::Ack(ack)).await {
                     return;
                 }

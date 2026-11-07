@@ -5,7 +5,7 @@
 //! under-counts the pool, so a hostile relay can delay/drop a sync but can
 //! never forge one, roll one back, or cause a wrongful early lock.
 
-use charter_primitives::{NostrEvent, PubKey};
+use charter_primitives::{NostrEvent, SignerSet};
 use charter_proto::UsageSyncPayload;
 use charter_schedule::MinuteSet;
 
@@ -37,7 +37,7 @@ pub enum UsageSyncError {
     Malformed,
     /// Event-id integrity or schnorr signature failed.
     BadSignature,
-    /// The author is not the pinned guardian.
+    /// The author is not in the signer set.
     UntrustedSigner,
     /// `ts` was at or below the highest already seen for this subject (replay).
     StaleTs,
@@ -46,10 +46,12 @@ pub enum UsageSyncError {
 /// Authenticate a USAGE_SYNC event. `prev_ts` is the highest `ts` previously
 /// accepted for this subject (None if never). Order mirrors `verify_clause`:
 /// malformed (incl. the bitmap, fail-closed) → event-id integrity → signature
-/// → pinned author → monotonic ts.
+/// → author in the signer set → monotonic ts. No skew gate (D1): a
+/// USAGE_SYNC dated ahead of the ward's clock is judged by its replay floor
+/// alone, as before the guardian-keys section.
 pub fn verify_usage_sync(
     event: &NostrEvent,
-    pinned_guardian: &PubKey,
+    signers: &dyn SignerSet,
     prev_ts: Option<u64>,
     _now: u64,
 ) -> Result<VerifiedUsageSync, UsageSyncError> {
@@ -73,7 +75,7 @@ pub fn verify_usage_sync(
     if !signature_is_valid(event) {
         return Err(UsageSyncError::BadSignature);
     }
-    if &event.pubkey != pinned_guardian {
+    if !signers.is_signer(&event.pubkey) {
         return Err(UsageSyncError::UntrustedSigner);
     }
 

@@ -543,6 +543,13 @@ function DeviceDetail({ child, device, onDone }: { child: Child; device: Device;
                 {paired ? "Managed by Kintrinsic" : "Disconnected"}
                 {paired ? ` · ${onHomeNetwork ? "On home network" : (seen ?? "waiting to hear from it")}` : ""}
               </div>
+              {device.departedAt !== undefined && (
+                // The device's last STATUS to this phone said its key is no longer
+                // trusted there (guardian keys); nothing more is sent to it.
+                <div className="card-sub" style={{ color: "var(--warn, #8a5a00)" }}>
+                  This phone no longer has access to {device.label}.
+                </div>
+              )}
             </div>
           </div>
           <Pill tone={paired ? "ok" : "neutral"}>{paired ? "On" : "Off"}</Pill>

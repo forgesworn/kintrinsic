@@ -15,12 +15,13 @@ import org.junit.Test
  */
 class AbiCheckTest {
 
-    /** ABI 5: times (§Times) — `charterDnsPlan` takes the clock and
-     *  `charterSetDefaultBrowser` is new. Moves together with `ABI_VERSION`
-     *  in android/jni/src/lib.rs. */
+    /** ABI 8: pending statements only behind the guardian PIN, on top of
+     *  ABI 7 (guardian roots and working keys), ABI 6 (connections) and
+     *  ABI 5 (times). Moves together with `ABI_VERSION` in
+     *  android/jni/src/lib.rs. */
     @Test
-    fun thisBuildExpectsAbiSix() {
-        assertEquals(6, CharterCore.EXPECTED_ABI_VERSION)
+    fun thisBuildExpectsAbiEight() {
+        assertEquals(8, CharterCore.EXPECTED_ABI_VERSION)
     }
 
     @Test

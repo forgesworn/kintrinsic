@@ -13,11 +13,12 @@ import { appRulesToGrant, debUpdateToGrant, debuggingToGrant, giftToGrant, polic
 import { effectivePolicyForDevice } from "../domain/effectivePolicy";
 import type { ClausePayload, GrantStandDown, UpdateManifest } from "../wire/types";
 import {
-  giftWrapClause,
   giftWrapGrant,
   giftWrapPairOffer,
   giftWrapRelease,
+  giftWrapSigned,
   giftWrapUsageSync,
+  signClauseInner,
   type GuardianOps,
 } from "../wire/giftwrap";
 import type { UsageSyncPayload } from "../wire/usageSync";
@@ -34,6 +35,7 @@ import { FREE_TIME_ID, isValidTimeId } from "../wire/times";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
 import { localRouteAvailable } from "../carrier/localLink";
+import { IssuedAtClock } from "./issuedAtClock";
 import {
   QueuedForHomeNetworkError,
   failedDeviceText,
@@ -59,6 +61,12 @@ export interface TargetDevice {
    *  `false` makes the signer refuse a typed gift or answer to it, because an
    *  older ward would land the minutes as Free time. */
   timesCapable?: boolean;
+  /**
+   * The last USB-debugging state this install sent to the device
+   * (`Device.debugging`), so rule 4 can re-sign a debugging clause sent
+   * before the standing record existed.
+   */
+  debugging?: { allow: boolean; until?: number };
 }
 
 /** Where one child's clauses must be delivered. */
@@ -107,6 +115,38 @@ export interface RealSignerDeps {
    * whose bunker approves out-of-band).
    */
   confirmGate?: ConfirmGate;
+  /**
+   * Guardian roots and working keys: the key that signs and seals for one
+   * ward. Returns this install's working key where the ward holds it (and the
+   * child passes the versioning gate); undefined keeps the connected root's
+   * key, as before the section. Absent = always the root's.
+   */
+  pickOps?: (machine: string) => GuardianOps | undefined;
+  /**
+   * The signed inner CLAUSE events of a rule change, once it was sent or held
+   * for the home network: the family roster carries them to the other
+   * guardians' phones as the rules in force (Q3). One per kind when every
+   * device got the same clause (no `machine`), else one per device with its
+   * machine; `update`, `maintenance` and `debugging` always name the device.
+   * Absent = not kept.
+   */
+  onRulesSigned?: (childId: string, signed: SignedRule[]) => void;
+  /**
+   * For `resendRulesTo`: the rules in force held for one child as they apply
+   * to one device, one per kind (the device's own rule where it has one,
+   * else the family-wide one, as this install's merge ranks them), and
+   * whether this install signed each. Absent = none held.
+   */
+  heldRules?: (childId: string, machine: string) => HeldRuleFor[];
+}
+
+/** One rule in force for a device, as `RealSignerDeps.heldRules` gives it. */
+export interface HeldRuleFor {
+  kind: string;
+  /** The signed inner CLAUSE event. */
+  event: NostrEvent;
+  /** This install signed it. */
+  local: boolean;
 }
 
 const CLAUSE_META: PublishMeta = { kind: "clause" };
@@ -118,6 +158,43 @@ const CLAUSE_META: PublishMeta = { kind: "clause" };
  * all-or-nothing sentence (docs/local-network-design.md, "Routing and
  * fallback" step 5).
  */
+/** One signed rule for the family roster: the inner CLAUSE, and its device when it went to that device only. */
+export interface SignedRule {
+  inner: NostrEvent;
+  machine?: string;
+}
+
+/** Kinds that always concern one device, whatever the others were sent. */
+const DEVICE_RULE_KINDS = new Set(["update", "maintenance", "debugging"]);
+
+/**
+ * The signed inners of one rule change, per kind and device. A kind every
+ * device got the same clause for is one family-wide rule; a kind whose
+ * clauses differ between devices (per-device rules), and the device kinds,
+ * are one rule per device (decision 1, keyed by `(subject, kind, device)`).
+ */
+class RulesSigned {
+  private byKind = new Map<string, Map<string, NostrEvent>>();
+
+  add(kind: string, device: string, inner: NostrEvent): void {
+    const m = this.byKind.get(kind) ?? new Map<string, NostrEvent>();
+    m.set(device, inner);
+    this.byKind.set(kind, m);
+  }
+
+  rules(): SignedRule[] {
+    const out: SignedRule[] = [];
+    for (const [kind, byDevice] of this.byKind) {
+      const all = [...byDevice];
+      // Compare the clause itself, not who signed it: one device may take W, another R.
+      const same = all.every(([, e]) => e.content === all[0][1].content);
+      if (same && !DEVICE_RULE_KINDS.has(kind)) out.push({ inner: all[0][1] });
+      else for (const [machine, inner] of all) out.push({ inner, machine });
+    }
+    return out;
+  }
+}
+
 class SendBatch {
   readonly held: QueuedForHomeNetworkError[] = [];
   readonly reached = new Set<string>();
@@ -158,50 +235,51 @@ export class RealSigner implements Signer {
   }
   private state: SignerState;
   private guardian: GuardianOps | null = null;
-  /** The last clause `issuedAt` this signer handed out — see `nextIssuedAt`. */
-  private lastIssuedAt = RealSigner.loadLastIssuedAt();
-
-  private static readonly ISSUED_AT_KEY = "charter.signer.lastIssuedAt";
-
-  private static loadLastIssuedAt(): number {
-    try {
-      const n = Number(localStorage.getItem(RealSigner.ISSUED_AT_KEY));
-      return Number.isFinite(n) && n > 0 ? n : 0;
-    } catch {
-      return 0;
-    }
-  }
+  /** The install's one rising clock (`issuedAtClock.ts`), shared through storage with the guardian keys. */
+  private clock = new IssuedAtClock();
 
   /**
-   * The `issuedAt` for the next clause: now, but STRICTLY above every one
-   * signed before. The device's per-(subject, kind) rollback floor DROPS a
-   * clause whose `issuedAt` does not exceed the standing one's, and `now()` is
-   * whole seconds — so two clauses of a kind inside one second silently lost
-   * the second: a lift that left the ward locked till midnight, a second
-   * "give 5 minutes" the log said had landed, the `apps` clause that actually
-   * opens an approved app. Stand-down used to carry its own per-session bump;
-   * one clock for every clause covers them all, and it is persisted so a
-   * reload inside the same second can't step back under it. It only ever runs
-   * ahead by as many seconds as clauses were signed in a burst; the device has
-   * no future-skew gate (its own clock may be dead), so that costs nothing.
+   * The `issuedAt` for the next clause: now, but STRICTLY above every time
+   * this install signed with before (clauses, statements, the PIN). The
+   * device's per-(subject, kind) rollback floor DROPS a clause whose
+   * `issuedAt` does not exceed the standing one's, and `now()` is whole
+   * seconds — so two clauses of a kind inside one second silently lost the
+   * second: a lift that left the ward locked till midnight, a second "give 5
+   * minutes" the log said had landed, the `apps` clause that actually opens
+   * an approved app. One clock for everything this install signs covers them
+   * all, and it is persisted so a reload inside the same second can't step
+   * back under it. It only ever runs ahead by as many seconds as events were
+   * signed in a burst, and a ward treats a claimed time ahead of its own
+   * clock as its own clock (it clamps, it doesn't refuse), so carrying the
+   * last issue time forward costs nothing.
    */
   private nextIssuedAt(): number {
-    const issuedAt = Math.max(this.deps.now(), this.lastIssuedAt + 1);
-    this.lastIssuedAt = issuedAt;
-    try {
-      localStorage.setItem(RealSigner.ISSUED_AT_KEY, String(issuedAt));
-    } catch {
-      // Private mode / quota — the in-memory floor still holds this session.
-    }
-    return issuedAt;
+    return this.clock.next(this.deps.now());
   }
 
   constructor(private deps: RealSignerDeps) {
     this.state = deps.initial ?? { connected: false, kind: "none", autoSign: false };
+    // The record of standing clauses fed the pre-departure re-sign, which is
+    // gone (decision D2); nothing reads it, so the old copy is dropped.
+    try {
+      localStorage.removeItem("charter.signer.standing.v1");
+    } catch {
+      // Storage unavailable: nothing to drop.
+    }
   }
 
   status(): SignerState {
     return this.state;
+  }
+
+  /** The connected root's operations (R over NIP-46, or the local key), or null. */
+  rootOps(): GuardianOps | null {
+    return this.guardian;
+  }
+
+  /** Who signs and seals for `machine`: its working key where that applies, else the root. */
+  private sealerFor(machine: string, root: GuardianOps): GuardianOps {
+    return this.deps.pickOps?.(machine) ?? root;
   }
 
   async connect(kind: SignerKind): Promise<SignerState> {
@@ -377,6 +455,26 @@ export class RealSigner implements Signer {
     return `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`;
   }
 
+  /**
+   * Sign one clause for one device, keep its signed inner for the roster, and
+   * wrap it. The wrap is dated with the raw clock, never `issuedAt`: a ward
+   * refuses a wrap more than two days from its clock (the NIP-59 jitter
+   * bound), and the rising clock can run that far ahead after a clock that
+   * was once ahead is corrected.
+   */
+  private async wrapRule(
+    clause: ClausePayload,
+    device: string,
+    guardian: GuardianOps,
+    issuedAt: number,
+    signed: RulesSigned,
+  ): Promise<NostrEvent> {
+    const ops = this.sealerFor(device, guardian);
+    const inner = await signClauseInner(clause, ops, issuedAt);
+    signed.add(clause.kind, device, inner);
+    return giftWrapSigned(inner, device, ops, this.deps.now());
+  }
+
   async signClause(childId: string, policy: Policy): Promise<SignOutcome> {
     const guardian = this.guardian;
     if (!guardian) throw new Error("signer not connected");
@@ -387,17 +485,20 @@ export class RealSigner implements Signer {
     await this.authorize("clause", `Rule change for ${target.name ?? childId} (${policy.id})`);
 
     const issuedAt = this.nextIssuedAt();
+    // Every device's signed inner, per kind, for the family roster.
+    const signed = new RulesSigned();
+    const wrapOne = (clause: ClausePayload, device: string) => this.wrapRule(clause, device, guardian, issuedAt, signed);
     if (policy.scope.kind === "app") {
       // App-scope rebuilds the child's ONE aggregate `appRules` clause, which
       // is the same set for every device — per-app rules are not splittable.
       const clauses = this.appRulesClauses(childId, policy, target.subject, issuedAt);
       for (const clause of clauses) {
         for (const device of target.devices) {
-          const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+          const wrap = await wrapOne(clause, device.pubkey);
           await this.send(target.relays, wrap, CLAUSE_META, held);
         }
       }
-      return this.settle(held);
+      return this.settleRules(held, childId, signed);
     }
 
     // Device scope: each device gets the charter as it applies to IT — the base
@@ -409,11 +510,102 @@ export class RealSigner implements Signer {
       const effective = effectivePolicyForDevice(policy, device.id);
       const clauses = policyToClauses(target.subject, effective, issuedAt);
       for (const clause of clauses) {
-        const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+        const wrap = await wrapOne(clause, device.pubkey);
         await this.send(target.relays, wrap, CLAUSE_META, held);
       }
     }
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
+  }
+
+  async resendRulesTo(childId: string, machine: string, policies: Policy[]): Promise<SignOutcome> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    const target = this.deps.resolveChild(childId);
+    if (!target) throw new Error(`unknown child: ${childId}`);
+    const device = target.devices.find((d) => d.pubkey === machine);
+    if (!device) throw new Error("that device isn't set up for this child yet");
+    await this.authorize("clause", `Send ${target.name ?? childId}'s rules to their new device`);
+    const ops = this.sealerFor(machine, guardian);
+    const batch = new SendBatch();
+    const held = this.deps.heldRules?.(childId, machine) ?? [];
+    const now = this.deps.now();
+    // The rule in force for each kind, once, to this device alone; the wrap
+    // is dated now, for relay reads. The install's rising clock doesn't move:
+    // these are not new rules.
+    // - This install's own: re-signed as it is, same payload and issuedAt (a
+    //   ward has no pairing floor for clauses, decision D6).
+    // - Anyone else's, the other parent's or a departed key's: nothing else
+    //   would send it, since the new device pins only this install's root
+    //   until the other parent joins it, and a departed key's rule stays
+    //   enforced on the child's other devices until a current signer
+    //   replaces it (rule 4), so this one must enforce it too. Re-signed by
+    //   this install with the same body, dated min(their issuedAt, now): a
+    //   far-future date would sit on this install's own floor for the kind
+    //   there and shut it out, and a current signer's next edit, dated above
+    //   theirs, still wins. It is not recorded as this install's rule.
+    for (const r of held) {
+      const payload = JSON.parse(r.event.content) as ClausePayload;
+      const issuedAt = r.local ? r.event.created_at : Math.min(payload.issuedAt, now);
+      const inner = await signClauseInner(r.local ? payload : { ...payload, issuedAt }, ops, issuedAt);
+      await this.send(target.relays, await giftWrapSigned(inner, machine, ops, now), CLAUSE_META, batch);
+    }
+    // A kind of this install's charter with no rule held for this device at
+    // all (signed before rules were kept, or split per device) goes as a
+    // fresh rule for this device alone.
+    const heldKinds = new Set(held.map((r) => r.kind));
+    const missing = this.charterClauses(target.subject, device.id, policies, 0).filter((c) => !heldKinds.has(c.kind));
+    const fresh: SignedRule[] = [];
+    if (missing.length > 0) {
+      const issuedAt = this.nextIssuedAt();
+      const kinds = new Set(missing.map((c) => c.kind));
+      for (const clause of this.charterClauses(target.subject, device.id, policies, issuedAt).filter((c) => kinds.has(c.kind))) {
+        const inner = await signClauseInner(clause, ops, issuedAt);
+        fresh.push({ inner, machine });
+        await this.send(target.relays, await giftWrapSigned(inner, machine, ops, now), CLAUSE_META, batch);
+      }
+    }
+    const note = () => {
+      if (fresh.length > 0) this.deps.onRulesSigned?.(childId, fresh);
+    };
+    try {
+      const out = this.settle(batch);
+      note();
+      return out;
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) note();
+      throw err;
+    }
+  }
+
+  /** Every clause a child's charter gives one device: each device-scope policy as it applies there, and the app rules. */
+  private charterClauses(subject: string | null, deviceId: string, policies: Policy[], issuedAt: number): ClausePayload[] {
+    const out: ClausePayload[] = [];
+    for (const p of policies) {
+      if (p.scope.kind === "device") out.push(...policyToClauses(subject, effectivePolicyForDevice(p, deviceId), issuedAt));
+    }
+    const apps = policies.filter((p) => p.scope.kind === "app");
+    if (apps.length > 0) {
+      const clause: ClausePayload = { v: 1, kind: "apprules", issuedAt, body: appRulesToGrant(apps, issuedAt) };
+      if (subject) clause.subject = subject;
+      out.push(clause);
+    }
+    return out;
+  }
+
+  /** `settle`, handing the signed rules on once they were sent or held (a send that failed outright set nothing). */
+  private settleRules(batch: SendBatch, childId: string, signed: RulesSigned): SignOutcome {
+    const note = () => {
+      const rules = signed.rules();
+      if (rules.length > 0) this.deps.onRulesSigned?.(childId, rules);
+    };
+    try {
+      const out = this.settle(batch);
+      note();
+      return out;
+    } catch (err) {
+      if (err instanceof QueuedForHomeNetworkError) note();
+      throw err;
+    }
   }
 
   /**
@@ -434,7 +626,7 @@ export class RealSigner implements Signer {
     const createdAt = this.deps.now();
     for (const [devicePubkey, payload] of Object.entries(payloadsByDevice)) {
       if (!target.devices.some((d) => d.pubkey === devicePubkey)) continue;
-      const wrap = await giftWrapUsageSync(payload, devicePubkey, guardian, createdAt);
+      const wrap = await giftWrapUsageSync(payload, devicePubkey, this.sealerFor(devicePubkey, guardian), createdAt);
       await this.deps.publish(target.relays, wrap);
     }
     return { ok: true };
@@ -462,7 +654,9 @@ export class RealSigner implements Signer {
     );
     const issuedAt = this.nextIssuedAt();
     // Absolute expiry, computed once: a duration would restart on every
-    // re-read of the stored clause and the window would never shut.
+    // re-read of the stored clause and the window would never shut. It counts
+    // from the raw clock, not `issuedAt`: the rising clock can be left ahead
+    // after a clock correction, and would stretch the window by that much.
     //
     // `minutes <= 0` is how a guardian CLOSES a window early: the expiry lands
     // at (or before) issue, so the ward's `is_open` — which shuts on
@@ -471,14 +665,15 @@ export class RealSigner implements Signer {
     // open one. The same shape lifting a stand-down uses. Nothing special is
     // needed on the phone, which is exactly why it is safe: a guardian ending
     // a loosening early must never depend on new ward code.
-    const body = { v: 1 as const, untilUnix: issuedAt + minutes * 60, issuedAt };
+    const body = { v: 1 as const, untilUnix: this.deps.now() + minutes * 60, issuedAt };
     const clause: ClausePayload = { v: 1, kind: "maintenance", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
+    const signed = new RulesSigned();
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
   }
 
   /**
@@ -559,7 +754,7 @@ export class RealSigner implements Signer {
     devices: TargetDevice[],
     g: { minutes: number; tz?: string; groupId?: string; time?: string },
     held: SendBatch,
-  ): Promise<void> {
+  ): Promise<ClausePayload> {
     const issuedAt = this.nextIssuedAt();
     // Each gift needs its own identity: the device's extension ledger applies
     // an id exactly once, which is what stops a clause it re-reads every tick
@@ -578,17 +773,21 @@ export class RealSigner implements Signer {
       minutes: clampGrantMinutes(g.minutes),
       // End of day in the CHILD's tz, exactly like a granted ask's exp — never
       // the guardian phone's midnight, which can land on the wrong side of the
-      // device's own day roll.
-      expiresAt: endOfDayUnix(issuedAt, g.tz),
+      // device's own day roll. The day is the raw clock's, not `issuedAt`'s:
+      // a rising clock left ahead after a correction must not move the gift
+      // into a later day.
+      expiresAt: endOfDayUnix(this.deps.now(), g.tz),
       groupId: g.groupId,
       time: g.time,
     });
     const clause: ClausePayload = { v: 1, kind: "gift", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const ops = this.sealerFor(device.pubkey, guardian);
+      const wrap = await giftWrapSigned(await signClauseInner(clause, ops, issuedAt), device.pubkey, ops, this.deps.now());
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
+    return clause;
   }
 
   /**
@@ -703,13 +902,19 @@ export class RealSigner implements Signer {
       // a ward whose device ran behind the guardian's. (Wardens with the
       // clock-independent `expiresAt <= issuedAt` rule don't need this; the
       // ones already shipped do.)
-      expiresAt: lift ? issuedAt - 86_400 : endOfDayUnix(issuedAt, opts?.tz),
+      //
+      // Both count from the raw clock, not `issuedAt`: the rising clock can be
+      // left ahead after a clock correction, and would carry a stand-down
+      // into a later day (or a lift into the ward's future). `issuedAt` is
+      // never below the raw clock, so a lift still has `expiresAt <= issuedAt`.
+      expiresAt: lift ? this.deps.now() - 86_400 : endOfDayUnix(this.deps.now(), opts?.tz),
       graceSecs: opts?.graceSecs ?? DEFAULT_STANDDOWN_GRACE_SECS,
     };
     const clause: ClausePayload = { v: 1, kind: "standdown", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
     for (const device of target.devices) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const ops = this.sealerFor(device.pubkey, guardian);
+      const wrap = await giftWrapSigned(await signClauseInner(clause, ops, issuedAt), device.pubkey, ops, this.deps.now());
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
     return this.settle(held);
@@ -740,11 +945,12 @@ export class RealSigner implements Signer {
     const body = updateToGrant(manifest, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
+    const signed = new RulesSigned();
     for (const device of phones) {
-      const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+      const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
       await this.send(target.relays, wrap, CLAUSE_META, held);
     }
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
   }
 
   async signDebUpdateClause(
@@ -778,9 +984,10 @@ export class RealSigner implements Signer {
     const body = debUpdateToGrant(deb, url);
     const clause: ClausePayload = { v: 1, kind: "update", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    const signed = new RulesSigned();
+    const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
     await this.send(target.relays, wrap, CLAUSE_META, held);
-    return this.settle(held);
+    return this.settleRules(held, childId, signed);
   }
 
   /**
@@ -820,10 +1027,11 @@ export class RealSigner implements Signer {
     const body = debuggingToGrant(grant, issuedAt);
     const clause: ClausePayload = { v: 1, kind: "debugging", issuedAt, body };
     if (target.subject) clause.subject = target.subject;
-    const wrap = await giftWrapClause(clause, device.pubkey, guardian, issuedAt);
+    const signed = new RulesSigned();
+    const wrap = await this.wrapRule(clause, device.pubkey, guardian, issuedAt, signed);
     await this.send(target.relays, wrap, CLAUSE_META, held);
     try {
-      return { ...this.settle(held), issuedAt };
+      return { ...this.settleRules(held, childId, signed), issuedAt };
     } catch (err) {
       // A held send throws; hand the caller the value that was really signed.
       if (err instanceof QueuedForHomeNetworkError) err.issuedAt = issuedAt;
@@ -872,7 +1080,7 @@ export class RealSigner implements Signer {
         ? `Disconnect ${label} — it stops following your rules`
         : `Release device ${machinePubkey.slice(0, 8)}…`,
     );
-    const wrap = await giftWrapRelease(machinePubkey, guardian, this.deps.now());
+    const wrap = await giftWrapRelease(machinePubkey, this.sealerFor(machinePubkey, guardian), this.deps.now());
     await this.deps.publish(relays, wrap);
     return { ok: true };
   }
@@ -888,6 +1096,11 @@ export class RealSigner implements Signer {
     if (!/^[0-9a-f]{64}$/.test(machinePubkey)) return { ok: true };
     if (!/^[0-9a-f]{32}$/.test(token)) return { ok: true };
     await this.authorize("clause", `Connect to computer ${machinePubkey.slice(0, 8)}…`);
+    // Always offered by the connected root, never by a working key: a ward
+    // that predates guardian keys would pin the seal author, and the app
+    // can't tell its version before pairing. W's approval follows once the
+    // ward is recorded (docs/guardian-keys-open-questions.md, "A working-key
+    // PAIR_OFFER to a ward that predates the section").
     const wrap = await giftWrapPairOffer(
       machinePubkey,
       token,
@@ -935,7 +1148,7 @@ export class RealSigner implements Signer {
         source: install.source,
         ts,
       });
-      const wrap = await giftWrapGrant(payload, install.machine, guardian, ts);
+      const wrap = await giftWrapGrant(payload, install.machine, this.sealerFor(install.machine, guardian), ts);
       await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: install.reqId });
       return { ok: true };
     }
@@ -959,7 +1172,7 @@ export class RealSigner implements Signer {
         minutesGranted: ctx?.minutesGranted ?? 0,
         ts,
       });
-      const wrap = await giftWrapGrant(payload, appOpen.machine, guardian, ts);
+      const wrap = await giftWrapGrant(payload, appOpen.machine, this.sealerFor(appOpen.machine, guardian), ts);
       await this.deps.publish(target.relays, wrap, { kind: "grant", reqId: appOpen.reqId });
       return { ok: true };
     }
@@ -1028,7 +1241,7 @@ export class RealSigner implements Signer {
       budgetTz: ctx.budgetTz,
     });
     // The GRANT answers exactly ONE device — the machine that brokered the ask.
-    const wrap = await giftWrapGrant(payload, wire.machine, guardian, ts);
+    const wrap = await giftWrapGrant(payload, wire.machine, this.sealerFor(wire.machine, guardian), ts);
     const meta: PublishMeta = { kind: "grant", reqId: wire.reqId };
     if (!batch) {
       await this.deps.publish(target.relays, wrap, meta);

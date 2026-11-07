@@ -1,0 +1,459 @@
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { npubEncode } from "nostr-tools/nip19";
+import Guardians from "./Guardians";
+import {
+  LAPTOP,
+  ME,
+  OTHER,
+  PHONE,
+  STATEMENT,
+  button,
+  device,
+  family,
+  guardians,
+  mockStore,
+  signetRoot,
+  typeInto,
+} from "./guardiansTestKit";
+import { JOIN_WITH_PHONE, JOIN_WITH_SIGNET, PHONE_JOIN_DONE } from "./guardiansView";
+
+const store = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock("../store/store", () => ({ useCharter: () => store.current }));
+
+type Store = ReturnType<typeof mockStore>;
+
+const nip19Npub = (hex: string) => npubEncode(hex);
+
+describe("Guardians screens", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  function render(s: Store, sub = "") {
+    store.current = s;
+    act(() => root.render(<Guardians sub={sub} />));
+  }
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    window.location.hash = "";
+  });
+
+  it("offers inviting a parent only when every device is ready, saying which needs an update", () => {
+    const children = family([device("Laptop", LAPTOP, "linux", guardians())]);
+    render(mockStore({ children, keys: { root: signetRoot() }, ready: false }));
+    expect(button(container, "Invite a parent")!.disabled).toBe(true);
+    expect(container.textContent).toContain("Update Kintrinsic on Laptop first, then invite another parent.");
+    expect(container.textContent).toContain("Needs a Kintrinsic update before it can take a second guardian.");
+
+    render(mockStore({ children, keys: { root: signetRoot() } }));
+    expect(button(container, "Invite a parent")!.disabled).toBe(false);
+  });
+
+  it("blocks leaving when you're the last guardian on a device", () => {
+    const alone = guardians({ roots: [{ root: ME, keys: [] }] });
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", alone)]), keys: { root: signetRoot() } }));
+    expect(button(container, "Leave the family")!.disabled).toBe(true);
+    expect(container.textContent).toContain("You're the only guardian on Laptop. Unpair it instead.");
+  });
+
+  it("leaves after a confirmation when another guardian remains", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    render(s);
+    await act(async () => button(container, "Leave the family")!.click());
+    expect(s.guardianKeys.leaveFamily).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("You stop being a guardian of every device at once");
+    const confirm = [...container.querySelectorAll("button")].filter((b) => b.textContent === "Leave the family").pop()!;
+    await act(async () => confirm.click());
+    expect(s.guardianKeys.leaveFamily).toHaveBeenCalledOnce();
+  });
+
+  it("says this phone objected to a removal of you, and offers leaving instead (Q1)", async () => {
+    const d = `kintrinsic/unguardian/${ME}`;
+    const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 9_999_999_999, expiresAt: 9_999_999_999 }] });
+    const keys = {
+      root: signetRoot(),
+      anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" as const, label: "Sam" } },
+    };
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys }));
+    expect(container.textContent).toContain("Sam asked to remove you from Robin's devices.");
+    expect(container.textContent).toContain("This phone objects for you as soon as it reaches the device.");
+    expect(button(container, "Object")).toBeUndefined();
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", g)]), keys: { ...keys, objected: { [LAPTOP]: [d] } } });
+    render(s);
+    expect(container.textContent).toContain(
+      "Sam asked to remove you from Robin's devices. We've objected on your behalf, so you stay a guardian.",
+    );
+    expect(s.guardianKeys.objectToRemoval).not.toHaveBeenCalled();
+    await act(async () => button(container, "Leave the family instead")!.click());
+    expect(window.location.hash).toBe("#/settings/guardians/leave");
+    render(s, "leave");
+    expect(container.textContent).toContain("You stop being a guardian of every device at once");
+  });
+
+  it("shows no objection banner when the pending removal is of the other parent, and offers cancelling your own", async () => {
+    const d = `kintrinsic/unguardian/${OTHER}`;
+    const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 9_999_999_999, expiresAt: 9_999_999_999 }] });
+    const s = mockStore({
+      children: family([device("Laptop", LAPTOP, "linux", g)]),
+      keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 9_999_999_999 - 7 * 86400, key: OTHER } } },
+    });
+    render(s);
+    expect(container.textContent).not.toContain("asked to remove you");
+    expect(container.textContent).toContain("Waiting for you to confirm in person here.");
+    await act(async () => button(container, "Cancel this")!.click());
+    expect(s.guardianKeys.cancelPending).toHaveBeenCalledWith(d);
+  });
+
+  it("offers removing the other parent to a key kept only on this phone, saying it makes a day-to-day key (D5)", () => {
+    render(
+      mockStore({
+        children: family([device("Laptop", LAPTOP, "linux", guardians())]),
+        signer: { connected: true, kind: "local", autoSign: false },
+      }),
+    );
+    const remove = [...container.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Remove the other parent"))!;
+    expect(remove.disabled).toBe(false);
+    expect(container.textContent).toContain("This phone will now use a separate day-to-day key, vouched for by your identity");
+  });
+
+  it("asks for a guardian PIN before inviting while an Android ward says it has none (D4)", () => {
+    const children = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: false }))]);
+    render(mockStore({ children, keys: { root: signetRoot() } }), "invite");
+    expect(container.textContent).toContain("Set a guardian PIN");
+    // No guessing that the other parent set one: the ward's STATUS says.
+    expect(container.textContent).not.toContain("already set a PIN");
+    const set = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: true }))]);
+    render(mockStore({ children: set, keys: { root: signetRoot() } }), "invite");
+    expect(container.textContent).toContain("Invite a parent");
+    expect(container.textContent).not.toContain("Set a guardian PIN");
+  });
+
+  it("shows a PIN still on its way, and offers to change one that is set", () => {
+    const children = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: false }))]);
+    render(mockStore({ children, keys: { root: signetRoot(), pins: { [PHONE]: { state: "sending", sentAt: 1 } } } }), "pin");
+    expect(container.textContent).toContain("Setting the guardian PIN on Robin's phone…");
+    const set = family([device("Robin's phone", PHONE, "android", guardians({ pinSet: true }))]);
+    render(mockStore({ children: set, keys: { root: signetRoot() } }), "pin");
+    expect(container.textContent).toContain("Change the guardian PIN");
+    render(mockStore({ children: set, keys: { root: signetRoot() } }));
+    expect(button(container, "Change the guardian PIN")).toBeDefined();
+  });
+
+  it("invites a pasted npub and then shows the other parent's checklist", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    render(s, "invite");
+    const { nip19 } = await import("nostr-tools");
+    const r2 = "6".repeat(64);
+    act(() => typeInto(container.querySelector("input")!, `nostr:${nip19.npubEncode(r2)}`));
+    await act(async () => button(container, "Next")!.click());
+    await act(async () => button(container, "Send the invitation")!.click());
+    expect(s.guardianKeys.inviteCoGuardian).toHaveBeenCalledWith(r2, {});
+    expect(container.textContent).toContain("Join a family");
+    expect(container.textContent).toContain("Sent to Laptop.");
+  });
+
+  it("refuses inviting your own guardian ID", async () => {
+    const { nip19 } = await import("nostr-tools");
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } }), "invite");
+    act(() => typeInto(container.querySelector("input")!, nip19.npubEncode(ME)));
+    await act(async () => button(container, "Next")!.click());
+    expect(container.querySelector('[role="alert"]')!.textContent).toContain("your own guardian ID");
+  });
+
+  it("shares the family roster and says when there's no one to share with", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.sendRoster.mockResolvedValueOnce({ sent: [], held: [], failed: [] });
+    render(s);
+    await act(async () => button(container, "Share the family with the other guardian")!.click());
+    expect(container.textContent).toContain("Nothing to share with yet");
+  });
+
+  it("lists roster-only devices as unconfirmed", () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.unconfirmedRosterDevices.mockReturnValue([
+      { subject: "x".repeat(64), machine: PHONE, name: "Sam's tablet", platform: "android" },
+    ]);
+    render(s);
+    expect(container.textContent).toContain("Sam's tablet");
+    expect(container.textContent).toContain("unconfirmed");
+  });
+
+  it("withdraws a lost phone only after a strong confirmation", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    render(s, "lost");
+    await act(async () => button(container, "Withdraw")!.click());
+    expect(container.textContent).toContain("That phone will stop receiving anything at once");
+    expect(s.guardianKeys.withdrawInstall).not.toHaveBeenCalled();
+    await act(async () => button(container, "Withdraw that phone for good")!.click());
+    expect(s.guardianKeys.withdrawInstall).toHaveBeenCalledWith("5".repeat(64));
+  });
+
+  it("offers a local-only family the move to My Signet (D5)", () => {
+    render(
+      mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), signer: { connected: true, kind: "local", autoSign: false } }),
+      "move",
+    );
+    expect(container.textContent).toContain("Moves your guardian identity from this phone's own key to My Signet or a Heartwood");
+    expect(container.textContent).toContain("This phone will now use a separate day-to-day key");
+  });
+
+  it("offers deleting the old key once a phone-held identity's move has landed, only after a warning", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.phoneKeyRetirable = vi.fn(() => true);
+    render(s, "move");
+    await act(async () => button(container, "Delete the old key from this phone")!.click());
+    expect(container.textContent).toContain("Backups made before the move hold that old key");
+    expect(container.textContent).toContain("This can't be undone.");
+    expect(s.guardianKeys.retirePhoneKey).not.toHaveBeenCalled();
+    await act(async () => button(container, "Delete the old key")!.click());
+    expect(s.guardianKeys.retirePhoneKey).toHaveBeenCalled();
+    expect(container.textContent).toContain("Old key deleted");
+  });
+
+  it("refuses joining on a phone that keeps its own key", () => {
+    render(
+      mockStore({ children: family([device("Laptop", LAPTOP, "linux")]), signer: { connected: true, kind: "local", autoSign: false } }),
+      "join",
+    );
+    expect(container.textContent).toContain("can't join another parent's family");
+    expect(button(container, "Connect My Signet")).toBeUndefined();
+  });
+
+  it("joins: connects My Signet, which approves this phone", async () => {
+    const s = mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_SIGNET)!.click());
+    await act(async () => button(container, "Connect My Signet")!.click());
+    const { nip19 } = await import("nostr-tools");
+    const [link, invited] = [...container.querySelectorAll("input")];
+    act(() => typeInto(link, "bunker://abc?relay=wss://one.example"));
+    // The invited identity is required here, so it is checked before anything is signed.
+    expect(button(container, "Connect")!.disabled).toBe(true);
+    act(() => typeInto(invited, nip19.npubEncode(OTHER)));
+    await act(async () => button(container, "Connect")!.click());
+    expect(s.pairSignet).toHaveBeenCalledWith("bunker://abc?relay=wss://one.example", { via: "signet", expectRoot: OTHER });
+  });
+
+  it("joins: offers My Signet or this phone only, in those words", () => {
+    render(mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } }), "join");
+    expect(JOIN_WITH_SIGNET).toBe("Join with My Signet (recommended: your identity survives losing this phone)");
+    expect(JOIN_WITH_PHONE).toBe(
+      "Join with this phone only (this phone's key becomes your identity for the family; back it up, and you can move it to My Signet later)",
+    );
+    expect(button(container, JOIN_WITH_SIGNET)).toBeDefined();
+    expect(button(container, JOIN_WITH_PHONE)).toBeDefined();
+  });
+
+  it("joins with this phone only: turns on this phone's key, then makes the identity and its day-to-day key", async () => {
+    const s = mockStore({ children: [], signer: { connected: false, kind: "none", autoSign: false } });
+    const order: string[] = [];
+    s.enableLocalSigner = vi.fn(async () => {
+      order.push("local");
+    });
+    s.guardianKeys.joinWithThisPhone = vi.fn(async () => {
+      order.push("join");
+      return undefined;
+    });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_PHONE)!.click());
+    expect(order).toEqual(["local", "join"]);
+    expect(s.pairSignet).not.toHaveBeenCalled();
+  });
+
+  it("joins with this phone only on a phone already signing with its own key, devices none", async () => {
+    const s = mockStore({ children: [], signer: { connected: true, kind: "local", autoSign: false } });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_PHONE)!.click());
+    expect(s.enableLocalSigner).not.toHaveBeenCalled();
+    expect(s.guardianKeys.joinWithThisPhone).toHaveBeenCalled();
+    // My Signet on such a phone: its own key has to go first.
+    render(mockStore({ children: [], signer: { connected: true, kind: "local", autoSign: false } }), "join");
+    await act(async () => button(container, JOIN_WITH_SIGNET)!.click());
+    expect(container.textContent).toContain("turn off parent approval first");
+  });
+
+  it("shows why joining with this phone only was refused", async () => {
+    const s = mockStore({ children: [], signer: { connected: true, kind: "local", autoSign: false } });
+    s.guardianKeys.joinWithThisPhone = vi.fn(async () => {
+      throw new Error("This phone already looks after devices, so it can't join another parent's family.");
+    });
+    render(s, "join");
+    await act(async () => button(container, JOIN_WITH_PHONE)!.click());
+    expect(container.textContent).toContain("This phone already looks after devices");
+  });
+
+  it("refuses a phone that looks after devices it paired with its own key", () => {
+    render(
+      mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), signer: { connected: true, kind: "local", autoSign: false } }),
+      "join",
+    );
+    expect(container.textContent).toContain("This phone already looks after devices with a guardian key of its own");
+    expect(button(container, JOIN_WITH_PHONE)).toBeUndefined();
+  });
+
+  it("phone only: shows this phone's guardian ID to be invited, then asks for theirs; no second-phone shortcut", () => {
+    const phone = { ...signetRoot()!, via: "phone" as const };
+    render(mockStore({ children: [], keys: { root: phone }, signer: { connected: true, kind: "local", autoSign: false } }), "join");
+    expect(container.textContent).toContain("Swap guardian codes");
+    expect(container.textContent).toContain("This is your guardian ID for the family, kept on this phone.");
+    expect(container.textContent).toContain(nip19Npub(ME));
+    expect(button(container, "Scan the other parent's guardian code")).toBeDefined();
+    expect(button(container, "This is a second phone for my own identity")).toBeUndefined();
+  });
+
+  it("phone only, after scanning their code: says what was made and what to back up, and links the move", async () => {
+    const phone = { ...signetRoot()!, via: "phone" as const };
+    render(
+      mockStore({
+        children: [],
+        keys: { root: phone, anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } },
+        signer: { connected: true, kind: "local", autoSign: false },
+      }),
+      "join",
+    );
+    expect(container.textContent).toContain("Now confirm in person");
+    expect(container.textContent).toContain(PHONE_JOIN_DONE);
+    expect(container.textContent).not.toContain("Adding a second phone");
+    await act(async () => button(container, "Move my identity to My Signet")!.click());
+    expect(window.location.hash).toBe("#/settings/guardians/move");
+    await act(async () => button(container, "Back up my guardian identity")!.click());
+    expect(window.location.hash).toBe("#/settings/key-backup");
+  });
+
+  it("My Signet join: no phone-only note after approval", () => {
+    render(
+      mockStore({ children: [], keys: { root: signetRoot(), anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } } }),
+      "join",
+    );
+    expect(container.textContent).not.toContain(PHONE_JOIN_DONE);
+  });
+
+  it("joins on a connected My Signet with the invited identity as the expected root", async () => {
+    const { nip19 } = await import("nostr-tools");
+    const s = mockStore({ children: [] });
+    render(s, "join");
+    act(() => typeInto(container.querySelector("input")!, nip19.npubEncode(OTHER)));
+    await act(async () => button(container, "Approve this phone")!.click());
+    expect(s.guardianKeys.approveInstall).toHaveBeenCalledWith({ expectRoot: OTHER });
+  });
+
+  it("after joining, shows the guardian ID and the confirm-in-person checklist", () => {
+    render(
+      mockStore({ children: [], keys: { root: signetRoot(), anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } } }),
+      "join",
+    );
+    expect(container.textContent).toContain("Now confirm in person");
+    expect(container.textContent).toContain("About this device → Guardians → Guardian presence");
+    expect(container.textContent).toContain("Family list from: npub1");
+  });
+
+  it("after approval, asks for the inviting parent's guardian code before confirming in person", async () => {
+    const s = mockStore({ children: [], keys: { root: signetRoot() } });
+    render(s, "join");
+    expect(container.textContent).toContain("Scan the other parent's guardian code");
+    expect(container.textContent).not.toContain("Now confirm in person");
+    expect(button(container, "Scan the other parent's guardian code")).toBeDefined();
+    // A wrong or garbled code: the reason is shown and nothing moves on.
+    s.guardianKeys.anchorRoot = vi.fn(() => {
+      throw new Error("That isn't a guardian code. It starts with npub1.");
+    });
+    const input = container.querySelector<HTMLInputElement>('input[placeholder="npub1…"]')!;
+    act(() => typeInto(input, "npub1garbage"));
+    await act(async () => button(container, "Use this code")!.click());
+    expect(s.guardianKeys.anchorRoot).toHaveBeenCalledWith("npub1garbage");
+    expect(container.textContent).toContain("That isn't a guardian code. It starts with npub1.");
+    expect(container.textContent).not.toContain("Now confirm in person");
+    // A second phone of the parent's own identity skips it.
+    await act(async () => button(container, "This is a second phone for my own identity")!.click());
+    expect(container.textContent).toContain("Now confirm in person");
+  });
+
+  it("says when the other parent's family list stopped because they changed identity", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.movedAwayRoots = vi.fn(() => [OTHER]);
+    render(s);
+    expect(container.textContent).toContain("The family list from npub1");
+    expect(container.textContent).toContain("If the other parent changed identity, scan their new guardian code.");
+    await act(async () => button(container, "Scan their new guardian code")!.click());
+    expect(window.location.hash).toContain("anchor");
+    render(s, "anchor");
+    expect(button(container, "Scan the other parent's guardian code")).toBeDefined();
+    expect(button(container, "Use this code")).toBeDefined();
+  });
+
+  it("shows a ward confirmed in person as waiting for the anchored parent's family list", () => {
+    const s = mockStore({
+      children: [],
+      keys: { root: signetRoot(), anchoredRoots: { [OTHER]: { anchoredAt: 1, how: "scanned" } } },
+    });
+    s.guardianKeys.waitingPresenceWards = vi.fn(() => [{ machine: PHONE, confirmedAt: 1, ts: 2 }]);
+    render(s);
+    expect(container.textContent).toContain("Waiting for npub1");
+    expect(container.textContent).toContain("'s family list");
+    expect(container.textContent).toContain("this phone sends it nothing: no limits, no PIN, no family list.");
+    expect(button(container, "Show my guardian code")).toBeDefined();
+  });
+
+  it("a past self-removal doesn't hide someone else's removal of you (M2)", async () => {
+    const d = `kintrinsic/unguardian/${ME}`;
+    const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 9_999_999_999, expiresAt: 9_999_999_999 }] });
+    // This phone left once before: its own removal of itself is still in `sent`.
+    const s = mockStore({
+      children: family([device("Laptop", LAPTOP, "linux", g)]),
+      keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: ME } } },
+    });
+    render(s);
+    expect(container.textContent).toContain("asked to remove you from Robin's devices");
+    expect(button(container, "Cancel this")).toBeUndefined();
+  });
+
+  it("doesn't show an expired item: the device has dropped it", () => {
+    const d = `kintrinsic/unguardian/${OTHER}`;
+    const g = guardians({ pending: [{ d, kind: "removal", takesEffectAt: 5, expiresAt: 10 }] });
+    render(
+      mockStore({
+        children: family([device("Laptop", LAPTOP, "linux", g)]),
+        keys: { root: signetRoot(), sent: { [d]: { id: STATEMENT, type: "removal", issuedAt: 1, key: OTHER } } },
+      }),
+    );
+    expect(container.textContent).not.toContain("Removal of");
+    expect(button(container, "Cancel this")).toBeUndefined();
+  });
+
+  it("offers finishing a move that lapsed after some devices switched (M1)", async () => {
+    const s = mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } });
+    s.guardianKeys.state.nextRoot = {
+      ...signetRoot()!,
+      pubkey: OTHER,
+      bunkerUri: "bunker://next",
+      moveD: `kintrinsic/root/${OTHER}`,
+      moveId: STATEMENT,
+      cancelledAt: 5,
+    };
+    s.guardianKeys.moveProgress.mockReturnValue({ to: OTHER, lapsed: true, moved: ["Laptop"] });
+    render(s);
+    expect(button(container, "Finish my identity move")!.disabled).toBe(false);
+    render(s, "move");
+    expect(container.textContent).toContain("lapsed before every device switched");
+    await act(async () => button(container, "Finish the move")!.click());
+    expect(s.guardianKeys.finishMove).toHaveBeenCalledOnce();
+  });
+
+  it("offers confirming in person to a key kept only on this phone (D5)", () => {
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), signer: { connected: true, kind: "local", autoSign: false } }));
+    expect(button(container, "Confirm in person")!.disabled).toBe(false);
+  });
+
+  it("refuses a removal route for a key no device reports", () => {
+    render(mockStore({ children: family([device("Laptop", LAPTOP, "linux", guardians())]), keys: { root: signetRoot() } }), `remove/${"9".repeat(64)}`);
+    expect(container.textContent).toContain("That guardian isn't on any of your devices.");
+  });
+});

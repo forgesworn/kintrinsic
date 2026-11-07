@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use charter_link::LocalSink;
-use charter_primitives::PubKey;
+use charter_primitives::{PubKey, SignerSet};
+use charter_spine::GuardianKeys;
 use charter_sys::relay::{PublishOutcome, RelayTransport, RelayUrl};
 use charter_transport::transport::{CharterTransport, Entropy, ReceivedClause};
 
@@ -42,22 +43,50 @@ pub trait WardenRelay: Send + Sync {
         since: u64,
         now: u64,
     ) -> Result<Vec<(charter_primitives::NostrEvent, PubKey)>, String>;
-    /// Gift-wrap + publish a STATUS payload. Returns how many relays accepted;
-    /// zero acceptances is an Err carrying the relays' rejection text.
-    fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String>;
+    /// Gift-wrap + publish a STATUS payload, one wrap per recipient in the
+    /// signer set (rule 9), on the pinned relays and `extra_relays` (rule 11:
+    /// a ward with more than one root keeps sending STATUS on its previous
+    /// relays for 7 days after a change).
+    /// Returns how many relay acceptances there were; a wrap no relay took
+    /// is parked and makes this an Err carrying the relays' rejection text.
+    fn emit_status(
+        &self,
+        status_json: &str,
+        now: u64,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> Result<usize, String>;
+    /// Gift-wrap + publish a departed key's last STATUS (the body from
+    /// `charter_spine::Farewell::to_json`) to `recipient` alone, on the
+    /// pinned relays and `extra_relays`. Never parked: the guardian-keys
+    /// state keeps it owed until a relay takes it. Returns whether one did.
+    fn emit_farewell(
+        &self,
+        json: &str,
+        now: u64,
+        recipient: &PubKey,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> bool;
     /// Retry parked offline wraps (the §2.2 spool); returns (sent, remaining).
-    fn drain_outbox(&self, now: u64) -> (usize, usize);
-    /// Gift-wrap (without publishing) a device AUDIT (kind 31000) to the
-    /// guardian — tags only, content always empty. Used by the break-glass
-    /// override so an emergency unlock is LOUD (contract §Break-glass
-    /// override event). NOT offered to the local link: the caller journals
-    /// it first and then offers it with [`Self::offer_audit_local`], and
-    /// retries it with [`Self::publish_wrap`].
-    fn build_audit_wrap(
+    /// A parked wrap addressed to a key no longer among the signer set's
+    /// recipients is dropped, never re-addressed (review batch 2, platforms
+    /// L4); with the guardian-keys state unreadable nothing is published.
+    /// A dropped REQUEST wrap is not lost with it: while `is_open` says the
+    /// request is still waiting, it is built afresh, one wrap per current
+    /// recipient (a root that approved its first working key stops being a
+    /// recipient while still pinned).
+    fn drain_outbox(&self, now: u64, is_open: &dyn Fn(&str) -> bool) -> (usize, usize);
+    /// Gift-wrap (without publishing) a device AUDIT (kind 31000), one wrap
+    /// per recipient in the signer set (rule 9) — tags only, content always
+    /// empty. Used by the break-glass override so an emergency unlock is LOUD
+    /// (contract §Break-glass override event). NOT offered to the local
+    /// link: the caller journals them first and then offers each with
+    /// [`Self::offer_audit_local`], and retries each with
+    /// [`Self::publish_wrap`].
+    fn build_audit_wraps(
         &self,
         tags: Vec<Vec<String>>,
         now: u64,
-    ) -> Option<charter_primitives::NostrEvent>;
+    ) -> Vec<charter_primitives::NostrEvent>;
     /// Offer an AUDIT wrap from [`Self::build_audit_wrap`] to the local link,
     /// once it is journaled.
     fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent);
@@ -88,6 +117,8 @@ pub struct BlockingRelay<R: RelayTransport + Send + Sync + Clone> {
     rt: tokio::runtime::Runtime,
     /// The durable offline spool (§2.2), when a base dir was provided.
     outbox: Option<crate::outbox::Outbox>,
+    /// The ward's guardian keys: who a parked wrap may still go to.
+    keys: Option<GuardianKeys>,
 }
 
 impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
@@ -124,12 +155,29 @@ impl<R: RelayTransport + Send + Sync + Clone> BlockingRelay<R> {
             relays,
             rt,
             outbox: None,
+            keys: None,
         })
     }
 
     /// Attach the durable offline spool rooted under `base`.
     pub fn with_outbox(mut self, base: &std::path::Path) -> Self {
         self.outbox = Some(crate::outbox::Outbox::new(base));
+        self
+    }
+
+    /// Address every wrap to the ward's guardian-keys recipients (rule 9):
+    /// STATUS and AUDITs to the live signer set's recipients; a departed key
+    /// owed its last STATUS gets [`WardenRelay::emit_farewell`] instead.
+    /// Without keys (an unpaired build path) the pinned guardian alone, as
+    /// before.
+    pub fn with_guardians(mut self, keys: Option<&GuardianKeys>) -> Self {
+        if let Some(keys) = keys {
+            self.transport
+                .set_signer_set(charter_spine::GuardianStatements::signers(keys));
+            self.audit_builder
+                .set_signer_set(charter_spine::GuardianStatements::signers(keys));
+            self.keys = Some(keys.clone());
+        }
         self
     }
 
@@ -161,33 +209,49 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
             .map_err(|e| format!("relay poll (release): {e:?}"))
     }
 
-    fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String> {
-        // Build once so a total failure can park the EXACT wrap for retry.
-        let Some(wrap) = self.transport.build_status_wrap(status_json, now) else {
-            return Err("status wrap build failed".into());
-        };
-        let outcomes = self
-            .rt
-            .block_on(self.transport.publish_prebuilt(wrap.clone()));
-        let accepted = outcomes
-            .iter()
-            .filter(|(_, o)| matches!(o, PublishOutcome::Ok))
-            .count();
-        if accepted == 0 {
-            if let Some(outbox) = &self.outbox {
-                let subject = serde_json::from_str::<serde_json::Value>(status_json)
-                    .ok()
-                    .and_then(|v| v.get("subject").and_then(|s| s.as_str().map(String::from)))
-                    .unwrap_or_else(|| "unknown".into());
-                outbox.put_status(&subject, &wrap, now);
-            }
-            let reasons: Vec<String> = outcomes
+    fn emit_status(
+        &self,
+        status_json: &str,
+        now: u64,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> Result<usize, String> {
+        // Build once so a total failure can park the EXACT wraps for retry:
+        // one per recipient (each already offered to the local link).
+        let wraps = self.transport.build_status_wraps(status_json, now);
+        if wraps.is_empty() {
+            return Err("status wrap build failed (no recipients)".into());
+        }
+        let subject = serde_json::from_str::<serde_json::Value>(status_json)
+            .ok()
+            .and_then(|v| v.get("subject").and_then(|s| s.as_str().map(String::from)))
+            .unwrap_or_else(|| "unknown".into());
+        let many = wraps.len() > 1;
+        let mut accepted = 0;
+        let mut reasons: Vec<String> = Vec::new();
+        for wrap in wraps {
+            let outcomes = self.rt.block_on(
+                self.transport
+                    .publish_prebuilt_on(std::slice::from_ref(&wrap), extra_relays),
+            );
+            let took = outcomes
                 .iter()
-                .map(|(url, o)| match o {
+                .filter(|(_, o)| matches!(o, PublishOutcome::Ok))
+                .count();
+            accepted += took;
+            if took == 0 {
+                if let Some(outbox) = &self.outbox {
+                    // Latest-only per (subject, recipient): one recipient's
+                    // parked STATUS never replaces another's.
+                    let recipient = many.then(|| wrap_recipient(&wrap)).flatten();
+                    outbox.put_status_for(&subject, recipient.as_deref(), &wrap, now);
+                }
+                reasons.extend(outcomes.iter().map(|(url, o)| match o {
                     PublishOutcome::Ok => format!("{url}: ok"),
                     PublishOutcome::Failed(e) => format!("{url}: {e}"),
-                })
-                .collect();
+                }));
+            }
+        }
+        if !reasons.is_empty() {
             return Err(format!(
                 "status rejected everywhere: {}",
                 reasons.join("; ")
@@ -196,12 +260,13 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         Ok(accepted)
     }
 
-    fn build_audit_wrap(
+    fn build_audit_wraps(
         &self,
         tags: Vec<Vec<String>>,
         now: u64,
-    ) -> Option<charter_primitives::NostrEvent> {
-        self.audit_builder.build_audit_wrap(tags, now)
+    ) -> Vec<charter_primitives::NostrEvent> {
+        // `audit_builder` has no local sink: nothing is offered here.
+        self.audit_builder.build_audit_wraps(tags, now)
     }
 
     fn offer_audit_local(&self, wrap: &charter_primitives::NostrEvent) {
@@ -221,19 +286,95 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         Ok(accepted)
     }
 
-    fn drain_outbox(&self, now: u64) -> (usize, usize) {
+    fn emit_farewell(
+        &self,
+        json: &str,
+        now: u64,
+        recipient: &PubKey,
+        extra_relays: &[Vec<RelayUrl>],
+    ) -> bool {
+        self.rt
+            .block_on(self.transport.emit_status_to(
+                json,
+                now,
+                std::slice::from_ref(recipient),
+                extra_relays,
+            ))
+            .iter()
+            .any(|(_, o)| matches!(o, PublishOutcome::Ok))
+    }
+
+    fn drain_outbox(&self, now: u64, is_open: &dyn Fn(&str) -> bool) -> (usize, usize) {
         let Some(outbox) = &self.outbox else {
             return (0, 0);
         };
+        let live: Option<Vec<String>> = match &self.keys {
+            Some(k) if !k.is_available() => return (0, outbox.len()),
+            Some(k) => Some(
+                charter_spine::GuardianStatements::signers(k)
+                    .recipients()
+                    .iter()
+                    .map(PubKey::to_hex)
+                    .collect(),
+            ),
+            None => None,
+        };
+        let entries = outbox.entries(now);
+        // Requests whose wrap to a departed key was dropped, to be built
+        // afresh for the current recipients below.
+        let mut rebuild: Vec<(crate::outbox::ParkedRequest, u64)> = Vec::new();
         let mut sent = 0;
-        for (path, wrap) in outbox.entries(now) {
-            let outcomes = self.rt.block_on(self.transport.publish_prebuilt(wrap));
+        for parked in &entries {
+            if let Some(live) = &live {
+                if !wrap_recipient(&parked.wrap).is_some_and(|p| live.contains(&p)) {
+                    outbox.remove(&parked.path);
+                    if let Some(req) = &parked.request {
+                        if !rebuild.iter().any(|(r, _)| r.req_id == req.req_id) {
+                            rebuild.push((req.clone(), parked.at));
+                        }
+                    }
+                    continue;
+                }
+            }
+            let outcomes = self
+                .rt
+                .block_on(self.transport.publish_prebuilt(parked.wrap.clone()));
             if outcomes
                 .iter()
                 .any(|(_, o)| matches!(o, PublishOutcome::Ok))
             {
-                outbox.remove(&path);
+                outbox.remove(&parked.path);
                 sent += 1;
+            }
+        }
+        for (req, at) in rebuild {
+            // Settled or expired: nothing more to ask.
+            if !is_open(&req.req_id) {
+                continue;
+            }
+            // A current recipient that had this ask parked (and has it still,
+            // or was just sent it) gets no second wrap.
+            let held = |p: &str| {
+                entries.iter().any(|e| {
+                    e.request.as_ref().is_some_and(|r| r.req_id == req.req_id)
+                        && wrap_recipient(&e.wrap).as_deref() == Some(p)
+                })
+            };
+            for wrap in self.transport.build_request_wraps(&req.json, now) {
+                if wrap_recipient(&wrap).is_some_and(|p| held(&p)) {
+                    continue;
+                }
+                let outcomes = self
+                    .rt
+                    .block_on(self.transport.publish_prebuilt(wrap.clone()));
+                if outcomes
+                    .iter()
+                    .any(|(_, o)| matches!(o, PublishOutcome::Ok))
+                {
+                    sent += 1;
+                } else {
+                    outbox.put_request(&wrap, &req.json, at);
+                }
             }
         }
         (sent, outbox.len())
@@ -258,6 +399,14 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
     }
 }
 
+/// The recipient a gift wrap is addressed to (its single `p` tag), as hex.
+fn wrap_recipient(wrap: &charter_primitives::NostrEvent) -> Option<String> {
+    wrap.tags
+        .iter()
+        .find(|t| t.first().is_some_and(|n| n == "p"))
+        .and_then(|t| t.get(1).cloned())
+}
+
 /// Build the production relay (feature `real-relay`): the real `wss://` client
 /// with rustls + compiled-in webpki roots — no OS cert store, no Google.
 #[cfg(feature = "real-relay")]
@@ -267,6 +416,7 @@ pub fn real_relay(
     relays: Vec<RelayUrl>,
     base: &std::path::Path,
     local_sink: Option<Arc<dyn LocalSink>>,
+    keys: Option<&GuardianKeys>,
 ) -> Result<std::sync::Arc<dyn WardenRelay>, String> {
     let transport =
         charter_sys::relay::RealRelayTransport::default().with_auth_signer(std::sync::Arc::new(
@@ -275,6 +425,7 @@ pub fn real_relay(
     Ok(std::sync::Arc::new(
         BlockingRelay::new(transport, machine_sk, guardian, relays)?
             .with_outbox(base)
+            .with_guardians(keys)
             .with_local_sink(local_sink),
     ))
 }
@@ -370,6 +521,14 @@ impl AndroidTransportFacade {
         self
     }
 
+    /// Address every REQUEST and AUDIT wrap to the signer set's recipients
+    /// (rule 9), one wrap each. The set is live, so an approval or a
+    /// departure is followed from the next wrap on.
+    pub fn with_signer_set(mut self, signers: Arc<dyn SignerSet>) -> Self {
+        self.transport.set_signer_set(signers);
+        self
+    }
+
     /// A poll's batch, with an unreachable relay set noted for
     /// [`charter_spine::TransportFacade::poll_health`] rather than swallowed.
     fn record_poll<T>(&self, r: Result<Vec<T>, charter_sys::relay::RelayIoError>) -> Vec<T> {
@@ -399,21 +558,21 @@ impl AndroidTransportFacade {
 #[async_trait::async_trait]
 impl charter_spine::TransportFacade for AndroidTransportFacade {
     async fn publish_request(&self, request_json: &str, now: u64) {
-        // Build once; if EVERY relay refuses, park the exact wrap for retry —
-        // a child's ask made offline must reach the guardian when the network
-        // returns, not silently vanish (§2.2). M16 already persisted the
-        // Pending record before this call, so the record + spool re-converge.
-        let Some(wrap) = self.transport.build_request_wrap(request_json, now) else {
-            return;
-        };
-        let outcomes = self.transport.publish_prebuilt(wrap.clone()).await;
-        self.record_publish(&outcomes);
-        let accepted = outcomes
-            .iter()
-            .any(|(_, o)| matches!(o, charter_sys::relay::PublishOutcome::Ok));
-        if !accepted {
-            if let Some(outbox) = &self.outbox {
-                outbox.put_request(&wrap, now);
+        // Build once, one wrap per recipient (rule 9); if EVERY relay
+        // refuses one, park that exact wrap for retry — a child's ask made
+        // offline must reach the guardian when the network returns, not
+        // silently vanish (§2.2). M16 already persisted the Pending record
+        // before this call, so the record + spool re-converge.
+        for wrap in self.transport.build_request_wraps(request_json, now) {
+            let outcomes = self.transport.publish_prebuilt(wrap.clone()).await;
+            self.record_publish(&outcomes);
+            let accepted = outcomes
+                .iter()
+                .any(|(_, o)| matches!(o, charter_sys::relay::PublishOutcome::Ok));
+            if !accepted {
+                if let Some(outbox) = &self.outbox {
+                    outbox.put_request(&wrap, request_json, now);
+                }
             }
         }
     }
@@ -458,6 +617,25 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
         let outcomes = self.transport.emit_audit(tags, now).await;
         self.record_publish(&outcomes);
     }
+    /// Guardian statements (31120) and presence confirmations (31121),
+    /// opened with the seal-exempt unwrap, for the broker's guardian-keys
+    /// port.
+    async fn poll_guardian_events(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Vec<charter_transport::GuardianSealed> {
+        self.record_poll(self.transport.poll_guardian_events(since, now).await)
+    }
+    /// Gift-wrapped RELAYS (rule 11), with any guardian PIN they carry: the
+    /// broker records the PIN in the guardian-keys state, never the pairing.
+    async fn poll_relays(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Vec<(charter_primitives::NostrEvent, PubKey)> {
+        self.record_poll(self.transport.poll_relays(since, now).await)
+    }
     fn pinned_guardian(&self) -> PubKey {
         self.guardian
     }
@@ -474,9 +652,11 @@ impl charter_spine::TransportFacade for AndroidTransportFacade {
         wrap: &charter_primitives::NostrEvent,
         now: u64,
     ) -> Option<charter_spine::LocalInbound> {
+        // The opened unwrap also sorts out gift-wrapped RELAYS and guardian
+        // statements / presence confirmations (seal-exempt, both authors).
         self.transport
-            .unwrap_inbound(wrap, now)
-            .map(|(ev, author)| charter_spine::classify_inbound(ev, author))
+            .unwrap_inbound_opened(wrap, now)
+            .map(charter_spine::transport_facade::classify_opened)
     }
     /// Read-and-reset, once per broker `poll_once` round.
     fn poll_health(&self) -> charter_spine::transport_facade::PollHealth {

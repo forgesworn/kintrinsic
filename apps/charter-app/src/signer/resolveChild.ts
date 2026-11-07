@@ -28,6 +28,9 @@ export function resolveChildTarget(
   const paired = child.devices.filter(
     (d) =>
       d.pairing === "paired" &&
+      // A device that told this install it no longer holds its key gets
+      // nothing more from it (guardian keys, departed key's last STATUS).
+      d.departedAt === undefined &&
       typeof d.devicePubkey === "string" &&
       /^[0-9a-f]{64}$/.test(d.devicePubkey),
   );
@@ -38,6 +41,7 @@ export function resolveChildTarget(
     pubkey: d.devicePubkey as string,
     platform: d.platform,
     ...(deviceStatus ? { timesCapable: canUseTimes(d, deviceStatus) } : {}),
+    ...(d.debugging ? { debugging: { allow: d.debugging.allow, ...(d.debugging.until !== undefined ? { until: d.debugging.until } : {}) } } : {}),
   }));
   // Each device's OWN relays (from its pairing), unioned with the defaults —
   // never just the current defaults, so a device paired under an older

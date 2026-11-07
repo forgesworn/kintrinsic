@@ -18,13 +18,16 @@ import org.forgesworn.mycharter.carrier.hexToKeyBytes
 import org.forgesworn.mycharter.link.LocalLink
 import org.forgesworn.mycharter.native.GuardianNative
 import org.forgesworn.mycharter.relay.RelayFraming
+import org.forgesworn.mycharter.relay.RelayRoute
+import org.forgesworn.mycharter.relay.RelayRoutes
 import org.json.JSONObject
 import org.json.JSONArray
 import java.util.concurrent.TimeUnit
 
 /**
  * The carrier's whole point: a foreground service holding one websocket per
- * relay, classifying every gift-wrap addressed to the guardian, and raising
+ * relay for each key it listens on (see [RelayRoute]; one key, one socket per
+ * relay), classifying every gift-wrap addressed to the guardian, and raising
  * an URGENT notification for each unseen ward REQUEST. No FCM — the socket
  * IS the push channel, which keeps de-Googled guardian phones first-class.
  *
@@ -41,14 +44,15 @@ class CarrierService : Service() {
     private lateinit var handler: Handler
     /** The home-network listener (local link v1); runs while provisioned. */
     private lateinit var localLink: LocalLink
-    private val sockets = mutableMapOf<String, WebSocket>()
-    private var connectedGuardian: String? = null
-    private val backoffs = mutableMapOf<String, Long>()
+    /** One socket per relay and key; a key or relay dropped from the
+     *  provision closes its sockets. */
+    private val sockets = mutableMapOf<RelayRoute, WebSocket>()
+    private val backoffs = mutableMapOf<RelayRoute, Long>()
     /** When each socket opened (monotonic) — how [scheduleReconnect] judges it. */
-    private val openedAt = mutableMapOf<String, Long>()
-    /** Relays with a reconnect already queued, so a socket reported dead twice
+    private val openedAt = mutableMapOf<RelayRoute, Long>()
+    /** Sockets with a reconnect already queued, so a socket reported dead twice
      *  does not end up with two of them. */
-    private val reconnecting = mutableSetOf<String>()
+    private val reconnecting = mutableSetOf<RelayRoute>()
     @Volatile private var running = false
 
     /**
@@ -113,25 +117,28 @@ class CarrierService : Service() {
         // Idempotent: same key + directory keeps the running listener; a new
         // guardian key restarts it.
         localLink.start()
-        val keyChanged = connectedGuardian != p.guardianPubkeyHex
-        connectedGuardian = p.guardianPubkeyHex
-        sockets.keys.filter { keyChanged || it !in p.relays }.forEach { relay ->
-            sockets.remove(relay)?.close(1000, "relay configuration changed")
-            openedAt.remove(relay)
-            backoffs.remove(relay)
+        // A key or relay no longer provisioned closes its sockets; a key added
+        // (a working key minted) opens its own beside the others.
+        RelayRoutes.stale(sockets.keys, p.relays, p.pubkeys).forEach { route ->
+            sockets.remove(route)?.close(1000, "relay configuration changed")
+            openedAt.remove(route)
+            backoffs.remove(route)
         }
         // Repeated service starts must respect an outage's queued retry,
         // rather than repeatedly waking the radio before its backoff expires.
-        p.relays.forEach { relay ->
-            if (ReconnectPolicy.shouldConnect(relay in sockets, relay in reconnecting)) connect(relay)
+        RelayRoutes.wanted(p.relays, p.pubkeys).forEach { route ->
+            if (ReconnectPolicy.shouldConnect(route in sockets, route in reconnecting)) connect(route)
         }
     }
 
-    private fun connect(relay: String) {
-        reconnecting.remove(relay)
+    private fun connect(route: RelayRoute) {
+        reconnecting.remove(route)
         if (!running) return
         val p = store.provision() ?: return
-        if (relay !in p.relays || relay in sockets) return
+        if (route !in RelayRoutes.wanted(p.relays, p.pubkeys) || route in sockets) return
+        val relay = route.relay
+        // This socket subscribes for, and signs in as, its own key alone.
+        val listenOn = listOf(route.pubkeyHex)
         val since = System.currentTimeMillis() / 1000 - RelayFraming.SINCE_WINDOW_SECS
         val ws = client.newWebSocket(
             Request.Builder().url(relay).build(),
@@ -142,8 +149,8 @@ class CarrierService : Service() {
                     Log.i(TAG, "open $relay")
                     // Note when it opened, but do NOT call it a success yet:
                     // see scheduleReconnect.
-                    handler.post { openedAt[relay] = SystemClock.elapsedRealtime() }
-                    webSocket.send(RelayFraming.reqMessage("carrier", p.guardianPubkeyHex, since))
+                    handler.post { openedAt[route] = SystemClock.elapsedRealtime() }
+                    webSocket.send(RelayFraming.reqMessage("carrier", listenOn, since))
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -154,7 +161,10 @@ class CarrierService : Service() {
                                 if (authId != null) return@post
                                 val challenge = frame.optString(1)
                                 if (challenge.isEmpty() || challenge.length > 4096) return@post
-                                val sk = hexToKeyBytes(p.guardianSkHex) ?: return@post
+                                // The socket's own key: a relay that hands wraps
+                                // only to the signed-in recipient then gives
+                                // this socket the wraps to that key.
+                                val sk = p.secretOf(route.pubkeyHex)?.let { hexToKeyBytes(it) } ?: return@post
                                 val proof = try {
                                     JSONObject(GuardianNative.guardianRelayAuth(relay, challenge, sk, System.currentTimeMillis() / 1000))
                                 } catch (_: Throwable) { return@post } finally { sk.fill(0) }
@@ -165,17 +175,17 @@ class CarrierService : Service() {
                             "OK" -> if (!authenticated && authId != null && frame.optString(1) == authId) {
                                 if (frame.optBoolean(2)) {
                                     authenticated = true
-                                    webSocket.send(RelayFraming.reqMessage("carrier", p.guardianPubkeyHex, since))
+                                    webSocket.send(RelayFraming.reqMessage("carrier", listenOn, since))
                                 } else {
                                     webSocket.cancel()
-                                    scheduleReconnect(relay, webSocket)
+                                    scheduleReconnect(route, webSocket)
                                 }
                             }
                             "CLOSED" -> {
                                 val reason = frame.optString(2)
                                 if (!reason.startsWith("auth-required:") || authenticated) {
                                     webSocket.cancel()
-                                    scheduleReconnect(relay, webSocket)
+                                    scheduleReconnect(route, webSocket)
                                 }
                             }
                             "EVENT" -> RelayFraming.parseEvent(text)?.let { classifyAndNotify(it) }
@@ -185,16 +195,16 @@ class CarrierService : Service() {
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.w(TAG, "socket failed $relay: ${t.message}")
-                    scheduleReconnect(relay, webSocket)
+                    scheduleReconnect(route, webSocket)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "closed $relay ($code)")
-                    scheduleReconnect(relay, webSocket)
+                    scheduleReconnect(route, webSocket)
                 }
             },
         )
-        sockets[relay] = ws
+        sockets[route] = ws
     }
 
     /**
@@ -208,23 +218,23 @@ class CarrierService : Service() {
      * day, and it looks healthy in the log because every round logs "open".
      * Only a connection that survived [STABLE_MS] earns a fresh start.
      */
-    private fun scheduleReconnect(relay: String, expectedSocket: WebSocket) {
+    private fun scheduleReconnect(route: RelayRoute, expectedSocket: WebSocket) {
         if (!running) return
         // These callbacks arrive on OkHttp's threads; every bit of bookkeeping
         // below is plain HashMap state owned by the worker.
         handler.post {
-            if (!running || sockets[relay] !== expectedSocket) return@post
+            if (!running || sockets[route] !== expectedSocket) return@post
             // OkHttp can report a dying socket more than once (failure after
             // close). Without this, each report would start its own reconnect
-            // chain and the relay would end up with several live sockets.
-            if (!reconnecting.add(relay)) return@post
-            sockets.remove(relay)
-            val lived = openedAt.remove(relay)
+            // chain and the relay would end up with several live sockets for one key.
+            if (!reconnecting.add(route)) return@post
+            sockets.remove(route)
+            val lived = openedAt.remove(route)
                 ?.let { SystemClock.elapsedRealtime() - it }
                 ?: 0L
-            val next = ReconnectPolicy.next(backoffs[relay] ?: 0L, lived, store.reconnectCap())
-            backoffs[relay] = next
-            handler.postDelayed({ connect(relay) }, next * 1000)
+            val next = ReconnectPolicy.next(backoffs[route] ?: 0L, lived, store.reconnectCap())
+            backoffs[route] = next
+            handler.postDelayed({ connect(route) }, next * 1000)
         }
     }
 
@@ -235,7 +245,9 @@ class CarrierService : Service() {
         // to go across as the stored hex String — immutable, interned, one
         // fresh uncollectable copy of the guardian's root key per delivered
         // wrap. The array below lives for the length of one classify call.
-        val sk = hexToKeyBytes(p.guardianSkHex) ?: return
+        // The wrap is encrypted to the key its `p` tag names: a working key's
+        // secret for a wrap to the working key, the root's for one to the root.
+        val sk = hexToKeyBytes(p.secretFor(RelayFraming.recipient(eventJson))) ?: return
         val verdict = try {
             JSONObject(GuardianNative.guardianClassifyWrap(eventJson, sk, now))
         } catch (t: Throwable) {

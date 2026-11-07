@@ -3,13 +3,13 @@ import QRCode from "qrcode";
 import { Banner, Button, SectionLabel } from "../components/ui";
 import { useCharter } from "../store/store";
 import type { Child, Device } from "../domain/types";
-import { guardianPubkeyHex } from "../signer/guardianKey";
 import { pairingSas } from "../domain/pairingSas";
 import { guardianPairingBunkerUri, guardianPairingQrContent } from "../signer/guardianPairing";
 import { DEFAULT_RELAYS } from "../signer/config";
 import { parseDevicePairingCode, parsePairInvite } from "../wire/deviceCode";
 import { QRScanner } from "../components/QRScanner";
 import SetupPhoneQr from "./SetupPhoneQr";
+import { bunkerRoot } from "../keys/state";
 
 
 /**
@@ -30,6 +30,7 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
     beginPhonePairing,
     cancelPhonePairing,
     sendPairOffer,
+    guardianKeys,
   } = useCharter();
   const [step, setStep] = useState<"scan" | "name">("scan");
   const [kind, setKind] = useState<Device["platform"]>("linux");
@@ -55,6 +56,66 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
   const kindNoun = kind === "android" ? "phone" : "computer";
   const codeParses = parseDevicePairingCode(code) !== null;
   const haveLocalSigner = state.signer.kind === "local";
+  // Under a My Signet or Heartwood root this phone's own key can't be turned
+  // into the guardian key, so a ward phone is claimed by its device code
+  // (docs/guardian-keys-open-questions.md, "Android pairing under a Signet root").
+  // A phone-held root (even one that minted a day-to-day key) pairs as before.
+  const signetRoot = !!bunkerRoot(guardianKeys.state);
+  // The pairing QR names the family's root (R under My Signet), so it is
+  // offered under a Signet root too. The phone then reports only to R until
+  // this phone's approval reaches it, so it can't announce itself here: the
+  // parent finishes by typing its device code. Cable and factory-reset QR
+  // setup wait for that announcement, so they stay with a local signer.
+  const pairingQr = haveLocalSigner || signetRoot;
+  const [localError, setLocalError] = useState<string | null>(null);
+  const turnOnLocal = () => {
+    setLocalError(null);
+    enableLocalSigner().catch((e: unknown) => setLocalError(e instanceof Error ? e.message : String(e)));
+  };
+  const localGate = (setup: string, back?: () => void) =>
+    signetRoot ? (
+      <>
+        <Banner tone="info">
+          Your guardian identity is in{" "}
+          {guardianKeys.state.root?.via === "heartwood" ? "a Heartwood" : "My Signet"}, so this phone can't offer{" "}
+          {setup}. Use the pairing code instead: scan it with the phone, then type the device code it shows.
+        </Banner>
+        <Button
+          block
+          onClick={() => {
+            setCableMode(false);
+            setManualEntry(false);
+          }}
+        >
+          Show the pairing code
+        </Button>
+        {back && (
+          <Button variant="ghost" block onClick={back}>
+            Back
+          </Button>
+        )}
+      </>
+    ) : (
+      <>
+        <Banner tone="info">
+          Pairing a phone needs your guardian key — turn on parent approval first and this becomes{" "}
+          {setup === "a cable setup" ? "a no-scanning cable setup" : "a one-scan setup"}.
+        </Banner>
+        {localError && (
+          <p role="alert" className="card-sub" style={{ margin: 0, color: "var(--danger, #B23B30)" }}>
+            {localError}
+          </p>
+        )}
+        <Button block onClick={turnOnLocal}>
+          Turn on parent approval
+        </Button>
+        {back && (
+          <Button variant="ghost" block onClick={back}>
+            Back
+          </Button>
+        )}
+      </>
+    );
   // The QR path and the cable path are mutually exclusive: entering cable mode
   // makes phoneScanMode false, so the QR-mint effect's cleanup cancels the QR
   // token (Fix 1) — the single shared pairing token is never owned by both.
@@ -82,7 +143,7 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
   // Mint the one-time token + QR when the phone-scan wait is on screen;
   // cancel the wait whenever it isn't (leaving the flow kills the token).
   useEffect(() => {
-    if (!phoneScanMode || !haveLocalSigner) {
+    if (!phoneScanMode || !pairingQr) {
       // QR setup mints its own token on mount, and a child's effects run
       // before this one: cancelling here would wipe it in the same commit.
       // SetupPhoneQr cancels its own token when it unmounts.
@@ -91,7 +152,9 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
       return;
     }
     const token = beginPhonePairing(child.id);
-    const pk = guardianPubkeyHex();
+    // The key the ward pins: this family's root (R with My Signet as root,
+    // else this phone's key). The SAS covers it and the token, as before.
+    const pk = guardianKeys.rootPubkey();
     const content = guardianPairingQrContent(pk, DEFAULT_RELAYS, token);
     setQrContent(content);
     let alive = true;
@@ -111,7 +174,7 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
     // cableMode is a dep so LEAVING cable mode re-mints the QR — otherwise the
     // displayed QR would encode the cancelled (dead) token and scanning hangs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phoneScanMode, haveLocalSigner, child.id, cableMode, qrSetupMode]);
+  }, [phoneScanMode, pairingQr, child.id, cableMode, qrSetupMode]);
 
   // The phone scanned our QR and announced itself: bind its real pubkey and
   // jump straight to naming it.
@@ -212,18 +275,7 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
               // must not lazily mint a key outside the backup path, and the
               // store's STATUS polling only runs once `signer.kind ===
               // "local"`. Without this, a provisioned phone would orphan.
-              <>
-                <Banner tone="info">
-                  Pairing a phone needs your guardian key — turn on parent
-                  approval first and this becomes a no-scanning cable setup.
-                </Banner>
-                <Button block onClick={() => enableLocalSigner()}>
-                  Turn on parent approval
-                </Button>
-                <Button variant="ghost" block onClick={() => setCableMode(false)}>
-                  Back
-                </Button>
-              </>
+              localGate("a cable setup", () => setCableMode(false))
             ) : (
               <SetupPhoneCable
                 child={child}
@@ -245,25 +297,21 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
           ) : (
             <>
               {phoneScanMode ? (
-                !haveLocalSigner ? (
-                  <>
-                    <Banner tone="info">
-                      Pairing a phone needs your guardian key — turn on parent
-                      approval first and this becomes a one-scan setup.
-                    </Banner>
-                    <Button block onClick={() => enableLocalSigner()}>
-                      Turn on parent approval
-                    </Button>
-                  </>
+                !pairingQr ? (
+                  localGate("a QR setup")
                 ) : (
                   <>
-                    <Button block onClick={() => setQrSetupMode(true)}>
-                      Set up with a QR code
-                    </Button>
-                    <div className="card-sub" style={{ textAlign: "center" }}>
-                      Recommended for a new or factory-reset phone. Already has
-                      the Kintrinsic ward app? Scan the code below instead.
-                    </div>
+                    {haveLocalSigner && (
+                      <>
+                        <Button block onClick={() => setQrSetupMode(true)}>
+                          Set up with a QR code
+                        </Button>
+                        <div className="card-sub" style={{ textAlign: "center" }}>
+                          Recommended for a new or factory-reset phone. Already has
+                          the Kintrinsic ward app? Scan the code below instead.
+                        </div>
+                      </>
+                    )}
                     <Banner tone="info">
                       <span>
                         Scan this with {child.name}'s <b>phone camera</b>. The
@@ -316,17 +364,33 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
                       </div>
                     )}
 
-                    <div
-                      className="card-sub"
-                      style={{ textAlign: "center" }}
-                      aria-live="polite"
-                    >
-                      Waiting for the phone to scan…
-                    </div>
+                    {signetRoot ? (
+                      <>
+                        <Banner tone="info">
+                          Your guardian identity is in{" "}
+                          {guardianKeys.state.root?.via === "heartwood" ? "a Heartwood" : "My Signet"}, so the
+                          phone can't tell this one it has paired. Once it shows its home screen, open About
+                          this device on it and type the device code here.
+                        </Banner>
+                        <Button block onClick={() => setManualEntry(true)}>
+                          Type the device code
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <div
+                          className="card-sub"
+                          style={{ textAlign: "center" }}
+                          aria-live="polite"
+                        >
+                          Waiting for the phone to scan…
+                        </div>
 
-                    <Button variant="ghost" block onClick={() => setManualEntry(true)}>
-                      No camera? Type the code instead
-                    </Button>
+                        <Button variant="ghost" block onClick={() => setManualEntry(true)}>
+                          No camera? Type the code instead
+                        </Button>
+                      </>
+                    )}
                     <Button variant="ghost" block onClick={onClose}>
                       Not now
                     </Button>
@@ -494,7 +558,7 @@ function SetupPhoneCable({
   onBack: () => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
-  const { phonePairing, beginPhonePairing, cancelPhonePairing, addDevice, confirmPairing } =
+  const { phonePairing, beginPhonePairing, cancelPhonePairing, addDevice, confirmPairing, guardianKeys } =
     useCharter();
   const [phase, setPhase] = useState<CablePhase>("intro");
   const [detail, setDetail] = useState("");
@@ -556,7 +620,7 @@ function SetupPhoneCable({
       );
 
       const token = beginPhonePairing(child.id);
-      const bunkerUri = guardianPairingBunkerUri(guardianPubkeyHex(), DEFAULT_RELAYS, token);
+      const bunkerUri = guardianPairingBunkerUri(guardianKeys.rootPubkey(), DEFAULT_RELAYS, token);
 
       await runProvision(session, bytes, bunkerUri, (p) => setDetail(p.detail));
 

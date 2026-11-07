@@ -9,6 +9,7 @@
 
 import { getPublicKey } from "nostr-tools";
 import { readGuardianKey } from "../signer/guardianKey";
+import { readPhoneWorkingKey } from "../signer/phoneWorkingKey";
 import { DEFAULT_RELAYS } from "../signer/config";
 import { allPairingRelays } from "../signer/pairingRelays";
 import type { Child } from "../domain/types";
@@ -51,16 +52,39 @@ export function provisionCarrier(children: Child[] = []): boolean {
   if (!carrier) return false;
   const loaded = readGuardianKey();
   if (loaded.kind !== "ok") return false;
-  const pubkey = getPublicKey(loaded.key);
+  // A phone-held root that minted a separate working key W (decision D5): the
+  // devices write to W once they list it, and to the guardian key until then.
+  // The primary key (the one an older carrier listens on alone, and the one
+  // the local link uses) moves to W as soon as any device lists W.
+  const minted = readPhoneWorkingKey();
+  const mintedPub = minted ? getPublicKey(minted) : null;
+  const listened =
+    minted && mintedPub && children.some((c) => c.devices.some((d) => d.guardians?.roots.some((r) => r.keys.includes(mintedPub))))
+      ? minted
+      : loaded.key;
+  const pubkey = getPublicKey(listened);
+  // Every key this install receives ward traffic on, so a carrier that knows
+  // the list listens on both while the wards move from R to W: the guardian
+  // key slot (this phone's own key; on a My Signet install, the key My Signet
+  // approved, never the identity itself, whose secret is not here) and a
+  // phone-held root's W once minted. An older carrier ignores `keys` and
+  // keeps the primary above.
+  const own = [loaded.key, ...(minted ? [minted] : [])];
+  const keys = own
+    .map((sk) => ({ skHex: bytesToHex(sk), pubkeyHex: getPublicKey(sk) }))
+    .filter((k, i, all) => all.findIndex((o) => o.pubkeyHex === k.pubkeyHex) === i);
   const relays = allPairingRelays(children, DEFAULT_RELAYS).sort();
-  const identity = JSON.stringify([pubkey, relays]);
+  // Public keys only (see provisionedIdentity): a W minted, promoted or
+  // cleared changes the list and hands over again.
+  const identity = JSON.stringify([pubkey, keys.map((k) => k.pubkeyHex), relays]);
   if (identity === provisionedIdentity) return true;
   carrier.provision(
     JSON.stringify({
       v: 1,
-      guardianSkHex: bytesToHex(loaded.key),
+      guardianSkHex: bytesToHex(listened),
       guardianPubkeyHex: pubkey,
       relays,
+      keys,
     }),
   );
   provisionedIdentity = identity;

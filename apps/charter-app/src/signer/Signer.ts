@@ -173,6 +173,17 @@ export interface Signer {
   signClause(childId: string, policy: Policy): Promise<SignOutcome>;
 
   /**
+   * A device just claimed for a child has received nothing: send it this
+   * install's own rules in force for the child, to that device only and each
+   * with its original `issuedAt`, so no other device's rules change and no
+   * newer rule is beaten by a re-send dated now. Rules another guardian set
+   * are left to their app and the roster. A kind of `policies` for which no
+   * rule at all is held for the device goes as a fresh rule. Optional: the
+   * store skips it when absent.
+   */
+  resendRulesTo?(childId: string, machine: string, policies: Policy[]): Promise<SignOutcome>;
+
+  /**
    * Publish each device its consolidated cross-device usage view
    * (USAGE_SYNC 31115 — B3 pooled budget). Optional: only signers with a real
    * publish path implement it; the store no-ops when absent.
