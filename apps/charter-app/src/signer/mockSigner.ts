@@ -145,6 +145,26 @@ export class MockSigner implements Signer {
     return { ok: true };
   }
 
+  async signScreenLockReset(
+    device: { label?: string },
+    newPin: string,
+  ): Promise<{ ok: true; id: string; issuedAt: number }> {
+    await this.authorize(
+      "clause",
+      newPin === ""
+        ? `Remove the screen lock on ${device.label ?? "a device"}`
+        : `Reset the screen lock on ${device.label ?? "a device"} to a new PIN`,
+    );
+    // No wire in the mock; the id is still a real-shaped one.
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return {
+      ok: true,
+      id: Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(""),
+      issuedAt: Math.floor(Date.now() / 1000),
+    };
+  }
+
   async releaseDevice(): Promise<{ ok: true }> {
     // No wire in the mock — the store still updates its device list.
     return { ok: true };

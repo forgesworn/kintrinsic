@@ -641,3 +641,79 @@ describe("debuggingOpen", () => {
     }
   });
 });
+
+// Android screen lock: a ward that has the reset always sends both booleans; a
+// wrong type is absent (never `false`), and one bad outcome entry never takes
+// the rest down with it.
+describe("screen lock fields", () => {
+  const base = sample("ab".repeat(32), "cd".repeat(32));
+  const parse = (extra: Record<string, unknown>) => parseStatus(JSON.stringify({ ...base, ...extra }));
+  const ID1 = "0123456789abcdef0123456789abcdef";
+  const ID2 = "fedcba9876543210fedcba9876543210";
+
+  it("parses screenLockSecure, screenLockResetReady and screenLockResets", () => {
+    const s = parse({
+      screenLockSecure: false,
+      screenLockResetReady: true,
+      screenLockResets: [
+        { id: ID1, result: "applied", at: 1_700_000_100 },
+        { id: ID2, result: "superseded", at: 1_700_000_000 },
+      ],
+    });
+    expect(s?.screenLockSecure).toBe(false);
+    expect(s?.screenLockResetReady).toBe(true);
+    expect(s?.screenLockResets).toEqual([
+      { id: ID1, result: "applied", at: 1_700_000_100 },
+      { id: ID2, result: "superseded", at: 1_700_000_000 },
+    ]);
+  });
+
+  it("stays undefined when absent — an older ward", () => {
+    const s = parse({});
+    expect(s?.screenLockSecure).toBeUndefined();
+    expect(s?.screenLockResetReady).toBeUndefined();
+    expect(s?.screenLockResets).toBeUndefined();
+  });
+
+  it("treats a wrong type as undefined, never false", () => {
+    for (const junk of ["true", 1, 0, null, {}, []]) {
+      expect(parse({ screenLockSecure: junk })?.screenLockSecure).toBeUndefined();
+      expect(parse({ screenLockResetReady: junk })?.screenLockResetReady).toBeUndefined();
+    }
+    for (const junk of ["x", 1, true, null, {}]) {
+      expect(parse({ screenLockResets: junk })?.screenLockResets).toBeUndefined();
+    }
+  });
+
+  it("drops a malformed outcome entry on its own", () => {
+    const s = parse({
+      screenLockResets: [
+        { id: ID1, result: "applied", at: 5 },
+        { id: "short", result: "applied", at: 5 },
+        { id: ID2, result: 7, at: 5 },
+        { id: ID2, result: "failed", at: "5" },
+        { id: ID2, result: "failed", at: -1 },
+        { id: ID2, result: "failed", at: 1.5 },
+        { id: ID2, result: "", at: 5 },
+        null,
+        "junk",
+        { id: ID2, result: "failed", at: 6 },
+      ],
+    });
+    expect(s?.screenLockResets).toEqual([
+      { id: ID1, result: "applied", at: 5 },
+      { id: ID2, result: "failed", at: 6 },
+    ]);
+  });
+
+  it("reads at most the ward's sixteen", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ id: ID1, result: "applied", at: i }));
+    expect(parse({ screenLockResets: many })?.screenLockResets).toHaveLength(16);
+  });
+
+  it("keeps a result it does not know, to be shown as unrecognised", () => {
+    expect(parse({ screenLockResets: [{ id: ID1, result: "from_the_future", at: 1 }] })?.screenLockResets).toEqual([
+      { id: ID1, result: "from_the_future", at: 1 },
+    ]);
+  });
+});

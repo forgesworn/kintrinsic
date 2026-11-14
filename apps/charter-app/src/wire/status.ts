@@ -248,6 +248,40 @@ export interface DeviceStatus {
    * `domain/debugging.ts`).
    */
   debuggingOpen?: boolean;
+  /**
+   * Android: the phone has a screen lock (PIN, pattern or password) right now.
+   * `false` is a real, supported state (a ward with no lock). Absent means an
+   * older ward or junk, and must never read as `false`: the screen-lock card is
+   * hidden without it.
+   */
+  screenLockSecure?: boolean;
+  /**
+   * Android: the ward can reset the screen lock now. `false` while it waits for
+   * the phone's next unlock (a PIN'd phone that has restarted). Absent = unknown,
+   * never `false`.
+   */
+  screenLockResetReady?: boolean;
+  /**
+   * Android: the outcome the ward recorded for each of the last 16 screen-lock
+   * resets, newest first, one entry per reset `id`. The guardian looks up the
+   * `id` it sent. Absent when the ward has recorded none (or on junk); a
+   * malformed entry is dropped on its own, never the whole list.
+   */
+  screenLockResets?: ScreenLockResetOutcome[];
+}
+
+/** One recorded outcome of a screen-lock reset — see `DeviceStatus.screenLockResets`. */
+export interface ScreenLockResetOutcome {
+  /** The reset `id` the guardian sent (32 lowercase hex). */
+  id: string;
+  /**
+   * `accepted` | `applied` | `failed` | `not_ready` | `notice_failed` |
+   * `rejected_time` | `superseded`. Kept as sent so a result a newer ward adds
+   * is still shown (as unrecognised) rather than read as "waiting".
+   */
+  result: string;
+  /** Unix seconds the ward recorded it. */
+  at: number;
 }
 
 /** One installed launchable app on a device. */
@@ -333,6 +367,28 @@ function isHex(s: unknown): s is string {
 }
 function isNonNegInt(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n) && n >= 0;
+}
+
+/** The ward keeps 16; a longer list is junk, so only the first 16 are read. */
+const MAX_SCREEN_LOCK_RESETS = 16;
+
+/**
+ * Tolerant read of `screenLockResets`: anything but an array is absent; an
+ * entry without a 32-hex `id`, a string `result` and a whole-number `at` is
+ * dropped by itself. Never throws.
+ */
+function parseScreenLockResets(v: unknown): ScreenLockResetOutcome[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: ScreenLockResetOutcome[] = [];
+  for (const e of v.slice(0, MAX_SCREEN_LOCK_RESETS)) {
+    if (typeof e !== "object" || e === null) continue;
+    const r = e as Record<string, unknown>;
+    if (typeof r.id !== "string" || !/^[0-9a-f]{32}$/.test(r.id)) continue;
+    if (typeof r.result !== "string" || r.result === "") continue;
+    if (!isNonNegInt(r.at) || !Number.isInteger(r.at)) continue;
+    out.push({ id: r.id, result: r.result, at: r.at });
+  }
+  return out;
 }
 
 /**
@@ -426,6 +482,11 @@ export function parseStatus(json: string): DeviceStatus | null {
     appLockArmed: typeof o.appLockArmed === "boolean" ? o.appLockArmed : undefined,
     // Same posture as appLockArmed: a non-boolean is absent, never `false`.
     debuggingOpen: typeof o.debuggingOpen === "boolean" ? o.debuggingOpen : undefined,
+    // Same posture again: a wrong type is absent, never `false`.
+    screenLockSecure: typeof o.screenLockSecure === "boolean" ? o.screenLockSecure : undefined,
+    screenLockResetReady:
+      typeof o.screenLockResetReady === "boolean" ? o.screenLockResetReady : undefined,
+    screenLockResets: parseScreenLockResets(o.screenLockResets),
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)
       ? (o.lockReason as StatusLockReason)

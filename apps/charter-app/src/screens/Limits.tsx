@@ -8,6 +8,7 @@ import {
   type AppSection,
 } from "../domain/deviceApps";
 import { deviceSetLimits } from "../domain/standing";
+import { devicesWithoutScreenLock, NO_SCREEN_LOCK_WARNING } from "../domain/screenLock";
 import { LEARNING_CATALOGUE } from "../data/learning_catalogue";
 import { normalizeWebDomain } from "../domain/webDomain";
 import {
@@ -1598,11 +1599,12 @@ function AlwaysAvailableExpirySheet({
   );
 }
 
-function AlwaysAvailableEditor({
+export function AlwaysAvailableEditor({
   alwaysAvailable,
   sections,
   onChange,
   wardName,
+  noScreenLockDeviceIds,
 }: {
   alwaysAvailable: AlwaysAvailablePolicy;
   /** The ward's reported inventory, grouped one section per paired device —
@@ -1612,6 +1614,9 @@ function AlwaysAvailableEditor({
   onChange: (a: AlwaysAvailablePolicy) => void;
   /** For the "from <ward>'s account" mark on a user-installed row. */
   wardName: string;
+  /** Devices (by `AppSection.deviceId`) that report no screen lock: for them, anyone
+   *  holding the device can use these apps, and the guardian is told so. */
+  noScreenLockDeviceIds?: ReadonlySet<string>;
 }) {
   // Which app's expiry sheet is open, by package. Null = none.
   const [expiryFor, setExpiryFor] = useState<string | null>(null);
@@ -1657,6 +1662,11 @@ function AlwaysAvailableEditor({
             <div className="row-sub" style={{ marginBottom: 4 }}>
               {s.platform === "android" ? "📱" : "💻"} {s.label}
             </div>
+            {noScreenLockDeviceIds?.has(s.deviceId) && (
+              <p className="card-sub" style={{ margin: "0 0 6px" }}>
+                {NO_SCREEN_LOCK_WARNING}
+              </p>
+            )}
             {s.apps.length === 0 ? (
               <p className="card-sub" style={{ margin: 0 }}>
                 Nothing to choose yet — the list fills in once this device
@@ -3356,6 +3366,13 @@ export function DeviceLimits({
     [child.devices, deviceStatus],
   );
 
+  // Devices that report no screen lock: the open-at-any-hour picker says so
+  // beside them, because anyone holding such a device can use those apps.
+  const noScreenLockDeviceIds = useMemo(
+    () => new Set(devicesWithoutScreenLock(child.devices, deviceStatus).map((d) => d.id)),
+    [child.devices, deviceStatus],
+  );
+
   // alwaysAvailable is version-gated on Android (39) as well as NEVER on
   // Linux (the `unsupported` half is covered by `parityNote` below) — every
   // ward on the branch before this one reports 38, so on the day this ships
@@ -3779,6 +3796,7 @@ export function DeviceLimits({
             sections={appSections}
             onChange={setDraftAlwaysAvailable}
             wardName={child.name}
+            noScreenLockDeviceIds={noScreenLockDeviceIds}
           />
           {alwaysAvailableTooOldNote && (
             <div style={{ marginTop: 10 }}>

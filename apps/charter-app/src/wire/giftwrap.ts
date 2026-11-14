@@ -26,6 +26,7 @@ export const CHARTER_DEVICE_CLAUSE = 31113;
 export const CHARTER_DEVICE_USAGE_SYNC = 31115;
 export const CHARTER_DEVICE_RELEASE = 31116;
 export const CHARTER_DEVICE_PAIR_OFFER = 31117;
+export const CHARTER_DEVICE_SCREEN_LOCK_RESET = 31119;
 export const SEAL = 13;
 export const GIFT_WRAP = 1059;
 export const MARKER: [string, string] = ["t", "charter-device"];
@@ -157,6 +158,43 @@ export async function giftWrapRelease(
     machinePubkey,
     guardian,
     createdAt,
+  );
+}
+
+/**
+ * The SCREEN-LOCK RESET payload: reset the phone's own screen lock to `newPin`,
+ * or remove it (`newPin === ""`). `issuedAt` is the guardian's true wall clock
+ * at signing: the ward accepts it only within an hour back and five minutes
+ * forward, so it is never a bumped or monotonic value.
+ *
+ * `newPin` is a secret. It exists only inside the signing call that builds
+ * this payload: never store, log or report one.
+ */
+export interface ScreenLockResetPayload {
+  v: 1;
+  /** 32 lowercase hex characters, fresh per reset; the ward reports its outcome under it. */
+  id: string;
+  machine: string;
+  issuedAt: number;
+  /** "" removes the screen lock; otherwise 4 to 16 ASCII digits. */
+  newPin: string;
+}
+
+/**
+ * Build the inner SCREEN-LOCK RESET event (31119) and gift-wrap it to the
+ * MACHINE whose lock is being reset, exactly as RELEASE is wrapped. Only the
+ * pinned guardian key can produce it, so a child cannot reset their own lock.
+ */
+export async function giftWrapScreenLockReset(
+  payload: ScreenLockResetPayload,
+  guardian: GuardianOps,
+): Promise<NostrEvent> {
+  return giftWrapSignedInner(
+    CHARTER_DEVICE_SCREEN_LOCK_RESET,
+    JSON.stringify(payload),
+    payload.machine,
+    guardian,
+    payload.issuedAt,
   );
 }
 

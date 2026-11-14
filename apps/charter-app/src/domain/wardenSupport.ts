@@ -40,6 +40,9 @@ export type WardenFeature =
   | "tethering"
   | "debugging"
   | "connections"
+  // Reset the phone's screen lock ("Reset screen lock"): a Device Owner act,
+  // Android only. See MIN_VERSION.
+  | "screenLock"
   | "alwaysAvailable"
   // Honest attribution (2026-08-03): the `cmdline:` identity form and the
   // unrecognised-time counter are both Linux-only concepts by construction —
@@ -144,6 +147,11 @@ const MIN_VERSION: Record<WardenFeature, Partial<Record<Device["platform"], Thre
   // clause; an older ward refuses the unknown tag, so the tiers do nothing
   // there until it updates.
   connections: { android: 52, linux: NEVER },
+  // Resetting the phone's own screen lock is a Device Owner act: Android only.
+  // Ward Kintrinsic 0.8.0 (versionCode 56) is the first build that reads the
+  // reset command and reports `screenLockSecure`. An older ward would ignore the
+  // command silently, so the card is hidden until the ward reports 56 or more.
+  screenLock: { android: 56, linux: NEVER },
   // Ward Kintrinsic 0.6.5 (36); charterd 0.7.1 (701) — before 0.7.1 charterd never
   // read the `apps` clause at all (only `appRules`), so on a laptop this
   // threshold gates the standing toggles AND holds alike: an older charterd
