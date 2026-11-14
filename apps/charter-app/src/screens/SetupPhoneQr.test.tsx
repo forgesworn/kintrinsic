@@ -26,7 +26,7 @@ vi.mock("../store/store", () => ({ useCharter: () => store }));
 vi.mock("../signer/guardianKey", () => ({ guardianPubkeyHex: () => PK }));
 vi.mock("../domain/pairingSas", () => ({ pairingSas: async () => "123 456" }));
 // jsdom has no canvas; the payload rides on the <img> as a data attribute.
-vi.mock("qrcode", () => ({ default: { toDataURL: async () => "data:image/png;base64,AAAA" } }));
+vi.mock("../components/qrDataUrl", () => ({ qrDataUrl: () => "data:image/png;base64,AAAA" }));
 
 const child: Child = { id: "c1", name: "Robin", color: "#abc", dependantPubkey: null, devices: [], policies: [] };
 

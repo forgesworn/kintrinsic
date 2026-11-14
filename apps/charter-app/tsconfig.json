@@ -15,7 +15,7 @@
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
-    "types": ["vite/client", "vite-plugin-pwa/client", "vitest/globals", "w3c-web-usb"]
+    "types": ["vite/client", "vite-plugin-pwa/client", "vitest/globals", "w3c-web-usb", "node"]
   },
   "include": ["src"]
 }

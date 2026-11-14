@@ -12,14 +12,13 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@types/qrcode": "^1.5.6",
+    "@forgesworn/qr": "^0.1.0",
     "@yume-chan/adb": "^2.6.0",
     "@yume-chan/adb-credential-web": "^2.1.0",
     "@yume-chan/adb-daemon-webusb": "^2.3.2",
     "@yume-chan/stream-extra": "^2.6.1",
     "jsqr": "^1.4.0",
     "nostr-tools": "^2.23.8",
-    "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

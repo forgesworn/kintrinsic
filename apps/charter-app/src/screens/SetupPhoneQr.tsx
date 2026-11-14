@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import QRCode from "qrcode";
+import { qrDataUrl } from "../components/qrDataUrl";
 import { Banner, Button } from "../components/ui";
 import { useCharter } from "../store/store";
 import type { Child } from "../domain/types";
@@ -107,17 +107,11 @@ export default function SetupPhoneQr({
       throw e;
     }
     setPayload(text);
-    let alive = true;
-    QRCode.toDataURL(text, { width: 560, margin: 1, errorCorrectionLevel: "L" })
-      .then((url) => {
-        if (alive) setQrSrc(url);
-      })
-      .catch(() => {
-        if (alive) setProblem("render");
-      });
-    return () => {
-      alive = false;
-    };
+    try {
+      setQrSrc(qrDataUrl(text, { width: 560, margin: 1, ecc: "L" }));
+    } catch {
+      setProblem("render");
+    }
   }, [feed, link, ssid, password, security]);
 
   if (feed.status === "error" || problem) {
