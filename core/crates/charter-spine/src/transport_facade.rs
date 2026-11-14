@@ -25,6 +25,10 @@ pub enum LocalInbound {
     Release(NostrEvent, PubKey),
     /// A USAGE_SYNC event (its seal author is unused, as on the poll path).
     UsageSync(NostrEvent),
+    /// A SCREEN_LOCK_RESET `(event, seal_author)`, as
+    /// `CharterTransport::poll_screen_lock_resets` returns it. Only a
+    /// platform with a screen lock to reset (Android) acts on it.
+    ScreenLockReset(NostrEvent, PubKey),
     /// Anything else that unwrapped: not acted on over the local link.
     Other {
         inner_kind: u16,
@@ -33,7 +37,7 @@ pub enum LocalInbound {
 
 /// Sort an unwrapped inner event into a [`LocalInbound`] by kind, matching
 /// the `poll_grants` / `poll_clauses` / `poll_releases` / `poll_usage_syncs`
-/// split. A facade over a `CharterTransport` implements
+/// / `poll_screen_lock_resets` split. A facade over a `CharterTransport` implements
 /// [`TransportFacade::unwrap_local`] as
 /// `t.unwrap_inbound(wrap, now).map(|(ev, author)| classify_inbound(ev, author))`.
 pub fn classify_inbound(event: NostrEvent, seal_author: PubKey) -> LocalInbound {
@@ -48,6 +52,9 @@ pub fn classify_inbound(event: NostrEvent, seal_author: PubKey) -> LocalInbound 
         }),
         kinds::CHARTER_DEVICE_RELEASE => LocalInbound::Release(event, seal_author),
         kinds::CHARTER_DEVICE_USAGE_SYNC => LocalInbound::UsageSync(event),
+        kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET => {
+            LocalInbound::ScreenLockReset(event, seal_author)
+        }
         inner_kind => LocalInbound::Other { inner_kind },
     }
 }

@@ -435,6 +435,11 @@ pub struct LocalIngestOutcome {
     /// With `handle_release: false`, the unwrapped RELEASE `(event,
     /// seal_author)`, unverified, for the platform's release path.
     pub release: Option<(NostrEvent, PubKey)>,
+    /// An unwrapped SCREEN_LOCK_RESET `(event, seal_author)`, unverified,
+    /// for the platform's own screen-lock path (Android's warden), which
+    /// decides the ACK. The broker has no screen lock to reset, so on its
+    /// own it reports `Ignored` (Linux).
+    pub screen_lock_reset: Option<(NostrEvent, PubKey)>,
 }
 
 impl LocalIngestOutcome {
@@ -446,6 +451,7 @@ impl LocalIngestOutcome {
             req_id: None,
             released: false,
             release: None,
+            screen_lock_reset: None,
         }
     }
 }
@@ -1540,6 +1546,12 @@ impl<S: SystemLayer, T: TransportFacade, E: Entropy> Broker<S, T, E> {
                 out.inner_id = Some(event.id);
                 let _turn = self.handlers.lock().await;
                 out.result = self.usage_sync_result(&event);
+            }
+            LocalInbound::ScreenLockReset(event, seal_author) => {
+                out.inner_kind = Some(event.kind);
+                out.inner_id = Some(event.id);
+                out.result = AckResult::Ignored;
+                out.screen_lock_reset = Some((event, seal_author));
             }
             LocalInbound::Other { inner_kind } => {
                 out.inner_kind = Some(inner_kind);

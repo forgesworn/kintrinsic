@@ -707,6 +707,49 @@ async fn a_release_is_handed_back_untouched_otherwise() {
     assert!(stored_child_clause(&b, &SUBJECT, ClauseKind::Schedule).is_some());
 }
 
+/// A screen-lock reset is handed back, unverified and with its seal author,
+/// whichever way releases are handled: only the platform has a screen lock
+/// to reset, so the broker alone (Linux) reports `ignored` and changes
+/// nothing; Android's warden decides the ACK.
+#[tokio::test]
+async fn a_screen_lock_reset_is_handed_back_for_the_platform() {
+    let w = Ward::new();
+    let b = w.broker();
+    pair(&b, &w.guardian);
+    let ev = sign_event(
+        &w.guardian.signer,
+        kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET,
+        NOW,
+        vec![kinds::marker_tag()],
+        json!({
+            "v": 1,
+            "id": "00112233445566778899aabbccddeeff",
+            "machine": machine_pk().to_hex(),
+            "issuedAt": NOW,
+            "newPin": "123456",
+        })
+        .to_string(),
+    );
+    for handle_release in [true, false] {
+        let out = b
+            .ingest_local(&w.wrap(&ev, 1), LocalIngestOptions { handle_release })
+            .await;
+        assert_eq!(out.result, AckResult::Ignored);
+        assert_eq!(
+            out.inner_kind,
+            Some(kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET)
+        );
+        assert_eq!(out.inner_id, Some(ev.id));
+        assert_eq!(
+            out.screen_lock_reset,
+            Some((ev.clone(), w.guardian.pubkey())),
+            "with its seal author"
+        );
+        assert!(out.release.is_none() && !out.released);
+        assert!(paired(&b), "nothing applied");
+    }
+}
+
 /// A clause that verifies against the released guardian must never land in
 /// the stores a release just cleared, or it survives into a later pairing.
 #[tokio::test]
