@@ -41,6 +41,13 @@ pub const CHARTER_DEVICE_PAIR_OFFER: u16 = 31117;
 /// Guardian-signed relay configuration, transferred locally for outage recovery.
 pub const CHARTER_DEVICE_RELAYS: u16 = 31118;
 
+/// Charter device SCREEN_LOCK_RESET (guardian -> machine, signed inner event,
+/// gift-wrapped like a RELEASE): set the ward device's own screen lock to a
+/// PIN the guardian chooses, or remove it. A one-shot imperative, bound to one
+/// machine and accepted only within an hour of its signed `issuedAt`. The ward
+/// is always told: the device keeps a record the child sees and acknowledges.
+pub const CHARTER_DEVICE_SCREEN_LOCK_RESET: u16 = 31119;
+
 /// Addressable (NIP-51-style) curator web-list: a curator's signed allow/deny
 /// entries; parents subscribe by pubkey. PROVISIONAL — final value is design
 /// open-question §10.1 (internal design spec 2026-06-28-charter-web-content-control-design).
@@ -97,6 +104,7 @@ mod tests {
         assert_eq!(CHARTER_DEVICE_RELEASE, 31116);
         assert_eq!(CHARTER_DEVICE_PAIR_OFFER, 31117);
         assert_eq!(CHARTER_DEVICE_RELAYS, 31118);
+        assert_eq!(CHARTER_DEVICE_SCREEN_LOCK_RESET, 31119);
         assert_eq!(CHARTER_CURATOR_WEB_LIST, 30100);
         assert_eq!(SOFTWARE_RELEASE, 30063);
     }
