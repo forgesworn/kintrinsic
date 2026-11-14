@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import QRCode from "qrcode";
+import { qrDataUrl } from "../components/qrDataUrl";
 import { Banner, Button, SectionLabel } from "../components/ui";
 import { useCharter } from "../store/store";
 import type { Child, Device } from "../domain/types";
@@ -95,9 +95,11 @@ export default function SetupComputer({ child, onClose }: { child: Child; onClos
     const content = guardianPairingQrContent(pk, DEFAULT_RELAYS, token);
     setQrContent(content);
     let alive = true;
-    QRCode.toDataURL(content, { width: 480, margin: 1 }).then((url) => {
-      if (alive) setQrSrc(url);
-    });
+    try {
+      setQrSrc(qrDataUrl(content, { width: 480, margin: 1, ecc: "M" }));
+    } catch {
+      setQrSrc(null);
+    }
     // The short code the ward's landing page shows for this exact link (S6).
     void pairingSas(pk, token).then((code) => {
       if (alive) setPairSas(code);
