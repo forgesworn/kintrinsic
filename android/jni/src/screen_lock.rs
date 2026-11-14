@@ -3,8 +3,9 @@
 //! this module keeps what the ward must remember about it:
 //!
 //! - the [`Ledger`]: one outcome per reset id in a ring of the last
-//!   [`RING_LEN`], plus the monotonic floor (the `issuedAt` of the last
-//!   accepted reset). Persisted under `<base>/screen-lock/`, in
+//!   [`RING_LEN`], the ids of a further [`FORGOTTEN_LEN`] that have left it,
+//!   and the monotonic floor (the `issuedAt` of the last accepted reset).
+//!   Persisted under `<base>/screen-lock/`, in
 //!   device-protected storage and OUTSIDE everything a RELEASE clears, so a
 //!   release cannot reopen a replay window or erase what the guardian is
 //!   told;
@@ -25,6 +26,12 @@ use zeroize::Zeroizing;
 /// How many reset outcomes the ward remembers (and STATUS carries).
 pub const RING_LEN: usize = charter_proto::MAX_STATUS_SCREEN_LOCK_RESETS;
 
+/// How many ids that have left the ring are still known as answered. The
+/// relays re-deliver every wrap for about two days, so an id the ring drops
+/// can come back; with this many more remembered, a re-delivery stays a no-op
+/// unless 128 resets arrive inside that window.
+pub const FORGOTTEN_LEN: usize = 112;
+
 /// The AUDIT `op` for a reset's outcome.
 pub const AUDIT_OP: &str = "screenlock.reset";
 
@@ -36,9 +43,6 @@ pub struct RingEntry {
     pub result: ScreenLockResetResult,
     /// When this result was recorded (device clock).
     pub at: u64,
-    /// The reset's signed `issuedAt`. Internal: it decides which entry a full
-    /// ring drops, and never rides STATUS.
-    pub issued_at: u64,
 }
 
 /// The ward's durable memory of screen-lock resets.
@@ -50,13 +54,17 @@ pub struct Ledger {
     pub floor: u64,
     /// Newest recorded first; at most [`RING_LEN`].
     pub ring: Vec<RingEntry>,
+    /// The ids that have left the ring, most recently dropped first; at most
+    /// [`FORGOTTEN_LEN`]. Their outcomes are gone, but they are still
+    /// answered: a re-delivery of one changes nothing.
+    #[serde(default)]
+    pub forgotten: Vec<String>,
 }
 
 /// What [`Ledger::admit`] decided for an authenticated reset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
-    /// Its id is already recorded, or it is older than everything a full
-    /// ring remembers: a re-delivery. Nothing changed.
+    /// Its id has already been answered: a re-delivery. Nothing changed.
     Duplicate,
     /// Recorded `rejected_time`.
     RejectedTime,
@@ -77,37 +85,31 @@ impl Ledger {
         self.position(id).map(|i| self.ring[i].result)
     }
 
-    /// A re-delivery: the id is recorded, or the ring is full and this reset
-    /// is no newer than the oldest-signed entry it holds. The second rule is
-    /// what keeps a ring that has dropped an id from recording it afresh on
-    /// every relay round for the rest of its two-day re-delivery, and with it
-    /// dropping the next one: a full ring always drops its oldest-signed
-    /// entry, so a dropped id is never newer than what is left.
-    fn is_duplicate(&self, id: &str, issued_at: u64) -> bool {
-        self.position(id).is_some()
-            || (self.ring.len() >= RING_LEN && self.ring.iter().all(|e| issued_at <= e.issued_at))
+    /// A re-delivery: the id is in the ring, or has left it and is still
+    /// remembered. Without the second, an id the ring had dropped would be
+    /// recorded afresh on every relay round for the rest of its two-day
+    /// re-delivery, dropping the next one in turn.
+    fn is_duplicate(&self, id: &str) -> bool {
+        self.position(id).is_some() || self.forgotten.iter().any(|f| f == id)
     }
 
-    /// Record `entry` as the newest; a full ring drops its oldest-signed entry
-    /// (the earliest recorded of any tie).
+    /// Record `entry` as the newest; a full ring drops its earliest recorded
+    /// entry, whose id joins `forgotten`.
     fn push(&mut self, entry: RingEntry) {
         self.ring.insert(0, entry);
         while self.ring.len() > RING_LEN {
-            let mut drop_at = 0;
-            for (i, e) in self.ring.iter().enumerate() {
-                if e.issued_at <= self.ring[drop_at].issued_at {
-                    drop_at = i;
-                }
+            if let Some(dropped) = self.ring.pop() {
+                self.forgotten.insert(0, dropped.id);
             }
-            self.ring.remove(drop_at);
         }
+        self.forgotten.truncate(FORGOTTEN_LEN);
     }
 
     /// Decide and record an AUTHENTICATED reset (signature, signer, machine
     /// and pairing epoch already checked) at `now`, in the contract's order:
     /// re-delivery, then the window, then the floor.
     pub fn admit(&mut self, p: &ScreenLockResetPayload, now: u64) -> Admission {
-        if self.is_duplicate(&p.id, p.issued_at) {
+        if self.is_duplicate(&p.id) {
             return Admission::Duplicate;
         }
         let (result, admission) =
@@ -125,7 +127,6 @@ impl Ledger {
             id: p.id.clone(),
             result,
             at: now,
-            issued_at: p.issued_at,
         });
         admission
     }
@@ -350,8 +351,8 @@ mod tests {
             "newest first"
         );
         // Each is recorded once: a second copy of any of them changes nothing.
-        for n in 1..=6 {
-            let issued_at = l.ring.iter().find(|e| e.id == id(n)).unwrap().issued_at;
+        let sent = [NOW - 3601, NOW + 301, NOW, NOW, NOW - 10, NOW + 1];
+        for (n, issued_at) in (1..=6).zip(sent) {
             assert_eq!(l.admit(&p(n, issued_at), NOW + 2), Admission::Duplicate);
         }
     }
@@ -380,34 +381,47 @@ mod tests {
     }
 
     #[test]
-    fn a_full_ring_drops_the_oldest_signed_and_never_churns() {
+    fn a_full_ring_forgets_in_recording_order_and_never_churns() {
         let mut l = Ledger::default();
         for n in 0..RING_LEN as u64 {
             assert_eq!(l.admit(&p(n, NOW + n), NOW + n), Admission::Accepted);
         }
         assert_eq!(l.ring.len(), RING_LEN);
-        // A seventeenth drops id 0, the oldest signed.
+        // A seventeenth drops id 0, the earliest recorded, into `forgotten`.
         let n = RING_LEN as u64;
         assert_eq!(l.admit(&p(n, NOW + n), NOW + n), Admission::Accepted);
         assert_eq!(l.ring.len(), RING_LEN);
         assert_eq!(l.result_of(&id(0)), None);
-        // Id 0 re-delivered: older than everything remembered, so a no-op,
-        // and it drops nothing on any later round either.
+        assert_eq!(l.forgotten, vec![id(0)]);
+        // Id 0 re-delivered on every later round: answered, so nothing moves.
         let before = l.clone();
         for round in 0..3 {
             assert_eq!(l.admit(&p(0, NOW), NOW + n + round), Admission::Duplicate);
         }
         assert_eq!(l, before);
-        // A late, stale reset newer than the oldest remembered is recorded,
-        // and the oldest-signed entry makes room.
-        let mut l2 = before.clone();
-        let late = p(99, NOW + 2);
-        assert_eq!(l2.admit(&late, NOW + 4000 + n), Admission::RejectedTime);
-        assert_eq!(
-            l2.result_of(&id(99)),
-            Some(ScreenLockResetResult::RejectedTime)
-        );
-        assert_eq!(l2.result_of(&id(1)), None);
+        // `forgotten` is bounded too.
+        for m in 0..(FORGOTTEN_LEN as u64 + 5) {
+            l.admit(&p(1000 + m, NOW + 1000 + m), NOW + 1000 + m);
+        }
+        assert_eq!(l.ring.len(), RING_LEN);
+        assert_eq!(l.forgotten.len(), FORGOTTEN_LEN);
+    }
+
+    /// Resets dated far ahead of the ward's clock are recorded
+    /// `rejected_time` and must never crowd out a correctly dated one: the
+    /// ring forgets in recording order, whatever the dates.
+    #[test]
+    fn a_ring_full_of_future_dated_rejections_still_accepts_a_good_reset() {
+        let mut l = Ledger::default();
+        for n in 0..RING_LEN as u64 {
+            assert_eq!(
+                l.admit(&p(n, NOW + 86_400 + n), NOW),
+                Admission::RejectedTime
+            );
+        }
+        assert_eq!(l.admit(&p(99, NOW), NOW), Admission::Accepted);
+        assert_eq!(l.result_of(&id(99)), Some(ScreenLockResetResult::Accepted));
+        assert!(l.settle(&id(99), ScreenLockResetResult::Applied, NOW + 1));
     }
 
     #[test]

@@ -2390,9 +2390,10 @@ generated): `core/crates/charter-testkit/vectors/screen_lock/screen_lock_reset_v
    `issuedAt >= paired_at`, so a reset signed before the current pairing is
    void, as a RELEASE is. Anything that fails is refused and **nothing is
    recorded**.
-2. **Already answered.** An `id` the device has already recorded changes
-   nothing. Nor does a reset no newer (by `issuedAt`) than the oldest entry
-   of a full record: it has been answered and forgotten.
+2. **Already answered.** An `id` the device has already answered changes
+   nothing. Beyond the 16 outcomes it reports, the device remembers the ids
+   of the next 112 it has dropped (128 in all), so a re-delivery stays a
+   no-op unless that many resets arrive within the relays' two-day window.
 3. **Window.** `now - 3600 <= issuedAt <= now + 300`, both edges inclusive:
    one hour back, five minutes forward, much tighter than a RELEASE's two
    days, because a reset is an "I am standing here now" action. Outside it,
@@ -2435,8 +2436,9 @@ new PIN." / "…removed your screen lock…") until the child acknowledges it on
 the device. Acknowledgement is only ever by the child on the device, never by
 a command.
 
-**The record survives a release.** The device keeps its last 16 outcomes and
-the floor in device-protected storage, outside everything a RELEASE clears,
+**The record survives a release.** The device keeps its last 16 outcomes
+(dropping the earliest recorded first), the answered ids and the floor in
+device-protected storage, outside everything a RELEASE clears,
 and the ward's history likewise. A re-paired device therefore still refuses a
 replay, and its outcomes stay visible on STATUS (to whichever guardian it is
 then paired with: ids and results only).
