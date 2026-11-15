@@ -13,8 +13,13 @@
 //!   the PIN. A crash before Kotlin takes it loses the reset, which is the
 //!   safe direction: the guardian sees no result and sends again.
 //!
-//! The PIN is never written to disk, never logged, and never put in STATUS
-//! or AUDIT. [`Pending`] has a redacted `Debug` and wipes its PIN on drop.
+//! The PIN arrives sealed to the machine key and is opened only for a reset
+//! the ward would otherwise accept (`charter_transport::open_screen_lock_pin`);
+//! a seal that will not open, or holds no PIN, is recorded `failed`. The PIN
+//! is never written to disk, never logged, and never put in STATUS or AUDIT.
+//! [`Pending`] has a redacted `Debug` and wipes its PIN on drop; the opened
+//! plaintext is wiped too, but transient copies inside the decrypt and the
+//! JNI string handed to Kotlin are not.
 
 use std::path::{Path, PathBuf};
 
@@ -105,22 +110,27 @@ impl Ledger {
         self.forgotten.truncate(FORGOTTEN_LEN);
     }
 
-    /// Decide and record an AUTHENTICATED reset (signature, signer, machine
-    /// and pairing epoch already checked) at `now`, in the contract's order:
-    /// re-delivery, then the window, then the floor.
-    pub fn admit(&mut self, p: &ScreenLockResetPayload, now: u64) -> Admission {
+    /// Decide, WITHOUT recording, what an AUTHENTICATED reset (signature,
+    /// signer, machine and pairing epoch already checked) would be at `now`,
+    /// in the contract's order: re-delivery, then the window, then the floor.
+    /// The device opens the sealed PIN only for [`Admission::Accepted`], then
+    /// records the result with [`Ledger::record`].
+    pub fn decide(&self, p: &ScreenLockResetPayload, now: u64) -> Admission {
         if self.is_duplicate(&p.id) {
             return Admission::Duplicate;
         }
-        let (result, admission) =
-            match charter_verify::check_screen_lock_reset_time(p, now, self.floor) {
-                Ok(()) => (ScreenLockResetResult::Accepted, Admission::Accepted),
-                Err(ScreenLockResetError::OutsideWindow) => {
-                    (ScreenLockResetResult::RejectedTime, Admission::RejectedTime)
-                }
-                Err(_) => (ScreenLockResetResult::Superseded, Admission::Superseded),
-            };
-        if admission == Admission::Accepted {
+        match charter_verify::check_screen_lock_reset_time(p, now, self.floor) {
+            Ok(()) => Admission::Accepted,
+            Err(ScreenLockResetError::OutsideWindow) => Admission::RejectedTime,
+            Err(_) => Admission::Superseded,
+        }
+    }
+
+    /// Record `result` for reset `p` at `now` as the newest entry. Only
+    /// `accepted` advances the floor: a reset whose seal would not open is
+    /// recorded `failed` and leaves the floor where it was.
+    pub fn record(&mut self, p: &ScreenLockResetPayload, result: ScreenLockResetResult, now: u64) {
+        if result == ScreenLockResetResult::Accepted {
             self.floor = p.issued_at;
         }
         self.push(RingEntry {
@@ -128,7 +138,21 @@ impl Ledger {
             result,
             at: now,
         });
-        admission
+    }
+
+    /// [`Ledger::decide`] then [`Ledger::record`], for a reset whose seal
+    /// opened (tests).
+    #[cfg(test)]
+    pub fn admit(&mut self, p: &ScreenLockResetPayload, now: u64) -> Admission {
+        let a = self.decide(p, now);
+        let result = match a {
+            Admission::Duplicate => return a,
+            Admission::Accepted => ScreenLockResetResult::Accepted,
+            Admission::RejectedTime => ScreenLockResetResult::RejectedTime,
+            Admission::Superseded => ScreenLockResetResult::Superseded,
+        };
+        self.record(p, result, now);
+        a
     }
 
     /// Replace `id`'s `accepted` with its final `result`, recorded at `at`
@@ -188,11 +212,12 @@ impl LedgerStore {
 
     /// The stored ledger. Absent is a fresh, empty one. A file that reads but
     /// will not parse is also treated as fresh (and replaced on the next
-    /// write): a torn write cannot happen (each is a rename), so this is a
-    /// file someone else damaged, and refusing every reset for ever over it
-    /// would shut the guardian out of the ward's phone for good. The cost is
-    /// that a reset from the last hour may apply once more. A file that will
-    /// not READ is [`LoadError::Unreadable`].
+    /// write): a torn write should not happen (each is fsynced, then renamed,
+    /// then the directory fsynced), so this is a file someone else damaged,
+    /// and refusing every reset for ever over it would shut the guardian out
+    /// of the ward's phone for good. The cost is that a reset from the last
+    /// hour may apply once more. A file that will not READ is
+    /// [`LoadError::Unreadable`].
     pub fn load(&self) -> Result<Ledger, LoadError> {
         match std::fs::read(self.path()) {
             Ok(bytes) => match serde_json::from_slice::<Ledger>(&bytes) {
@@ -209,9 +234,12 @@ impl LedgerStore {
         }
     }
 
-    /// Write the ledger atomically (a temporary file renamed over it).
-    /// Whether it landed.
+    /// Write the ledger atomically and durably: a temporary file, fsynced,
+    /// renamed over the ledger, then the directory fsynced so the rename
+    /// itself survives a power cut (where the platform allows a directory to
+    /// be opened; elsewhere the rename is still atomic). Whether it landed.
     pub fn save(&self, l: &Ledger) -> bool {
+        use std::io::Write as _;
         if std::fs::create_dir_all(&self.dir).is_err() {
             return false;
         }
@@ -219,11 +247,20 @@ impl LedgerStore {
             return false;
         };
         let tmp = self.dir.join("ledger.json.tmp");
-        let ok = std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, self.path()).is_ok();
-        if !ok {
+        let written = std::fs::File::create(&tmp)
+            .and_then(|mut f| {
+                f.write_all(&json)?;
+                f.sync_all()
+            })
+            .is_ok();
+        if !written || std::fs::rename(&tmp, self.path()).is_err() {
             let _ = std::fs::remove_file(&tmp);
+            return false;
         }
-        ok
+        if let Ok(dir) = std::fs::File::open(&self.dir) {
+            let _ = dir.sync_all();
+        }
+        true
     }
 }
 
@@ -246,10 +283,11 @@ impl std::fmt::Debug for Pending {
 }
 
 impl Pending {
-    pub fn from_payload(p: &ScreenLockResetPayload) -> Pending {
+    /// The accepted reset `p`, with the PIN its seal opened to.
+    pub fn new(p: &ScreenLockResetPayload, new_pin: Zeroizing<String>) -> Pending {
         Pending {
             id: p.id.clone(),
-            new_pin: Zeroizing::new(p.new_pin.clone()),
+            new_pin,
             issued_at: p.issued_at,
         }
     }
@@ -296,8 +334,13 @@ mod tests {
             id: id(n),
             machine: PubKey::from_bytes([7; 32]),
             issued_at,
-            new_pin: "123456".into(),
+            epk: PubKey::from_bytes([8; 32]),
+            new_pin_sealed: "AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGh".into(),
         }
+    }
+
+    fn pending(n: u64, issued_at: u64, pin: &str) -> Pending {
+        Pending::new(&p(n, issued_at), Zeroizing::new(pin.to_string()))
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -309,9 +352,8 @@ mod tests {
 
     #[test]
     fn debug_never_prints_the_pin() {
-        let mut payload = p(1, NOW);
-        payload.new_pin = "90817263".into();
-        let pending = Pending::from_payload(&payload);
+        let payload = p(1, NOW);
+        let pending = pending(1, NOW, "90817263");
         for shown in [
             format!("{pending:?}"),
             format!("{pending:#?}"),
@@ -319,7 +361,35 @@ mod tests {
             format!("{payload:#?}"),
         ] {
             assert!(!shown.contains("90817263"), "PIN leaked: {shown}");
+            assert!(
+                !shown.contains(&payload.new_pin_sealed),
+                "seal leaked: {shown}"
+            );
         }
+    }
+
+    /// A reset whose seal would not open is recorded `failed`, once, and
+    /// leaves the floor alone: a good reset signed in the same second is
+    /// still accepted.
+    #[test]
+    fn a_failed_seal_is_recorded_once_and_moves_no_floor() {
+        let mut l = Ledger::default();
+        assert_eq!(l.decide(&p(1, NOW), NOW), Admission::Accepted);
+        l.record(&p(1, NOW), ScreenLockResetResult::Failed, NOW);
+        assert_eq!(l.floor, 0);
+        assert_eq!(l.result_of(&id(1)), Some(ScreenLockResetResult::Failed));
+        assert_eq!(l.decide(&p(1, NOW), NOW + 1), Admission::Duplicate);
+        assert_eq!(l.admit(&p(2, NOW), NOW), Admission::Accepted);
+        assert_eq!(l.floor, NOW);
+        assert!(!l.settle(&id(1), ScreenLockResetResult::Applied, NOW + 2));
+    }
+
+    #[test]
+    fn decide_records_nothing() {
+        let l = Ledger::default();
+        assert_eq!(l.decide(&p(1, NOW), NOW), Admission::Accepted);
+        assert_eq!(l.decide(&p(2, NOW - 3601), NOW), Admission::RejectedTime);
+        assert_eq!(l, Ledger::default());
     }
 
     #[test]
@@ -448,6 +518,10 @@ mod tests {
         l.admit(&p(1, NOW), NOW);
         assert!(s.save(&l));
         assert_eq!(s.load(), Ok(l.clone()));
+        assert!(
+            !dir.join("screen-lock/ledger.json.tmp").exists(),
+            "no temporary file left behind"
+        );
         let raw = std::fs::read_to_string(dir.join("screen-lock/ledger.json")).unwrap();
         assert!(!raw.contains("123456"), "no PIN on disk: {raw}");
         assert!(raw.contains("\"floor\":1700000000"), "{raw}");
@@ -458,7 +532,7 @@ mod tests {
 
     #[test]
     fn pending_never_shows_its_pin_except_in_the_take_body() {
-        let pending = Pending::from_payload(&p(1, NOW));
+        let pending = pending(1, NOW, "123456");
         let dbg = format!("{pending:?}");
         assert!(!dbg.contains("123456"), "{dbg}");
         assert_eq!(

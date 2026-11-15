@@ -46,9 +46,10 @@ pub use params::{
 pub use release::ReleasePayload;
 pub use request::{RequestPayload, REQUEST_VERSION};
 pub use screen_lock::{
-    is_valid_new_pin, is_valid_reset_id, ScreenLockPayloadError, ScreenLockResetPayload,
+    is_plausible_seal, is_valid_new_pin, is_valid_reset_id, screen_lock_pin_from_plaintext,
+    screen_lock_pin_plaintext, ScreenLockPayloadError, ScreenLockResetPayload,
     ScreenLockResetResult, SCREEN_LOCK_PIN_MAX_DIGITS, SCREEN_LOCK_PIN_MIN_DIGITS,
-    SCREEN_LOCK_RESET_ID_LEN, SCREEN_LOCK_RESET_VERSION,
+    SCREEN_LOCK_RESET_ID_LEN, SCREEN_LOCK_RESET_VERSION, SCREEN_LOCK_SEALED_MAX_LEN,
 };
 pub use status::{
     AppRef, EnforcementGap, GroupSpent, InstallChange, InstallChangeKind, InstallWindowReport,

@@ -726,7 +726,8 @@ async fn a_screen_lock_reset_is_handed_back_for_the_platform() {
             "id": "00112233445566778899aabbccddeeff",
             "machine": machine_pk().to_hex(),
             "issuedAt": NOW,
-            "newPin": "123456",
+            "epk": "cd".repeat(32),
+            "newPinSealed": "AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGh",
         })
         .to_string(),
     );
@@ -750,14 +751,14 @@ async fn a_screen_lock_reset_is_handed_back_for_the_platform() {
     }
 }
 
-/// The reset event's content is the new PIN: nothing that holds it may print
-/// it through `Debug` (a stray `{:?}` in a log line is the leak).
+/// The reset event's content carries the new PIN, sealed: nothing that holds
+/// it may print it through `Debug` (a stray `{:?}` in a log line is the leak).
 #[tokio::test]
 async fn a_screen_lock_reset_outcome_never_debug_prints_the_pin() {
     let w = Ward::new();
     let b = w.broker();
     pair(&b, &w.guardian);
-    let pin = "90817263";
+    let pin = "AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGh";
     let ev = sign_event(
         &w.guardian.signer,
         kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET,
@@ -768,7 +769,8 @@ async fn a_screen_lock_reset_outcome_never_debug_prints_the_pin() {
             "id": "00112233445566778899aabbccddeeff",
             "machine": machine_pk().to_hex(),
             "issuedAt": NOW,
-            "newPin": pin,
+            "epk": "cd".repeat(32),
+            "newPinSealed": pin,
         })
         .to_string(),
     );
@@ -777,12 +779,18 @@ async fn a_screen_lock_reset_outcome_never_debug_prints_the_pin() {
         .await;
     assert!(out.screen_lock_reset.is_some());
     for shown in [format!("{out:?}"), format!("{out:#?}")] {
-        assert!(!shown.contains(pin), "PIN leaked through Debug: {shown}");
+        assert!(
+            !shown.contains(pin),
+            "sealed PIN leaked through Debug: {shown}"
+        );
         assert!(!shown.contains("newPin"), "content leaked: {shown}");
     }
     let inbound = LocalInbound::ScreenLockReset(ev.clone(), w.guardian.pubkey());
     for shown in [format!("{inbound:?}"), format!("{inbound:#?}")] {
-        assert!(!shown.contains(pin), "PIN leaked through Debug: {shown}");
+        assert!(
+            !shown.contains(pin),
+            "sealed PIN leaked through Debug: {shown}"
+        );
         assert!(!shown.contains("newPin"), "content leaked: {shown}");
     }
 }

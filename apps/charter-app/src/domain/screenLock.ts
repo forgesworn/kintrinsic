@@ -22,6 +22,12 @@ export const NO_SCREEN_LOCK_WARNING =
   "Anyone holding this device can use its open-at-any-hour apps.";
 
 export const WAITING_FOR_DEVICE = "Waiting for the device…";
+/** A send the relays couldn't take, which this phone's carrier holds for the home network. */
+export const HELD_FOR_HOME_NETWORK = "Held until the device is on your home network.";
+/** An `accepted` with no final result an hour after the send: the device took
+ *  it but may have restarted before it acted on it. */
+export const ACCEPTED_UNCONFIRMED =
+  "The device received it but didn't confirm the result. If nothing has changed, send it again.";
 export const NO_RESPONSE_IN_AN_HOUR =
   "The device didn't respond within an hour. Try again when it's online.";
 
@@ -125,7 +131,9 @@ export function screenLockResultText(result: string, at: number, wardName: strin
 /**
  * The card's whole state. `sent` is what this guardian last sent; the outcome
  * is the ward's own, looked up by id. A reset with no outcome yet is "waiting"
- * for the hour the ward would still accept it, then the plain "didn't respond".
+ * (or "held", when only this phone's carrier has it) for the hour the ward
+ * would still accept it, then the plain "didn't respond". An `accepted` that
+ * is still unconfirmed an hour after the send says so.
  */
 export function screenLockReading(
   sent: DeviceScreenLockReset | undefined,
@@ -139,10 +147,14 @@ export function screenLockReading(
   let progress: ScreenLockProgress | null = null;
   if (sent && nowUnix - sent.issuedAt < SENT_LINE_KEEP_SECS) {
     const entry = status?.screenLockResets?.find((r) => r.id === sent.id);
+    const withinHour = nowUnix - sent.issuedAt < SCREEN_LOCK_WINDOW_SECS;
     if (entry) {
-      progress = screenLockResultText(entry.result, entry.at, wardName);
-    } else if (nowUnix - sent.issuedAt < SCREEN_LOCK_WINDOW_SECS) {
-      progress = { tone: "waiting", text: WAITING_FOR_DEVICE };
+      progress =
+        entry.result === "accepted" && !withinHour
+          ? { tone: "warn", text: ACCEPTED_UNCONFIRMED }
+          : screenLockResultText(entry.result, entry.at, wardName);
+    } else if (withinHour) {
+      progress = { tone: "waiting", text: sent.held ? HELD_FOR_HOME_NETWORK : WAITING_FOR_DEVICE };
     } else {
       progress = { tone: "warn", text: NO_RESPONSE_IN_AN_HOUR };
     }

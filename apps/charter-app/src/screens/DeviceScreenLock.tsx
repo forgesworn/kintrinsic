@@ -20,7 +20,8 @@ type Choice = "set" | "remove";
  *
  * The PIN is held in this dialog's own state while it is typed and cleared the
  * moment it is sent or the dialog closes. It never reaches the store, which is
- * handed it for the one call and keeps only the reset's id and time.
+ * handed it for the one call and keeps only the reset's id and time. Its fields
+ * ask the browser not to autofill or remember it (`autoComplete="off"`).
  */
 export default function DeviceScreenLock({ child, device }: { child: Child; device: Device }) {
   const { deviceStatus, resetDeviceScreenLock } = useCharter();
@@ -32,7 +33,8 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
   const [error, setError] = useState<string | null>(null);
 
   // Re-render when the hour a reset can still be accepted runs out, so "Waiting
-  // for the device…" turns into the plain "didn't respond" by itself.
+  // for the device…" (or an unconfirmed "received") turns into the plain
+  // "didn't respond" (or "didn't confirm") by itself.
   const [, setTick] = useState(0);
   const sentAt = device.screenLockReset?.issuedAt;
   useEffect(() => {
@@ -163,7 +165,7 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
                   <input
                     type="password"
                     inputMode="numeric"
-                    autoComplete="new-password"
+                    autoComplete="off"
                     maxLength={16}
                     aria-label="New PIN"
                     value={screenLockPin}
@@ -175,7 +177,7 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
                   <input
                     type="password"
                     inputMode="numeric"
-                    autoComplete="new-password"
+                    autoComplete="off"
                     maxLength={16}
                     aria-label="New PIN again"
                     value={again}

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Device } from "./types";
 import type { DeviceStatus } from "../wire/status";
 import {
+  ACCEPTED_UNCONFIRMED,
   devicesWithoutScreenLock,
+  HELD_FOR_HOME_NETWORK,
   isValidScreenLockPin,
   NO_RESPONSE_IN_AN_HOUR,
   NO_SCREEN_LOCK_WARNING,
@@ -111,6 +113,37 @@ describe("screenLockReading", () => {
 
   it("drops the sent line after a day", () => {
     expect(screenLockReading({ id: ID, issuedAt: NOW - 86_400 }, st(), NOW, "Robin").progress).toBeNull();
+  });
+
+  it("says a send only this phone holds is held for the home network, for the same hour", () => {
+    const held = { id: ID, issuedAt: NOW - 60, held: true };
+    expect(screenLockReading(held, st(), NOW, "Robin").progress).toEqual({
+      tone: "waiting",
+      text: HELD_FOR_HOME_NETWORK,
+    });
+    expect(HELD_FOR_HOME_NETWORK).toBe("Held until the device is on your home network.");
+    expect(screenLockReading({ ...held, issuedAt: NOW - 3600 }, st(), NOW, "Robin").progress).toEqual({
+      tone: "warn",
+      text: NO_RESPONSE_IN_AN_HOUR,
+    });
+    // Once the ward answers, its answer is what shows.
+    const status = st({ screenLockResets: [{ id: ID, result: "applied", at: NOW }] });
+    expect(screenLockReading(held, status, NOW, "Robin").progress?.tone).toBe("ok");
+  });
+
+  it("an accepted reset unconfirmed an hour after the send says so, not 'yet'", () => {
+    const status = st({ screenLockResets: [{ id: ID, result: "accepted", at: NOW - 3590 }] });
+    expect(screenLockReading({ id: ID, issuedAt: NOW - 3599 }, status, NOW, "Robin").progress).toEqual({
+      tone: "waiting",
+      text: "The device received it but hasn't confirmed the result yet.",
+    });
+    expect(screenLockReading({ id: ID, issuedAt: NOW - 3600 }, status, NOW, "Robin").progress).toEqual({
+      tone: "warn",
+      text: ACCEPTED_UNCONFIRMED,
+    });
+    expect(ACCEPTED_UNCONFIRMED).toBe(
+      "The device received it but didn't confirm the result. If nothing has changed, send it again.",
+    );
   });
 });
 

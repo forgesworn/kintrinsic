@@ -1,9 +1,12 @@
 //! Hand-written cross-stack vectors for the guardian SCREEN_LOCK_RESET
 //! (kind 31122). The SAME file is asserted from the guardian app (TS
-//! producer). This side proves the consumer: each pinned `content` parses to
-//! its `payload` and reserializes byte-identically, every `invalid` payload is
-//! refused, the inner kind and tags are the ones the device acts on, and the
-//! acceptance window on `issuedAt` is the pinned one, both edges inclusive.
+//! producer). This side proves the consumer's shape rules: each pinned
+//! `content` (and each `sealFailures` content, whose seal is only refused
+//! when the device opens it) parses to its `payload` and reserializes
+//! byte-identically, every `invalid` payload is refused, the inner kind and
+//! tags are the ones the device acts on, and the acceptance window on
+//! `issuedAt` is the pinned one, both edges inclusive. Opening the seals is
+//! `charter-transport/tests/screen_lock_seal_vectors.rs`.
 
 use charter_primitives::kinds;
 use charter_proto::ScreenLockResetPayload;
@@ -31,8 +34,9 @@ fn the_inner_event_is_the_kind_and_tags_the_device_acts_on() {
 fn vectors_parse_and_reserialize_byte_identically() {
     let doc = load();
     let vectors = doc["vectors"].as_array().expect("vectors");
-    assert!(!vectors.is_empty());
-    for v in vectors {
+    let failures = doc["sealFailures"].as_array().expect("sealFailures");
+    assert!(!vectors.is_empty() && !failures.is_empty());
+    for v in vectors.iter().chain(failures) {
         let name = v["name"].as_str().unwrap();
         let content = v["content"].as_str().unwrap();
         let parsed = ScreenLockResetPayload::from_json(content)
@@ -40,11 +44,9 @@ fn vectors_parse_and_reserialize_byte_identically() {
         assert_eq!(parsed.to_json(), content, "{name}: wire bytes drift");
         let back: Value = serde_json::from_str(&parsed.to_json()).unwrap();
         assert_eq!(back, v["payload"], "{name}: payload drift");
-        assert_eq!(
-            parsed.removes_screen_lock(),
-            v["removesScreenLock"].as_bool().unwrap(),
-            "{name}"
-        );
+        assert_eq!(parsed.issued_at, doc["issuedAt"].as_u64().unwrap());
+        // No PIN is ever in the signed content in the clear.
+        assert!(!content.contains("newPin\""), "{name}: plaintext PIN field");
     }
 }
 

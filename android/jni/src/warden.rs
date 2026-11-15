@@ -467,6 +467,10 @@ pub struct Warden {
     /// The accepted reset waiting for Kotlin (`charterTakeScreenLockReset`).
     /// Memory ONLY: it holds the PIN.
     screen_lock_pending: Option<crate::screen_lock::Pending>,
+    /// The in-memory ledger holds a platform result that did not reach disk:
+    /// each tick tries the write again, so a restart does not turn an
+    /// `applied` back into `accepted`.
+    screen_lock_dirty: bool,
     /// What the platform last said: a secure screen lock is set (STATUS
     /// `screenLockSecure`). `None` until Kotlin reports it.
     screen_lock_secure: Option<bool>,
@@ -604,6 +608,7 @@ impl Warden {
             screen_lock_store,
             screen_lock,
             screen_lock_pending: None,
+            screen_lock_dirty: false,
             screen_lock_secure: None,
             screen_lock_reset_ready: None,
         };
@@ -1635,6 +1640,26 @@ impl Warden {
         self.screen_lock.as_mut()
     }
 
+    /// Write the screen-lock ledger; a write that lands clears the dirty flag
+    /// (it carries every in-memory result).
+    fn save_screen_lock(&mut self, next: &crate::screen_lock::Ledger) -> bool {
+        let ok = self.screen_lock_store.save(next);
+        if ok {
+            self.screen_lock_dirty = false;
+        }
+        ok
+    }
+
+    /// Retry a platform result that did not reach disk (each tick).
+    fn flush_screen_lock(&mut self) {
+        if !self.screen_lock_dirty {
+            return;
+        }
+        if let Some(l) = self.screen_lock.clone() {
+            self.save_screen_lock(&l);
+        }
+    }
+
     /// Authenticate and record one SCREEN_LOCK_RESET, from a relay poll or
     /// the local link, and say what to ACK.
     ///
@@ -1642,12 +1667,17 @@ impl Warden {
     /// recorded (`refused`). An id already recorded: nothing changes
     /// (`unchanged`) — the relays re-deliver every wrap for two days, and the
     /// link may resend. Otherwise exactly one outcome is recorded for the id:
-    /// `rejected_time` (`expired`), `superseded` (`superseded`) or `accepted`
-    /// (`applied`). An accepted reset's floor and ring entry are written
-    /// BEFORE it is parked for Kotlin; if that write fails it is not parked
-    /// (`failed`), and the guardian, seeing no result, sends again. A newer
-    /// accepted reset replaces one Kotlin has not taken yet, which is then
-    /// recorded `superseded`.
+    /// `rejected_time` (`expired`), `superseded` (`superseded`), `failed`
+    /// (`failed`: the sealed PIN would not open with this machine's key, or
+    /// held no PIN; the floor stays put) or `accepted` (`applied`). The seal
+    /// is opened only for a reset that would otherwise be accepted, so a
+    /// re-delivery never yields a plaintext. An accepted reset's floor and
+    /// ring entry are written BEFORE it is parked for Kotlin; if that write
+    /// fails it is not parked (`failed`), and the guardian, seeing no result,
+    /// sends again. Any other outcome whose write fails is not kept either
+    /// (`failed`): the next delivery decides it afresh, rather than a restart
+    /// forgetting what the guardian was told. A newer accepted reset replaces
+    /// one Kotlin has not taken yet, which is then recorded `superseded`.
     ///
     /// Nothing here logs or returns the event's content.
     pub(crate) fn absorb_screen_lock_reset(
@@ -1674,40 +1704,53 @@ impl Warden {
         let Some(mut next) = self.screen_lock_ledger().cloned() else {
             return AckResult::Failed;
         };
-        match next.admit(&payload, now) {
-            Admission::Duplicate => AckResult::Unchanged,
+        let (result, ack, opened) = match next.decide(&payload, now) {
+            Admission::Duplicate => return AckResult::Unchanged,
+            Admission::RejectedTime => (R::RejectedTime, AckResult::Expired, None),
+            Admission::Superseded => (R::Superseded, AckResult::Superseded, None),
             Admission::Accepted => {
-                let replaced = self
-                    .screen_lock_pending
-                    .as_ref()
-                    .map(|old| old.id.clone())
-                    .filter(|old| next.settle(old, R::Superseded, now));
-                if !self.screen_lock_store.save(&next) {
-                    return AckResult::Failed;
+                let opened = self
+                    .machine_sk
+                    .as_deref()
+                    .ok_or(charter_transport::ScreenLockSealError::BadKey)
+                    .and_then(|sk| charter_transport::open_screen_lock_pin(sk, &payload));
+                match opened {
+                    Ok(pin) => (R::Accepted, AckResult::Applied, Some(pin)),
+                    Err(e) => {
+                        eprintln!(
+                            "charter: a screen-lock reset's PIN would not open ({})",
+                            e.as_str()
+                        );
+                        (R::Failed, AckResult::Failed, None)
+                    }
                 }
-                self.screen_lock = Some(next);
-                self.screen_lock_pending = Some(Pending::from_payload(&payload));
-                if let Some(old) = replaced {
-                    self.break_glass
-                        .queue_audit(audit_tags(R::Superseded, &old, now));
-                }
-                AckResult::Applied
             }
-            admission => {
-                let (result, ack) = if admission == Admission::RejectedTime {
-                    (R::RejectedTime, AckResult::Expired)
-                } else {
-                    (R::Superseded, AckResult::Superseded)
-                };
-                // Recorded even if the write fails: STATUS carries it for the
-                // rest of this run either way.
-                let _ = self.screen_lock_store.save(&next);
-                self.screen_lock = Some(next);
-                self.break_glass
-                    .queue_audit(audit_tags(result, &payload.id, now));
-                ack
-            }
+        };
+        next.record(&payload, result, now);
+        let replaced = if opened.is_some() {
+            self.screen_lock_pending
+                .as_ref()
+                .map(|old| old.id.clone())
+                .filter(|old| next.settle(old, R::Superseded, now))
+        } else {
+            None
+        };
+        if !self.save_screen_lock(&next) {
+            // Nothing is kept: the next delivery decides it afresh.
+            return AckResult::Failed;
         }
+        self.screen_lock = Some(next);
+        if let Some(pin) = opened {
+            self.screen_lock_pending = Some(Pending::new(&payload, pin));
+            if let Some(old) = replaced {
+                self.break_glass
+                    .queue_audit(audit_tags(R::Superseded, &old, now));
+            }
+        } else {
+            self.break_glass
+                .queue_audit(audit_tags(result, &payload.id, now));
+        }
+        ack
     }
 
     /// Every SCREEN_LOCK_RESET a relay round delivered, through
@@ -1770,8 +1813,12 @@ impl Warden {
         if !next.settle(id, r, at) {
             return Ok(false);
         }
-        // Recorded even if the write fails, as for a rejected reset.
-        let _ = self.screen_lock_store.save(&next);
+        // Kept in memory even if the write fails (STATUS carries it, and the
+        // AUDIT goes out); each tick then retries the write, so a restart
+        // does not bring the `accepted` back.
+        if !self.save_screen_lock(&next) {
+            self.screen_lock_dirty = true;
+        }
         self.screen_lock = Some(next);
         self.break_glass
             .queue_audit(crate::screen_lock::audit_tags(r, id, at));
@@ -3203,6 +3250,7 @@ impl Warden {
         now: i64,
         foreground_pkg: Option<&str>,
     ) -> Vec<dto::ChildDecision> {
+        self.flush_screen_lock();
         // N1: a pairing record that exists but will not read is NOT "no
         // ward". The release below would unsuspend, unhide, drop the lock and
         // unpin the web filter. Hold instead: no decision at all, so Kotlin
@@ -11149,12 +11197,20 @@ mod link_loop_tests {
         use charter_primitives::kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET;
         let rig = Rig::new(concat!(module_path!(), line!()));
         let reset = |signer: &charter_sys::signer::SeedSigner, id: &str, issued_at: u64| {
+            let (epk, new_pin_sealed) = charter_transport::seal_screen_lock_pin(
+                "123456",
+                &[0x5E; 32],
+                &rig.machine,
+                &[0x6F; 32],
+            )
+            .unwrap();
             let payload = charter_proto::ScreenLockResetPayload {
                 v: 1,
                 id: id.into(),
                 machine: rig.machine,
                 issued_at,
-                new_pin: "123456".into(),
+                epk,
+                new_pin_sealed,
             };
             charter_verify::test_support::sign_event(
                 signer,
@@ -12935,11 +12991,39 @@ mod screen_lock_tests {
         (w, base, guardian, machine, t0)
     }
 
-    fn reset_content(id: &str, machine: &PubKey, issued_at: u64, pin: &str) -> String {
+    /// The one-use key the test guardian seals with.
+    const EPHEMERAL: [u8; 32] = [0x5E; 32];
+
+    /// `(epk, newPinSealed)`: `pin` sealed to `to` as the guardian app does,
+    /// with NO check on the PIN (a misbehaving guardian could seal anything).
+    /// A target that is not a curve point gets a stand-in seal.
+    fn seal_to(to: &PubKey, pin: &str) -> (PubKey, String) {
+        let epk = PubKey::from_bytes(charter_crypto::xonly_pubkey(&EPHEMERAL).unwrap());
+        let sealed = charter_transport::nip44::conversation_key(&EPHEMERAL, to.as_bytes())
+            .and_then(|key| {
+                charter_transport::nip44::encrypt(&format!("\"{pin}\""), &key, &[0x6F; 32])
+            })
+            .unwrap_or_else(|_| "AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGh".into());
+        (epk, sealed)
+    }
+
+    fn content_sealed_to(
+        id: &str,
+        machine: &PubKey,
+        issued_at: u64,
+        pin: &str,
+        to: &PubKey,
+    ) -> String {
+        let (epk, sealed) = seal_to(to, pin);
         format!(
-            "{{\"v\":1,\"id\":\"{id}\",\"machine\":\"{}\",\"issuedAt\":{issued_at},\"newPin\":\"{pin}\"}}",
-            machine.to_hex()
+            "{{\"v\":1,\"id\":\"{id}\",\"machine\":\"{}\",\"issuedAt\":{issued_at},\"epk\":\"{}\",\"newPinSealed\":\"{sealed}\"}}",
+            machine.to_hex(),
+            epk.to_hex()
         )
+    }
+
+    fn reset_content(id: &str, machine: &PubKey, issued_at: u64, pin: &str) -> String {
+        content_sealed_to(id, machine, issued_at, pin, machine)
     }
 
     fn reset(
@@ -13135,14 +13219,32 @@ mod screen_lock_tests {
                 "uppercase id",
                 reset(&g.signer, &machine, &"AB".repeat(16), t0, "1234"),
             ),
-            ("3-digit PIN", reset(&g.signer, &machine, &id(4), t0, "123")),
             (
-                "17-digit PIN",
-                reset(&g.signer, &machine, &id(5), t0, "12345678901234567"),
+                "a plaintext PIN and no seal",
+                sign_event(
+                    &g.signer,
+                    CHARTER_DEVICE_SCREEN_LOCK_RESET,
+                    t0,
+                    vec![marker_tag()],
+                    format!(
+                        "{{\"v\":1,\"id\":\"{}\",\"machine\":\"{}\",\"issuedAt\":{t0},\"newPin\":\"1234\"}}",
+                        id(4),
+                        machine.to_hex()
+                    ),
+                ),
             ),
             (
-                "non-digit PIN",
-                reset(&g.signer, &machine, &id(6), t0, "12a4"),
+                "an empty seal",
+                sign_event(
+                    &g.signer,
+                    CHARTER_DEVICE_SCREEN_LOCK_RESET,
+                    t0,
+                    vec![marker_tag()],
+                    reset_content(&id(5), &machine, t0, "1234").replace(
+                        &seal_to(&machine, "1234").1,
+                        "",
+                    ),
+                ),
             ),
             (
                 "before the pairing",
@@ -13363,6 +13465,209 @@ mod screen_lock_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A seal that will not open with this machine's key, or opens to
+    /// something that is not a PIN: authentic, so recorded `failed` (once,
+    /// and audited), ACKed `failed`, nothing parked, the pending reset left
+    /// alone and the floor unmoved, so a good reset signed in the same second
+    /// still goes through.
+    #[test]
+    fn a_seal_that_will_not_open_or_holds_no_pin_is_recorded_failed_and_moves_no_floor() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let id = |n: u8| format!("{n:032x}");
+        let earlier = reset(&g.signer, &machine, &id(1), t0 - 10, "4321");
+        assert_eq!(w.absorb_screen_lock_reset(&earlier, t0), AckResult::Applied);
+        let floor = w.screen_lock.as_ref().unwrap().floor;
+        assert_eq!(floor, t0 - 10);
+
+        let elsewhere = PubKey::from_bytes(charter_crypto::xonly_pubkey(&[0x33; 32]).unwrap());
+        let sign = |content: String| {
+            sign_event(
+                &g.signer,
+                CHARTER_DEVICE_SCREEN_LOCK_RESET,
+                t0,
+                vec![marker_tag()],
+                content,
+            )
+        };
+        let bad = [
+            sign(content_sealed_to(
+                &id(2),
+                &machine,
+                t0,
+                "123456",
+                &elsewhere,
+            )),
+            reset(&g.signer, &machine, &id(3), t0, "123"),
+            reset(&g.signer, &machine, &id(4), t0, "12345678901234567"),
+            reset(&g.signer, &machine, &id(5), t0, "12a4"),
+        ];
+        for ev in &bad {
+            assert_eq!(w.absorb_screen_lock_reset(ev, t0), AckResult::Failed);
+            assert_eq!(
+                w.screen_lock.as_ref().unwrap().floor,
+                floor,
+                "floor unmoved"
+            );
+        }
+        for ev in &bad {
+            assert_eq!(w.absorb_screen_lock_reset(ev, t0 + 1), AckResult::Unchanged);
+        }
+        assert_eq!(
+            outcomes(&w, t0),
+            vec![
+                o(&id(5), "failed"),
+                o(&id(4), "failed"),
+                o(&id(3), "failed"),
+                o(&id(2), "failed"),
+                o(&id(1), "accepted"),
+            ]
+        );
+        assert_eq!(
+            spooled(&w),
+            (2..=5)
+                .map(|n| audit_tags(R::Failed, &id(n), t0))
+                .collect::<Vec<_>>()
+        );
+        // The earlier reset is still the one waiting for the platform.
+        let taken: serde_json::Value = serde_json::from_str(&w.take_screen_lock_reset()).unwrap();
+        assert_eq!(taken["id"], id(1));
+        assert_eq!(taken["newPin"], "4321");
+        // A good reset signed in the same second as the failures is accepted.
+        let good = reset(&g.signer, &machine, &id(6), t0, "135790");
+        assert_eq!(w.absorb_screen_lock_reset(&good, t0), AckResult::Applied);
+        let taken: serde_json::Value = serde_json::from_str(&w.take_screen_lock_reset()).unwrap();
+        assert_eq!(
+            taken,
+            serde_json::json!({"id": id(6), "newPin": "135790", "ts": t0})
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The hand-written golden vector, whose seals the guardian app's own
+    /// NIP-44 library made: a ward holding the vector's machine key applies
+    /// every valid one with its PIN, and records `failed` for every seal
+    /// failure.
+    #[test]
+    fn the_golden_vector_opens_on_a_ward_holding_its_machine_key() {
+        let doc: serde_json::Value =
+            charter_testkit::golden::load_json("screen_lock/screen_lock_reset_vectors.json");
+        let keys = &doc["keys"];
+        let issued_at = doc["issuedAt"].as_u64().unwrap();
+        let ward_for = |name: &str| {
+            let base = temp_base(&format!("vector-{name}"));
+            std::fs::create_dir_all(&base).unwrap();
+            std::fs::write(
+                base.join("machine.key"),
+                keys["machineSecretKey"].as_str().unwrap(),
+            )
+            .unwrap();
+            let guardian = TestGuardian::new();
+            let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+            assert_eq!(w.machine_pubkey_hex(), keys["machine"].as_str().unwrap());
+            let uri = format!(
+                "bunker://{}?relay=wss://relay.example&kind=charter",
+                guardian.pubkey().to_hex()
+            );
+            w.pair(&uri, issued_at - 600).unwrap();
+            (w, base, guardian)
+        };
+        let signed = |g: &TestGuardian, content: &str| {
+            sign_event(
+                &g.signer,
+                CHARTER_DEVICE_SCREEN_LOCK_RESET,
+                issued_at,
+                vec![marker_tag()],
+                content.to_string(),
+            )
+        };
+        for v in doc["vectors"].as_array().unwrap() {
+            let name = v["name"].as_str().unwrap();
+            let (mut w, base, g) = ward_for(name);
+            let ev = signed(&g, v["content"].as_str().unwrap());
+            assert_eq!(
+                w.absorb_screen_lock_reset(&ev, issued_at),
+                AckResult::Applied,
+                "{name}"
+            );
+            let taken: serde_json::Value =
+                serde_json::from_str(&w.take_screen_lock_reset()).unwrap();
+            assert_eq!(
+                taken,
+                serde_json::json!({
+                    "id": v["payload"]["id"],
+                    "newPin": v["newPin"],
+                    "ts": issued_at,
+                }),
+                "{name}"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        }
+        for f in doc["sealFailures"].as_array().unwrap() {
+            let name = f["name"].as_str().unwrap();
+            let (mut w, base, g) = ward_for(name);
+            let ev = signed(&g, f["content"].as_str().unwrap());
+            assert_eq!(
+                w.absorb_screen_lock_reset(&ev, issued_at),
+                AckResult::Failed,
+                "{name}"
+            );
+            let id = f["payload"]["id"].as_str().unwrap();
+            assert_eq!(outcomes(&w, issued_at), vec![o(id, "failed")], "{name}");
+            assert!(w.take_screen_lock_reset().is_empty(), "{name}");
+            assert_eq!(w.screen_lock.as_ref().unwrap().floor, 0, "{name}");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
+    /// A rejected reset whose record will not write is not kept in memory
+    /// either (ACK `failed`): were it kept, a restart would forget it and a
+    /// later re-delivery could be accepted although the guardian was told it
+    /// was turned down. The next delivery decides it afresh.
+    #[test]
+    fn a_rejected_reset_whose_record_will_not_write_is_not_kept() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        std::fs::write(base.join("screen-lock"), b"in the way").unwrap();
+        let ahead = reset(&g.signer, &machine, A, t0 + 301, "1234");
+        assert_eq!(w.absorb_screen_lock_reset(&ahead, t0), AckResult::Failed);
+        assert_eq!(outcomes(&w, t0), vec![], "nothing kept");
+        assert!(spooled(&w).is_empty(), "nothing audited");
+        std::fs::remove_file(base.join("screen-lock")).unwrap();
+        assert_eq!(w.absorb_screen_lock_reset(&ahead, t0), AckResult::Expired);
+        assert_eq!(outcomes(&w, t0), vec![o(A, "rejected_time")]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A platform result whose write fails is kept in memory (STATUS and the
+    /// AUDIT carry it) and written on the next tick, so a restart does not
+    /// bring the `accepted` back.
+    #[test]
+    fn a_platform_result_that_will_not_write_is_written_on_the_next_tick() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let a = reset(&g.signer, &machine, A, t0, "1234");
+        assert_eq!(w.absorb_screen_lock_reset(&a, t0), AckResult::Applied);
+        assert!(!w.take_screen_lock_reset().is_empty());
+        // A directory where the temporary file goes: no write lands.
+        let blocker = base.join("screen-lock/ledger.json.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+        assert_eq!(w.report_screen_lock_reset(A, "applied", t0 + 1), Ok(true));
+        assert_eq!(outcomes(&w, t0 + 1), vec![o(A, "applied")]);
+        assert_eq!(spooled(&w), vec![audit_tags(R::Applied, A, t0 + 1)]);
+        let on_disk = || {
+            crate::screen_lock::LedgerStore::new(&base)
+                .load()
+                .unwrap()
+                .ring[0]
+                .result
+        };
+        assert_eq!(on_disk(), R::Accepted, "the write did not land");
+        w.tick(None, true, (t0 + 2) as i64, None);
+        assert_eq!(on_disk(), R::Accepted, "still blocked");
+        std::fs::remove_dir(&blocker).unwrap();
+        w.tick(None, true, (t0 + 3) as i64, None);
+        assert_eq!(on_disk(), R::Applied, "written on the next tick");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Test PIN 123456 (and a long one no other record could contain by
     /// chance): after a reset is taken, reported and audited, and after
     /// malformed ones are refused, the PIN is in no poll reason, STATUS,
@@ -13384,7 +13689,8 @@ mod screen_lock_tests {
             50,
             t0,
         ));
-        // Malformed: 17 digits, and a PIN of the wrong JSON type.
+        // A seal that opens to 17 digits (recorded `failed`), and a seal of
+        // the wrong JSON type (refused).
         mock.inject(wrap(
             &reset(&g.signer, &machine, C, t0 + 2, &format!("{LONG}1")),
             &machine,
@@ -13397,10 +13703,11 @@ mod screen_lock_tests {
             t0 + 3,
             vec![marker_tag()],
             format!(
-                "{{\"v\":1,\"id\":\"{}\",\"machine\":\"{}\",\"issuedAt\":{},\"newPin\":{LONG}}}",
+                "{{\"v\":1,\"id\":\"{}\",\"machine\":\"{}\",\"issuedAt\":{},\"epk\":\"{}\",\"newPinSealed\":{LONG}}}",
                 "d".repeat(32),
                 machine.to_hex(),
-                t0 + 3
+                t0 + 3,
+                seal_to(&machine, "1234").0.to_hex()
             ),
         );
         mock.inject(wrap(&mistyped, &machine, 70, t0));

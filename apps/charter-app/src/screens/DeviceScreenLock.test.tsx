@@ -157,6 +157,33 @@ describe("Screen lock card", () => {
     expect(text()).not.toContain("135790");
   });
 
+  it("asks the browser not to autofill or remember the PIN, and offers a number pad", async () => {
+    mount(phone);
+    await click("Reset screen lock on Robin’s phone");
+    for (const label of ["New PIN", "New PIN again"]) {
+      const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      expect(input.getAttribute("autocomplete")).toBe("off");
+      expect(input.getAttribute("inputmode")).toBe("numeric");
+    }
+  });
+
+  it("says plainly when nothing was sent: no signer, or not paired", async () => {
+    store.resetDeviceScreenLock.mockRejectedValue(
+      new Error("Not sent: your signer isn't connected. Reconnect it and try again."),
+    );
+    mount(phone);
+    await click("Reset screen lock on Robin’s phone");
+    const remove = [...container.querySelectorAll<HTMLInputElement>("input[type=radio]")][1];
+    await act(async () => { remove.click(); });
+    await click("Remove the screen lock");
+    expect(text()).toContain("Not sent: your signer isn't connected.");
+  });
+
+  it("says a held send is held for the home network", () => {
+    mount({ ...phone, screenLockReset: { id: ID, issuedAt: NOW - 30, held: true } });
+    expect(text()).toContain("Held until the device is on your home network.");
+  });
+
   describe("after sending", () => {
     const sent = (issuedAt = NOW - 30) => ({ ...phone, screenLockReset: { id: ID, issuedAt } });
     const withResult = (result: string, at = new Date(2026, 10, 14, 19, 42).getTime() / 1000) =>

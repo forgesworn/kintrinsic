@@ -440,6 +440,9 @@ export interface DeviceScreenLockReset {
   id: string;
   /** Unix seconds it was signed (the guardian's wall clock). */
   issuedAt: number;
+  /** The relays couldn't take it; this phone is holding it until the device is
+   *  on the home network. */
+  held?: boolean;
 }
 
 /** The last `debugging` clause sent to a device — see `Device.debugging`. */

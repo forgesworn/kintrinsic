@@ -344,8 +344,9 @@ async fn device_commands_sort_releases_and_screen_lock_resets_from_one_query() {
         NOW,
         vec![kinds::marker_tag()],
         format!(
-            "{{\"v\":1,\"id\":\"00112233445566778899aabbccddeeff\",\"machine\":\"{}\",\"issuedAt\":{NOW},\"newPin\":\"123456\"}}",
-            machine_pk.to_hex()
+            "{{\"v\":1,\"id\":\"00112233445566778899aabbccddeeff\",\"machine\":\"{}\",\"issuedAt\":{NOW},\"epk\":\"{}\",\"newPinSealed\":\"AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGh\"}}",
+            machine_pk.to_hex(),
+            "cd".repeat(32)
         ),
     );
     let clause = ClauseBuilder::schedule(NOW).build(&guardian);
