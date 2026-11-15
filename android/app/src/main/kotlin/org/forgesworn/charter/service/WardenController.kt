@@ -54,6 +54,9 @@ class WardenController(
     /** The same, for apps with their own agreed hours (`appRules`). Separate
      *  store: it answers which scheduled apps are shut, not which holds run. */
     private val ruleMemory: org.forgesworn.charter.enforce.RuleMemoryStore? = null,
+    /** The guardian's screen-lock reset and the child's notice of it. Null in
+     *  tests: its parts are exercised directly in `ScreenLockResetTest`. */
+    private val screenLock: org.forgesworn.charter.enforce.ScreenLockResetStep? = null,
 ) {
     private var initialized = false
     /** When [init] last ran (unix secs), and with which mode — so a failed
@@ -396,6 +399,16 @@ class WardenController(
         } finally {
             // Guarded: a throw here must not replace the tick's own.
             guard.run("debugging") { syncDebugging(nowUnix) }
+            // The screen-lock reset and its notice, on every way out of the
+            // tick too: the notice must outlive a release, a failed init and
+            // an unreadable pairing (A2, A5). The Device Owner part needs the
+            // core; the notice needs only its history.
+            screenLock?.let { step ->
+                if (initialized && Provisioning.isDeviceOwner(context)) {
+                    guard.run("screenLock") { step.platformTick(nowUnix) }
+                }
+                guard.run("screenLockNotice") { step.noticeTick() }
+            }
         }
 
     private fun tickOnce(nowUnix: Long, screenWas: Boolean?): List<CharterCore.ChildDecision> {
@@ -1177,6 +1190,14 @@ class WardenController(
                     org.forgesworn.charter.enforce.NotificationHoldNotifier(context),
                 holdMemory = org.forgesworn.charter.enforce.HoldMemoryStore(context),
                 ruleMemory = org.forgesworn.charter.enforce.RuleMemoryStore(context),
+                screenLock = org.forgesworn.charter.enforce.ScreenLockResetStep(
+                    platform = org.forgesworn.charter.enforce.DpmScreenLockPlatform(context, dpm, admin),
+                    tokens = org.forgesworn.charter.enforce.PrefsScreenLockTokenStore(context),
+                    history = org.forgesworn.charter.enforce.FileScreenLockHistory.get(context),
+                    core = org.forgesworn.charter.enforce.CoreScreenLock,
+                    notice = org.forgesworn.charter.enforce.NotificationScreenLockNotice(context),
+                    log = { Log.i(TAG, it) },
+                ),
             )
         }
     }

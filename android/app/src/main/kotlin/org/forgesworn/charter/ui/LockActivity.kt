@@ -93,6 +93,16 @@ class LockActivity : Activity() {
      *  0 = none; consumed by the next onStop (see [onStop]). */
     private var launchedBehindAt = 0L
 
+    /** The guardian-reset-your-screen-lock line of the current render, and the
+     *  words [callPoll] last read for it: kept so a reset that lands while the
+     *  shade is up shows at once, not at the next resume. */
+    private var screenLockLine: TextView? = null
+    @Volatile private var screenLockNotice: String? = null
+
+    /** "Unlock phone" of the current render: shown while the phone's own lock
+     *  is up, kept so [callPoll] can show and hide it as that changes. */
+    private var unlockButton: Button? = null
+
     /** The Wi-Fi and Bluetooth row of the current render, kept so [callPoll] can
      *  hide it the moment the while-locked restrictions stop being in force. */
     private var connectionsRow: android.view.View? = null
@@ -135,7 +145,18 @@ class LockActivity : Activity() {
             }.getOrDefault(false)
             // Level-triggered: on this worker because it is a binder read.
             val closed = Connections.lockedSurfaceClosed(this@LockActivity)
+            // The screen-lock notice (A2): read from the history every pass.
+            val notice = runCatching {
+                org.forgesworn.charter.enforce.ScreenLockCopy.currentNotice(
+                    org.forgesworn.charter.enforce.FileScreenLockHistory.get(this@LockActivity).records(),
+                    java.time.ZoneId.systemDefault(),
+                )
+            }.getOrNull()
+            screenLockNotice = notice
+            val unlock = unlockWanted()
             runOnUiThread {
+                paintScreenLockLine(notice)
+                unlockButton?.visibility = if (unlock) android.view.View.VISIBLE else android.view.View.GONE
                 endCallButton?.visibility = if (inCall) android.view.View.VISIBLE
                 else android.view.View.GONE
                 connectionsRow?.visibility = if (closed) android.view.View.VISIBLE
@@ -601,6 +622,42 @@ class LockActivity : Activity() {
         }
     }
 
+    /** A binder read: either thread. */
+    private fun unlockWanted(): Boolean = runCatching {
+        val km = getSystemService(KeyguardManager::class.java)
+        unlockOffered(km.isDeviceSecure, km.isKeyguardLocked)
+    }.getOrDefault(false)
+
+    /** Ask for the phone's own credential; on success the shade stays. */
+    private fun unlockPhone() {
+        val km = getSystemService(KeyguardManager::class.java) ?: return
+        if (!km.isKeyguardLocked) return
+        km.requestDismissKeyguard(
+            this,
+            object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() {
+                    Log.i(TAG, "phone unlocked from the shade")
+                    unlockButton?.visibility = android.view.View.GONE
+                }
+
+                override fun onDismissCancelled() {
+                    Log.i(TAG, "unlock from the shade cancelled")
+                }
+
+                override fun onDismissError() {
+                    Log.w(TAG, "unlock from the shade failed")
+                }
+            },
+        )
+    }
+
+    private fun paintScreenLockLine(notice: String?) {
+        screenLockLine?.apply {
+            text = notice.orEmpty()
+            visibility = if (notice == null) android.view.View.GONE else android.view.View.VISIBLE
+        }
+    }
+
     /** Worker-thread only: refresh [askOutcome] for this lock spell's ask. */
     private fun readAskOutcome() {
         val id = askReqId ?: return
@@ -887,6 +944,12 @@ class LockActivity : Activity() {
         }
         if (!info?.usedLine.isNullOrEmpty()) {
             root.addView(text(info!!.usedLine, CharterTheme.FS_SMALL, CharterTheme.INK_TEXT_2, 20))
+        }
+        // The guardian reset this phone's screen lock: the child sees why their
+        // old PIN is refused, here as on the lock screen's notification.
+        screenLockLine = text("", CharterTheme.FS_SMALL, CharterTheme.WARN_ON_INK, 20).also {
+            root.addView(it)
+            paintScreenLockLine(screenLockNotice)
         }
 
         // "Ask for more time" — the sanctioned exit. One-shot per lock; the
@@ -1197,6 +1260,17 @@ class LockActivity : Activity() {
         // switch — connecting to a network grants no screen time.
         paintConnectionsRow(root, connections, lockedSurfaceClosed)
 
+        // "Unlock phone": the phone's own credential, entered from the shade.
+        // After a reboot the Open row is empty until the first unlock, and the
+        // shade covers the keyguard, so without this the only way to the
+        // bouncer was the Wi-Fi button. Unlocking opens nothing: the shade
+        // stays (LockTask). It unlocks the phone's storage, so messages arrive.
+        unlockButton = CharterTheme.secondaryButton(this, "Unlock phone", onInk = true).apply {
+            visibility = if (unlockWanted()) android.view.View.VISIBLE else android.view.View.GONE
+            setOnClickListener { unlockPhone() }
+        }
+        root.addView(unlockButton, CharterTheme.stackParams(this, 10))
+
         // Break-glass (design memo 2026-07-24): the fire alarm. Nothing stops
         // the ward using it — no approval, no network needed — and using it is
         // LOUD: journaled, the guardian is told, it shows in the week. There
@@ -1326,6 +1400,10 @@ class LockActivity : Activity() {
  * other core "not locked" (a lock the core has just lifted, which the shade is
  * about to dismiss itself for) reads plainly as "Locked".
  */
+/** The shade offers "Unlock phone" only while the phone has its own lock and
+ *  that lock is up: with none, or once unlocked, there is nothing to enter. */
+internal fun unlockOffered(secure: Boolean, keyguardLocked: Boolean): Boolean = secure && keyguardLocked
+
 internal fun shadeInfo(info: CharterCore.LockInfo?, standIn: Boolean): CharterCore.LockInfo? {
     if (info == null || info.locked) return info
     return if (standIn) {

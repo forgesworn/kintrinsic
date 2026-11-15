@@ -89,10 +89,15 @@ class CharterService : Service() {
     private var tickWake: PowerManager.WakeLock? = null
     private var pollWake: PowerManager.WakeLock? = null
 
+    /** Brings the in-call screen up when a call rings during a lockout. */
+    private val ringing by lazy { RingingWatch(this) { ActivityLockController.lockAlive } }
+
     /** One enforcement tick, timed for the watchdog. Worker thread only. */
     private fun runTick(screenWas: Boolean? = null) {
         tickStartedAt = SystemClock.elapsedRealtime()
         try {
+            // Takes once READ_PHONE_STATE is held (granted at init); a no-op after.
+            ringing.ensure()
             controller.tickAndApply(screenWas = screenWas)
             if (RelayPollPace.waiting()) {
                 RelayPollPace.reconcile(org.forgesworn.charter.native.CharterCore.listRequests(128).associate { it.reqId to it.state })
@@ -468,6 +473,7 @@ class CharterService : Service() {
         running = false
         armed = false
         runCatching { unregisterReceiver(screenReceiver) }
+        ringing.stop()
         runCatching { tickWake?.takeIf { it.isHeld }?.release() }
         runCatching { pollWake?.takeIf { it.isHeld }?.release() }
         if (::worker.isInitialized) worker.quitSafely()
