@@ -94,7 +94,7 @@ class ScreenLockResetTest {
             ),
         )
         assertEquals(2, records.size)
-        assertEquals(ScreenLockRecord(id1, at1942, ScreenLockChange.CHANGED, ScreenLockOutcome.APPLIED, true), records[0])
+        assertEquals(ScreenLockRecord(id1, at1942, ScreenLockChange.CHANGED, ScreenLockOutcome.APPLIED, true, acknowledgedAt = at1942 + 60), records[0])
         assertEquals(ScreenLockRecord(id2, at1942 + 100, ScreenLockChange.REMOVED, ScreenLockOutcome.FAILED, false), records[1])
     }
 
@@ -570,5 +570,58 @@ class ScreenLockResetTest {
         assertNull(CharterCore.parseScreenLockDirective("""{"error":"not initialized"}"""))
         assertNull(CharterCore.parseScreenLockDirective("""{"id":"$id1","newPin":"123"""))
         assertNull(CharterCore.parseScreenLockDirective("""{"id":"$id1","ts":1}"""))
+    }
+
+    // ---- acknowledgedAt (the activity card) ------------------------------------------
+
+    @Test
+    fun `acknowledgedAt is the at of the earliest acknowledgement of that record`() {
+        val records = ScreenLockHistoryFormat.fold(
+            listOf(
+                ScreenLockLine(id1, at1942, kind = ScreenLockChange.CHANGED, outcome = ScreenLockOutcome.PENDING),
+                ScreenLockLine(id1, at1942 + 5, outcome = ScreenLockOutcome.APPLIED),
+                ScreenLockLine(id1, at1942 + 60, acknowledged = true),
+                ScreenLockLine(id1, at1942 + 900, acknowledged = true),
+            ),
+        )
+        assertEquals(at1942 + 60, records.single().acknowledgedAt)
+        assertTrue(records.single().acknowledged)
+    }
+
+    @Test
+    fun `a record with no acknowledgement has no acknowledgedAt`() {
+        val records = ScreenLockHistoryFormat.fold(
+            listOf(
+                ScreenLockLine(id1, at1942, kind = ScreenLockChange.CHANGED, outcome = ScreenLockOutcome.PENDING),
+                ScreenLockLine(id1, at1942 + 5, outcome = ScreenLockOutcome.APPLIED),
+            ),
+        )
+        assertNull(records.single().acknowledgedAt)
+    }
+
+    @Test
+    fun `an acknowledgement for an earlier record with the same id never carries over`() {
+        val records = ScreenLockHistoryFormat.fold(
+            listOf(
+                ScreenLockLine(id1, at1942, kind = ScreenLockChange.CHANGED, outcome = ScreenLockOutcome.PENDING),
+                ScreenLockLine(id1, at1942 + 60, acknowledged = true),
+                ScreenLockLine(id1, at1942 + 3600, kind = ScreenLockChange.REMOVED, outcome = ScreenLockOutcome.PENDING),
+            ),
+        )
+        assertEquals(2, records.size)
+        assertEquals(at1942 + 60, records[0].acknowledgedAt)
+        assertNull(records[1].acknowledgedAt)
+        assertFalse(records[1].acknowledged)
+        // ...and an acknowledgement after the reuse belongs to the reuse only.
+        val later = ScreenLockHistoryFormat.fold(
+            listOf(
+                ScreenLockLine(id1, at1942, kind = ScreenLockChange.CHANGED, outcome = ScreenLockOutcome.PENDING),
+                ScreenLockLine(id1, at1942 + 60, acknowledged = true),
+                ScreenLockLine(id1, at1942 + 3600, kind = ScreenLockChange.REMOVED, outcome = ScreenLockOutcome.PENDING),
+                ScreenLockLine(id1, at1942 + 3700, acknowledged = true),
+            ),
+        )
+        assertEquals(at1942 + 60, later[0].acknowledgedAt)
+        assertEquals(at1942 + 3700, later[1].acknowledgedAt)
     }
 }

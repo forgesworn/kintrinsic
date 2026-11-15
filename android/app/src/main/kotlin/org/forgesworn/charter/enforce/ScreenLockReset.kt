@@ -66,13 +66,15 @@ data class ScreenLockLine(
 )
 
 /** One reset as the history tells it, folded from its lines. [at] is when
- *  it arrived (its first line). */
+ *  it arrived (its first line). [acknowledgedAt] is the `at` of the earliest
+ *  acknowledgement line that belongs to this record, null while it has none. */
 data class ScreenLockRecord(
     val id: String,
     val at: Long,
     val kind: String,
     val outcome: String,
     val acknowledged: Boolean,
+    val acknowledgedAt: Long? = null,
 )
 
 /** The history's line format and its fold. Pure. */
@@ -110,7 +112,8 @@ object ScreenLockHistoryFormat {
      * outcome or acknowledgement line belongs to the latest record for its
      * id. Field by field, never "last line wins": [ScreenLockRecord.at] and
      * kind come from the record line, the outcome from the latest line that
-     * has one, and an acknowledgement, once made, stays made. An id whose
+     * has one, and an acknowledgement, once made, stays made (with the `at` of
+     * the earliest one, in [ScreenLockRecord.acknowledgedAt]). An id whose
      * record line was lost still shows (as a change, `pending` until an
      * outcome says otherwise) rather than vanishing.
      */
@@ -127,12 +130,16 @@ object ScreenLockHistoryFormat {
                     kind = l.kind ?: ScreenLockChange.CHANGED,
                     outcome = l.outcome ?: ScreenLockOutcome.PENDING,
                     acknowledged = l.acknowledged,
+                    acknowledgedAt = if (l.acknowledged) l.at else null,
                 )
             } else {
                 val prev = records[at]
                 records[at] = prev.copy(
                     outcome = l.outcome ?: prev.outcome,
                     acknowledged = prev.acknowledged || l.acknowledged,
+                    // The earliest acknowledgement of THIS record: once set it
+                    // is never moved, and an earlier record's never carries over.
+                    acknowledgedAt = prev.acknowledgedAt ?: if (l.acknowledged) l.at else null,
                 )
             }
         }
@@ -181,7 +188,8 @@ object ScreenLockCopy {
     fun currentNotice(records: List<ScreenLockRecord>, zone: ZoneId): String? =
         ScreenLockHistoryFormat.unacknowledged(records).firstOrNull()?.let { notice(it, zone) }
 
-    /** One row of "Screen lock history". */
+    /** One row of the old "Screen lock history" card. The home screen now
+     *  shows [ActivityCopy.screenLockRow] in "Activity on this phone". */
     fun historyRow(r: ScreenLockRecord, zone: ZoneId): String {
         val time = whenText(r.at, zone)
         val what = if (r.kind == ScreenLockChange.REMOVED) "Removed" else "Changed"
