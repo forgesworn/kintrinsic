@@ -510,31 +510,38 @@ class LockActivity : Activity() {
      * An emergency number (the Emergency button, or a lifeline entry the
      * platform counts as one) is different: the platform will not let an app
      * that is not the dialer place it, and turns ACTION_CALL into the dialer's
-     * keypad, which does not show over the keyguard. With the phone's own lock
-     * kept during a lockout, that keypad would open behind the PIN. So while the
-     * keyguard is locked it opens the platform's emergency dialer instead, with
-     * the number filled in: that shows over the keyguard, LockTask lets it
-     * through, and nothing is dialled until the ward presses call. The same
-     * screen the keyguard's own Emergency button opens. [ACTION_DIAL_EMERGENCY]
-     * is the platform's action for it (Intent.ACTION_DIAL_EMERGENCY, not in the
-     * public SDK), so it is resolved first and the old path kept as the fallback.
+     * keypad, which LockTask refuses to launch during a lockout (and which does
+     * not show over the keyguard). So whether or not the keyguard is locked it
+     * opens the platform's emergency dialer, with the number filled in: that
+     * shows over the keyguard, LockTask lets it through, and nothing is dialled
+     * until the ward presses call. The same screen the keyguard's own Emergency
+     * button opens. [ACTION_DIAL_EMERGENCY] is the platform's action for it
+     * (Intent.ACTION_DIAL_EMERGENCY, not in the public SDK), so it is resolved
+     * first; if this phone has none, ACTION_DIAL with the number (the system
+     * dialler is on the lockout allowlist), and only then the old ACTION_CALL.
+     * The choice itself is [CallRoute.choose].
      */
     private fun callIntent(number: String, emergency: Boolean): CallPlan {
-        val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
         val isEmergency = emergency || runCatching {
             (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
                 .isEmergencyNumber(number)
         }.getOrDefault(false)
         val tel = android.net.Uri.parse("tel:" + android.net.Uri.encode(number))
-        if (locked && isEmergency) {
-            val dialer = Intent(ACTION_DIAL_EMERGENCY, tel).addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
-            )
-            // Only if this phone has one; otherwise the old path, as before.
-            if (dialer.resolveActivity(packageManager) != null) return CallPlan(dialer, emergency = true)
+        val newTask = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+        val emergencyDialler = Intent(ACTION_DIAL_EMERGENCY, tel).addFlags(newTask)
+        val systemDial = Intent(Intent.ACTION_DIAL, tel).addFlags(newTask)
+        val route = CallRoute.choose(
+            isEmergency = isEmergency,
+            emergencyDiallerResolves = isEmergency && emergencyDialler.resolveActivity(packageManager) != null,
+            systemDialResolves = isEmergency && systemDial.resolveActivity(packageManager) != null,
+        )
+        val intent = when (route) {
+            CallRoute.Route.EMERGENCY_DIALLER -> emergencyDialler
+            CallRoute.Route.SYSTEM_DIAL -> systemDial
+            CallRoute.Route.CALL -> Intent(Intent.ACTION_CALL, tel)
         }
-        return CallPlan(Intent(Intent.ACTION_CALL, tel), isEmergency)
+        return CallPlan(intent, isEmergency)
     }
 
     /** What a hold-to-call button starts, and whether that is an emergency
@@ -1372,7 +1379,7 @@ class LockActivity : Activity() {
                                     org.forgesworn.charter.enforce.EmergencyUse
                                         .recordUnlock(applicationContext, pressedAt)
                                     if (res.scope == "full") {
-                                        bgStatus.text = "Unlocked. Your guardian has been told."
+                                        bgStatus.text = "Unlocked."
                                         runCatching { stopLockTask() }
                                         finish()
                                     } else {
