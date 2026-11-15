@@ -324,6 +324,17 @@ class LockActivity : Activity() {
         callSequencer?.onFocusChanged(hasFocus)
     }
 
+    /**
+     * The shade is never recreated (`configChanges` in the manifest): a
+     * rotation or a dark-mode switch mid-call would otherwise drop the call
+     * sequencer and its sticky status line. It is repainted instead, as it is
+     * on every resume.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        render()
+    }
+
     override fun onPause() {
         // Don't tick a clock nobody can see (and never hold the CPU awake for
         // it): the shade re-paints the moment it comes back.
