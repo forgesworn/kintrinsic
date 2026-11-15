@@ -906,8 +906,18 @@ impl Warden {
     /// release can arrive on a thread that belongs to the link's async
     /// runtime, where the relay's blocking publish must not be started). The
     /// spool is cleared at once; the thread owns the wraps and the relay.
+    ///
+    /// A spool that cannot be read now is set aside (removed if it cannot be
+    /// moved), not left for a later round to read and send to the next
+    /// guardian; and an audit stamped for another guardian is not sent to this
+    /// one.
     fn flush_audits_on_release(&self, now: u64) {
-        let held = self.break_glass.entries();
+        // An unreadable spool is set aside here (never left in place for a
+        // later round to read and send to the next guardian), and an entry
+        // stamped for another guardian is not sent to this one.
+        let held = self
+            .break_glass
+            .take_for_release(self.guardian_hex().as_deref());
         if held.is_empty() {
             return;
         }
@@ -2100,10 +2110,15 @@ impl Warden {
     }
 
     /// The ward breaks the glass. Returns the JSON the shade renders:
-    /// `{allowed, scope, secsLeft, reason}`. Never blocked by the network —
-    /// the unlock is immediate and the guardian's audit is spooled durably
-    /// for the next poll. Refused only when the guardian hasn't enabled it
-    /// (fail-closed on config, never on connectivity).
+    /// `{"allowed":true,"scope":…,"secsLeft":…,"journaled":bool}`, or
+    /// `{"allowed":false,"reason":"not-enabled"}`. Never blocked by the
+    /// network — the unlock is immediate and the guardian's audit is spooled
+    /// durably for the next poll. Refused only when the guardian hasn't
+    /// enabled it (fail-closed on config, never on connectivity).
+    ///
+    /// `journaled` is whether the audit reached the journal. When it is false
+    /// the guardian may never be told, and the shade must not say they have
+    /// been. A reader that finds it absent treats it as true.
     pub fn break_glass(&mut self, now: u64) -> String {
         let cfg = self.break_glass_cfg();
         let Some((scope, duration_secs)) = cfg else {
@@ -2123,7 +2138,7 @@ impl Warden {
         // (or immediately after, if the phone is online).
         // `now` rides in the audit so the guardian sees when it was pressed,
         // not when the wrap was eventually built and published.
-        self.journal_audit(
+        let journaled = self.journal_audit(
             crate::breakglass::audit_tags(&scope, duration_secs, now),
             "break-glass",
         );
@@ -2131,6 +2146,7 @@ impl Warden {
             "allowed": true,
             "scope": scope,
             "secsLeft": duration_secs,
+            "journaled": journaled,
         })
         .to_string()
     }
@@ -2163,13 +2179,21 @@ impl Warden {
     /// press still happens, but a guardian who is never told should not also
     /// be silent in the log. Whether it was journaled.
     fn journal_audit(&self, tags: Vec<Vec<String>>, what: &str) -> bool {
-        let ok = self.break_glass.queue_audit(tags);
+        let ok = self
+            .break_glass
+            .queue_audit(tags, self.guardian_hex().as_deref());
         if !ok {
             eprintln!(
                 "charter: {what} audit could not be journaled; the guardian will not be told of it"
             );
         }
         ok
+    }
+
+    /// The guardian this phone is paired to, as the hex public key a journaled
+    /// audit is stamped with.
+    fn guardian_hex(&self) -> Option<String> {
+        self.guardian.map(|g| g.to_hex())
     }
 
     /// The guardian-configured break-glass, if enabled: `(scope, secs)`.
@@ -5020,6 +5044,7 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
             .map(|w| {
                 w.break_glass.wraps_to_publish(
                     now,
+                    w.guardian_hex().as_deref(),
                     |tags| relay.build_audit_wrap(tags.to_vec(), now),
                     |wrap| relay.offer_audit_local(wrap),
                 )
@@ -7446,6 +7471,7 @@ mod tests {
         assert_eq!(w.emergency_call_used(t0), r#"{"ok":true}"#);
         let held = w.break_glass.wraps_to_publish(
             t0,
+            w.guardian_hex().as_deref(),
             |tags| relay.build_audit_wrap(tags.to_vec(), t0),
             |_| {},
         );
@@ -7470,6 +7496,128 @@ mod tests {
         assert!(
             w.break_glass.entries().is_empty(),
             "nothing is left for the next guardian"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S4: a release over a spool that cannot be read sets it aside instead of
+    /// leaving it, so a press made under the old guardian cannot be sent to the
+    /// next one after a re-pair. Even if the spool were still there (a failed
+    /// set-aside and removal), its entries are stamped for the old guardian and
+    /// `wraps_to_publish` refuses them for the new one.
+    #[cfg(unix)]
+    #[test]
+    fn a_release_over_an_unreadable_spool_never_leaks_to_the_next_guardian() {
+        use charter_sys::relay::MockRelayTransport;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+
+        let base = temp_base(concat!(module_path!(), line!()));
+        let old = TestGuardian::new();
+        let next = TestGuardian::from_seed(0x77);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = |g: &TestGuardian| {
+            format!(
+                "bunker://{}?relay=wss://relay.example&kind=charter",
+                g.pubkey().to_hex()
+            )
+        };
+        let t0 = IN_WINDOW as u64;
+        w.pair(&uri(&old), t0 - 100).unwrap();
+        let sk = *w.machine_sk.clone().expect("machine key");
+        let relays = vec!["wss://relay.example".to_string()];
+        let up = MockRelayTransport::new();
+        w.inject_relay(Arc::new(
+            crate::relay::BlockingRelay::new(up.clone(), sk, old.pubkey(), relays).unwrap(),
+        ));
+        assert_eq!(w.emergency_call_used(t0), r#"{"ok":true}"#);
+        let spool = w.break_glass.spool_path();
+        let journal = std::fs::read(&spool).unwrap();
+        assert!(
+            String::from_utf8_lossy(&journal).contains(&old.pubkey().to_hex()),
+            "the press is stamped with the guardian it was made under"
+        );
+
+        // The spool becomes unreadable (EACCES; skipped where it still reads,
+        // as for root).
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&spool).is_ok() {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        w.apply_release(t0 + 10);
+        assert!(!spool.exists(), "the release did not leave it in place");
+        assert!(
+            std::fs::read_dir(spool.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .any(|e| e
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("pending-audits.json.bad-")),
+            "it was set aside, not lost"
+        );
+
+        // Re-paired to a different guardian: nothing is left to send.
+        w.pair(&uri(&next), t0 + 20).unwrap();
+        assert_eq!(w.guardian_hex(), Some(next.pubkey().to_hex()));
+        let wraps = w.break_glass.wraps_to_publish(
+            t0 + 30,
+            w.guardian_hex().as_deref(),
+            |_| panic!("nothing to build for the next guardian"),
+            |_| panic!("nothing to offer to the next guardian"),
+        );
+        assert!(wraps.is_empty());
+
+        // Defence in depth: were the old spool still in place (neither the
+        // set-aside nor the removal worked), its stamped press is refused.
+        std::fs::write(&spool, &journal).unwrap();
+        let wraps = w.break_glass.wraps_to_publish(
+            t0 + 40,
+            w.guardian_hex().as_deref(),
+            |_| panic!("the old guardian's press is never built for the next one"),
+            |_| panic!("nor offered"),
+        );
+        assert!(wraps.is_empty());
+        assert!(w.break_glass.entries().is_empty(), "and it is dropped");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S3: `break_glass` says whether the audit reached the journal, so the
+    /// shade does not tell the ward their guardian has been told when it has
+    /// not. The unlock itself never depends on it.
+    #[test]
+    fn break_glass_says_whether_it_was_journaled() {
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let ward = TestGuardian::from_seed(0x45);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        w.set_pairing(&guardian.pubkey().to_hex(), &ward.pubkey().to_hex())
+            .unwrap();
+        let now = IN_WINDOW as u64;
+
+        let ok: serde_json::Value = serde_json::from_str(&w.break_glass(now)).unwrap();
+        assert_eq!(
+            ok,
+            json!({"allowed": true, "scope": "full", "secsLeft": 600, "journaled": true})
+        );
+        assert_eq!(w.break_glass.pending_audits().len(), 1);
+        assert!(
+            w.break_glass.entries()[0].guardian.as_deref() == Some(&guardian.pubkey().to_hex()),
+            "stamped with the guardian"
+        );
+        w.break_glass.clear_audits();
+
+        // The spool cannot be read: the unlock still happens, the journal
+        // refuses, and the answer says so.
+        let spool = w.break_glass.spool_path();
+        std::fs::create_dir_all(&spool).unwrap();
+        let bad: serde_json::Value = serde_json::from_str(&w.break_glass(now + 5)).unwrap();
+        assert_eq!(bad["allowed"], json!(true));
+        assert_eq!(bad["journaled"], json!(false));
+        assert!(
+            w.break_glass.window().is_some(),
+            "the glass is broken anyway"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -7541,6 +7689,7 @@ mod tests {
         assert_eq!(w.emergency_call_used(t0), r#"{"ok":true}"#);
         let held = w.break_glass.wraps_to_publish(
             t0,
+            w.guardian_hex().as_deref(),
             |tags| relay.build_audit_wrap(tags.to_vec(), t0),
             |_| {},
         );

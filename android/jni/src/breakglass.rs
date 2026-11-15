@@ -20,6 +20,8 @@
 //! transparency is what starts it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use charter_primitives::{EventId, NostrEvent};
 use charter_transport::nip59::MAX_JITTER_SECS;
@@ -67,6 +69,24 @@ pub struct SpooledAudit {
     pub tags: Vec<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<NostrEvent>,
+    /// The guardian (hex public key) this audit was journaled under. An entry
+    /// stamped for a different guardian is never sent to the current one; an
+    /// unstamped (legacy) entry is treated as the current guardian's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardian: Option<String>,
+}
+
+impl SpooledAudit {
+    /// May this entry go to `current`? Unstamped entries (written before the
+    /// stamp existed) are the current guardian's, as they always were; a
+    /// stamped one is only ever the stamping guardian's.
+    fn belongs_to(&self, current: Option<&str>) -> bool {
+        match (&self.guardian, current) {
+            (None, _) => true,
+            (Some(stamp), Some(current)) => stamp == current,
+            (Some(_), None) => false,
+        }
+    }
 }
 
 /// A spool entry as stored: the current shape, or the tags-only list an
@@ -74,7 +94,7 @@ pub struct SpooledAudit {
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum StoredAudit {
-    Entry(SpooledAudit),
+    Entry(Box<SpooledAudit>),
     Legacy(Vec<Vec<String>>),
 }
 
@@ -111,22 +131,41 @@ fn write_durably(tmp: &Path, dest: &Path, bytes: &[u8]) -> bool {
 /// How many moved-aside unreadable spools are kept.
 const KEEP_BAD_SPOOLS: usize = 3;
 
+/// A spool that cannot be read for a reason other than "missing", "not UTF-8"
+/// or "does not parse" (EIO, EACCES) may heal on its own, so it is left alone
+/// at first. Once this many loads in a row have failed, over at least
+/// [`PERSISTENT_FAILURE_SPAN`], it is persistent: it is set aside and the
+/// journal starts afresh, so a press is never silently unjournaled for good.
+const PERSISTENT_FAILURE_LOADS: u32 = 4;
+const PERSISTENT_FAILURE_SPAN: Duration = Duration::from_secs(60);
+
+/// Consecutive failed spool loads, in memory only.
+#[derive(Default)]
+struct LoadFailures {
+    count: u32,
+    first: Option<Instant>,
+}
+
 /// Durable store for the window + the audit spool.
 pub struct BreakGlass {
     dir: PathBuf,
+    failures: Mutex<LoadFailures>,
 }
 
 impl BreakGlass {
     pub fn new(base: &Path) -> BreakGlass {
         let dir = base.join("breakglass");
         let _ = std::fs::create_dir_all(&dir);
-        BreakGlass { dir }
+        BreakGlass {
+            dir,
+            failures: Mutex::new(LoadFailures::default()),
+        }
     }
 
     fn window_path(&self) -> PathBuf {
         self.dir.join("window.json")
     }
-    fn spool_path(&self) -> PathBuf {
+    pub(crate) fn spool_path(&self) -> PathBuf {
         self.dir.join("pending-audits.json")
     }
 
@@ -151,14 +190,23 @@ impl BreakGlass {
     /// immediately regardless of the network, and this rides out on the next
     /// successful poll.
     ///
+    /// The entry is stamped with `guardian` (hex public key), the guardian the
+    /// phone is paired to now, so that it can only ever be sent to that one.
+    ///
     /// Refuses (false) when the spool exists but cannot be read right now:
     /// writing would replace entries that were never read, so the caller's
-    /// retry, or the break-glass log line, takes over instead.
-    pub fn queue_audit(&self, tags: Vec<Vec<String>>) -> bool {
+    /// retry, or the break-glass log line, takes over instead. A spool that
+    /// stays unreadable is set aside after several loads in a row (see
+    /// [`PERSISTENT_FAILURE_LOADS`]), so the refusal does not last for ever.
+    pub fn queue_audit(&self, tags: Vec<Vec<String>>, guardian: Option<&str>) -> bool {
         let Some(mut all) = self.load() else {
             return false;
         };
-        all.push(SpooledAudit { tags, wrap: None });
+        all.push(SpooledAudit {
+            tags,
+            wrap: None,
+            guardian: guardian.map(str::to_owned),
+        });
         self.write_entries(&all)
     }
 
@@ -178,7 +226,8 @@ impl BreakGlass {
     ///
     /// Any OTHER read error (a transient I/O error, a denial) is not evidence
     /// the spool is bad: it reads as empty here and nothing is renamed, so the
-    /// next round reads it again. A caller that is about to WRITE must use
+    /// next round reads it again (until the error has persisted, when the spool
+    /// is set aside: see [`BreakGlass::load`]). A caller that is about to WRITE must use
     /// [`BreakGlass::load`] instead, so that a write never replaces a spool it
     /// could not read.
     pub fn entries(&self) -> Vec<SpooledAudit> {
@@ -188,7 +237,58 @@ impl BreakGlass {
     /// As [`BreakGlass::entries`], but a spool that could not be read for a
     /// reason other than "missing", "not UTF-8" or "does not parse" is `None`
     /// (after one retry), not empty.
+    ///
+    /// Counts consecutive failures: the fourth, at least a minute after the
+    /// first, sets the spool aside (or removes it when it cannot be renamed)
+    /// and reads as empty, so the journal can start again. Any load that
+    /// reads, or finds the spool missing or damaged, ends the run.
     fn load(&self) -> Option<Vec<SpooledAudit>> {
+        self.load_at(Instant::now())
+    }
+
+    fn load_at(&self, now: Instant) -> Option<Vec<SpooledAudit>> {
+        let loaded = self.try_load();
+        let mut f = self.failures.lock().unwrap_or_else(|p| p.into_inner());
+        if loaded.is_some() {
+            *f = LoadFailures::default();
+            return loaded;
+        }
+        let first = *f.first.get_or_insert(now);
+        f.count = f.count.saturating_add(1);
+        if f.count < PERSISTENT_FAILURE_LOADS
+            || now.saturating_duration_since(first) < PERSISTENT_FAILURE_SPAN
+        {
+            return None;
+        }
+        eprintln!(
+            "charter: break-glass spool unreadable {} times in a row; setting it aside",
+            f.count
+        );
+        if self.set_aside_or_remove() {
+            *f = LoadFailures::default();
+            Some(Vec::new())
+        } else {
+            None
+        }
+    }
+
+    /// Move the spool aside; failing that, remove it, so that a spool nobody
+    /// can read stops standing in the way. Whether the spool is gone.
+    fn set_aside_or_remove(&self) -> bool {
+        if self.set_spool_aside() {
+            return true;
+        }
+        let path = self.spool_path();
+        let removed = std::fs::remove_file(&path)
+            .or_else(|_| std::fs::remove_dir_all(&path))
+            .is_ok();
+        if removed {
+            eprintln!("charter: break-glass spool removed (it could not be set aside)");
+        }
+        removed || !path.exists()
+    }
+
+    fn try_load(&self) -> Option<Vec<SpooledAudit>> {
         let path = self.spool_path();
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -220,8 +320,12 @@ impl BreakGlass {
             Ok(list) => Some(
                 list.into_iter()
                     .map(|e| match e {
-                        StoredAudit::Entry(e) => e,
-                        StoredAudit::Legacy(tags) => SpooledAudit { tags, wrap: None },
+                        StoredAudit::Entry(e) => *e,
+                        StoredAudit::Legacy(tags) => SpooledAudit {
+                            tags,
+                            wrap: None,
+                            guardian: None,
+                        },
                     })
                     .collect(),
             ),
@@ -237,7 +341,7 @@ impl BreakGlass {
     /// overwriting an earlier one), keeping the newest [`KEEP_BAD_SPOOLS`] of
     /// them, so the data stays on the phone for recovery and the next write
     /// starts a fresh file.
-    fn set_spool_aside(&self) {
+    fn set_spool_aside(&self) -> bool {
         const PREFIX: &str = "pending-audits.json.bad-";
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -267,7 +371,7 @@ impl BreakGlass {
                 "charter: break-glass spool could not be set aside ({:?})",
                 e.kind()
             );
-            return;
+            return false;
         }
         eprintln!("charter: break-glass spool set aside as {PREFIX}{stamp}");
         let mut bad = existing(&self.dir);
@@ -275,6 +379,7 @@ impl BreakGlass {
         for (_, path) in bad.into_iter().skip(KEEP_BAD_SPOOLS) {
             let _ = std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path));
         }
+        true
     }
 
     /// Write the spool (atomically: a temporary file renamed over it, so a
@@ -305,16 +410,28 @@ impl BreakGlass {
     /// guardian's freshness window. An entry is never dropped for its age; one
     /// whose build fails keeps waiting and is tried again next round.
     ///
+    /// `guardian` is the guardian the phone is paired to now (hex public key).
+    /// An entry stamped for any other guardian is dropped from the journal
+    /// here, unbuilt and unsent: it was pressed under someone else and must
+    /// never reach this one. An unstamped (legacy) entry is this guardian's.
+    ///
     /// If the journal cannot be written (a full disk) nothing is offered: an
     /// offer made for a wrap the journal does not hold would be followed by
     /// another, with a new id, every round.
     pub fn wraps_to_publish(
         &self,
         now: u64,
+        guardian: Option<&str>,
         mut build: impl FnMut(&[Vec<String>]) -> Option<NostrEvent>,
         mut offer: impl FnMut(&NostrEvent),
     ) -> Vec<NostrEvent> {
         let mut all = self.entries();
+        let held = all.len();
+        all.retain(|e| e.belongs_to(guardian));
+        let foreign = all.len() != held;
+        if foreign {
+            eprintln!("charter: dropping held audits that belong to another guardian");
+        }
         let mut fresh: Vec<NostrEvent> = Vec::new();
         for e in all.iter_mut() {
             let due = e
@@ -329,7 +446,7 @@ impl BreakGlass {
                 e.wrap = Some(w);
             }
         }
-        if !fresh.is_empty() {
+        if !fresh.is_empty() || foreign {
             if self.write_entries(&all) {
                 for w in &fresh {
                     offer(w);
@@ -352,6 +469,28 @@ impl BreakGlass {
         if all.len() != before {
             self.write_entries(&all);
         }
+    }
+
+    /// The audits to send the guardian that is releasing this phone, for its
+    /// one best-effort publish: those stamped for it or unstamped, oldest
+    /// first. Unlike [`BreakGlass::entries`] this never leaves an unreadable
+    /// spool in place: after a release there is no next round for this
+    /// guardian, and what a later round could read would be sent to the next
+    /// one. A spool that cannot be read now is set aside (removed if it cannot
+    /// be), and reads as empty.
+    pub fn take_for_release(&self, guardian: Option<&str>) -> Vec<SpooledAudit> {
+        let mut all = match self.load() {
+            Some(all) => all,
+            None => {
+                eprintln!("charter: break-glass spool unreadable at a release; setting it aside");
+                if !self.set_aside_or_remove() {
+                    eprintln!("charter: the unreadable spool could not be set aside or removed");
+                }
+                Vec::new()
+            }
+        };
+        all.retain(|e| e.belongs_to(guardian));
+        all
     }
 
     /// Drain the spool (a guardian's release, once its held audits have had
@@ -442,8 +581,8 @@ mod tests {
         let base = tmp("spool");
         let bg = BreakGlass::new(&base);
         assert!(bg.pending_audits().is_empty());
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
-        bg.queue_audit(audit_tags(SCOPE_CALLS, 300, T0));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0), None);
+        bg.queue_audit(audit_tags(SCOPE_CALLS, 300, T0), None);
         let reopened = BreakGlass::new(&base);
         let pending = reopened.pending_audits();
         assert_eq!(pending.len(), 2, "offline audits survive a restart");
@@ -479,24 +618,24 @@ mod tests {
     fn each_audit_is_built_once_and_dropped_only_when_sent() {
         let base = tmp("once");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0), None);
         let mut builds = 0u8;
         let mut build = |_: &[Vec<String>]| {
             builds += 1;
             Some(fake_wrap(builds))
         };
         let mut offered = Vec::new();
-        let first = bg.wraps_to_publish(T0, &mut build, |w| offered.push(w.id));
-        let again =
-            BreakGlass::new(&base).wraps_to_publish(T0 + 60, &mut build, |w| offered.push(w.id));
+        let first = bg.wraps_to_publish(T0, None, &mut build, |w| offered.push(w.id));
+        let again = BreakGlass::new(&base)
+            .wraps_to_publish(T0 + 60, None, &mut build, |w| offered.push(w.id));
         assert_eq!(
             first, again,
             "the stored wrap is reused, across restarts too"
         );
         assert_eq!(first.len(), 1);
         // A second audit gets its own wrap; the first keeps its own.
-        bg.queue_audit(audit_tags(SCOPE_CALLS, 300, T0));
-        let both = bg.wraps_to_publish(T0 + 120, &mut build, |w| offered.push(w.id));
+        bg.queue_audit(audit_tags(SCOPE_CALLS, 300, T0), None);
+        let both = bg.wraps_to_publish(T0 + 120, None, &mut build, |w| offered.push(w.id));
         assert_eq!(builds, 2);
         assert_eq!(
             offered,
@@ -528,7 +667,7 @@ mod tests {
         assert!(legacy[0].iter().all(|t| t[0] != "at"));
         std::fs::write(bg.spool_path(), serde_json::to_string(&legacy).unwrap()).unwrap();
         assert_eq!(bg.pending_audits(), legacy);
-        let wraps = bg.wraps_to_publish(T0, |_| Some(fake_wrap(9)), |_| {});
+        let wraps = bg.wraps_to_publish(T0, None, |_| Some(fake_wrap(9)), |_| {});
         assert_eq!(wraps, vec![fake_wrap(9)]);
         assert_eq!(bg.entries()[0].wrap, Some(fake_wrap(9)));
         let _ = std::fs::remove_dir_all(&base);
@@ -542,12 +681,13 @@ mod tests {
     fn a_wrap_waiting_over_a_day_is_rebuilt_once_and_never_sent_stale() {
         let base = tmp("stale");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0), None);
         let mut n = 0u8;
         let mut offered = Vec::new();
         let mut round = |now: u64, offered: &mut Vec<NostrEvent>| {
             bg.wraps_to_publish(
                 now,
+                None,
                 |_| {
                     n += 1;
                     Some(fake_wrap_at(n, now))
@@ -577,7 +717,7 @@ mod tests {
         // A wrap already outside the window (a clock that jumped) whose
         // rebuild fails is kept, but never handed out to publish.
         let far = T0 + 10 * REBUILD_AFTER_SECS;
-        let none = bg.wraps_to_publish(far, |_| None, |_| panic!("nothing new to offer"));
+        let none = bg.wraps_to_publish(far, None, |_| None, |_| panic!("nothing new to offer"));
         assert!(
             none.is_empty(),
             "a wrap the guardian would refuse is not sent"
@@ -593,17 +733,17 @@ mod tests {
     fn a_wrap_that_could_not_be_journaled_is_not_offered() {
         let base = tmp("nodisk");
         let bg = BreakGlass::new(&base);
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0), None);
         // The temporary file's name is taken by a directory: the write fails.
         std::fs::create_dir_all(bg.dir.join("pending-audits.json.tmp")).unwrap();
         let mut offers = 0;
-        let wraps = bg.wraps_to_publish(T0, |_| Some(fake_wrap(4)), |_| offers += 1);
+        let wraps = bg.wraps_to_publish(T0, None, |_| Some(fake_wrap(4)), |_| offers += 1);
         assert_eq!(offers, 0, "not offered while unjournaled");
         assert_eq!(wraps.len(), 1, "the relays still get it");
         assert_eq!(bg.entries()[0].wrap, None, "the journal is unchanged");
         // The disk recovers: journaled, then offered, once.
         std::fs::remove_dir_all(bg.dir.join("pending-audits.json.tmp")).unwrap();
-        let wraps = bg.wraps_to_publish(T0 + 15, |_| Some(fake_wrap(5)), |_| offers += 1);
+        let wraps = bg.wraps_to_publish(T0 + 15, None, |_| Some(fake_wrap(5)), |_| offers += 1);
         assert_eq!(offers, 1);
         assert_eq!(bg.entries()[0].wrap, Some(wraps[0].clone()));
         let _ = std::fs::remove_dir_all(&base);
@@ -654,8 +794,8 @@ mod tests {
             std::fs::read_to_string(bg.window_path()).unwrap(),
             serde_json::to_string(&w).unwrap()
         );
-        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
-        assert!(bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0)));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), None));
+        assert!(bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0), None));
         let expected = serde_json::to_string(&bg.entries()).unwrap();
         assert_eq!(
             std::fs::read_to_string(bg.spool_path()).unwrap(),
@@ -691,7 +831,7 @@ mod tests {
         let bg = BreakGlass::new(&base);
         assert!(bg.entries().is_empty());
         assert!(bad_files(&bg).is_empty());
-        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), None));
         assert_eq!(bg.entries().len(), 1);
         assert!(bad_files(&bg).is_empty());
         let _ = std::fs::remove_dir_all(&base);
@@ -705,7 +845,7 @@ mod tests {
         let bg = BreakGlass::new(&base);
         let damaged = b"[[[\"outcome\",\"override\"],[\"op\",\"unlock.bre";
         std::fs::write(bg.spool_path(), damaged).unwrap();
-        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), None));
         let kept = bad_files(&bg);
         assert_eq!(kept.len(), 1, "the damaged spool is kept");
         assert_eq!(std::fs::read(bg.dir.join(&kept[0])).unwrap(), damaged);
@@ -737,7 +877,7 @@ mod tests {
         let bg = BreakGlass::new(&base);
         let damaged = [0xff, 0xfe, 0x00, 0x5b, 0xc3];
         std::fs::write(bg.spool_path(), damaged).unwrap();
-        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), None));
         let kept = bad_files(&bg);
         assert_eq!(kept.len(), 1);
         assert_eq!(std::fs::read(bg.dir.join(&kept[0])).unwrap(), damaged);
@@ -758,10 +898,18 @@ mod tests {
         std::fs::write(bg.spool_path().join("marker"), b"x").unwrap();
 
         assert!(bg.entries().is_empty());
-        let wraps = bg.wraps_to_publish(T0, |_| panic!("nothing to build"), |_| panic!("nothing"));
+        let wraps = bg.wraps_to_publish(
+            T0,
+            None,
+            |_| panic!("nothing to build"),
+            |_| panic!("nothing"),
+        );
         assert!(wraps.is_empty());
         bg.mark_sent(&[]);
-        assert!(!bg.queue_audit(emergency_call_audit_tags(T0)), "refused");
+        assert!(
+            !bg.queue_audit(emergency_call_audit_tags(T0), None),
+            "refused"
+        );
 
         assert!(bad_files(&bg).is_empty(), "nothing renamed aside");
         assert!(bg.spool_path().is_dir(), "the spool is still in place");
@@ -769,8 +917,159 @@ mod tests {
 
         // The error clears: the same spool path is read normally again.
         std::fs::remove_dir_all(bg.spool_path()).unwrap();
-        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), None));
         assert_eq!(bg.entries().len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S3: a read error that persists no longer silences the journal for good.
+    /// Four loads in a row fail over at least a minute: the spool is set aside
+    /// whole and the next press is journaled into a fresh file. A load that
+    /// succeeds in between starts the count again, and four in under a minute
+    /// are not yet enough.
+    #[test]
+    fn a_persistent_read_error_sets_the_spool_aside_and_journals_afresh() {
+        let base = tmp("persist");
+        let bg = BreakGlass::new(&base);
+        std::fs::create_dir_all(bg.spool_path()).unwrap();
+        std::fs::write(bg.spool_path().join("marker"), b"x").unwrap();
+        let t = Instant::now();
+        let at = |secs: u64| t + Duration::from_secs(secs);
+
+        // Four failures inside a minute are not persistent yet.
+        for secs in [0, 5, 10, 15] {
+            assert!(bg.load_at(at(secs)).is_none());
+        }
+        assert!(bad_files(&bg).is_empty(), "under a minute: left in place");
+        assert!(bg.spool_path().is_dir());
+
+        // A good read in between ends the run.
+        std::fs::remove_dir_all(bg.spool_path()).unwrap();
+        assert_eq!(bg.load_at(at(20)), Some(Vec::new()));
+        std::fs::create_dir_all(bg.spool_path()).unwrap();
+        std::fs::write(bg.spool_path().join("marker"), b"x").unwrap();
+        for secs in [30, 60, 80] {
+            assert!(bg.load_at(at(secs)).is_none(), "the run began again at 30");
+        }
+        assert!(bad_files(&bg).is_empty());
+
+        // The fourth failure since 30 s, 60 s after the first: set aside.
+        assert_eq!(bg.load_at(at(90)), Some(Vec::new()));
+        let kept = bad_files(&bg);
+        assert_eq!(kept.len(), 1);
+        assert!(
+            bg.dir.join(&kept[0]).join("marker").exists(),
+            "the unreadable spool is kept whole on the phone"
+        );
+        assert!(!bg.spool_path().exists());
+
+        // The journal works again, and a later poll of the fresh file is clean.
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), None));
+        assert_eq!(bg.entries().len(), 1);
+        assert_eq!(bad_files(&bg).len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S3, end to end through the real clock: a press is refused while the
+    /// error is young, the failures are counted by every reader (a poll's read
+    /// counts as much as a press's), and the count survives only in memory.
+    #[test]
+    fn every_reader_counts_towards_a_persistent_read_error() {
+        let base = tmp("persist-readers");
+        let bg = BreakGlass::new(&base);
+        std::fs::create_dir_all(bg.spool_path()).unwrap();
+        assert!(!bg.queue_audit(emergency_call_audit_tags(T0), None));
+        assert!(bg.entries().is_empty());
+        bg.mark_sent(&[]);
+        assert!(!bg.queue_audit(emergency_call_audit_tags(T0), None));
+        // A new handle (a restart) starts the count over.
+        let again = BreakGlass::new(&base);
+        assert!(!again.queue_audit(emergency_call_audit_tags(T0), None));
+        assert!(bad_files(&again).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S4: an entry is stamped with the guardian it was journaled under, and
+    /// is never sent to another one. The stamp is dropped with the entry, never
+    /// built, offered or published; an unstamped legacy entry is the current
+    /// guardian's.
+    #[test]
+    fn an_entry_stamped_for_another_guardian_is_never_sent_to_this_one() {
+        let base = tmp("stamp");
+        let bg = BreakGlass::new(&base);
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), Some("aa")));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0 + 1), None));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0 + 2), Some("bb")));
+        assert_eq!(bg.entries()[0].guardian.as_deref(), Some("aa"));
+        assert_eq!(bg.entries()[1].guardian, None);
+
+        let mut built = Vec::new();
+        let wraps = bg.wraps_to_publish(
+            T0,
+            Some("bb"),
+            |tags| {
+                built.push(tags.to_vec());
+                Some(fake_wrap(built.len() as u8))
+            },
+            |_| {},
+        );
+        assert_eq!(wraps.len(), 2, "this guardian's and the legacy one");
+        assert_eq!(
+            built,
+            vec![
+                emergency_call_audit_tags(T0 + 1),
+                emergency_call_audit_tags(T0 + 2)
+            ],
+            "the other guardian's entry was never even built"
+        );
+        let left = bg.entries();
+        assert_eq!(left.len(), 2, "the foreign entry is gone from the journal");
+        assert!(left.iter().all(|e| e.guardian.as_deref() != Some("aa")));
+
+        // With no guardian at all, only unstamped entries can go.
+        let none = bg.wraps_to_publish(T0, None, |_| Some(fake_wrap(7)), |_| {});
+        assert_eq!(none.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S4: an entry that was dropped as foreign is dropped even when nothing
+    /// else changed (no wrap to store), so it cannot wait for a later round.
+    #[test]
+    fn a_foreign_entry_is_dropped_even_when_nothing_is_built() {
+        let base = tmp("stamp-only");
+        let bg = BreakGlass::new(&base);
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), Some("aa")));
+        let wraps = bg.wraps_to_publish(
+            T0,
+            Some("bb"),
+            |_| panic!("nothing to build"),
+            |_| panic!("nothing to offer"),
+        );
+        assert!(wraps.is_empty());
+        assert!(bg.entries().is_empty());
+        assert!(!bg.spool_path().exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S4: a release reads the spool with `load`, so an unreadable one is set
+    /// aside rather than left for a later round; the entries it does read are
+    /// only this guardian's own.
+    #[test]
+    fn a_release_sets_an_unreadable_spool_aside() {
+        let base = tmp("release-unreadable");
+        let bg = BreakGlass::new(&base);
+        std::fs::create_dir_all(bg.spool_path()).unwrap();
+        std::fs::write(bg.spool_path().join("marker"), b"x").unwrap();
+        assert!(bg.take_for_release(Some("aa")).is_empty());
+        assert!(!bg.spool_path().exists(), "no later round can read it");
+        assert_eq!(bad_files(&bg).len(), 1, "kept whole on the phone");
+
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0), Some("aa")));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0 + 1), Some("bb")));
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0 + 2), None));
+        let held = bg.take_for_release(Some("aa"));
+        assert_eq!(held.len(), 2, "its own and the unstamped one");
+        assert!(held.iter().all(|e| e.guardian.as_deref() != Some("bb")));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -802,8 +1101,8 @@ mod tests {
         let base = tmp("clear");
         let bg = BreakGlass::new(&base);
         assert!(bg.clear_audits());
-        bg.queue_audit(emergency_call_audit_tags(T0));
-        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
+        bg.queue_audit(emergency_call_audit_tags(T0), None);
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0), None);
         assert_eq!(bg.entries().len(), 2);
         assert!(bg.clear_audits());
         assert!(bg.entries().is_empty());

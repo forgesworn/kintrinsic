@@ -611,8 +611,11 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterL
 }
 
 /// The ward breaks the glass: an immediate emergency unlock, loudly
-/// journaled for the guardian. Returns `{"allowed",...}` JSON. Refused only
-/// when the guardian hasn't enabled it — never for lack of network.
+/// journaled for the guardian. Returns `{"allowed",...}` JSON: on success
+/// `{"allowed":true,"scope","secsLeft","journaled":bool}` (`journaled` false
+/// means the guardian may never be told; absent reads as true), otherwise
+/// `{"allowed":false,"reason"}`. Refused only when the guardian hasn't enabled
+/// it — never for lack of network.
 #[no_mangle]
 pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterBreakGlass(
     env: JNIEnv,
