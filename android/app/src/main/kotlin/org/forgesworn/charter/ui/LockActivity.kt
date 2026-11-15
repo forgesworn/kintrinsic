@@ -156,10 +156,15 @@ class LockActivity : Activity() {
             val read = runCatching {
                 org.forgesworn.charter.enforce.FileScreenLockHistory.get(this@LockActivity).records()
             }.getOrNull()
+            // Formatting is guarded too: a damaged record (an out-of-range time)
+            // must never crash the shade in a loop during a lockout, so it keeps
+            // the line already shown, as an unreadable history does.
             val notice = if (read == null) {
                 screenLockNotice
             } else {
-                org.forgesworn.charter.enforce.ScreenLockCopy.currentNotice(read, java.time.ZoneId.systemDefault())
+                runCatching {
+                    org.forgesworn.charter.enforce.ScreenLockCopy.currentNotice(read, java.time.ZoneId.systemDefault())
+                }.getOrElse { screenLockNotice }
             }
             screenLockNotice = notice
             val unlock = unlockWanted()

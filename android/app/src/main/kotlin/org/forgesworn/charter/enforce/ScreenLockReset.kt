@@ -345,7 +345,8 @@ class ScreenLockResetStep(
      *  only a good read with nothing to tell takes the notice down. */
     fun noticeTick() {
         val records = runCatching { history.records() }.getOrNull() ?: return
-        val text = ScreenLockCopy.currentNotice(records, zone())
+        // A damaged record that will not format keeps whatever is showing too.
+        val text = runCatching { ScreenLockCopy.currentNotice(records, zone()) }.getOrElse { return }
         if (text == null) notice.hide() else notice.show(text)
     }
 
