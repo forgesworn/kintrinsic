@@ -84,8 +84,9 @@ internal class CallCountdown(
  * main thread.
  *
  * - **One at a time.** While a press is counting, no other button starts one
- *   ([start] refuses), so a second press can never abandon the first one's
- *   routing, nor replace its advice.
+ *   ([start] refuses), so two countdowns never run at once, and a second one
+ *   can never complete in the first one's window and abandon its press. (A
+ *   press begun after a countdown has completed is a new press, as ever.)
  * - **Only in sight.** A countdown is called off, as if the ward had tapped it,
  *   when the screen goes off ([cancelAll]), when a tick runs late in real time
  *   or finds the screen off (see [CallCountdown.tick]), and when a render no

@@ -1911,7 +1911,7 @@ and a fresh one started. Only the newest journal set aside this way, or set
 aside as damaged, is read again: on each good read of the journal, and once it
 parses it is merged back and deleted. It is moved out of the way before the
 merged journal is written, so it is merged once even if it cannot then be
-deleted. Older ones stay on the phone, unread. The ward app hands the report to the warden
+deleted. An older one is not read while a newer one remains. The ward app hands the report to the warden
 before it records the press on the phone, and retries a refused one a few
 times while the process lives. Consumers fold copies of one press by
 `(machine, at)` **per op**, so a break-glass press and an emergency call in the
@@ -1929,7 +1929,7 @@ guardian is ever told to the next. The journal is cleared at once and the
 release never waits for a relay: the publish carries on in the background. A
 journal the phone cannot read at that moment is set aside (kept on the phone,
 never read again by the warden, and removed if it cannot be moved) rather than
-left for a later round. A damaged one (it reads, but does not parse) is set
+left for a later round. A damaged one (not text, or text that does not parse) is set
 aside as any damaged journal is: the warden may read it again, but it never
 parses, so nothing in it is ever merged back. A phone journals an audit only while it is paired, and
 stamps it on the phone with the guardian it is paired to; an older entry with
