@@ -118,19 +118,19 @@ describe("Screen lock card", () => {
     expect(text()).not.toContain("can't reset");
   });
 
-  it("the dialog offers both choices and always says the ward will be told", async () => {
+  it("the dialog offers both choices and always says the ward's phone will tell them", async () => {
     mount(phone);
     await click("Reset screen lock on Robin’s phone");
     expect(text()).toContain("Set a new PIN");
     expect(text()).toContain("Remove the screen lock");
-    expect(text()).toContain("Robin will be told you did this.");
+    expect(text()).toContain("Robin’s phone will tell them, and keep a record of it.");
     await click("Cancel");
     expect(container.querySelector("[role=dialog]")).toBeNull();
     // And again in the remove choice.
     await click("Reset screen lock on Robin’s phone");
     const remove = [...container.querySelectorAll<HTMLInputElement>("input[type=radio]")][1];
     await act(async () => { remove.click(); });
-    expect(text()).toContain("Robin will be told you did this.");
+    expect(text()).toContain("Robin’s phone will tell them, and keep a record of it.");
   });
 
   it("sends a new PIN only when it is 4 to 16 digits and typed twice the same", async () => {

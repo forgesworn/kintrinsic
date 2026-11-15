@@ -2350,9 +2350,11 @@ The carrier subscribes to the union of paired-device relays and public defaults.
 
 A guardian must always be able to get into a ward's phone. The way in is a
 **screen-lock reset**: the guardian sets the phone's own screen lock to a PIN
-they choose, or removes it. It is honest by construction: **the ward is
-always told**. No command, flag or later message can make a reset silent or
-erase the record of it. A ward with no screen lock is normal and supported;
+they choose, or removes it. It is honest by construction: **every reset is
+recorded on the ward's device, where the ward can always look, and the device
+shows the ward a notice**. No command, flag or later message can make a reset
+silent or erase the record of it. Whoever holds the device can dismiss the
+notice, a guardian included; the record stays. A ward with no screen lock is normal and supported;
 nothing here requires one.
 
 This is a one-shot imperative, like the RELEASE (31116, the parent-gated
@@ -2468,8 +2470,10 @@ confirmed: the device may have restarted before the platform took it.
 device-protected storage, never containing a PIN, and shows a notice
 ("Your guardian changed your screen lock at 19:42 on 14 Nov. Ask them for the
 new PIN." / "…removed your screen lock…") until the child acknowledges it on
-the device. Acknowledgement is only ever by the child on the device, never by
-a command. The ward app refuses (answers `failed`) any reset whose `id` its
+the device. Acknowledgement is only ever a tap on the device, never a
+command. The device cannot know who tapped, so a guardian holding the phone
+can dismiss the notice; the history still keeps the reset, with no way to
+delete it. The ward app refuses (answers `failed`) any reset whose `id` its
 history already holds, even one the device core has long since forgotten, and
 every reset it applies starts a new history record with its own unacknowledged
 notice: reusing an old, acknowledged `id` can never make a reset silent.

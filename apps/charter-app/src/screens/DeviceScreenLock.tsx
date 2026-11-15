@@ -20,7 +20,7 @@ const PIN_MASK = { WebkitTextSecurity: "disc" } as React.CSSProperties;
 
 /**
  * One ward phone's screen-lock card: whether it has a lock, a "Reset screen
- * lock" button that sets a new PIN or removes the lock (always telling the ward),
+ * lock" button that sets a new PIN or removes the lock (always shown to the ward and recorded on their phone),
  * and what became of the reset just sent, from the ward's own report. Android
  * wards that report `screenLockSecure` only; everything else shows nothing. A
  * phone Android won't let Kintrinsic reset (`screenLockResetSupported: false`)
@@ -213,7 +213,7 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
                 )}
               </div>
             )}
-            <p className="card-sub">{child.name} will be told you did this.</p>
+            <p className="card-sub">{child.name}’s phone will tell them, and keep a record of it.</p>
             <div className="stack" style={{ marginTop: 6 }}>
               <Button variant="danger" block disabled={!canSend} onClick={() => void send()}>
                 {choice === "remove" ? "Remove the screen lock" : "Set the new PIN"}

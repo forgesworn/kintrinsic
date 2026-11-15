@@ -17,8 +17,10 @@ import java.util.Locale
  * A2, A3, A4, A5, A7).
  *
  * A guardian can always get into a ward phone by resetting its own screen lock
- * to a PIN they choose, or removing it, and the child is always told. The
- * core verifies the signed reset and parks it; this file applies it through
+ * to a PIN they choose, or removing it. The child is shown a notice and keeps
+ * a record of it that no command can delete (whoever holds the phone can
+ * dismiss the notice; the record stays). The core verifies the signed reset
+ * and parks it; this file applies it through
  * the Device Owner's reset-password token and keeps the child's record of it.
  *
  * The record is an append-only JSON-lines file in device-protected storage,
