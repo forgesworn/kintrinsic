@@ -290,12 +290,72 @@ class NotifierTextTest {
         val rows = (1..25).map { Notifier.LiveRow("ask$it", it.toLong()) }.reversed() +
             Notifier.LiveRow(Notifier.TAG_ASK_UNPAIRED, 0L) + Notifier.LiveRow(null, 0L)
         val cancel = Notifier.askRowsToCancel(rows, keep = Notifier.ASK_ROW_CAP - 1)
-        // 25 live, room for the 20th: the oldest six go, oldest first.
-        assertEquals(listOf("ask1", "ask2", "ask3", "ask4", "ask5", "ask6"), cancel)
-        assertEquals(20, Notifier.ASK_ROW_CAP)
-        assertEquals(emptyList<String>(), Notifier.askRowsToCancel(rows.take(10), keep = 19))
+        // 25 live, room for the 10th: the oldest sixteen go, oldest first.
+        assertEquals((1..16).map { "ask$it" }, cancel)
+        assertEquals(10, Notifier.ASK_ROW_CAP)
+        assertEquals(emptyList<String>(), Notifier.askRowsToCancel(rows.take(5), keep = 9))
         // Exactly at the cap before the new one: the oldest one makes room.
-        assertEquals(listOf("ask1"), Notifier.askRowsToCancel((1..20).map { Notifier.LiveRow("ask$it", it.toLong()) }, keep = 19))
+        assertEquals(listOf("ask1"), Notifier.askRowsToCancel((1..10).map { Notifier.LiveRow("ask$it", it.toLong()) }, keep = 9))
+    }
+
+    // ---- the platform's cap on live notifications ------------------------------------------
+
+    private fun ask(i: Int, t: Long = i.toLong()) = Notifier.ShadeRow(Notifier.NOTIF_ID_REQUEST, "ask$i", t)
+    private fun emergency(i: Int, t: Long = i.toLong()) = Notifier.ShadeRow(Notifier.NOTIF_ID_EMERGENCY, "emergency-call-m$i-1", t)
+    private val service = Notifier.ShadeRow(Notifier.SERVICE_NOTIF_ID, null, 0L)
+
+    @Test fun thePlatformAllowsTwentyFiveUpToAndroid11AndFiftyFromAndroid12() {
+        assertEquals(25, Notifier.platformLimit(29))
+        assertEquals(25, Notifier.platformLimit(30))
+        assertEquals(50, Notifier.platformLimit(31))
+        assertEquals(50, Notifier.platformLimit(36))
+        assertEquals(3, Notifier.LIMIT_MARGIN)
+    }
+
+    @Test fun nothingIsCancelledWhileThereIsRoomUnderTheMargin() {
+        // 21 live and one more makes 22 = 25 - 3: still fine on API 29-30.
+        val rows = listOf(service) + (1..20).map { ask(it) }
+        assertEquals(emptyList<Notifier.ShadeRow>(), Notifier.rowsToCancel(rows, "new", Notifier.NOTIF_ID_EMERGENCY, 25))
+        // On API 31+ the same shade has plenty of room.
+        assertEquals(emptyList<Notifier.ShadeRow>(), Notifier.rowsToCancel(rows + (21..40).map { ask(it) }, "new", Notifier.NOTIF_ID_EMERGENCY, 50))
+    }
+
+    @Test fun asksAreEvictedFirstOldestFirstOnTheOlderLimit() {
+        // 23 live: posting one more reaches 24, over the budget of 22 by two.
+        val rows = listOf(service) + (1..10).map { ask(it) } + (1..12).map { emergency(it, 100L + it) }
+        assertEquals(23, rows.size)
+        val cancel = Notifier.rowsToCancel(rows, "new", Notifier.NOTIF_ID_EMERGENCY, Notifier.platformLimit(30))
+        assertEquals(listOf(ask(1), ask(2)), cancel)
+    }
+
+    @Test fun theOldestEmergencyRowGoesOnlyWhenNoAskIsLeftAndTheServiceRowNeverDoes() {
+        val rows = listOf(service) + (1..2).map { ask(it) } + (1..22).map { emergency(it, 100L + it) }
+        // 25 live, budget 22: need to drop 4: both asks, then the two oldest emergency rows.
+        val cancel = Notifier.rowsToCancel(rows.shuffled(java.util.Random(7)), "new", Notifier.NOTIF_ID_EMERGENCY, 25)
+        assertEquals(listOf(ask(1), ask(2), emergency(1, 101), emergency(2, 102)), cancel)
+        assertFalse(service in cancel)
+        // Nothing but the service row and emergency rows: still never the service row.
+        val only = listOf(service) + (1..30).map { emergency(it, it.toLong()) }
+        val c2 = Notifier.rowsToCancel(only, "new", Notifier.NOTIF_ID_EMERGENCY, 25)
+        assertEquals(31 + 1 - 22, c2.size)
+        assertTrue(c2.none { it.id == Notifier.SERVICE_NOTIF_ID })
+        assertEquals((1..10).map { emergency(it, it.toLong()) }, c2)
+    }
+
+    @Test fun theLimitIsFiftyFromApi31() {
+        val rows = listOf(service) + (1..46).map { ask(it) }
+        // 47 live; budget 47: one more is 48 > 47, so one ask goes.
+        assertEquals(listOf(ask(1)), Notifier.rowsToCancel(rows, "new", Notifier.NOTIF_ID_EMERGENCY, Notifier.platformLimit(31)))
+        // The same shade on API 30 needs far more room.
+        assertEquals(26, Notifier.rowsToCancel(rows, "new", Notifier.NOTIF_ID_EMERGENCY, Notifier.platformLimit(30)).size)
+    }
+
+    @Test fun updatingARowAlreadyLiveNeedsNoRoomAndOtherRowsAreNeverTouched() {
+        val rows = listOf(service) + (1..30).map { ask(it) } + emergency(1)
+        assertEquals(emptyList<Notifier.ShadeRow>(), Notifier.rowsToCancel(rows, emergency(1).tag, Notifier.NOTIF_ID_EMERGENCY, 25))
+        val other = Notifier.ShadeRow(99, "x", 0L)
+        val cancel = Notifier.rowsToCancel(listOf(other) + (1..30).map { emergency(it) }, "new", Notifier.NOTIF_ID_EMERGENCY, 25)
+        assertFalse(other in cancel)
     }
 
     // ---- G4: a released machine's live emergency rows are counted by tag --------------------

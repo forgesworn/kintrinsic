@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import org.forgesworn.mycharter.MainActivity
 import org.forgesworn.mycharter.R
@@ -48,8 +49,14 @@ object Notifier {
     /** The one row that every ask from a phone that is not paired shares. */
     internal const val TAG_ASK_UNPAIRED = "ask-unpaired"
 
-    /** Most live ask rows for paired wards; the oldest beyond it is cancelled, so emergency rows always have room. */
-    internal const val ASK_ROW_CAP = 20
+    /** Most live ask rows for paired wards; the oldest beyond it is cancelled, so emergency rows have room. */
+    internal const val ASK_ROW_CAP = 10
+
+    /** Live notifications the platform allows this app: 25 up to Android 11, 50 from Android 12 (API 31). */
+    internal fun platformLimit(sdk: Int): Int = if (sdk >= 31) 50 else 25
+
+    /** Posting stays this far under [platformLimit], so a refusal at the limit never costs an emergency row. */
+    internal const val LIMIT_MARGIN = 3
 
     /** Most live emergency rows for one released machine; more presses update the shared stranger row. */
     internal const val RELEASED_ROW_CAP = 5
@@ -325,7 +332,39 @@ object Notifier {
         // The press time, not the time the guardian's phone heard of it.
         if (whenMillis != null) b.setWhen(whenMillis).setShowWhen(true)
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        makeRoomForEmergency(nm, key)
         nm.notify(key, NOTIF_ID_EMERGENCY, b.build())
+    }
+
+    /** A live notification of this app, any kind: its id, tag and when it was posted. */
+    internal data class ShadeRow(val id: Int, val tag: String?, val postTime: Long)
+
+    /**
+     * Which live rows to cancel so that posting the row ([tag], [id]) stays inside
+     * [limit] minus [LIMIT_MARGIN]. Updating a row already live needs no room. The
+     * rows to go: paired-ward asks first (id [NOTIF_ID_REQUEST], oldest first), then,
+     * if there is still no room, emergency rows (id [NOTIF_ID_EMERGENCY], oldest
+     * first; the press stays in the spool and Activity). Anything else, above all
+     * the service row, is never touched.
+     */
+    internal fun rowsToCancel(rows: List<ShadeRow>, tag: String?, id: Int, limit: Int): List<ShadeRow> {
+        if (rows.any { it.id == id && it.tag == tag }) return emptyList()
+        val excess = rows.size + 1 - (limit - LIMIT_MARGIN)
+        if (excess <= 0) return emptyList()
+        val asks = rows.filter { it.id == NOTIF_ID_REQUEST }.sortedBy { it.postTime }
+        val emergencies = rows.filter { it.id == NOTIF_ID_EMERGENCY }.sortedBy { it.postTime }
+        return (asks + emergencies).take(excess)
+    }
+
+    /** Make room for the emergency row ([tag], [NOTIF_ID_EMERGENCY]) under the platform's cap. */
+    private fun makeRoomForEmergency(nm: NotificationManager, tag: String) {
+        try {
+            val rows = nm.activeNotifications.map { ShadeRow(it.id, it.tag, it.postTime) }
+            rowsToCancel(rows, tag, NOTIF_ID_EMERGENCY, platformLimit(Build.VERSION.SDK_INT))
+                .forEach { nm.cancel(it.tag, it.id) }
+        } catch (_: Throwable) {
+            // Best effort: never let the room-making stop the alert itself.
+        }
     }
 
     /** A live row the shade holds: its tag and when it was posted. */
