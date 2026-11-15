@@ -245,8 +245,10 @@ class CarrierService : Service() {
             sk.fill(0)
         }
         // The ward's emergency controls: the break-glass unlock (the ward
-        // opened their phone) and the emergency-call button (the dialler
-        // opened). Alert NOW — the whole design trades prevention for
+        // opened their phone) and the emergency-call button (the ward used the
+        // button; the ward app asked the phone to open its emergency dialler,
+        // which is not proof the dialler appeared or a call was placed). The
+        // button is alerted on whatever outcome the audit carries. Alert NOW — the whole design trades prevention for
         // immediate transparency, so a late notification breaks the deal.
         if (verdict.optString("type") == "audit") {
             val action = Notifier.auditAction(
@@ -267,46 +269,51 @@ class CarrierService : Service() {
             }
             // The press time the ward stamped, when it is a plain number.
             val at = if (verdict.has("at")) verdict.optLong("at", -1L).takeIf { it >= 0 } else null
-            // Alert ONCE. Every reconnect resubscribes 48h back and the
-            // relay replays the same wrap, so without this the guardian is
-            // re-buzzed about one unlock for two days (seen live: 6 alerts
-            // for one press, 2026-08-09). The audit rumor carries no id of
-            // its own, so the key is the outer wrap id — one wrap is built
-            // per audit and published to every relay, so it also folds the
-            // per-relay copies into one alert. An unreadable id falls
-            // through to notify: a repeated alarm beats a missed emergency.
-            if (wrapId != null && !store.markSeen("audit:$wrapId")) return
-            // Has the console told us its devices yet? If so, a sender not in
-            // that list is not one of this guardian's wards.
-            // An EMPTY roster (a console that booted without its household) is not
-            // evidence that this sender is a stranger, so it keeps the old wording.
-            val rosterKnown = store.knownMachines()?.isNotEmpty() == true
+            // Has the console told us its devices yet? An empty roster (a console
+            // that booted without its household) is not evidence that this sender
+            // is a stranger, so it counts as "not yet", like an absent one. A
+            // released device is still in the roster, so it is not unpaired.
+            val roster = store.roster()
+            val rosterKnown = store.knownRoster() != null
+            // Told once per wrap (replays and per-relay copies fold) and once per
+            // press (a rebuilt wrap has a new id and the same press time; it is
+            // still spooled above, and the console folds by machine and press
+            // time). A sender not in the roster shares ONE row and never enters
+            // the dedup list a paired ward's wraps live in, so a flood of
+            // strangers holds one notification slot and evicts nothing. An
+            // unreadable id falls through to alert: a repeated alarm beats a
+            // missed emergency. See [AuditAdmission].
+            when (val admission = AuditAdmission.decide(store, action, machine, at, wrapId, roster, rosterKnown)) {
+                AuditAdmission.Skip -> return
+                is AuditAdmission.Unpaired -> {
+                    Notifier.notifyUnpaired(this, admission.count)
+                    return
+                }
+                AuditAdmission.Alert -> Unit
+            }
             when (action) {
                 Notifier.AuditAction.UNLOCK -> Notifier.notifyOverride(
                     this,
                     machine = machine,
                     scope = verdict.optString("scope", ""),
                     durationSecs = verdict.optString("durationSecs", "").toLongOrNull() ?: 0L,
-                    roster = store.roster(),
+                    roster = roster,
                     at = at,
                     wrapId = wrapId,
-                    rosterKnown = rosterKnown,
                 )
                 Notifier.AuditAction.EMERGENCY_CALL -> Notifier.notifyEmergencyCall(
                     this,
                     machine = machine,
-                    roster = store.roster(),
+                    roster = roster,
                     at = at,
                     wrapId = wrapId,
-                    rosterKnown = rosterKnown,
                 )
                 Notifier.AuditAction.OTHER_CONTROL -> Notifier.notifyEmergencyControl(
                     this,
                     machine = machine,
-                    roster = store.roster(),
+                    roster = roster,
                     at = at,
                     wrapId = wrapId,
-                    rosterKnown = rosterKnown,
                 )
                 Notifier.AuditAction.IGNORE -> Unit
             }

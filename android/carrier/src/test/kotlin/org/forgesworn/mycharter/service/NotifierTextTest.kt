@@ -1,5 +1,7 @@
 package org.forgesworn.mycharter.service
 
+import android.app.NotificationManager
+import org.forgesworn.mycharter.carrier.CarrierStore
 import org.forgesworn.mycharter.carrier.WardName
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -86,14 +88,55 @@ class NotifierTextTest {
         assertFalse(Notifier.emergencyControlText(who).contains("opened"))
     }
 
-    // ---- a roster miss (L6) -------------------------------------------------
+    @Test fun noEmergencyCopyClaimsTheDiallerOpenedOrACallWasPlaced() {
+        val all = listOf(
+            Notifier.EMERGENCY_CALL_TITLE,
+            Notifier.EMERGENCY_CONTROL_TITLE,
+            Notifier.UNPAIRED_TITLE,
+            Notifier.emergencyCallText(who),
+            Notifier.emergencyCallText(who, released = true),
+            Notifier.emergencyCallText(null),
+            Notifier.unpairedText(3),
+        )
+        for (t in all) {
+            assertFalse(t, t.contains("dialler", ignoreCase = true))
+            assertFalse(t, t.contains("a call was", ignoreCase = true))
+            assertFalse(t, t.contains("called", ignoreCase = true))
+        }
+        assertTrue(Notifier.emergencyCallText(who).contains("used the emergency call button"))
+    }
 
-    @Test fun anUnpairedSenderIsNeverCalledYourWard() {
-        val text = "A device you haven't paired reported an emergency control."
-        assertEquals(text, Notifier.UNPAIRED_TEXT)
-        assertEquals(text, Notifier.emergencyCallText(null, unpaired = true))
-        assertEquals(text, Notifier.emergencyControlText(null, unpaired = true))
-        assertEquals(text, Notifier.overrideText("full", 10, null, unpaired = true))
+    // ---- C4: a device the guardian has since disconnected ---------------------------
+
+    @Test fun aReleasedDevicesAlertNamesTheChildAndDeviceAndSaysItWasBeforeTheDisconnect() {
+        assertEquals(
+            "Mia used the emergency call button on Pixel 6, before you disconnected that phone.",
+            Notifier.emergencyCallText(who, released = true),
+        )
+        assertEquals(
+            "Mia opened their phone (Pixel 6) for 10 minutes, before you disconnected that phone.",
+            Notifier.overrideText("full", 10, who, released = true),
+        )
+        assertEquals(
+            "Mia: an emergency control was used on Pixel 6, before you disconnected that phone",
+            Notifier.emergencyControlText(who, released = true),
+        )
+    }
+
+    @Test fun aDeviceThatIsNotReleasedKeepsTheOriginalWording() {
+        assertEquals("Mia used the emergency call button on Pixel 6.", Notifier.emergencyCallText(who, released = false))
+        assertEquals("Mia opened their phone (Pixel 6) for 10 minutes.", Notifier.overrideText("full", 10, who, released = false))
+    }
+
+    // ---- C2: unpaired senders share one row -------------------------------------------
+
+    @Test fun theUnpairedRowSaysHowManyReportsWithoutNamingAnyone() {
+        assertEquals("Reports from devices you haven't paired: 1", Notifier.unpairedText(1))
+        assertEquals("Reports from devices you haven't paired: 7", Notifier.unpairedText(7))
+        assertEquals("Reports from devices you haven't paired: 1", Notifier.unpairedText(0))
+        val cap = CarrierStore.UNPAIRED_CAP
+        assertEquals("Reports from devices you haven't paired: $cap or more", Notifier.unpairedText(cap))
+        assertFalse(Notifier.unpairedText(2).contains("your ward", ignoreCase = true))
     }
 
     @Test fun onlyAKnownRosterWithNoEntryMakesASenderUnpaired() {
@@ -104,6 +147,38 @@ class NotifierTextTest {
         assertFalse(Notifier.isUnpaired("m2", roster, rosterKnown = false))
         assertFalse(Notifier.isUnpaired("m2", emptyList(), rosterKnown = false))
         assertTrue(Notifier.isUnpaired("m2", emptyList(), rosterKnown = true))
+    }
+
+    @Test fun aReleasedDeviceIsNotUnpaired() {
+        val roster = listOf(RosterEntry("m1", "Mia", "Pixel 6", paired = false, released = true))
+        assertFalse(Notifier.isUnpaired("m1", roster, rosterKnown = true))
+    }
+
+    @Test fun everyRowUsesTheTagFormUnderAFixedId() {
+        // Ids that are not derived from sender-influenced strings; the service row's is its own.
+        val ids = setOf(Notifier.SERVICE_NOTIF_ID, Notifier.NOTIF_ID_EMERGENCY, Notifier.NOTIF_ID_REQUEST)
+        assertEquals(3, ids.size)
+    }
+
+    // ---- C3: the Emergencies channel state, for the console ----------------------------
+
+    @Test fun alertStateSaysWhetherNotificationsAndTheChannelAreOn() {
+        val high = NotificationManager.IMPORTANCE_HIGH
+        assertEquals("""{"notifications":true,"channel":true}""", Notifier.alertStateJson(true, high))
+        assertEquals("""{"notifications":false,"channel":true}""", Notifier.alertStateJson(false, high))
+        assertEquals(
+            """{"notifications":true,"channel":false}""",
+            Notifier.alertStateJson(true, NotificationManager.IMPORTANCE_NONE),
+        )
+        assertEquals("""{"notifications":true,"channel":false}""", Notifier.alertStateJson(true, null))
+        assertEquals("""{"notifications":false,"channel":false}""", Notifier.alertStateJson(false, null))
+    }
+
+    @Test fun aQuietButNotMutedChannelCountsAsOn() {
+        assertEquals(
+            """{"notifications":true,"channel":true}""",
+            Notifier.alertStateJson(true, NotificationManager.IMPORTANCE_LOW),
+        )
     }
 
     // ---- one row per press, and the press time ---------------------------------
@@ -122,9 +197,28 @@ class NotifierTextTest {
 
     @Test fun twoPressesGetTwoRows() {
         assertNotEquals(
-            Notifier.alertKey("emergency-call", "m1", 100L, null).hashCode(),
-            Notifier.alertKey("emergency-call", "m1", 160L, null).hashCode(),
+            Notifier.alertKey("emergency-call", "m1", 100L, null),
+            Notifier.alertKey("emergency-call", "m1", 160L, null),
         )
+    }
+
+    // ---- C6: one press, whichever wrap carries it ---------------------------------
+
+    @Test fun aPressKeyExistsOnlyWhenTheWardStampedATimeAndIgnoresTheWrapId() {
+        assertNull(Notifier.pressKey(Notifier.AuditAction.EMERGENCY_CALL, "m1", null))
+        assertEquals(
+            "press:emergency-call-m1-100",
+            Notifier.pressKey(Notifier.AuditAction.EMERGENCY_CALL, "m1", 100L),
+        )
+        assertEquals("press:override-m1-100", Notifier.pressKey(Notifier.AuditAction.UNLOCK, "m1", 100L))
+        assertEquals("press:emergency-control-m1-100", Notifier.pressKey(Notifier.AuditAction.OTHER_CONTROL, "m1", 100L))
+    }
+
+    @Test fun aPressKeyIsPerMachineAndPerKind() {
+        val call = Notifier.pressKey(Notifier.AuditAction.EMERGENCY_CALL, "m1", 100L)
+        assertNotEquals(call, Notifier.pressKey(Notifier.AuditAction.EMERGENCY_CALL, "m2", 100L))
+        assertNotEquals(call, Notifier.pressKey(Notifier.AuditAction.UNLOCK, "m1", 100L))
+        assertNotEquals(call, Notifier.pressKey(Notifier.AuditAction.EMERGENCY_CALL, "m1", 101L))
     }
 
     @Test fun anUnlockAndACallNeverShareARow() {
@@ -174,8 +268,14 @@ class NotifierTextTest {
         assertEquals(Notifier.AuditAction.OTHER_CONTROL, Notifier.auditAction("override", "Call.Emergency"))
     }
 
-    @Test fun anyOtherOutcomeIsIgnoredWhateverTheOp() {
-        for (op in listOf("call.emergency", "unlock.breakglass", "", "screenlock.reset")) {
+    @Test fun anEmergencyCallAlertsWhateverItsOutcome() {
+        for (outcome in listOf("override", "applied", "failed", "enacted", "", "Override", "something-new")) {
+            assertEquals(outcome, Notifier.AuditAction.EMERGENCY_CALL, Notifier.auditAction(outcome, "call.emergency"))
+        }
+    }
+
+    @Test fun anyOtherOutcomeIsIgnoredWhateverTheOtherOp() {
+        for (op in listOf("unlock.breakglass", "", "screenlock.reset")) {
             for (outcome in listOf("applied", "failed", "enacted", "", "Override")) {
                 assertEquals(Notifier.AuditAction.IGNORE, Notifier.auditAction(outcome, op))
             }
