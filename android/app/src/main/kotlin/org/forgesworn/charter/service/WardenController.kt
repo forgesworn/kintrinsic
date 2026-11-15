@@ -57,6 +57,10 @@ class WardenController(
     /** The guardian's screen-lock reset and the child's notice of it. Null in
      *  tests: its parts are exercised directly in `ScreenLockResetTest`. */
     private val screenLock: org.forgesworn.charter.enforce.ScreenLockResetStep? = null,
+    /** "Activity on this phone": the debugging, pairing and version edges.
+     *  Null in tests: the decisions are exercised directly in
+     *  `ActivityLogTest`. Local only, never sent to the guardian. */
+    private val activity: org.forgesworn.charter.enforce.ActivityWatcher? = null,
 ) {
     private var initialized = false
     /** When [init] last ran (unix secs), and with which mode — so a failed
@@ -399,6 +403,9 @@ class WardenController(
         } finally {
             // Guarded: a throw here must not replace the tick's own.
             guard.run("debugging") { syncDebugging(nowUnix) }
+            // The ward's own log of what is out of the ordinary (pairing,
+            // app updates). Guarded, and never able to change enforcement.
+            activity?.let { watcher -> guard.run("activity") { observeActivity(watcher, nowUnix) } }
             // The screen-lock reset and its notice, on every way out of the
             // tick too: the notice must outlive a release, a failed init and
             // an unreadable pairing (A2, A5). The Device Owner part needs the
@@ -1000,6 +1007,24 @@ class WardenController(
      * Runs after the decisions, so a baseline cleared this tick (a charter
      * going away) is put back in the same tick.
      */
+    private var versionObserved = false
+
+    /** Pairing (once the core is up, so a failed init is never read as an
+     *  unpairing) and, once per process, the app version. The pure decisions
+     *  and the baseline rules are in [org.forgesworn.charter.enforce.ActivityTriggers]. */
+    private fun observeActivity(watcher: org.forgesworn.charter.enforce.ActivityWatcher, nowUnix: Long) {
+        if (!versionObserved) {
+            val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+            if (info != null) {
+                watcher.observeVersion(info.versionName, info.longVersionCode, nowUnix)
+                versionObserved = true
+            }
+        }
+        if (initialized) {
+            watcher.observePairing(runCatching { CharterCore.pairingState() }.getOrNull(), nowUnix)
+        }
+    }
+
     private fun syncDebugging(nowUnix: Long) {
         if (!Provisioning.isDeviceOwner(context)) {
             runCatching { CharterCore.setDebuggingOpen(null) }
@@ -1015,6 +1040,9 @@ class WardenController(
             val debugKey = android.os.UserManager.DISALLOW_DEBUGGING_FEATURES
             val open = runCatching { !restrictions.isRestrictionActive(debugKey) }.getOrNull()
             runCatching { CharterCore.setDebuggingOpen(open) }
+            // The same read-back, for the ward's own log. A null is not an
+            // observation. [until] is only a window end when it is positive.
+            activity?.observeDebugging(open, until.takeIf { it > 0 }, nowUnix)
         }
     }
 
@@ -1197,6 +1225,10 @@ class WardenController(
                     core = org.forgesworn.charter.enforce.CoreScreenLock,
                     notice = org.forgesworn.charter.enforce.NotificationScreenLockNotice(context),
                     log = { Log.i(TAG, it) },
+                ),
+                activity = org.forgesworn.charter.enforce.ActivityWatcher(
+                    log = org.forgesworn.charter.enforce.FileActivityLog.get(context),
+                    memory = org.forgesworn.charter.enforce.PrefsActivityMemory(context),
                 ),
             )
         }

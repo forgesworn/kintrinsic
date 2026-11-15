@@ -519,7 +519,7 @@ class LockActivity : Activity() {
      * is the platform's action for it (Intent.ACTION_DIAL_EMERGENCY, not in the
      * public SDK), so it is resolved first and the old path kept as the fallback.
      */
-    private fun callIntent(number: String, emergency: Boolean): Intent {
+    private fun callIntent(number: String, emergency: Boolean): CallPlan {
         val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
         val isEmergency = emergency || runCatching {
             (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
@@ -532,10 +532,14 @@ class LockActivity : Activity() {
                     Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
             )
             // Only if this phone has one; otherwise the old path, as before.
-            if (dialer.resolveActivity(packageManager) != null) return dialer
+            if (dialer.resolveActivity(packageManager) != null) return CallPlan(dialer, emergency = true)
         }
-        return Intent(Intent.ACTION_CALL, tel)
+        return CallPlan(Intent(Intent.ACTION_CALL, tel), isEmergency)
     }
+
+    /** What a hold-to-call button starts, and whether that is an emergency
+     *  dialer or call (for "Activity on this phone"). */
+    private class CallPlan(val intent: Intent, val emergency: Boolean)
 
     /**
      * A lifeline button with two gates against the pocket-dial (and the
@@ -567,7 +571,18 @@ class LockActivity : Activity() {
 
         fun place() {
             reset()
-            val placed = runCatching { startActivity(callIntent(number, emergency)) }.isSuccess
+            // The emergency entry in "Activity on this phone" is written only
+            // after startActivity has returned, off this thread, and can never
+            // change whether or how the call starts (see EmergencyUse).
+            val appContext = applicationContext
+            val placed = org.forgesworn.charter.enforce.EmergencyUse.placeAndRecord(
+                start = {
+                    val plan = callIntent(number, emergency)
+                    startActivity(plan.intent)
+                    plan.emergency
+                },
+                record = { org.forgesworn.charter.enforce.EmergencyUse.record(appContext) },
+            )
             if (!placed) status.text = "Couldn't start the call — tell your guardian."
         }
 

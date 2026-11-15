@@ -2476,7 +2476,10 @@ can dismiss the notice; the history still keeps the reset, with no way to
 delete it. The ward app refuses (answers `failed`) any reset whose `id` its
 history already holds, even one the device core has long since forgotten, and
 every reset it applies starts a new history record with its own unacknowledged
-notice: reusing an old, acknowledged `id` can never make a reset silent.
+notice: reusing an old, acknowledged `id` can never make a reset silent. The
+ward app's home screen also lists every reset with when its notice was
+acknowledged (or "not seen yet"), alongside other local activity, and none of
+it leaves the device.
 
 **The record survives a release.** The device keeps its last 16 outcomes
 (dropping the earliest recorded first), the answered ids and the floor in
