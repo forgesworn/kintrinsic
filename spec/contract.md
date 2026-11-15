@@ -1878,16 +1878,24 @@ set (the device parses but does not yet act on that flag).
 
 **Emergency call event (ABI 8, ward 0.8.1; additive).** Every time the ward
 holds the lock shade's own emergency-call control to completion, through its
-hold and then its 3-second cancel window (a cancelled countdown emits nothing),
-the device emits the standard device audit with tags `["t","charter-device"]`,
-`["outcome","override"]`, `["op","call.emergency"]`, `["at","<unix secs>"]` —
-content empty. Nothing else rides on it: **never** a number, a duration, a
-reason or any PII. It is reported on every completed press, whether or not a
-route to a dialler resolved, started, threw or was refused. It means: the
-control completed its hold and cancel window, and the ward app asked the phone
-to open its emergency dialler. It is not proof that the dialler appeared or
-that a call was placed. A lifeline entry that merely happens to be an emergency
-number does not emit it.
+hold and then its 3-second cancel window, the device emits the standard device
+audit with tags `["t","charter-device"]`, `["outcome","override"]`,
+`["op","call.emergency"]`, `["at","<unix secs>"]` — content empty. Nothing else
+rides on it: **never** a number, a duration, a reason or any PII. It is reported
+on every completed press, whether or not a route to a dialler resolved, started,
+threw or was refused. A cancelled countdown, including one cancelled by the
+screen going off, emits nothing. The countdown is also cancelled, never
+completed, when the phone slept through part of it, or when the shade stops
+showing its button, since in each case the ward could not have seen or stopped
+it. While one press counts down, no other call button starts a second. It means:
+the control completed its hold and cancel window, and the ward app then tried,
+in turn and as far as each is available, the phone's emergency dialler, the
+phone's own lock screen (which has an Emergency call button), its system dialler
+and, last, a direct call (which may place the call outright). It tries each only
+while its shade is uncovered with the screen on, so a press that completes while
+the shade is covered, or just as the screen goes off, may try none of them. It
+is not proof that anything appeared or that a call was placed. A lifeline entry
+that merely happens to be an emergency number does not emit it.
 
 `at` follows the break-glass rules exactly: the moment the press completed,
 stable across wrap rebuilds; a consumer dates by `at` unless it is later than
@@ -1899,8 +1907,11 @@ waits) and emitted on reconnect. A journal that cannot be read is left alone
 while that may be passing, and a press made meanwhile is reported as not
 journaled; one that stays unreadable across four attempts over at least a
 minute (running out of memory or file descriptors does not count) is set aside
-and a fresh one started. A journal set aside this way is read again, and
-merged back and deleted once it parses. The ward app hands the report to the warden
+and a fresh one started. Only the newest journal set aside this way, or set
+aside as damaged, is read again: on each good read of the journal, and once it
+parses it is merged back and deleted. It is moved out of the way before the
+merged journal is written, so it is merged once even if it cannot then be
+deleted. Older ones stay on the phone, unread. The ward app hands the report to the warden
 before it records the press on the phone, and retries a refused one a few
 times while the process lives. Consumers fold copies of one press by
 `(machine, at)` **per op**, so a break-glass press and an emergency call in the
@@ -1918,7 +1929,9 @@ guardian is ever told to the next. The journal is cleared at once and the
 release never waits for a relay: the publish carries on in the background. A
 journal the phone cannot read at that moment is set aside (kept on the phone,
 never read again by the warden, and removed if it cannot be moved) rather than
-left for a later round. A phone journals an audit only while it is paired, and
+left for a later round. A damaged one (it reads, but does not parse) is set
+aside as any damaged journal is: the warden may read it again, but it never
+parses, so nothing in it is ever merged back. A phone journals an audit only while it is paired, and
 stamps it on the phone with the guardian it is paired to; an older entry with
 no stamp is stamped with the guardian paired when the warden next considers it.
 An audit stamped for one guardian is never sent to another, even if the clear
