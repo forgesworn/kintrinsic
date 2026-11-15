@@ -1876,24 +1876,41 @@ audit kind or a shared `["t","audit"]` + device-outcome vocabulary, and decide
 whether to also wrap audits to the **dependant** when `audit_transparency` is
 set (the device parses but does not yet act on that flag).
 
-**Emergency call event (ABI 8, ward 0.8.1; additive).** When the ward holds the
-lock shade's own emergency-call control to completion and the emergency
-dialler (or emergency call intent) has started successfully, the device emits
-the standard device audit with tags `["t","charter-device"]`,
+**Emergency call event (ABI 8, ward 0.8.1; additive).** Every time the ward
+holds the lock shade's own emergency-call control to completion, through its
+hold and then its 3-second cancel window (a cancelled countdown emits nothing),
+the device emits the standard device audit with tags `["t","charter-device"]`,
 `["outcome","override"]`, `["op","call.emergency"]`, `["at","<unix secs>"]` —
 content empty. Nothing else rides on it: **never** a number, a duration, a
-reason or any PII. It means the shade's own control completed its hold and the
-dialler started; it is **not** proof that a call was placed or connected, and a
-lifeline entry that merely happens to be an emergency number does not emit it.
-`at` follows the break-glass rules exactly: the moment of the press, stable
-across wrap rebuilds; a consumer dates by `at` unless it is later than the
-wrap's `created_at` or more than 30 days old, in which case it dates by
+reason or any PII. It is reported on every completed press, whether or not a
+route to a dialler resolved, started, threw or was refused. It means: the
+control completed its hold and cancel window, and the ward app asked the phone
+to open its emergency dialler. It is not proof that the dialler appeared or
+that a call was placed. A lifeline entry that merely happens to be an emergency
+number does not emit it.
+
+`at` follows the break-glass rules exactly: the moment the press completed,
+stable across wrap rebuilds; a consumer dates by `at` unless it is later than
+the wrap's `created_at` or more than 30 days old, in which case it dates by
 `created_at`. Like the override, it **never waits on the wire**: offline, the
 event is journaled durably (the journal is flushed to disk as it is written, the
-same journal as the override, and one wrap per press however many rounds it waits)
-and emitted on reconnect. Consumers fold copies of one press by `(machine, at)`
-**per op**, so a break-glass press and an emergency call in the same second are
-two events.
+same journal as the override, and one wrap per press however many rounds it
+waits) and emitted on reconnect. The ward app hands the report to the warden
+before it records the press on the phone, and retries a refused one a few
+times while the process lives. Consumers fold copies of one press by
+`(machine, at)` **per op**, so a break-glass press and an emergency call in the
+same second are two events.
+
+On a phone without a usable emergency dialler, the unlocked fallback opens the
+system dialler, where any number can be dialled; the control is reported all
+the same.
+
+**A guardian's release and the held audits.** When a guardian releases the
+phone, the device makes one best-effort publish of every audit still held (this
+event, the override and the screen-lock outcomes) to the guardian doing the
+releasing, and then clears the journal, so nothing a ward pressed under one
+guardian is ever told to the next. A release that arrives with no relay, or to
+relays that refuse, drops them.
 
 The outcome is `override` on purpose: a carrier notifies immediately on any
 `outcome=override` audit, so a carrier that predates this event still alerts
