@@ -1827,7 +1827,9 @@ gift-wrapped-to-guardian audit per decision: tags
 empty**; no child content, exec source path, `time.extend` reason, or DOB ever
 appears. The outcome vocabulary is `enacted | denied | failed | locked | thawed
 | override`, plus, under `["op","screenlock.reset"]`, the screen-lock reset
-results (see "Screen-lock reset").
+results (see "Screen-lock reset"). The `override` outcome carries two ops,
+`["op","unlock.breakglass"]` (the break-glass override) and
+`["op","call.emergency"]` (the emergency call event), both below.
 
 **Break-glass override event (frozen 2026-07-24; design memo
 `docs/superpowers/specs/2026-07-24-lifeline-incall-and-break-glass.md`).**
@@ -1873,6 +1875,32 @@ authored audit feed (`["t","audit"]`); reconcile to either a distinct device-
 audit kind or a shared `["t","audit"]` + device-outcome vocabulary, and decide
 whether to also wrap audits to the **dependant** when `audit_transparency` is
 set (the device parses but does not yet act on that flag).
+
+**Emergency call event (ABI 8, ward 0.8.1; additive).** When the ward holds the
+lock shade's own emergency-call control to completion and the emergency
+dialler (or emergency call intent) has started successfully, the device emits
+the standard device audit with tags `["t","charter-device"]`,
+`["outcome","override"]`, `["op","call.emergency"]`, `["at","<unix secs>"]` —
+content empty. Nothing else rides on it: **never** a number, a duration, a
+reason or any PII. It means the shade's own control completed its hold and the
+dialler started; it is **not** proof that a call was placed or connected, and a
+lifeline entry that merely happens to be an emergency number does not emit it.
+`at` follows the break-glass rules exactly: the moment of the press, stable
+across wrap rebuilds; a consumer dates by `at` unless it is later than the
+wrap's `created_at` or more than 30 days old, in which case it dates by
+`created_at`. Like the override, it **never waits on the wire**: offline, the
+event is journaled durably (the journal is flushed to disk as it is written, the
+same journal as the override, and one wrap per press however many rounds it waits)
+and emitted on reconnect. Consumers fold copies of one press by `(machine, at)`
+**per op**, so a break-glass press and an emergency call in the same second are
+two events.
+
+The outcome is `override` on purpose: a carrier notifies immediately on any
+`outcome=override` audit, so a carrier that predates this event still alerts
+(it fails towards alerting), with the break-glass wording ("Emergency unlock
+used"); a carrier that knows the op words it as an emergency call. A consumer
+meeting an unknown `op` under `outcome=override` SHOULD say that an emergency
+control was used rather than assume an unlock.
 
 ### Device STATUS feed — `CHARTER_DEVICE_STATUS = 31114` (v1 wire; emission deferred)
 
