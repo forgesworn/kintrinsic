@@ -151,13 +151,16 @@ class LockActivity : Activity() {
             }.getOrDefault(false)
             // Level-triggered: on this worker because it is a binder read.
             val closed = Connections.lockedSurfaceClosed(this@LockActivity)
-            // The screen-lock notice (A2): read from the history every pass.
-            val notice = runCatching {
-                org.forgesworn.charter.enforce.ScreenLockCopy.currentNotice(
-                    org.forgesworn.charter.enforce.FileScreenLockHistory.get(this@LockActivity).records(),
-                    java.time.ZoneId.systemDefault(),
-                )
+            // The screen-lock notice (A2): read from the history every pass. A
+            // history that will not read keeps the line already shown.
+            val read = runCatching {
+                org.forgesworn.charter.enforce.FileScreenLockHistory.get(this@LockActivity).records()
             }.getOrNull()
+            val notice = if (read == null) {
+                screenLockNotice
+            } else {
+                org.forgesworn.charter.enforce.ScreenLockCopy.currentNotice(read, java.time.ZoneId.systemDefault())
+            }
             screenLockNotice = notice
             val unlock = unlockWanted()
             val userUnlocked = runCatching {

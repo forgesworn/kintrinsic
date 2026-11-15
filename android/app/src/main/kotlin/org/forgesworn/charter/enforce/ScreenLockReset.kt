@@ -102,20 +102,24 @@ object ScreenLockHistoryFormat {
     }.getOrNull()
 
     /**
-     * Fold lines into records, oldest first. Field by field, never "last line
-     * wins": [ScreenLockRecord.at] and kind come from the id's first line, the
-     * outcome from its latest line that has one, and an acknowledgement, once
-     * made, stays made. An id whose record line was lost still shows (as a
-     * change, `pending` until an outcome says otherwise) rather than vanishing.
+     * Fold lines into records, oldest first. Every record line (one with a
+     * kind) starts a NEW record, even for an id seen before, so a reset can
+     * never inherit an earlier record's acknowledgement and go untold. An
+     * outcome or acknowledgement line belongs to the latest record for its
+     * id. Field by field, never "last line wins": [ScreenLockRecord.at] and
+     * kind come from the record line, the outcome from the latest line that
+     * has one, and an acknowledgement, once made, stays made. An id whose
+     * record line was lost still shows (as a change, `pending` until an
+     * outcome says otherwise) rather than vanishing.
      */
     fun fold(lines: List<ScreenLockLine>): List<ScreenLockRecord> {
-        val order = mutableListOf<String>()
-        val byId = mutableMapOf<String, ScreenLockRecord>()
+        val records = mutableListOf<ScreenLockRecord>()
+        val latest = mutableMapOf<String, Int>()
         for (l in lines) {
-            val prev = byId[l.id]
-            if (prev == null) {
-                order += l.id
-                byId[l.id] = ScreenLockRecord(
+            val at = latest[l.id]
+            if (at == null || l.kind != null) {
+                latest[l.id] = records.size
+                records += ScreenLockRecord(
                     id = l.id,
                     at = l.at,
                     kind = l.kind ?: ScreenLockChange.CHANGED,
@@ -123,13 +127,14 @@ object ScreenLockHistoryFormat {
                     acknowledged = l.acknowledged,
                 )
             } else {
-                byId[l.id] = prev.copy(
+                val prev = records[at]
+                records[at] = prev.copy(
                     outcome = l.outcome ?: prev.outcome,
                     acknowledged = prev.acknowledged || l.acknowledged,
                 )
             }
         }
-        return order.mapNotNull { byId[it] }
+        return records
     }
 
     /** The records the child must still be told about, newest first (A2):
@@ -255,13 +260,17 @@ interface ScreenLockTokenStore {
 interface ScreenLockHistory {
     /** Durable when it returns true. */
     fun append(line: ScreenLockLine): Boolean
-    fun records(): List<ScreenLockRecord>
+    /** Null when the history will not read: never the same as empty, so an
+     *  unreadable history can never hide a notice. */
+    fun records(): List<ScreenLockRecord>?
 }
 
 /** The core's half (JNI). Seam for tests. */
 interface ScreenLockCore {
     fun take(): CharterCore.ScreenLockDirective?
-    fun report(id: String, result: String, atUnix: Long)
+    /** True once the core has taken the outcome (recorded it, or already
+     *  had one for that id); false when it could not, so it is sent again. */
+    fun report(id: String, result: String, atUnix: Long): Boolean
     /** [resetSupported] false: the platform refuses a reset token on this
      *  device for good, so no unlock will make [resetReady] true. */
     fun setState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean)
@@ -310,6 +319,9 @@ class ScreenLockResetStep(
      * one active.
      */
     private var supported = true
+    /** Outcomes the core could not take yet, by id, re-sent every tick until
+     *  it does. Its settle is once per id, so sending one again is harmless. */
+    private val unreported = LinkedHashMap<String, Pair<String, Long>>()
 
     private fun logRefusal(message: String) {
         if (refusalsLogged.add(message)) log(message)
@@ -319,30 +331,54 @@ class ScreenLockResetStep(
     fun platformTick(nowUnix: Long) {
         syncToken(nowUnix)
         val secure = runCatching { platform.isDeviceSecure() }.getOrDefault(false)
-        val ready = tokenActive()
-        if (ready) supported = true
-        core.setState(secure, ready, supported)
+        val active = tokenActive()
+        if (active) supported = true
+        // Ready only when the token the platform holds active is one this app
+        // has: an active token it lacks would answer every reset `not_ready`.
+        val held = runCatching { tokens.load() }.getOrNull() != null
+        core.setState(secure, active && held, supported)
+        resendReports()
         drain(nowUnix)
     }
 
-    /** Every tick. */
+    /** Every tick. A history that will not read keeps whatever is showing:
+     *  only a good read with nothing to tell takes the notice down. */
     fun noticeTick() {
-        val text = ScreenLockCopy.currentNotice(history.records(), zone())
+        val records = runCatching { history.records() }.getOrNull() ?: return
+        val text = ScreenLockCopy.currentNotice(records, zone())
         if (text == null) notice.hide() else notice.show(text)
     }
 
     private fun tokenActive(): Boolean = runCatching { platform.isTokenActive() }.getOrDefault(false)
 
     private fun syncToken(nowUnix: Long) {
-        val stored = runCatching { tokens.load() }.getOrNull()
+        // A read that throws is not "no token": provisioning over it could
+        // replace a token the platform holds active. Try again next tick.
+        val stored = try {
+            tokens.load()
+        } catch (_: Throwable) {
+            return
+        }
         val active = tokenActive()
         if (active) restored = false
         when (ScreenLockTokenPolicy.step(stored != null, active, restored, lastRefusedAt, nowUnix)) {
             ScreenLockTokenStep.NONE -> Unit
             ScreenLockTokenStep.PROVISION -> {
+                if (active) {
+                    // Never silently: it is useless to us without its bytes,
+                    // and on a phone with a PIN the new one waits for an unlock.
+                    logRefusal("the platform holds an active reset token this app does not have: replacing it")
+                }
                 val token = newToken()
-                val taken = setToken(token)
-                if (taken && tokens.save(token)) {
+                // Kept first, then set: the platform never holds a token this
+                // app lacks. A set it refuses leaves the kept token inactive,
+                // which RESTORE retries.
+                if (!runCatching { tokens.save(token) }.getOrDefault(false)) {
+                    lastRefusedAt = nowUnix
+                    logRefusal("screen-lock reset token could not be kept, so it was not set")
+                    return
+                }
+                if (setToken(token)) {
                     // Just set: on a phone with a PIN it is pending until the
                     // next unlock, and setting it again would change nothing.
                     restored = true
@@ -351,7 +387,7 @@ class ScreenLockResetStep(
                     log("screen-lock reset token provisioned")
                 } else {
                     lastRefusedAt = nowUnix
-                    logRefusal("screen-lock reset token not provisioned (platform took it: $taken)")
+                    logRefusal("screen-lock reset token not provisioned (the platform refused it)")
                 }
             }
             ScreenLockTokenStep.RESTORE -> {
@@ -389,12 +425,27 @@ class ScreenLockResetStep(
         val d = core.take() ?: return
         val tag = d.id.take(8)
         val kind = if (d.removes) ScreenLockChange.REMOVED else ScreenLockChange.CHANGED
+        val known = runCatching { history.records() }.getOrNull()
+        if (known == null) {
+            // Its id cannot be checked, and the child may not be told.
+            log("screen-lock reset $tag…: the history will not read, so nothing was changed")
+            report(d.id, ScreenLockOutcome.NOTICE_FAILED, nowUnix)
+            return
+        }
+        if (known.any { it.id == d.id }) {
+            // The core forgets ids in time; the child's history never does. A
+            // reused id must never apply: its record could carry an earlier
+            // acknowledgement, and the child would not be told.
+            log("screen-lock reset $tag…: its id is already in the history, so nothing was changed")
+            report(d.id, ScreenLockOutcome.FAILED, nowUnix)
+            return
+        }
         val recorded = runCatching {
             history.append(ScreenLockLine(d.id, nowUnix, kind = kind, outcome = ScreenLockOutcome.PENDING))
         }.getOrDefault(false)
         if (!recorded) {
             log("screen-lock reset $tag…: no notice could be recorded, so nothing was changed")
-            core.report(d.id, ScreenLockOutcome.NOTICE_FAILED, nowUnix)
+            report(d.id, ScreenLockOutcome.NOTICE_FAILED, nowUnix)
             return
         }
         val token = runCatching { tokens.load() }.getOrNull()
@@ -418,8 +469,28 @@ class ScreenLockResetStep(
         // still tells the child ("may have changed"); the guardian hears the
         // real outcome either way.
         runCatching { history.append(ScreenLockLine(id, nowUnix, outcome = outcome)) }
-        core.report(id, outcome, nowUnix)
+        report(id, outcome, nowUnix)
         log("screen-lock reset $tag…: $outcome")
+    }
+
+    /** Tell the core an outcome; one it cannot take yet is sent again on
+     *  later ticks, so the guardian is not left at `accepted`. */
+    private fun report(id: String, outcome: String, nowUnix: Long) {
+        unreported.remove(id)
+        if (runCatching { core.report(id, outcome, nowUnix) }.getOrDefault(false)) return
+        unreported[id] = outcome to nowUnix
+        while (unreported.size > MAX_UNREPORTED) unreported.remove(unreported.keys.first())
+    }
+
+    private fun resendReports() {
+        for ((id, sent) in unreported.entries.toList()) {
+            if (runCatching { core.report(id, sent.first, sent.second) }.getOrDefault(false)) unreported.remove(id)
+        }
+    }
+
+    private companion object {
+        /** As many as the core's own ring of outcomes. */
+        const val MAX_UNREPORTED = 16
     }
 }
 
@@ -469,7 +540,7 @@ class FileScreenLockHistory(private val file: File) : ScreenLockHistory {
     private var lines: MutableList<ScreenLockLine>? = null
 
     @Synchronized
-    override fun records(): List<ScreenLockRecord> = ScreenLockHistoryFormat.fold(loaded())
+    override fun records(): List<ScreenLockRecord>? = loaded()?.let { ScreenLockHistoryFormat.fold(it) }
 
     @Synchronized
     override fun append(line: ScreenLockLine): Boolean {
@@ -486,7 +557,7 @@ class FileScreenLockHistory(private val file: File) : ScreenLockHistory {
         } catch (_: Throwable) {
             false
         }
-        if (ok) current += line else lines = null // re-read: the file is the truth
+        if (ok && current != null) current += line else lines = null // re-read: the file is the truth
         return ok
     }
 
@@ -498,13 +569,14 @@ class FileScreenLockHistory(private val file: File) : ScreenLockHistory {
         }
     }
 
-    private fun loaded(): MutableList<ScreenLockLine> {
+    /** Null when the file will not read. That is not cached, and never
+     *  read as empty: the next call tries again. */
+    private fun loaded(): MutableList<ScreenLockLine>? {
         lines?.let { return it }
         val read = runCatching {
             if (file.exists()) file.readLines(Charsets.UTF_8).mapNotNull { ScreenLockHistoryFormat.decode(it) } else emptyList()
-        }.getOrNull()
-        // An unreadable file is not cached as empty: the next call tries again.
-        return (read ?: return mutableListOf()).toMutableList().also { lines = it }
+        }.getOrNull() ?: return null
+        return read.toMutableList().also { lines = it }
     }
 
     companion object {
@@ -527,9 +599,8 @@ class FileScreenLockHistory(private val file: File) : ScreenLockHistory {
 /** The JNI half. */
 object CoreScreenLock : ScreenLockCore {
     override fun take(): CharterCore.ScreenLockDirective? = CharterCore.takeScreenLockReset()
-    override fun report(id: String, result: String, atUnix: Long) {
-        CharterCore.reportScreenLockReset(id, result, atUnix)
-    }
+    override fun report(id: String, result: String, atUnix: Long): Boolean =
+        CharterCore.reportScreenLockReset(id, result, atUnix) != null
     override fun setState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean) {
         if (CharterCore.setScreenLockState(secure, resetReady, resetSupported)) {
             Log.i(

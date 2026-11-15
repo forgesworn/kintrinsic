@@ -617,13 +617,14 @@ class MainActivity : Activity() {
             val usageNeeded = runCatching {
                 QrSetup.needsUsageAccess(Provisioning.isDeviceOwner(this), QrSetup.usageOpMode(this))
             }.getOrDefault(false)
+            // Null when the history will not read: the card keeps what it showed.
             val screenLock = runCatching {
                 org.forgesworn.charter.enforce.FileScreenLockHistory.get(this).records()
-            }.getOrDefault(emptyList())
+            }.getOrNull()
             runOnUiThread {
                 render(state, view, tether, groups, askFirst, requests, holds, now, debugging)
                 renderUsageAccess(usageNeeded)
-                renderScreenLock(screenLock)
+                screenLock?.let { renderScreenLock(it) }
             }
         }
     }

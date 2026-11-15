@@ -579,10 +579,13 @@ object CharterCore {
             null
         }
 
-    /** Report a taken reset's outcome. True when the core recorded it. */
-    fun reportScreenLockReset(id: String, result: String, atUnix: Long): Boolean = runCatching {
-        JSONObject(jni().charterReportScreenLockReset(id, result, atUnix)).optBoolean("recorded", false)
-    }.getOrDefault(false)
+    /** Report a taken reset's outcome. True when the core recorded it, false
+     *  when it already had one for that id, null when it could not take it
+     *  (not initialised, or its record would not read): send it again. */
+    fun reportScreenLockReset(id: String, result: String, atUnix: Long): Boolean? = runCatching {
+        val o = JSONObject(jni().charterReportScreenLockReset(id, result, atUnix))
+        if (o.optBoolean("ok", false)) o.optBoolean("recorded", false) else null
+    }.getOrNull()
 
     /** Feed STATUS `screenLockSecure` / `screenLockResetReady` /
      *  `screenLockResetSupported`. True on a change. */
