@@ -312,6 +312,15 @@ pub struct StatusPayload {
     /// lock this turns true after the ward's next unlock. Absent as above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_lock_reset_ready: Option<bool>,
+    /// Android: whether the platform will hold a reset token on this device
+    /// at all. `false` means it refuses one for good: the phone had a screen
+    /// lock and was unlocked before Kintrinsic became its Device Owner, so
+    /// Android switched escrow tokens off, and only setting the device up
+    /// again from a factory reset brings them back. While it is `false`,
+    /// `screen_lock_reset_ready` stays `false` and a reset cannot be applied.
+    /// Absent as above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_lock_reset_supported: Option<bool>,
     /// Android: the outcomes of the most recent guardian screen-lock resets,
     /// one per reset id, newest first, at most
     /// [`MAX_STATUS_SCREEN_LOCK_RESETS`]. Absent until the device has
@@ -555,6 +564,7 @@ mod tests {
             active_time: None,
             screen_lock_secure: None,
             screen_lock_reset_ready: None,
+            screen_lock_reset_supported: None,
             screen_lock_resets: None,
         }
     }
@@ -615,12 +625,14 @@ mod tests {
         for key in [
             "screenLockSecure",
             "screenLockResetReady",
+            "screenLockResetSupported",
             "screenLockResets",
         ] {
             assert!(!json.contains(key), "{key} absent when not reported");
         }
         s.screen_lock_secure = Some(true);
         s.screen_lock_reset_ready = Some(false);
+        s.screen_lock_reset_supported = Some(false);
         s.screen_lock_resets = Some(vec![ScreenLockResetOutcome {
             id: "0123456789abcdef0123456789abcdef".into(),
             result: "applied".into(),
@@ -629,6 +641,10 @@ mod tests {
         let json = s.to_json();
         assert!(json.contains("\"screenLockSecure\":true"), "{json}");
         assert!(json.contains("\"screenLockResetReady\":false"), "{json}");
+        assert!(
+            json.contains("\"screenLockResetSupported\":false"),
+            "{json}"
+        );
         assert!(
             json.contains(
                 "\"screenLockResets\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"result\":\"applied\",\"at\":1700000100}]"

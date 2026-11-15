@@ -477,6 +477,10 @@ pub struct Warden {
     /// What the platform last said: the reset token is active (STATUS
     /// `screenLockResetReady`). `None` until Kotlin reports it.
     screen_lock_reset_ready: Option<bool>,
+    /// What the platform last said: it will hold a reset token on this
+    /// device at all (STATUS `screenLockResetSupported`). `false` once it has
+    /// refused one outright. `None` until Kotlin reports it.
+    screen_lock_reset_supported: Option<bool>,
 }
 
 /// Whether Free time's own (already hold-resolved) `apps` clause would let
@@ -611,6 +615,7 @@ impl Warden {
             screen_lock_dirty: false,
             screen_lock_secure: None,
             screen_lock_reset_ready: None,
+            screen_lock_reset_supported: None,
         };
         w.rebuild_relay();
         Ok(w)
@@ -1826,13 +1831,21 @@ impl Warden {
     }
 
     /// `charterSetScreenLockState`: what the platform says, for STATUS
-    /// `screenLockSecure` / `screenLockResetReady`. Whether either changed
-    /// (a change goes out on the next poll, past the heartbeat throttle).
-    pub fn set_screen_lock_state(&mut self, secure: bool, reset_ready: bool) -> bool {
+    /// `screenLockSecure` / `screenLockResetReady` /
+    /// `screenLockResetSupported`. Whether any changed (a change goes out on
+    /// the next poll, past the heartbeat throttle).
+    pub fn set_screen_lock_state(
+        &mut self,
+        secure: bool,
+        reset_ready: bool,
+        reset_supported: bool,
+    ) -> bool {
         let changed = self.screen_lock_secure != Some(secure)
-            || self.screen_lock_reset_ready != Some(reset_ready);
+            || self.screen_lock_reset_ready != Some(reset_ready)
+            || self.screen_lock_reset_supported != Some(reset_supported);
         self.screen_lock_secure = Some(secure);
         self.screen_lock_reset_ready = Some(reset_ready);
+        self.screen_lock_reset_supported = Some(reset_supported);
         changed
     }
 
@@ -2914,6 +2927,8 @@ impl Warden {
                     || self.last_status.as_ref().is_some_and(|last| {
                         last.screen_lock_secure != status.screen_lock_secure
                             || last.screen_lock_reset_ready != status.screen_lock_reset_ready
+                            || last.screen_lock_reset_supported
+                                != status.screen_lock_reset_supported
                             || last.screen_lock_resets != status.screen_lock_resets
                     })
             });
@@ -3072,6 +3087,7 @@ impl Warden {
         // recent guardian reset (absent until one is recorded). No PIN.
         status.screen_lock_secure = self.screen_lock_secure;
         status.screen_lock_reset_ready = self.screen_lock_reset_ready;
+        status.screen_lock_reset_supported = self.screen_lock_reset_supported;
         status.screen_lock_resets = self
             .screen_lock
             .as_ref()
@@ -13390,6 +13406,64 @@ mod screen_lock_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A platform that refuses the reset token outright (escrow switched off
+    /// before Kintrinsic was Device Owner): STATUS says so at once, the
+    /// same value on later ticks emits nothing more, and a token the platform
+    /// later takes says so at once too.
+    #[test]
+    fn status_says_at_once_when_the_platform_refuses_reset_tokens() {
+        let (mut w, base, _g, _machine, t0) = ward(concat!(module_path!(), line!()));
+        let mock = MockRelayTransport::new();
+        w.wire_test_relay(mock).unwrap();
+        let lock = Mutex::new(Some(w));
+        let with = |f: &mut dyn FnMut(&mut Warden)| f(lock.lock().unwrap().as_mut().unwrap());
+        let last = |lock: &Mutex<Option<Warden>>| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_status_for_tests()
+                .cloned()
+                .unwrap()
+        };
+
+        assert!(poll_once_locked(&lock, t0).status_emitted);
+        with(&mut |w| assert!(w.set_screen_lock_state(true, false, true)));
+        assert!(poll_once_locked(&lock, t0 + 1).status_emitted);
+        assert!(last(&lock)
+            .to_json()
+            .contains("\"screenLockResetSupported\":true"));
+
+        with(&mut |w| {
+            assert!(
+                w.set_screen_lock_state(true, false, false),
+                "refused ⇒ change"
+            )
+        });
+        assert!(
+            poll_once_locked(&lock, t0 + 2).status_emitted,
+            "refused ⇒ emit"
+        );
+        let s = last(&lock);
+        assert_eq!(s.screen_lock_reset_supported, Some(false));
+        assert_eq!(s.screen_lock_reset_ready, Some(false));
+        assert!(s.to_json().contains("\"screenLockResetSupported\":false"));
+
+        // Each retry the platform refuses again: no change, no extra emit.
+        for i in 3..6 {
+            with(&mut |w| assert!(!w.set_screen_lock_state(true, false, false)));
+            assert!(!poll_once_locked(&lock, t0 + i).status_emitted, "throttled");
+        }
+
+        with(&mut |w| assert!(w.set_screen_lock_state(true, false, true)));
+        assert!(
+            poll_once_locked(&lock, t0 + 6).status_emitted,
+            "taken ⇒ emit"
+        );
+        assert_eq!(last(&lock).screen_lock_reset_supported, Some(true));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn status_carries_the_screen_lock_and_emits_on_each_change() {
         let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
@@ -13412,14 +13486,15 @@ mod screen_lock_tests {
         for key in [
             "screenLockSecure",
             "screenLockResetReady",
+            "screenLockResetSupported",
             "screenLockResets",
         ] {
             assert!(!json.contains(key), "{key} absent until known: {json}");
         }
         assert!(!poll_once_locked(&lock, t0 + 1).status_emitted, "throttled");
 
-        with(&mut |w| assert!(w.set_screen_lock_state(true, false)));
-        with(&mut |w| assert!(!w.set_screen_lock_state(true, false), "no change"));
+        with(&mut |w| assert!(w.set_screen_lock_state(true, false, true)));
+        with(&mut |w| assert!(!w.set_screen_lock_state(true, false, true), "no change"));
         assert!(
             poll_once_locked(&lock, t0 + 2).status_emitted,
             "change ⇒ emit"
@@ -13427,9 +13502,10 @@ mod screen_lock_tests {
         let s = last(&lock);
         assert_eq!(s.screen_lock_secure, Some(true));
         assert_eq!(s.screen_lock_reset_ready, Some(false));
+        assert_eq!(s.screen_lock_reset_supported, Some(true));
         assert!(!poll_once_locked(&lock, t0 + 3).status_emitted, "throttled");
 
-        with(&mut |w| assert!(w.set_screen_lock_state(true, true)));
+        with(&mut |w| assert!(w.set_screen_lock_state(true, true, true)));
         assert!(
             poll_once_locked(&lock, t0 + 4).status_emitted,
             "ready ⇒ emit"
@@ -13717,7 +13793,7 @@ mod screen_lock_tests {
             .unwrap()
             .as_mut()
             .unwrap()
-            .set_screen_lock_state(true, true);
+            .set_screen_lock_state(true, true, true);
 
         let mut reasons = vec![poll_once_locked(&lock, t0 + 4).reason];
         {

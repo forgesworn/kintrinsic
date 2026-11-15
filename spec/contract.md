@@ -1915,6 +1915,7 @@ interface StatusPayload {
   activeTime?: string;             // §Times: the named-time id in force right now; absent when Free time or locked (pre-times payloads stay byte-identical)
   screenLockSecure?: boolean;      // Android: a secure screen lock (PIN, pattern or password) is set right now, as the platform reports it
   screenLockResetReady?: boolean;  // Android: a guardian screen-lock reset can be applied right now (the reset token is active)
+  screenLockResetSupported?: boolean; // Android: false = the platform refuses a reset token on this device for good (it had a screen lock before Kintrinsic became Device Owner); see "Screen-lock reset"
   screenLockResets?: { id: string; result: string; at: number }[]; // Android: recent screen-lock reset outcomes, newest first, at most 16 — see "Screen-lock reset"
 }
 ```
@@ -2491,12 +2492,24 @@ Linux has no screen lock to reset: `charterd` does not poll this kind and
 ACKs it `ignored`.
 
 **STATUS.** `screenLockSecure` (a secure screen lock is set right now),
-`screenLockResetReady` (a reset can be applied right now) and
-`screenLockResets` (the recorded outcomes, `{id, result, at}`, newest first,
-at most 16; `at` is when the device recorded the result, on its own clock).
-The guardian looks up its own `id`. A change to any of them goes out on the
-device's next poll rather than waiting for the heartbeat. Absent means a
-device with no such control, or one that has nothing to report yet.
+`screenLockResetReady` (a reset can be applied right now),
+`screenLockResetSupported` (whether the platform will hold a reset token on
+this device at all) and `screenLockResets` (the recorded outcomes,
+`{id, result, at}`, newest first, at most 16; `at` is when the device recorded
+the result, on its own clock). The guardian looks up its own `id`. A change to
+any of them goes out on the device's next poll rather than waiting for the
+heartbeat. Absent means a device with no such control, or one that has nothing
+to report yet.
+
+`screenLockResetSupported` is `false` when the platform refuses the reset
+token outright (on Android, `setResetPasswordToken` throws
+`SecurityException`). That happens for good on a phone that had a screen lock
+and was unlocked before the ward app became its Device Owner: Android then
+switches escrow tokens off, and only setting the device up again from a
+factory reset brings them back. `screenLockResetReady` is then `false` too,
+but no unlock will change it, so a guardian app shows that the device cannot
+be reset remotely rather than "ready after the next unlock". Absent means
+unknown, never `false`.
 
 **AUDIT.** Each final outcome (`applied`, `failed`, `not_ready`,
 `notice_failed`, `rejected_time`, `superseded`; not `accepted`) emits the

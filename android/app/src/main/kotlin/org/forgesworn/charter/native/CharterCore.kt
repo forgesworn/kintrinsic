@@ -584,9 +584,10 @@ object CharterCore {
         JSONObject(jni().charterReportScreenLockReset(id, result, atUnix)).optBoolean("recorded", false)
     }.getOrDefault(false)
 
-    /** Feed STATUS `screenLockSecure` / `screenLockResetReady`. True on a change. */
-    fun setScreenLockState(secure: Boolean, resetReady: Boolean): Boolean = runCatching {
-        JSONObject(jni().charterSetScreenLockState(secure, resetReady)).optBoolean("changed", false)
+    /** Feed STATUS `screenLockSecure` / `screenLockResetReady` /
+     *  `screenLockResetSupported`. True on a change. */
+    fun setScreenLockState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean): Boolean = runCatching {
+        JSONObject(jni().charterSetScreenLockState(secure, resetReady, resetSupported)).optBoolean("changed", false)
     }.getOrDefault(false)
 
     /** One forced-resolution rewrite (host -> answer) for SafeSearch / YouTube. */

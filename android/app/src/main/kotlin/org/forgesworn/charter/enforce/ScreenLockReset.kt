@@ -262,7 +262,9 @@ interface ScreenLockHistory {
 interface ScreenLockCore {
     fun take(): CharterCore.ScreenLockDirective?
     fun report(id: String, result: String, atUnix: Long)
-    fun setState(secure: Boolean, resetReady: Boolean)
+    /** [resetSupported] false: the platform refuses a reset token on this
+     *  device for good, so no unlock will make [resetReady] true. */
+    fun setState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean)
 }
 
 /** The child's notification. Seam for tests. */
@@ -297,6 +299,17 @@ class ScreenLockResetStep(
      *  before it had a Device Owner) refuses every retry for good, so each is
      *  said once, not every minute. */
     private val refusalsLogged = mutableSetOf<String>()
+    /**
+     * Whether the platform will hold a reset token here at all (STATUS
+     * `screenLockResetSupported`). Latched: false once setting the token
+     * throws `SecurityException`, which Android does for good on a phone that
+     * had a screen lock and was unlocked before Kintrinsic was its Device
+     * Owner ("Permanently disabling support for escrow tokens"). It stays
+     * false through the ticks between retries, so it never flaps, and turns
+     * true again only if the platform takes a token without throwing or holds
+     * one active.
+     */
+    private var supported = true
 
     private fun logRefusal(message: String) {
         if (refusalsLogged.add(message)) log(message)
@@ -307,7 +320,8 @@ class ScreenLockResetStep(
         syncToken(nowUnix)
         val secure = runCatching { platform.isDeviceSecure() }.getOrDefault(false)
         val ready = tokenActive()
-        core.setState(secure, ready)
+        if (ready) supported = true
+        core.setState(secure, ready, supported)
         drain(nowUnix)
     }
 
@@ -355,7 +369,12 @@ class ScreenLockResetStep(
     }
 
     private fun setToken(token: ByteArray): Boolean = try {
-        platform.setToken(token)
+        platform.setToken(token).also { supported = true }
+    } catch (e: SecurityException) {
+        // The platform refuses reset tokens on this device outright.
+        supported = false
+        logRefusal("setting the screen-lock reset token threw ${e.javaClass.simpleName}")
+        false
     } catch (t: Throwable) {
         logRefusal("setting the screen-lock reset token threw ${t.javaClass.simpleName}")
         false
@@ -511,9 +530,12 @@ object CoreScreenLock : ScreenLockCore {
     override fun report(id: String, result: String, atUnix: Long) {
         CharterCore.reportScreenLockReset(id, result, atUnix)
     }
-    override fun setState(secure: Boolean, resetReady: Boolean) {
-        if (CharterCore.setScreenLockState(secure, resetReady)) {
-            Log.i("ScreenLockReset", "screen lock: secure=$secure resetReady=$resetReady")
+    override fun setState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean) {
+        if (CharterCore.setScreenLockState(secure, resetReady, resetSupported)) {
+            Log.i(
+                "ScreenLockReset",
+                "screen lock: secure=$secure resetReady=$resetReady resetSupported=$resetSupported",
+            )
         }
     }
 }

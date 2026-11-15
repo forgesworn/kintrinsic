@@ -195,12 +195,13 @@ class ScreenLockResetTest {
         var secure: Boolean = true,
         var active: Boolean = true,
         var resetResult: () -> Boolean = { true },
+        var setTokenResult: () -> Boolean = { true },
     ) : ScreenLockPlatform {
         val tokensSet = mutableListOf<ByteArray>()
         val resets = mutableListOf<String?>()
         override fun isDeviceSecure() = secure
         override fun isTokenActive() = active
-        override fun setToken(token: ByteArray): Boolean { tokensSet += token; return true }
+        override fun setToken(token: ByteArray): Boolean { tokensSet += token; return setTokenResult() }
         override fun resetWithToken(newPin: String?, token: ByteArray): Boolean { resets += newPin; return resetResult() }
     }
 
@@ -218,9 +219,14 @@ class ScreenLockResetTest {
     private class FakeCore(var pending: CharterCore.ScreenLockDirective? = null) : ScreenLockCore {
         val reports = mutableListOf<Pair<String, String>>()
         var state: Pair<Boolean, Boolean>? = null
+        /** Every `resetSupported` reported, one per tick. */
+        val supported = mutableListOf<Boolean>()
         override fun take() = pending.also { pending = null }
         override fun report(id: String, result: String, atUnix: Long) { reports += id to result }
-        override fun setState(secure: Boolean, resetReady: Boolean) { state = secure to resetReady }
+        override fun setState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean) {
+            state = secure to resetReady
+            supported += resetSupported
+        }
     }
 
     private class FakeNotice : ScreenLockNoticeSurface {
@@ -310,6 +316,74 @@ class ScreenLockResetTest {
         p.active = true; s2.platformTick(1006)
         p.active = false; s2.platformTick(1008); s2.platformTick(1010)
         assertEquals(3, p.tokensSet.size)
+    }
+
+    @Test
+    fun `a working phone reports reset supported`() {
+        val c = FakeCore()
+        step(FakePlatform(), FakeTokens(), FakeHistory(), c, FakeNotice(), mutableListOf()).platformTick(1000)
+        assertEquals(listOf(true), c.supported)
+        // A fresh token the platform takes but holds pending (a PIN, no
+        // unlock since): not ready, but supported.
+        val p = FakePlatform(active = false); val c2 = FakeCore()
+        step(p, FakeTokens(token = null), FakeHistory(), c2, FakeNotice(), mutableListOf()).platformTick(1000)
+        assertEquals(true to false, c2.state)
+        assertEquals(listOf(true), c2.supported)
+    }
+
+    @Test
+    fun `a platform that refuses the token outright reports unsupported, steadily, and says so once`() {
+        // Escrow switched off before Kintrinsic was Device Owner: every
+        // setResetPasswordToken throws SecurityException, for good.
+        val p = FakePlatform(active = false, setTokenResult = { throw SecurityException("Escrow token is disabled on the current user") })
+        val t = FakeTokens(token = null); val c = FakeCore(); val logs = mutableListOf<String>()
+        val s = step(p, t, FakeHistory(), c, FakeNotice(), logs)
+        // Ticks every 10 s for three minutes: retried each minute, refused each time.
+        for (now in 1000L..1180L step 10) s.platformTick(now)
+        assertTrue(p.tokensSet.size >= 3)
+        assertNull(t.token)
+        assertTrue(c.supported.isNotEmpty())
+        assertTrue("never flaps between retries: ${c.supported}", c.supported.all { !it })
+        assertEquals(false, c.state!!.second)
+        assertEquals(logs.toString(), 2, logs.size)
+        assertTrue(logs[0].contains("SecurityException"))
+        assertFalse(logs.joinToString().contains("Escrow token"))
+    }
+
+    @Test
+    fun `a stored token refused when set again also reports unsupported`() {
+        val p = FakePlatform(active = false, setTokenResult = { throw SecurityException("nope") })
+        val c = FakeCore()
+        step(p, FakeTokens(), FakeHistory(), c, FakeNotice(), mutableListOf()).platformTick(1000)
+        assertEquals(listOf(false), c.supported)
+    }
+
+    @Test
+    fun `only SecurityException means unsupported, and a later take clears it`() {
+        val p = FakePlatform(active = false, setTokenResult = { throw IllegalStateException("busy") })
+        val t = FakeTokens(token = null); val c = FakeCore()
+        val s = step(p, t, FakeHistory(), c, FakeNotice(), mutableListOf())
+        s.platformTick(1000)
+        assertEquals(listOf(true), c.supported)
+        // A plain false is a refusal, not "for good".
+        p.setTokenResult = { false }
+        s.platformTick(1100)
+        assertEquals(listOf(true, true), c.supported)
+        p.setTokenResult = { throw SecurityException("nope") }
+        s.platformTick(1200)
+        assertEquals(false, c.supported.last())
+        // The platform takes one after all (or holds one active): supported again.
+        p.setTokenResult = { true }
+        s.platformTick(1300)
+        assertEquals(true, c.supported.last())
+        assertTrue(t.token != null)
+        val c2 = FakeCore()
+        val p2 = FakePlatform(active = false, setTokenResult = { throw SecurityException("nope") })
+        val s2 = step(p2, FakeTokens(token = null), FakeHistory(), c2, FakeNotice(), mutableListOf())
+        s2.platformTick(1000)
+        p2.active = true
+        s2.platformTick(1010)
+        assertEquals(listOf(false, true), c2.supported)
     }
 
     @Test

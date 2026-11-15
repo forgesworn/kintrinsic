@@ -562,20 +562,27 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterR
 }
 
 /// What the platform says about the screen lock, each tick: `secure`
-/// (`KeyguardManager.isDeviceSecure`) and `reset_ready`
-/// (`DevicePolicyManager.isResetPasswordTokenActive`). Rides STATUS as
-/// `screenLockSecure` / `screenLockResetReady`. Returns
-/// `{"ok":true,"changed":bool}`; a change goes out on the next poll rather
-/// than waiting for the heartbeat.
+/// (`KeyguardManager.isDeviceSecure`), `reset_ready`
+/// (`DevicePolicyManager.isResetPasswordTokenActive`) and `reset_supported`
+/// (false once `setResetPasswordToken` has thrown `SecurityException`: the
+/// platform refuses reset tokens on this device for good). Rides STATUS as
+/// `screenLockSecure` / `screenLockResetReady` / `screenLockResetSupported`.
+/// Returns `{"ok":true,"changed":bool}`; a change goes out on the next poll
+/// rather than waiting for the heartbeat.
 #[no_mangle]
 pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterSetScreenLockState(
     env: JNIEnv,
     _class: JClass,
     secure: jboolean,
     reset_ready: jboolean,
+    reset_supported: jboolean,
 ) -> jstring {
     with_warden_mut(&env, |w| {
-        let changed = w.set_screen_lock_state(secure != JNI_FALSE, reset_ready != JNI_FALSE);
+        let changed = w.set_screen_lock_state(
+            secure != JNI_FALSE,
+            reset_ready != JNI_FALSE,
+            reset_supported != JNI_FALSE,
+        );
         serde_json::json!({ "ok": true, "changed": changed }).to_string()
     })
 }

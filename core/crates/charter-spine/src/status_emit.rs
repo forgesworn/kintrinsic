@@ -122,6 +122,7 @@ pub fn build_status(
         // state and the warden's reset ring; Linux has no such control.
         screen_lock_secure: None,
         screen_lock_reset_ready: None,
+        screen_lock_reset_supported: None,
         screen_lock_resets: None,
     }
 }

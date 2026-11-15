@@ -262,9 +262,11 @@ object CharterNative {
      *  or `{"error":…}`. */
     external fun charterReportScreenLockReset(id: String, result: String, atUnix: Long): String
 
-    /** What the platform says each tick, for STATUS `screenLockSecure` and
-     *  `screenLockResetReady`. `{"ok":true,"changed":bool}`. */
-    external fun charterSetScreenLockState(secure: Boolean, resetReady: Boolean): String
+    /** What the platform says each tick, for STATUS `screenLockSecure`,
+     *  `screenLockResetReady` and `screenLockResetSupported` ([resetSupported]
+     *  false once the platform has refused a reset token outright).
+     *  `{"ok":true,"changed":bool}`. */
+    external fun charterSetScreenLockState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean): String
 
     // ---- local link (ABI 3) -------------------------------------------------
 
