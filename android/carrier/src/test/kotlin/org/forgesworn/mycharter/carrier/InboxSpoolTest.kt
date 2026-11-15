@@ -1,6 +1,7 @@
 package org.forgesworn.mycharter.carrier
 
 import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -140,7 +141,12 @@ class InboxSpoolTest {
         for (i in 1..40) s = InboxSpool.add(s, "spoof$i", fake(i), wrap("spoof$i"), now + 100 + i, emptySet())
         val held = ids(s!!)
         for (i in 1..15) assertTrue("real$i" in held)
-        assertEquals(15 + InboxSpool.UNKNOWN_CAP, held.size)
+        // An empty roster is "no roster yet": nobody is demoted or evicted.
+        assertEquals(15 + 40, held.size)
+        // And a later NON-empty roster that does not name the strangers files them as unknown.
+        s = InboxSpool.add(s, "spoof41", fake(41), wrap("spoof41"), now + 200, setOf(real))
+        assertEquals(15 + InboxSpool.UNKNOWN_CAP, ids(s).size)
+        for (i in 1..15) assertTrue("real$i" in ids(s))
     }
 
     @Test fun aRosterThatDropsAMachineLeavesItsHeldEntriesInTheKnownGroup() {
@@ -152,7 +158,7 @@ class InboxSpoolTest {
 
     @Test fun anEntryAdmittedAsUnknownStaysUnknownEvenIfTheRosterLaterNamesIt() {
         var s: String? = null
-        for (i in 1..15) s = InboxSpool.add(s, "x$i", real, wrap("x$i"), now + i, emptySet())
+        for (i in 1..15) s = InboxSpool.add(s, "x$i", real, wrap("x$i"), now + i, setOf("someone-else"))
         assertEquals(InboxSpool.UNKNOWN_CAP, ids(s!!).size)
         val flagged = JSONArray(s).getJSONObject(0)
         assertEquals(false, flagged.getBoolean("known"))
@@ -160,7 +166,7 @@ class InboxSpoolTest {
         // and does not revive the old ones into the large group: they are still
         // capped at ten among themselves.
         s = InboxSpool.add(s, "late", real, wrap("late"), now + 99, setOf(real))
-        s = InboxSpool.add(s, "x16", real, wrap("x16"), now + 100, emptySet())
+        s = InboxSpool.add(s, "x16", real, wrap("x16"), now + 100, setOf("someone-else"))
         val held = ids(s)
         assertTrue("late" in held)
         assertTrue("x6" !in held)
@@ -178,10 +184,104 @@ class InboxSpoolTest {
         assertEquals(50, ids(s!!).size) // none squeezed into the unknown cap of 10
     }
 
-    @Test fun anEmptyRosterMakesEveryoneUnknown() {
+    @Test fun anEmptyRosterMakesNobodyUnknown() {
+        // An empty roster (a console that booted without its household) says nothing
+        // about who is a stranger: the first presses must not land in the 10-slot
+        // bucket where ten forged audits would evict them.
         var s: String? = null
         for (i in 1..30) s = InboxSpool.add(s, "w$i", fake(i), wrap("w$i"), now + i, known = emptySet())
-        assertEquals(InboxSpool.UNKNOWN_CAP, ids(s!!).size)
+        assertEquals(30, ids(s!!).size)
+        val all = JSONArray(s)
+        for (i in 0 until all.length()) assertFalse("no entry is stamped under an empty roster", all.getJSONObject(i).has("known"))
+    }
+
+    @Test fun entriesAdmittedUnderAnEmptyRosterFollowTheNextNonEmptyOne() {
+        var s: String? = null
+        // (fake(1) and fake(10) are the same string once padded, so use distinct machines here.)
+        fun machine(i: Int) = "%064x".format(i)
+        for (i in 1..30) s = InboxSpool.add(s, "w$i", machine(i), wrap("w$i"), now + i, known = emptySet())
+        // The roster arrives and names only one of them: the other 29 are strangers, capped at 10.
+        s = InboxSpool.add(s, "w31", machine(1), wrap("w31"), now + 99, known = setOf(machine(1)))
+        val held = ids(s)
+        assertTrue("w1" in held && "w31" in held)
+        assertEquals(1 + 1 + InboxSpool.UNKNOWN_CAP, held.size)
+    }
+
+    // ---- C7: tombstones ------------------------------------------------------------
+
+    @Test fun aConsumedIdIsNotReadmitted() {
+        val s = InboxSpool.add(null, "w2", "m", wrap("w2"), now)
+        val again = InboxSpool.add(s, "w1", "m", wrap("w1"), now + 1, consumed = setOf("w1"))
+        assertEquals(listOf("w2"), ids(again))
+    }
+
+    @Test fun tombstonesAreStampedAndPrunedAfterFortyEightHours() {
+        val t = InboxSpool.tombstone(emptyMap(), """["a","b",""]""", now)
+        assertEquals(mapOf("a" to now, "b" to now), t)
+        val later = InboxSpool.tombstone(t, """["c"]""", now + InboxSpool.TOMBSTONE_SECS)
+        assertEquals(setOf("a", "b", "c"), later.keys) // exactly 48 h old is still held
+        val pruned = InboxSpool.tombstone(t, """["c"]""", now + InboxSpool.TOMBSTONE_SECS + 1)
+        assertEquals(setOf("c"), pruned.keys)
+    }
+
+    @Test fun tombstonesAreBounded() {
+        val ids = (1..InboxSpool.MAX_TOMBSTONES + 10).joinToString(",", "[", "]") { "\"t$it\"" }
+        val t = InboxSpool.tombstone(emptyMap(), ids, now)
+        assertEquals(InboxSpool.MAX_TOMBSTONES, t.size)
+        assertFalse("t1" in t)
+        assertTrue("t${InboxSpool.MAX_TOMBSTONES + 10}" in t)
+    }
+
+    @Test fun aBadIdListTombstonesNothing() {
+        assertEquals(mapOf("a" to now), InboxSpool.tombstone(mapOf("a" to now), "not json", now))
+    }
+
+    // ---- the file's document -------------------------------------------------------
+
+    @Test fun theDocumentRoundTripsAndABareArrayStillReads() {
+        val entries = InboxSpool.add(null, "w1", "m", wrap("w1"), now)
+        val doc = InboxSpool.decode(InboxSpool.encode(InboxSpool.Doc(entries, mapOf("old" to now))))!!
+        assertEquals(listOf("w1"), ids(doc.entries))
+        assertEquals(mapOf("old" to now), doc.consumed)
+        val legacy = InboxSpool.decode(entries)!!
+        assertEquals(listOf("w1"), ids(legacy.entries))
+        assertTrue(legacy.consumed.isEmpty())
+    }
+
+    @Test fun textThatIsNotASpoolDocumentIsDamage() {
+        for (junk in listOf("", "not json", """{"a":1}""", """{"entries":"x"}""", """[{"id":"x""")) {
+            assertEquals(junk, null, InboxSpool.decode(junk))
+        }
+    }
+
+    // ---- C9: salvage ---------------------------------------------------------------
+
+    @Test fun salvageKeepsEveryCompleteEntryOfATruncatedFile() {
+        var s: String? = null
+        for (i in 1..3) s = InboxSpool.add(s, "w$i", real, wrap("w$i"), now + i)
+        val cut = s!!.substring(0, s.length - 25) // the last entry is torn
+        assertEquals(listOf("w1", "w2"), ids(InboxSpool.salvage(cut)))
+    }
+
+    @Test fun salvageReadsEntriesOutOfATornDocumentAndSkipsGarbageBetweenThem() {
+        var s: String? = null
+        for (i in 1..3) s = InboxSpool.add(s, "w$i", real, wrap("w$i"), now + i)
+        val parts = JSONArray(s)
+        val torn = """{"v":2,"entries":[${parts.getJSONObject(0)},@@@garbage@@@,${parts.getJSONObject(1)},${parts.getJSONObject(2).toString().take(40)}"""
+        assertEquals(listOf("w1", "w2"), ids(InboxSpool.salvage(torn)))
+    }
+
+    @Test fun salvageIgnoresObjectsThatAreNotEntriesAndKeepsStringsWithBraces() {
+        val tricky = JSONObject()
+            .put("id", "t").put("machine", "m").put("receivedAt", now)
+            .put("wrap", JSONObject().put("id", "t").put("content", "a } { \\\" b"))
+        val text = """[{"id":"nope","machine":"m"},$tricky,{"id":"t","machine":"m","wrap":{"id":"dup"}}"""
+        assertEquals(listOf("t"), ids(InboxSpool.salvage(text)))
+    }
+
+    @Test fun salvageOfNothingReadableIsEmpty() {
+        assertEquals("[]", InboxSpool.salvage(""))
+        assertEquals("[]", InboxSpool.salvage("\u0000\u0000 not json"))
     }
 
     @Test fun aWrapOverSixteenKilobytesIsDropped() {
