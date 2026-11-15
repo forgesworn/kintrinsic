@@ -149,6 +149,10 @@ const BAD_PREFIX: &str = "pending-audits.json.bad-";
 /// A spool set aside because a guardian released the phone while it could not
 /// be read. Never merged back: its presses belong to that guardian.
 const RELEASED_PREFIX: &str = "pending-audits.json.released-";
+/// A [`BAD_PREFIX`] spool being merged back: moved here before the merge is
+/// written, and deleted once it has been. Never read: a leftover (its delete
+/// failed) is already in the spool.
+const SALVAGED_PREFIX: &str = "pending-audits.json.salvaged-";
 
 /// ENOMEM, ENFILE and EMFILE (the same numbers on Linux and Android). Running
 /// out of memory or file descriptors makes `open` fail while the spool itself
@@ -312,10 +316,26 @@ impl BreakGlass {
     /// merged in front of `current` and deleted: a spool set aside after a long
     /// but passing read error, or that was only unreadable, is not lost. One
     /// that does not parse (damaged: that is why it was set aside) is left
-    /// alone. The merged spool is written first; if that fails nothing is
-    /// deleted and `current` is returned as it was. The stamps are the
-    /// entries' own, so the usual rules about guardians still apply to them.
+    /// alone. The stamps are the entries' own, so the usual rules about
+    /// guardians still apply to them.
+    ///
+    /// It is merged once. Before the merged spool is written, the file is
+    /// renamed out of the salvage's sight (see [`SALVAGED_PREFIX`]), so one
+    /// that cannot then be deleted is never merged again. If it cannot be
+    /// renamed, nothing is merged this time; if the merged spool cannot be
+    /// written, it is renamed back for the next load, and `current` is
+    /// returned as it was. (A crash between the rename and the write leaves
+    /// its presses on the phone, but no longer merged back.)
     fn salvage_newest_bad(&self, current: Vec<SpooledAudit>) -> Vec<SpooledAudit> {
+        self.salvage_newest_bad_with(current, |p| std::fs::remove_file(p))
+    }
+
+    /// [`Self::salvage_newest_bad`], deleting the salvaged file with `remove`.
+    fn salvage_newest_bad_with(
+        &self,
+        current: Vec<SpooledAudit>,
+        remove: impl Fn(&Path) -> std::io::Result<()>,
+    ) -> Vec<SpooledAudit> {
         let newest = std::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
@@ -326,7 +346,7 @@ impl BreakGlass {
                 Some((n, e.path()))
             })
             .max_by_key(|(n, _)| *n);
-        let Some((_, path)) = newest else {
+        let Some((n, path)) = newest else {
             return current;
         };
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -335,15 +355,26 @@ impl BreakGlass {
         let Ok(list) = serde_json::from_str::<Vec<StoredAudit>>(&raw) else {
             return current;
         };
+        let taken = self.dir.join(format!("{SALVAGED_PREFIX}{n}"));
+        if let Err(e) = std::fs::rename(&path, &taken) {
+            eprintln!(
+                "charter: a spool set aside earlier could not be moved to be merged back ({:?})",
+                e.kind()
+            );
+            return current;
+        }
         let mut merged: Vec<SpooledAudit> = list.into_iter().map(StoredAudit::into_entry).collect();
         let salvaged = merged.len();
         merged.extend(current.iter().cloned());
         if salvaged > 0 && !self.write_entries(&merged) {
+            // Not merged: back where the next load looks for it.
+            if std::fs::rename(&taken, &path).is_err() {
+                eprintln!("charter: a spool set aside earlier could not be put back; its presses stay on the phone");
+            }
             return current;
         }
-        if std::fs::remove_file(&path).is_err() {
-            // Written but not deleted: it would merge again next time. Say
-            // nothing more; the duplicates share a wrap id once built.
+        if remove(&taken).is_err() {
+            // Merged, and out of the salvage's sight: it is never merged again.
             eprintln!("charter: a salvaged break-glass spool could not be deleted");
         }
         eprintln!("charter: {salvaged} held audit(s) salvaged from a spool set aside earlier");
@@ -1263,6 +1294,70 @@ mod tests {
             .entries()
             .iter()
             .all(|e| e.guardian.as_deref() == Some("aa")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// F7: a salvaged spool is moved out of the salvage's sight before the
+    /// merge is written, so one whose delete then fails is never merged again;
+    /// and one whose merge cannot be written is put back, losing nothing.
+    #[test]
+    fn a_salvaged_spool_is_merged_once_even_if_it_cannot_be_deleted() {
+        let base = tmp("salvage-once");
+        let bg = BreakGlass::new(&base);
+        let aside = bg.dir.join("pending-audits.json.bad-5");
+        let taken = bg.dir.join("pending-audits.json.salvaged-5");
+        let old = SpooledAudit {
+            tags: emergency_call_audit_tags(T0),
+            wrap: None,
+            guardian: Some("aa".into()),
+        };
+        std::fs::write(
+            &aside,
+            serde_json::to_string(std::slice::from_ref(&old)).unwrap(),
+        )
+        .unwrap();
+        let merged = bg
+            .salvage_newest_bad_with(Vec::new(), |_| Err(std::io::Error::other("delete refused")));
+        assert_eq!(merged, vec![old.clone()]);
+        assert!(!aside.exists(), "moved out of the salvage's sight");
+        assert!(
+            taken.exists(),
+            "the delete failed: it is still on the phone"
+        );
+        assert!(bad_files(&bg).is_empty());
+        // Every later load reads the spool once, with no second merge.
+        for _ in 0..3 {
+            assert_eq!(bg.entries(), vec![old.clone()]);
+        }
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0 + 1), Some("aa")));
+        assert_eq!(bg.entries().len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_salvage_whose_merge_cannot_be_written_is_put_back_for_the_next_load() {
+        let base = tmp("salvage-unwritten");
+        let bg = BreakGlass::new(&base);
+        let aside = bg.dir.join("pending-audits.json.bad-5");
+        let old = SpooledAudit {
+            tags: emergency_call_audit_tags(T0),
+            wrap: None,
+            guardian: Some("aa".into()),
+        };
+        std::fs::write(
+            &aside,
+            serde_json::to_string(std::slice::from_ref(&old)).unwrap(),
+        )
+        .unwrap();
+        // The journal's temporary file is a directory: the merge cannot land.
+        let tmp_path = bg.dir.join("pending-audits.json.tmp");
+        std::fs::create_dir_all(tmp_path.join("blocker")).unwrap();
+        assert!(bg.entries().is_empty(), "nothing merged");
+        assert!(aside.exists(), "put back where the next load looks");
+        assert!(!bg.dir.join("pending-audits.json.salvaged-5").exists());
+        std::fs::remove_dir_all(&tmp_path).unwrap();
+        assert_eq!(bg.entries(), vec![old]);
+        assert!(!aside.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
