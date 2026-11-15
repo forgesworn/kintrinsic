@@ -2469,7 +2469,10 @@ device-protected storage, never containing a PIN, and shows a notice
 ("Your guardian changed your screen lock at 19:42 on 14 Nov. Ask them for the
 new PIN." / "…removed your screen lock…") until the child acknowledges it on
 the device. Acknowledgement is only ever by the child on the device, never by
-a command.
+a command. The ward app refuses (answers `failed`) any reset whose `id` its
+history already holds, even one the device core has long since forgotten, and
+every reset it applies starts a new history record with its own unacknowledged
+notice: reusing an old, acknowledged `id` can never make a reset silent.
 
 **The record survives a release.** The device keeps its last 16 outcomes
 (dropping the earliest recorded first), the answered ids and the floor in
