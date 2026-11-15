@@ -968,8 +968,13 @@ export class RealSigner implements Signer {
       return { ok: true, id, issuedAt, held: true };
     }
     // The ward answered over the home network at once and did not take it:
-    // say why now, rather than "Waiting…" for an hour.
-    if (out && isProblemAck(out.local)) throw new Error(screenLockAckText(name, out.local));
+    // say why now, rather than "Waiting…" for an hour. A `failed` ACK is not
+    // final: the ward may have kept nothing (a stale link, an unreadable or
+    // unwritable ledger) and the same wrap still reaches it over the relays, so
+    // keep the id and let STATUS settle what really happened.
+    if (out && isProblemAck(out.local) && out.local !== "failed") {
+      throw new Error(screenLockAckText(name, out.local));
+    }
     return { ok: true, id, issuedAt };
   }
 

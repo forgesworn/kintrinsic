@@ -255,7 +255,6 @@ describe("RealSigner.signScreenLockReset", () => {
 
   it.each([
     ["refused", "Robin’s phone refused the reset."],
-    ["failed", "Robin’s phone couldn't carry out the reset. Try again."],
     ["expired", "Robin’s phone turned it down: its clock and yours disagree."],
     ["superseded", "Robin’s phone already had a newer reset, so it didn't use this one."],
   ] as const)("a ward's immediate %s over the home network is said at once", async (ack, text) => {
@@ -264,6 +263,14 @@ describe("RealSigner.signScreenLockReset", () => {
     const err = await signer.signScreenLockReset(DEVICE, "246810").catch((e: unknown) => e);
     expect((err as Error).message).toBe(text);
     expect((err as Error).message).not.toContain("246810");
+  });
+
+  it("an immediate failed over the home network is not final: the id is kept for STATUS", async () => {
+    const { signer } = setup(async () => ({ routed: true, local: "failed" as const }));
+    await signer.connect("local");
+    const out = await signer.signScreenLockReset(DEVICE, "246810");
+    expect(out).toMatchObject({ ok: true, issuedAt: NOW });
+    expect(out.id).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("needs a connected signer", async () => {

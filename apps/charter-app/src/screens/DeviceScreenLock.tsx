@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type React from "react";
 import { Button } from "../components/ui";
 import { useCharter } from "../store/store";
 import type { Child, Device } from "../domain/types";
@@ -12,6 +13,11 @@ import {
 
 type Choice = "set" | "remove";
 
+/** Mask the PIN as it is typed without making it a password field: browsers
+ *  and password managers offer to save anything typed into `type="password"`,
+ *  and this PIN belongs to the ward's phone, not to the guardian's accounts. */
+const PIN_MASK = { WebkitTextSecurity: "disc" } as React.CSSProperties;
+
 /**
  * One ward phone's screen-lock card: whether it has a lock, a "Reset screen
  * lock" button that sets a new PIN or removes the lock (always telling the ward),
@@ -21,7 +27,8 @@ type Choice = "set" | "remove";
  * The PIN is held in this dialog's own state while it is typed and cleared the
  * moment it is sent or the dialog closes. It never reaches the store, which is
  * handed it for the one call and keeps only the reset's id and time. Its fields
- * ask the browser not to autofill or remember it (`autoComplete="off"`).
+ * are plain masked text with autofill off, so no browser or password manager
+ * offers to save it.
  */
 export default function DeviceScreenLock({ child, device }: { child: Child; device: Device }) {
   const { deviceStatus, resetDeviceScreenLock } = useCharter();
@@ -163,9 +170,14 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
                 <label className="stack" style={{ gap: 4 }}>
                   <span className="row-sub">New PIN (4 to 16 digits)</span>
                   <input
-                    type="password"
+                    type="text"
                     inputMode="numeric"
                     autoComplete="off"
+                    spellCheck={false}
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    data-bwignore="true"
+                    style={PIN_MASK}
                     maxLength={16}
                     aria-label="New PIN"
                     value={screenLockPin}
@@ -175,9 +187,14 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
                 <label className="stack" style={{ gap: 4 }}>
                   <span className="row-sub">Enter it again</span>
                   <input
-                    type="password"
+                    type="text"
                     inputMode="numeric"
                     autoComplete="off"
+                    spellCheck={false}
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    data-bwignore="true"
+                    style={PIN_MASK}
                     maxLength={16}
                     aria-label="New PIN again"
                     value={again}
