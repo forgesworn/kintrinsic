@@ -99,13 +99,48 @@ class LockActivity : Activity() {
     private var callStatusView: TextView? = null
     private var callStatusText = ""
 
+    /** The hold-to-call clock: the main thread's handler for the delays,
+     *  `elapsedRealtime` for the deadlines. The handler's delays stop while the
+     *  device sleeps; `elapsedRealtime` does not. */
+    private val callTimer = object : CallSequencer.Timer {
+        override fun postDelayed(task: Runnable, delayMs: Long) {
+            ui.postDelayed(task, delayMs)
+        }
+
+        override fun cancel(task: Runnable) {
+            ui.removeCallbacks(task)
+        }
+
+        override fun now(): Long = android.os.SystemClock.elapsedRealtime()
+    }
+
     /**
-     * Hold-to-call presses in their 3-2-1 window, by [CallCountdown.key]. Held
-     * here, not in a button, so a render (a resume, a rotation) rebuilds each
-     * one still counting and cancellable; a countdown kept in the button it
-     * started on went on counting on a detached view, out of the ward's reach.
+     * Hold-to-call presses in their 3-2-1 window. Held here, not in a button,
+     * so a render (a resume, a rotation) rebuilds each one still counting and
+     * cancellable; a countdown kept in the button it started on went on
+     * counting on a detached view, out of the ward's reach. One at a time, and
+     * only while the ward can see it (see [CallCountdowns]).
      */
-    private val countdowns = mutableMapOf<String, CallCountdown>()
+    private val countdowns = CallCountdowns(
+        callTimer,
+        object : CallCountdowns.Host {
+            override fun paint(key: String, text: String) {
+                callButtons[key]?.text = text
+            }
+
+            override fun screenOn(): Boolean = screenInteractive()
+
+            override fun complete(c: CallCountdown) {
+                if (isDestroyed || isFinishing) return
+                placeCall(c.number, c.emergency)
+            }
+
+            override fun cancelled() {
+                val kept = callStatusText
+                showCallStatus(CallCountdown.lineAfterCancel(kept), sticky = kept.isNotEmpty())
+            }
+        },
+    )
 
     /** The lifeline buttons of the current render, by [CallCountdown.key]. */
     private val callButtons = mutableMapOf<String, Button>()
@@ -241,12 +276,17 @@ class LockActivity : Activity() {
         }
     }
 
-    /** The screen going off settles a press still being routed (see
-     *  CallSequencer): with a dialler in front the shade is already stopped,
-     *  so no lifecycle callback of its own says so. */
+    /** The screen going off calls off every press still in its 3-2-1 window,
+     *  which the ward can no longer see or tap (see [CallCountdowns]), and
+     *  settles a press still being routed (see CallSequencer): with a dialler
+     *  in front the shade is already stopped, so no lifecycle callback of its
+     *  own says so. */
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) callSequencer?.onScreenOff()
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                countdowns.cancelAll()
+                callSequencer?.onScreenOff()
+            }
         }
     }
 
@@ -273,7 +313,7 @@ class LockActivity : Activity() {
             registerReceiver(hideReceiver, filter)
         }
         // Never at the shade's expense: without it, a sleep is still caught by
-        // the sequencer's real-time deadlines.
+        // the real-time deadlines, and a dark screen by each countdown tick.
         runCatching {
             registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED)
         }
@@ -384,6 +424,7 @@ class LockActivity : Activity() {
         ActivityLockController.coveredSince = 0L
         runCatching { cameraManager?.unregisterTorchCallback(torchCallback) }
         ui.removeCallbacks(clockTick)
+        countdowns.abandon()
         callSequencer?.abandon()
         // A break-glass already running finishes; none can be queued after.
         breakGlassExecutor.shutdown()
@@ -689,10 +730,7 @@ class LockActivity : Activity() {
                 override fun clear(): Boolean =
                     shadeResumed && shadeFocused && screenOn()
 
-                // Unreadable is taken as on, so a failed read never blocks a route.
-                override fun screenOn(): Boolean =
-                    runCatching { getSystemService(android.os.PowerManager::class.java)?.isInteractive }
-                        .getOrNull() != false
+                override fun screenOn(): Boolean = screenInteractive()
 
                 // READ_PHONE_STATE is held (the Device Owner grants it); the
                 // device-wide state is what matters, so the deprecated read is
@@ -712,18 +750,7 @@ class LockActivity : Activity() {
                     CallRoute.Route.BOUNCER -> openPhoneLock(result)
                 }
             },
-            timer = object : CallSequencer.Timer {
-                override fun postDelayed(task: Runnable, delayMs: Long) {
-                    ui.postDelayed(task, delayMs)
-                }
-
-                override fun cancel(task: Runnable) {
-                    ui.removeCallbacks(task)
-                }
-
-                // The handler's delays stop while the device sleeps; this does not.
-                override fun now(): Long = android.os.SystemClock.elapsedRealtime()
-            },
+            timer = callTimer,
             listener = object : CallSequencer.Listener {
                 override fun onRoute(route: CallRoute.Route) {
                     Log.i(TAG, "call route: $route")
@@ -787,37 +814,11 @@ class LockActivity : Activity() {
         startCall(number, emergency)
     }
 
-    /** Starts [c]'s 3-2-1 window on whichever button is its own at each tick. */
-    private fun startCountdown(c: CallCountdown) {
-        countdowns.remove(c.key)?.posted?.let { ui.removeCallbacks(it) }
-        countdowns[c.key] = c
-        callButtons[c.key]?.text = c.text()
-        val tick = object : Runnable {
-            override fun run() {
-                if (countdowns[c.key] !== c || isDestroyed || isFinishing) return
-                if (c.tick()) {
-                    countdowns.remove(c.key)
-                    callButtons[c.key]?.text = c.label
-                    placeCall(c.number, c.emergency)
-                } else {
-                    callButtons[c.key]?.text = c.text()
-                    ui.postDelayed(this, 1_000L)
-                }
-            }
-        }
-        c.posted = tick
-        ui.postDelayed(tick, 1_000L)
-    }
-
-    /** A tap during the countdown: "no, stop". A sticky line already showing
-     *  stays (see [CallCountdown.lineAfterCancel]). */
-    private fun cancelCountdown(key: String) {
-        val c = countdowns.remove(key) ?: return
-        c.posted?.let { ui.removeCallbacks(it) }
-        callButtons[key]?.text = c.label
-        val kept = callStatusText
-        showCallStatus(CallCountdown.lineAfterCancel(kept), sticky = kept.isNotEmpty())
-    }
+    /** `PowerManager.isInteractive`. Unreadable is taken as on, so a failed
+     *  read never blocks a route or calls off a press. */
+    private fun screenInteractive(): Boolean =
+        runCatching { getSystemService(android.os.PowerManager::class.java)?.isInteractive }
+            .getOrNull() != false
 
     /**
      * A lifeline button with two gates against the pocket-dial (and the
@@ -826,6 +827,7 @@ class LockActivity : Activity() {
      * does the call actually fire. No PIN, no reading: a child in trouble can
      * always get through, a phone in a pocket never can. The window lives at
      * activity level (see [countdowns]), so a rebuilt button is still counting.
+     * One press counts at a time: while one does, the other buttons do nothing.
      */
     private fun callButton(
         label: String,
@@ -846,17 +848,26 @@ class LockActivity : Activity() {
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     android.view.MotionEvent.ACTION_DOWN -> {
-                        if (countdowns.containsKey(key)) {
+                        if (countdowns[key] != null) {
                             // A tap during the countdown = "no, stop".
-                            cancelCountdown(key)
+                            countdowns.cancel(key)
                             return@setOnTouchListener true
                         }
+                        // Another button is counting: one press at a time.
+                        if (countdowns.any()) return@setOnTouchListener true
                         v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
                         text = "Keep holding to call $who…"
                         val r = Runnable {
                             holdRunnable = null
-                            v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-                            startCountdown(CallCountdown(label, who, number, emergency, CANCEL_WINDOW_SECS))
+                            val c = CallCountdown(label, who, number, emergency, CANCEL_WINDOW_SECS)
+                            // Not when another button began counting while this
+                            // one was held (two fingers), nor when the current
+                            // render has no button to show or cancel it.
+                            if (callButtons.containsKey(key) && countdowns.start(c)) {
+                                v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                            } else {
+                                text = label
+                            }
                         }
                         holdRunnable = r
                         ui.postDelayed(r, holdMs)
@@ -1696,6 +1707,11 @@ class LockActivity : Activity() {
 
         setContentView(screen, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // A press counting on a button this render did not rebuild (no longer
+        // offered, or its number changed) would fire with nothing to cancel
+        // it: called off, as if tapped.
+        countdowns.keepOnly(callButtons.keys.toSet())
     }
 }
 
