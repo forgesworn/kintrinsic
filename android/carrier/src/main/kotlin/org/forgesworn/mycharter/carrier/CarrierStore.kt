@@ -90,23 +90,27 @@ class CarrierStore(context: Context) {
         return true
     }
 
-    /** Hold a relay-delivered emergency audit until the console consumes it (see [InboxSpool]). */
-    @Synchronized
-    fun spoolInboxWrap(id: String, machine: String, wrapJson: String, nowSecs: Long) {
-        val next = InboxSpool.add(prefs.getString(K_INBOX_SPOOL, null), id, machine, wrapJson, nowSecs)
-        prefs.edit().putString(K_INBOX_SPOOL, next).apply()
-    }
+    /** The relay-delivered emergency audits held for the console (see [InboxSpool]). */
+    private val spool = SpoolFile(java.io.File(context.filesDir, "inbox-spool.json"))
+
+    /**
+     * The device pubkeys the console has told us about, or null when it has
+     * never pushed a roster (an older console, or before first launch). Null
+     * means "unknown, so treat everything as known": failing towards keeping.
+     */
+    fun knownMachines(): Set<String>? =
+        if (prefs.contains(K_ROSTER)) roster().map { it.machine }.toSet() else null
+
+    /** Hold a relay-delivered emergency audit until the console consumes it.
+     *  Synchronous (never `apply()`), so it is on disk before the alert. Throws on failure. */
+    fun spoolInboxWrap(id: String, machine: String, wrapJson: String, nowSecs: Long) =
+        spool.add(id, machine, wrapJson, nowSecs, knownMachines())
 
     /** The spooled entries, as the console's inbox shape. Never throws. */
-    @Synchronized
-    fun inboxSpool(): String = prefs.getString(K_INBOX_SPOOL, null) ?: "[]"
+    fun inboxSpool(): String = spool.read()
 
     /** The console has persisted these ids (a JSON array of strings): forget them. */
-    @Synchronized
-    fun consumeInboxSpool(idsJson: String) {
-        val cur = prefs.getString(K_INBOX_SPOOL, null) ?: return
-        prefs.edit().putString(K_INBOX_SPOOL, InboxSpool.remove(cur, idsJson)).apply()
-    }
+    fun consumeInboxSpool(idsJson: String) = spool.remove(idsJson)
 
     /**
      * The local link's DNS-SD instance name, `Kintrinsic <4 hex>`: random,
@@ -130,7 +134,6 @@ class CarrierStore(context: Context) {
         const val K_RELAYS = "relays"
         const val K_ROSTER = "roster"
         const val K_SEEN = "seenReqIds"
-        const val K_INBOX_SPOOL = "relayInboxSpool"
         const val K_LINK_NAME = "linkInstanceName"
         const val SEEN_CAP = 200
     }

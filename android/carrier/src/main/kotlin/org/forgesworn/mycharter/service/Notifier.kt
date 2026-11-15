@@ -75,6 +75,7 @@ object Notifier {
         roster: List<RosterEntry> = emptyList(),
         at: Long? = null,
         wrapId: String? = null,
+        rosterKnown: Boolean = false,
     ) = postEmergencyAlert(
         ctx,
         key = alertKey("override", machine, at, wrapId),
@@ -83,6 +84,7 @@ object Notifier {
             scope,
             (durationSecs / 60).coerceAtLeast(1),
             describeWard(machine, roster),
+            unpaired = isUnpaired(machine, roster, rosterKnown),
         ),
         whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
     )
@@ -99,11 +101,15 @@ object Notifier {
         roster: List<RosterEntry> = emptyList(),
         at: Long? = null,
         wrapId: String? = null,
+        rosterKnown: Boolean = false,
     ) = postEmergencyAlert(
         ctx,
         key = alertKey("emergency-call", machine, at, wrapId),
         title = EMERGENCY_CALL_TITLE,
-        text = emergencyCallText(describeWard(machine, roster)),
+        text = emergencyCallText(
+            describeWard(machine, roster),
+            unpaired = isUnpaired(machine, roster, rosterKnown),
+        ),
         whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
     )
 
@@ -117,11 +123,15 @@ object Notifier {
         roster: List<RosterEntry> = emptyList(),
         at: Long? = null,
         wrapId: String? = null,
+        rosterKnown: Boolean = false,
     ) = postEmergencyAlert(
         ctx,
         key = alertKey("emergency-control", machine, at, wrapId),
         title = EMERGENCY_CONTROL_TITLE,
-        text = emergencyControlText(describeWard(machine, roster)),
+        text = emergencyControlText(
+            describeWard(machine, roster),
+            unpaired = isUnpaired(machine, roster, rosterKnown),
+        ),
         whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
     )
 
@@ -207,7 +217,8 @@ object Notifier {
      * [Notification]. `who == null` (empty/stale/no-hit roster) MUST render
      * verbatim what shipped before the roster existed — never a guessed name.
      */
-    internal fun overrideText(scope: String, mins: Long, who: WardName?): String {
+    internal fun overrideText(scope: String, mins: Long, who: WardName?, unpaired: Boolean = false): String {
+        if (unpaired) return UNPAIRED_TEXT
         val what = if (scope == "full") "their phone" else "calls"
         return if (who != null) {
             "${who.childName} opened $what (${who.deviceLabel}) for $mins minutes."
@@ -215,6 +226,18 @@ object Notifier {
             "Your ward opened $what for $mins minutes."
         }
     }
+
+    /**
+     * What a roster miss says once the console has told us its devices: the
+     * sender is validly sealed to this guardian but is not one of theirs, so
+     * the alert must not claim it is "your ward". Still loud: failing towards
+     * alerting.
+     */
+    internal const val UNPAIRED_TEXT = "A device you haven't paired reported an emergency control."
+
+    /** True when the roster is known (the console has pushed one) and has no entry for [machine]. */
+    internal fun isUnpaired(machine: String, roster: List<RosterEntry>, rosterKnown: Boolean): Boolean =
+        rosterKnown && describeWard(machine, roster) == null
 
     internal const val EMERGENCY_CALL_TITLE = "Emergency call button used"
     internal const val EMERGENCY_CONTROL_TITLE = "Emergency control used"
@@ -262,16 +285,20 @@ object Notifier {
     }
 
     /** Pure text for [notifyEmergencyCall] — see [overrideText]. */
-    internal fun emergencyCallText(who: WardName?): String =
-        if (who != null) {
+    internal fun emergencyCallText(who: WardName?, unpaired: Boolean = false): String =
+        if (unpaired) {
+            UNPAIRED_TEXT
+        } else if (who != null) {
             "${who.childName} used the emergency call button on ${who.deviceLabel}."
         } else {
             "Your ward used the emergency call button."
         }
 
     /** Pure text for [notifyEmergencyControl] — see [overrideText]. */
-    internal fun emergencyControlText(who: WardName?): String =
-        if (who != null) {
+    internal fun emergencyControlText(who: WardName?, unpaired: Boolean = false): String =
+        if (unpaired) {
+            UNPAIRED_TEXT
+        } else if (who != null) {
             "${who.childName}: an emergency control was used on ${who.deviceLabel}"
         } else {
             "Your ward: an emergency control was used"

@@ -5,6 +5,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.forgesworn.mycharter.carrier.RosterEntry
 import org.junit.Test
 
 /**
@@ -82,6 +84,26 @@ class NotifierTextTest {
             Notifier.emergencyControlText(null),
         )
         assertFalse(Notifier.emergencyControlText(who).contains("opened"))
+    }
+
+    // ---- a roster miss (L6) -------------------------------------------------
+
+    @Test fun anUnpairedSenderIsNeverCalledYourWard() {
+        val text = "A device you haven't paired reported an emergency control."
+        assertEquals(text, Notifier.UNPAIRED_TEXT)
+        assertEquals(text, Notifier.emergencyCallText(null, unpaired = true))
+        assertEquals(text, Notifier.emergencyControlText(null, unpaired = true))
+        assertEquals(text, Notifier.overrideText("full", 10, null, unpaired = true))
+    }
+
+    @Test fun onlyAKnownRosterWithNoEntryMakesASenderUnpaired() {
+        val roster = listOf(RosterEntry("m1", "Mia", "Pixel 6"))
+        assertFalse(Notifier.isUnpaired("m1", roster, rosterKnown = true))
+        assertTrue(Notifier.isUnpaired("m2", roster, rosterKnown = true))
+        // No roster pushed yet: the old "Your ward" wording, never "unpaired".
+        assertFalse(Notifier.isUnpaired("m2", roster, rosterKnown = false))
+        assertFalse(Notifier.isUnpaired("m2", emptyList(), rosterKnown = false))
+        assertTrue(Notifier.isUnpaired("m2", emptyList(), rosterKnown = true))
     }
 
     // ---- one row per press, and the press time ---------------------------------

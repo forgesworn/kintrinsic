@@ -57,14 +57,84 @@ class InboxSpoolTest {
         assertEquals(listOf("w1"), ids(InboxSpool.merge("[]", s)))
     }
 
-    @Test fun theOldestGoWhenFullAndStaleEntriesAreDropped() {
+    @Test fun theOldestKnownGoWhenFullAndStaleEntriesAreDropped() {
         var s: String? = null
-        for (i in 1..InboxSpool.CAP + 5) s = InboxSpool.add(s, "w$i", "m", wrap("w$i"), now)
+        for (i in 1..InboxSpool.KNOWN_CAP + 5) s = InboxSpool.add(s, "w$i", "m", wrap("w$i"), now)
         val held = ids(s!!)
-        assertEquals(InboxSpool.CAP, held.size)
+        assertEquals(InboxSpool.KNOWN_CAP, held.size)
         assertEquals("w6", held.first())
         val later = InboxSpool.add(s, "new", "m", wrap("new"), now + InboxSpool.MAX_AGE_SECS + 1)
         assertEquals(listOf("new"), ids(later))
+    }
+
+    @Test fun anEntryStaysHeldPastTheOldTwoDayLimit() {
+        val s = InboxSpool.add(null, "w1", "m", wrap("w1"), now)
+        val later = InboxSpool.add(s, "w2", "m", wrap("w2"), now + 5L * 24 * 60 * 60)
+        assertEquals(listOf("w1", "w2"), ids(later))
+    }
+
+    // ---- V1: a stranger cannot push out a real press ---------------------------
+
+    private val real = "r".repeat(64)
+    private fun fake(i: Int) = "f$i".padEnd(64, '0')
+
+    @Test fun unknownMachinesNeverEvictKnownOnes() {
+        val known = setOf(real)
+        var s = InboxSpool.add(null, "real1", real, wrap("real1"), now, known)
+        s = InboxSpool.add(s, "real2", real, wrap("real2"), now + 1, known)
+        for (i in 1..500) s = InboxSpool.add(s, "spoof$i", fake(i), wrap("spoof$i"), now + 2 + i, known)
+        val held = ids(s)
+        assertTrue("real1" in held && "real2" in held)
+        assertEquals(2 + InboxSpool.UNKNOWN_CAP, held.size)
+    }
+
+    @Test fun unknownMachinesGoOldestFirstWithinTheirOwnCap() {
+        val known = setOf(real)
+        var s: String? = null
+        for (i in 1..InboxSpool.UNKNOWN_CAP + 3) s = InboxSpool.add(s, "u$i", fake(i), wrap("u$i"), now + i, known)
+        val held = ids(s!!)
+        assertEquals(InboxSpool.UNKNOWN_CAP, held.size)
+        assertEquals("u4", held.first())
+        assertEquals("u${InboxSpool.UNKNOWN_CAP + 3}", held.last())
+    }
+
+    @Test fun knownEntriesHaveTheirOwnLargerCapAndOrderIsKept() {
+        val known = setOf(real)
+        var s = InboxSpool.add(null, "a", real, wrap("a"), now, known)
+        s = InboxSpool.add(s, "u", fake(1), wrap("u"), now + 1, known)
+        s = InboxSpool.add(s, "b", real, wrap("b"), now + 2, known)
+        assertEquals(listOf("a", "u", "b"), ids(s))
+        for (i in 1..InboxSpool.KNOWN_CAP + 2) s = InboxSpool.add(s, "k$i", real, wrap("k$i"), now + 10 + i, known)
+        val held = ids(s)
+        assertEquals(InboxSpool.KNOWN_CAP + 1, held.size) // the 200 known plus the one unknown
+        assertTrue("u" in held)
+        assertTrue("a" !in held && "b" !in held)
+    }
+
+    @Test fun beforeTheFirstRosterEveryMachineCountsAsKnown() {
+        var s: String? = null
+        for (i in 1..50) s = InboxSpool.add(s, "w$i", fake(i), wrap("w$i"), now + i, known = null)
+        assertEquals(50, ids(s!!).size) // none squeezed into the unknown cap of 10
+    }
+
+    @Test fun anEmptyRosterMakesEveryoneUnknown() {
+        var s: String? = null
+        for (i in 1..30) s = InboxSpool.add(s, "w$i", fake(i), wrap("w$i"), now + i, known = emptySet())
+        assertEquals(InboxSpool.UNKNOWN_CAP, ids(s!!).size)
+    }
+
+    @Test fun aWrapOverSixteenKilobytesIsDropped() {
+        val big = """{"id":"big","content":"${"x".repeat(InboxSpool.MAX_ENTRY_BYTES)}"}"""
+        val s = InboxSpool.add(null, "w1", "m", wrap("w1"), now)
+        assertEquals(s, InboxSpool.add(s, "big", "m", big, now))
+        val ok = """{"id":"ok","content":"${"x".repeat(InboxSpool.MAX_ENTRY_BYTES - 100)}"}"""
+        assertEquals(listOf("w1", "ok"), ids(InboxSpool.add(s, "ok", "m", ok, now)))
+    }
+
+    @Test fun everyEntryCarriesWhenTheCarrierVerifiedIt() {
+        val e = JSONArray(InboxSpool.add(null, "w1", "m", wrap("w1"), now)).getJSONObject(0)
+        assertEquals(now, e.getLong("verifiedAt"))
+        assertEquals(now, e.getLong("receivedAt"))
     }
 
     @Test fun aNonJsonWrapIsNotHeld() {

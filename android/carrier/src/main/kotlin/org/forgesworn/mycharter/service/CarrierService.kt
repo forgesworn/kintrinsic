@@ -276,6 +276,9 @@ class CarrierService : Service() {
             // per-relay copies into one alert. An unreadable id falls
             // through to notify: a repeated alarm beats a missed emergency.
             if (wrapId != null && !store.markSeen("audit:$wrapId")) return
+            // Has the console told us its devices yet? If so, a sender not in
+            // that list is not one of this guardian's wards.
+            val rosterKnown = store.knownMachines() != null
             when (action) {
                 Notifier.AuditAction.UNLOCK -> Notifier.notifyOverride(
                     this,
@@ -285,6 +288,7 @@ class CarrierService : Service() {
                     roster = store.roster(),
                     at = at,
                     wrapId = wrapId,
+                    rosterKnown = rosterKnown,
                 )
                 Notifier.AuditAction.EMERGENCY_CALL -> Notifier.notifyEmergencyCall(
                     this,
@@ -292,6 +296,7 @@ class CarrierService : Service() {
                     roster = store.roster(),
                     at = at,
                     wrapId = wrapId,
+                    rosterKnown = rosterKnown,
                 )
                 Notifier.AuditAction.OTHER_CONTROL -> Notifier.notifyEmergencyControl(
                     this,
@@ -299,6 +304,7 @@ class CarrierService : Service() {
                     roster = store.roster(),
                     at = at,
                     wrapId = wrapId,
+                    rosterKnown = rosterKnown,
                 )
                 Notifier.AuditAction.IGNORE -> Unit
             }
