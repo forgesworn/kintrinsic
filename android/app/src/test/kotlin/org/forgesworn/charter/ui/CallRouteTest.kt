@@ -218,25 +218,29 @@ class CallRouteTest {
     }
 
     @Test
-    fun `an emergency press keeps the advice whatever it settles on, and only a failure with the shade clear says so`() {
+    fun `an emergency press keeps the advice whatever it settles on, and only a failure with nothing opened says so`() {
         for (outcome in CallSequencer.Outcome.values()) {
-            for (clear in bools) {
-                val expected = if (outcome == CallSequencer.Outcome.FAILED && clear) {
+            for (nothingOpened in bools) {
+                val expected = if (outcome == CallSequencer.Outcome.FAILED && nothingOpened) {
                     CallRoute.Line.NOTHING_OPENED
                 } else {
                     CallRoute.Line.ADVICE
                 }
-                assertEquals("$outcome clear=$clear", expected, CallRoute.settledLine(true, outcome, clear))
+                assertEquals(
+                    "$outcome nothingOpened=$nothingOpened",
+                    expected,
+                    CallRoute.settledLine(true, outcome, nothingOpened),
+                )
             }
         }
     }
 
     @Test
     fun `a guardian's number says nothing unless its call could not be started`() {
-        for (clear in bools) {
-            assertEquals(CallRoute.Line.BLANK, CallRoute.settledLine(false, CallSequencer.Outcome.OPENED, clear))
-            assertEquals(CallRoute.Line.BLANK, CallRoute.settledLine(false, CallSequencer.Outcome.CANCELLED, clear))
-            assertEquals(CallRoute.Line.CALL_FAILED, CallRoute.settledLine(false, CallSequencer.Outcome.FAILED, clear))
+        for (nothingOpened in bools) {
+            assertEquals(CallRoute.Line.BLANK, CallRoute.settledLine(false, CallSequencer.Outcome.OPENED, nothingOpened))
+            assertEquals(CallRoute.Line.BLANK, CallRoute.settledLine(false, CallSequencer.Outcome.CANCELLED, nothingOpened))
+            assertEquals(CallRoute.Line.CALL_FAILED, CallRoute.settledLine(false, CallSequencer.Outcome.FAILED, nothingOpened))
         }
     }
 

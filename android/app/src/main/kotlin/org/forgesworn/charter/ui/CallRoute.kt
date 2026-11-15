@@ -13,10 +13,12 @@ package org.forgesworn.charter.ui
  * - A guardian's number (not an emergency number): [Route.CALL] (ACTION_CALL),
  *   which places the call straight away. Unchanged, and the only route.
  * - An emergency number (the shade's Emergency button, or a lifeline entry the
- *   platform counts as one): the platform will not let an app that is not the
- *   dialer place it. Telecom turns ACTION_CALL into the system dialler's
- *   keypad, and during a lockout that launch can be refused by LockTask. So the
- *   order is:
+ *   platform counts as one): ACTION_CALL from an app that is not the dialer
+ *   may be refused (during a lockout LockTask can refuse it), may open the
+ *   system dialler's keypad, or may place the call outright, with no keypad
+ *   and nothing to confirm: on the emulator Telecom placed it. So it comes
+ *   last, behind the routes that only open a dialler, and the sequencer never
+ *   reaches it after the ward closed a dialler that did open. The order is:
  *   1. [Route.EMERGENCY_DIALLER], when one resolved from the system image and
  *      LockTask will let it through (see [emergencyDiallerUsable]);
  *   2. with the phone's own lock showing, [Route.BOUNCER]: that lock's own
@@ -158,14 +160,17 @@ object CallRoute {
 
     /**
      * The line a press settles on. An emergency press keeps [Line.ADVICE]
-     * through OPENED, CANCELLED and a FAILED with the shade covered (something
-     * may be up, or the screen is off), and only a FAILED with the shade clear
-     * says the dialler could not be opened. A guardian's number says nothing
-     * unless its call could not be started. Nothing ever says a call started.
+     * through every ending except one: a FAILED where [nothingOpened], meaning
+     * every route was tried and the shade was clear at the end, with nothing
+     * covering it, says the dialler could not be opened. A failure for any
+     * other reason (the ward closed what opened, the screen went off, a call
+     * rang, the device slept, the phone's own lock went unanswered) keeps the
+     * advice. A guardian's number says nothing unless its call could not be
+     * started. Nothing ever says a call started.
      */
-    fun settledLine(isEmergency: Boolean, outcome: CallSequencer.Outcome, shadeClear: Boolean): Line = when {
+    fun settledLine(isEmergency: Boolean, outcome: CallSequencer.Outcome, nothingOpened: Boolean): Line = when {
         !isEmergency -> if (outcome == CallSequencer.Outcome.FAILED) Line.CALL_FAILED else Line.BLANK
-        outcome == CallSequencer.Outcome.FAILED && shadeClear -> Line.NOTHING_OPENED
+        outcome == CallSequencer.Outcome.FAILED && nothingOpened -> Line.NOTHING_OPENED
         else -> Line.ADVICE
     }
 }
@@ -178,7 +183,8 @@ object CallRoute {
  *
  * The shade is CLEAR when it is resumed, has the window focus and the screen is
  * on ([Shade.clear]); the activity calls [onClear] whenever it may have become
- * clear (from `onResume` and `onWindowFocusChanged(true)`).
+ * clear (from `onResume` and `onWindowFocusChanged(true)`), [onPaused] from
+ * `onPause`, and [onScreenOff] when the screen goes off.
  *
  * - **A route launches only from a clear shade.** When one is due and the
  *   shade is not clear, it waits for [onClear], bounded at [CLEAR_WAIT_MS]; at
@@ -187,20 +193,33 @@ object CallRoute {
  *   whatever is covering the shade.
  * - **An intent route** (the emergency dialler, ACTION_DIAL, ACTION_CALL) is
  *   checked once, [CHECK_MS] after `startActivity` (see [CallRoute.check]):
- *   clear means it showed nothing and the next route runs; covered with the
- *   screen off, or by a ringing call, settles FAILED; otherwise OPENED. A
- *   launch that throws runs the next route at once.
+ *   covered with the screen off, or by a ringing call, settles FAILED;
+ *   otherwise covered is OPENED. Clear means the route is over: if the shade
+ *   paused after the launch, something showed and the ward closed it, so the
+ *   press settles FAILED and nothing further is launched (ACTION_CALL may
+ *   place the call outright, and the ward has just backed out); if it never
+ *   paused (refused by LockTask, or silent), the next route runs. A launch
+ *   that throws runs the next route at once.
  * - **The phone's own lock** ([CallRoute.Route.BOUNCER]) is requested from a
  *   clear shade. Dismissed (now unlocked) or an error: the next route, once
  *   clear. Cancelled: settles CANCELLED. Still clear [CHECK_MS] after the
  *   request: it never appeared, and the next route runs (a late answer is
- *   ignored). No answer at all within [BOUNCER_WAIT_MS]: FAILED.
+ *   ignored). Once it has covered the shade, a clear shade for [LOCK_GONE_MS]
+ *   with no answer means it went away without saying how: the advice comes
+ *   back and nothing is launched (a dismissal may still be on its way). No
+ *   answer within [BOUNCER_WAIT_MS] of the request: FAILED.
+ * - **Sleep.** The timers run on the device's awake time, so a device that
+ *   sleeps runs them late. Every wait also has a deadline on [Timer.now]
+ *   (`elapsedRealtime`, which counts the sleep): a timer that runs more than
+ *   [LATE_MS] past its time, and an [onClear], a lock answer or a due route
+ *   past the wait's deadline, settle FAILED instead of launching. The screen
+ *   going off settles an unsettled press FAILED.
  *
  * The status line does not depend on any of this being right: an emergency
  * press shows [CallRoute.Line.ADVICE] from the start, and only a FAILED with
- * the shade clear says nothing opened (see [CallRoute.settledLine]). A
- * guardian's number is one ACTION_CALL, launched from a clear shade like every
- * route and settled when it starts.
+ * every route tried and the shade clear says nothing opened (see
+ * [CallRoute.settledLine]). A guardian's number is one ACTION_CALL, launched
+ * from a clear shade like every route and settled when it starts.
  *
  * One settlement per press. Settlement, a new press (the activity abandons the
  * old sequencer) and [abandon] invalidate every timer and every late answer.
@@ -251,8 +270,13 @@ class CallSequencer(
     }
 
     interface Timer {
+        /** Runs [task] after [delayMs] of the device being awake: one that
+         *  sleeps in between runs it late. */
         fun postDelayed(task: Runnable, delayMs: Long)
         fun cancel(task: Runnable)
+
+        /** `elapsedRealtime`, in milliseconds: it goes on counting while the device sleeps. */
+        fun now(): Long
     }
 
     interface Listener {
@@ -276,8 +300,11 @@ class CallSequencer(
         /** An intent route was started; its check is pending. */
         CHECKING,
 
-        /** The phone's own lock was requested; its answer is pending. */
+        /** The phone's own lock was requested; its check is pending. */
         BOUNCER,
+
+        /** The phone's own lock covered the shade at its check; its answer is pending. */
+        BOUNCER_UP,
 
         /** Settled or abandoned: nothing more happens. */
         SETTLED,
@@ -292,6 +319,20 @@ class CallSequencer(
     private var pending: Runnable? = null
     private var line: CallRoute.Line? = null
 
+    /** The current wait's deadline on [Timer.now]: past it, nothing is launched. */
+    private var deadline = Long.MAX_VALUE
+
+    /** When the phone's own lock was requested, on [Timer.now]. */
+    private var requestedAt = 0L
+
+    /** The shade has paused since the current route launched: something
+     *  showed. It decides only whether a clear shade falls through to the next
+     *  route, never whether a route opened. */
+    private var pausedSinceLaunch = false
+
+    /** In [State.BOUNCER_UP], the pending timer is the "lock gone" one. */
+    private var lockGoneArmed = false
+
     fun begin() {
         if (state != State.IDLE) return
         show(if (isEmergency) CallRoute.Line.ADVICE else CallRoute.Line.BLANK)
@@ -299,9 +340,31 @@ class CallSequencer(
     }
 
     /** The shade may have become clear (from `onResume` and
-     *  `onWindowFocusChanged(true)`): a route waiting for it runs now. */
+     *  `onWindowFocusChanged(true)`): a route waiting for it runs now, unless
+     *  its wait is over in real time. */
     fun onClear() {
-        if (state == State.WAITING_FOR_CLEAR && shade.clear()) due()
+        when (state) {
+            State.WAITING_FOR_CLEAR -> when {
+                late() -> settle(Outcome.FAILED)
+                shade.clear() -> due()
+            }
+            State.BOUNCER_UP -> if (!lockGoneArmed && shade.clear()) {
+                lockGoneArmed = true
+                arm(LOCK_GONE_MS) { lockGone() }
+            }
+            else -> Unit
+        }
+    }
+
+    /** The shade paused (from `onPause`). */
+    fun onPaused() {
+        if (state != State.SETTLED) pausedSinceLaunch = true
+    }
+
+    /** The screen went off: an unsettled press settles FAILED, with the advice
+     *  there to be seen on waking, and nothing more is launched. */
+    fun onScreenOff() {
+        if (state != State.IDLE && state != State.SETTLED) settle(Outcome.FAILED)
     }
 
     /** The shade is going away, or a new press replaces this one: nothing
@@ -311,6 +374,8 @@ class CallSequencer(
         token++
         cancelPending()
     }
+
+    private fun late(): Boolean = timer.now() > deadline
 
     private fun show(next: CallRoute.Line) {
         if (next == line) return
@@ -325,34 +390,43 @@ class CallSequencer(
 
     private fun arm(delayMs: Long, onFire: () -> Unit) {
         cancelPending()
+        val dueAt = timer.now() + delayMs
         val task = object : Runnable {
             override fun run() {
                 // A task cancelled too late to stop it running still does nothing.
                 if (pending !== this || state == State.SETTLED) return
                 pending = null
-                onFire()
+                // Run long after its time: the device slept through it, and
+                // nothing is launched so long after the press.
+                if (timer.now() > dueAt + LATE_MS) settle(Outcome.FAILED) else onFire()
             }
         }
         pending = task
         timer.postDelayed(task, delayMs)
     }
 
-    private fun settle(outcome: Outcome) {
+    private fun settle(outcome: Outcome, nothingOpened: Boolean = false) {
         if (state == State.SETTLED) return
         state = State.SETTLED
         token++
         cancelPending()
-        show(CallRoute.settledLine(isEmergency, outcome, shade.clear()))
+        show(CallRoute.settledLine(isEmergency, outcome, nothingOpened))
         listener.onSettled(outcome)
     }
 
     /** The next route is due: launched now if the shade is clear, otherwise
-     *  once it is, within [CLEAR_WAIT_MS]. None left: FAILED. */
+     *  once it is, within [CLEAR_WAIT_MS]. None left: FAILED. Past the current
+     *  wait's deadline: FAILED, with nothing launched. */
     private fun due() {
         if (state == State.SETTLED) return
+        if (late()) {
+            settle(Outcome.FAILED)
+            return
+        }
         val route = CallRoute.choose(isEmergency, locked, emergencyDiallerOk, systemDialOk, attempt)
         if (route == null) {
-            settle(Outcome.FAILED)
+            // Every route tried: nothing opened, if nothing covers the shade.
+            settle(Outcome.FAILED, nothingOpened = shade.clear())
             return
         }
         if (shade.clear()) {
@@ -362,6 +436,7 @@ class CallSequencer(
             // The bound runs from when the route fell due, not from the last
             // time the shade looked.
             state = State.WAITING_FOR_CLEAR
+            deadline = timer.now() + CLEAR_WAIT_MS
             arm(CLEAR_WAIT_MS) { settle(Outcome.FAILED) }
         }
     }
@@ -369,14 +444,20 @@ class CallSequencer(
     private fun launch(route: CallRoute.Route) {
         attempt++
         val mine = ++token
+        pausedSinceLaunch = false
+        lockGoneArmed = false
         listener.onRoute(route)
+        val now = timer.now()
         if (route == CallRoute.Route.BOUNCER) {
             state = State.BOUNCER
+            requestedAt = now
+            deadline = now + BOUNCER_WAIT_MS
             show(CallRoute.Line.BOUNCER)
             // Armed before the request, so an answer given at once cancels it.
             arm(CHECK_MS) { bouncerCheck() }
         } else {
             state = State.CHECKING
+            deadline = now + CHECK_MS + LATE_MS
         }
         launcher.launch(route) { result ->
             if (mine == token && state != State.SETTLED) answered(route, result)
@@ -388,12 +469,14 @@ class CallSequencer(
             if (result == Launch.STARTED) return // not an answer the lock gives
             token++
             cancelPending()
+            lockGoneArmed = false
             when (result) {
                 Launch.CANCELLED -> settle(Outcome.CANCELLED)
                 Launch.DISMISSED -> {
                     // Unlocked now: the lock's own screen is spent, and so is the
                     // emergency dialler if it was ever going to be tried. The
-                    // unlocked routes run, once the shade is clear.
+                    // unlocked routes run, once the shade is clear, if the
+                    // answer came within the lock's deadline.
                     locked = false
                     emergencyDiallerOk = false
                     attempt = 0
@@ -421,7 +504,13 @@ class CallSequencer(
 
     private fun intentCheck() {
         when (CallRoute.check(shade.clear(), shade.screenOn(), shade.ringing())) {
-            CallRoute.Check.NEXT_ROUTE -> due()
+            CallRoute.Check.NEXT_ROUTE -> if (pausedSinceLaunch) {
+                // Something showed and the ward closed it: no escalation,
+                // least of all to ACTION_CALL, which may place the call.
+                settle(Outcome.FAILED)
+            } else {
+                due()
+            }
             CallRoute.Check.FAILED -> settle(Outcome.FAILED)
             CallRoute.Check.OPENED -> settle(Outcome.OPENED)
         }
@@ -435,8 +524,24 @@ class CallSequencer(
             show(CallRoute.Line.ADVICE)
             due()
         } else {
-            arm(BOUNCER_WAIT_MS - CHECK_MS) { settle(Outcome.FAILED) }
+            state = State.BOUNCER_UP
+            armBound()
         }
+    }
+
+    /** The rest of the lock's [BOUNCER_WAIT_MS], counted from the request. */
+    private fun armBound() {
+        lockGoneArmed = false
+        val left = requestedAt + BOUNCER_WAIT_MS - timer.now()
+        if (left <= 0) settle(Outcome.FAILED) else arm(left) { settle(Outcome.FAILED) }
+    }
+
+    private fun lockGone() {
+        // Clear for LOCK_GONE_MS with no answer: the lock went away without
+        // saying how. The advice comes back; nothing is launched, because a
+        // dismissal may still be on its way. The lock's own bound still runs.
+        if (shade.clear()) show(CallRoute.Line.ADVICE)
+        armBound()
     }
 
     companion object {
@@ -448,5 +553,13 @@ class CallSequencer(
 
         /** How long, from the request, the phone's own lock has to answer. */
         const val BOUNCER_WAIT_MS = 60_000L
+
+        /** How long the shade, once the lock has covered it, must be clear with
+         *  no answer before the lock is taken to have gone away. */
+        const val LOCK_GONE_MS = 3_000L
+
+        /** How far past its time a timer may run before the device is taken to
+         *  have slept through it (a busy main thread runs one a little late). */
+        const val LATE_MS = 1_000L
     }
 }

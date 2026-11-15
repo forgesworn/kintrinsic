@@ -241,6 +241,15 @@ class LockActivity : Activity() {
         }
     }
 
+    /** The screen going off settles a press still being routed (see
+     *  CallSequencer): with a dialler in front the shade is already stopped,
+     *  so no lifecycle callback of its own says so. */
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) callSequencer?.onScreenOff()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Over the keyguard: LockTask keeps the phone's own screen lock
@@ -262,6 +271,11 @@ class LockActivity : Activity() {
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(hideReceiver, filter)
+        }
+        // Never at the shade's expense: without it, a sleep is still caught by
+        // the sequencer's real-time deadlines.
+        runCatching {
+            registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED)
         }
         // render() now paints after a worker round-trip (its JNI reads are off
         // the main thread); tint the window dark up front so the lock never
@@ -358,6 +372,9 @@ class LockActivity : Activity() {
         ui.removeCallbacks(clockTick)
         org.forgesworn.charter.service.RelayPollPace.hide(this)
         shadeResumed = false
+        // Something showed over the shade: a route that leaves it clear again
+        // was closed by the ward, and is not escalated (see CallSequencer).
+        callSequencer?.onPaused()
         super.onPause()
     }
 
@@ -370,6 +387,7 @@ class LockActivity : Activity() {
         // A break-glass already running finishes; none can be queued after.
         breakGlassExecutor.shutdown()
         runCatching { unregisterReceiver(hideReceiver) }
+        runCatching { unregisterReceiver(screenOffReceiver) }
         // Release the ask worker's native thread — otherwise it leaks per lock
         // lifecycle (same pattern as CharterService.onDestroy).
         if (::askThread.isInitialized) askThread.quitSafely()
@@ -698,6 +716,9 @@ class LockActivity : Activity() {
                 override fun cancel(task: Runnable) {
                     ui.removeCallbacks(task)
                 }
+
+                // The handler's delays stop while the device sleeps; this does not.
+                override fun now(): Long = android.os.SystemClock.elapsedRealtime()
             },
             listener = object : CallSequencer.Listener {
                 override fun onRoute(route: CallRoute.Route) {
