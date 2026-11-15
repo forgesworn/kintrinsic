@@ -86,3 +86,28 @@ describe("buildCarrierRoster", () => {
     expect(buildCarrierRoster([])).toEqual([]);
   });
 });
+
+describe("buildCarrierRoster during the short grace after a release", () => {
+  const machine = "c".repeat(64);
+  const releasedList = (releasedAt: number) => [
+    { machine, childId: "child-1", childName: "Mia", deviceLabel: "Pixel 6", relays: [], releasedAt },
+  ];
+
+  it("lists the machine as paired, not released, while it is releasing", () => {
+    const now = Date.now();
+    expect(buildCarrierRoster([child()], releasedList(now), now, new Set([machine]))).toEqual([
+      { machine, childName: "Mia", deviceLabel: "Pixel 6", paired: true },
+    ]);
+  });
+
+  it("says released again once the grace is over", () => {
+    const now = Date.now();
+    expect(buildCarrierRoster([], releasedList(now), now, new Set())).toEqual([
+      { machine, childName: "Mia", deviceLabel: "Pixel 6", paired: false, released: true },
+    ]);
+  });
+
+  it("never lists a machine that is not on the released record as paired", () => {
+    expect(buildCarrierRoster([], undefined, Date.now(), new Set([machine]))).toEqual([]);
+  });
+});

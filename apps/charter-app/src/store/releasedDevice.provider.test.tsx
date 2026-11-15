@@ -32,6 +32,8 @@ vi.mock("nostr-tools", async (importOriginal) => {
 import { CharterProvider, STORAGE_KEY, useCharter, type CharterState } from "./store";
 import { RELEASED_GRACE_MS, type ReleasedDevice } from "./releasedDevices";
 import { buildCarrierRoster } from "../carrier/roster";
+import { pushCarrierRoster } from "../carrier/bridge";
+import { RELEASE_LINK_GRACE_MS, resetReleaseGraceForTests } from "./releaseGrace";
 
 const DAY = 24 * 60 * 60 * 1000;
 const guardianSk = generateSecretKey();
@@ -161,6 +163,7 @@ describe("a press made before the guardian disconnected the device", () => {
     act(() => root.unmount());
     container.remove();
     delete window.CharterCarrier;
+    resetReleaseGraceForTests();
     localStorage.clear();
     resetGuardianKeyCacheForTests();
     vi.useRealTimers();
@@ -377,6 +380,82 @@ describe("a press made before the guardian disconnected the device", () => {
         { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: false, released: true },
       ]);
       expect(buildCarrierRoster(current().children, current().releasedDevices, Date.now() + RELEASED_GRACE_MS + DAY)).toEqual([]);
+    });
+
+    describe("the home-network link after a disconnect", () => {
+      const roster = vi.fn();
+      const lastRoster = () =>
+        (JSON.parse(roster.mock.calls.at(-1)![0] as string) as { entries: { machine: string; paired: boolean; released?: boolean }[] }).entries;
+      const pushLikeTheApp = () => pushCarrierRoster(current().children, current().releasedDevices);
+
+      beforeEach(() => {
+        roster.mockClear();
+        window.CharterCarrier = { provision: vi.fn(), roster, isCarrier: () => true };
+      });
+
+      it("still lists the machine as paired for 10 seconds, then pushes it as released with no re-render", async () => {
+        mount();
+        await settle();
+        act(() => api.unpairDevice("c1", "d1"));
+        // The persisted state says unpaired from the first moment.
+        expect(current().children[0].devices[0].pairing).toBe("unpaired");
+        expect(stored().children[0].devices[0].pairing).toBe("unpaired");
+        expect(JSON.stringify(stored())).not.toContain("releasingUntil");
+
+        pushLikeTheApp();
+        expect(lastRoster()).toEqual([{ machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: true }]);
+
+        await settle(RELEASE_LINK_GRACE_MS - 1_000);
+        pushLikeTheApp();
+        expect(lastRoster()[0]).toMatchObject({ paired: true });
+
+        // Nothing else renders; the timer alone pushes the roster again.
+        roster.mockClear();
+        await settle(1_001);
+        expect(roster).toHaveBeenCalledTimes(1);
+        expect(lastRoster()).toEqual([
+          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: false, released: true },
+        ]);
+      });
+
+      it("gives a device removed while it has no key no grace, and a removed child's device the same grace", async () => {
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify(
+            seeded({
+              children: [
+                {
+                  id: "c1",
+                  name: "Robin",
+                  color: "#3B6FB2",
+                  dependantPubkey: null,
+                  policies: [],
+                  devices: [
+                    { id: "d1", label: "Laptop", platform: "linux", pairing: "paired", devicePubkey: machinePk, relays: [OWN_RELAY] },
+                    { id: "d2", label: "Spare", platform: "linux", pairing: "unpaired", devicePubkey: null },
+                  ],
+                },
+              ],
+            }),
+          ),
+        );
+        mount();
+        await settle();
+        act(() => api.removeDevice("c1", "d2"));
+        pushLikeTheApp();
+        expect(lastRoster()).toEqual([
+          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: true },
+        ]);
+        act(() => api.removeChild("c1"));
+        pushLikeTheApp();
+        expect(lastRoster()).toEqual([
+          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: true },
+        ]);
+        await settle(RELEASE_LINK_GRACE_MS + 1);
+        expect(lastRoster()).toEqual([
+          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: false, released: true },
+        ]);
+      });
     });
 
     it("keeps reading the released device's own relays, so the flush can be heard", async () => {

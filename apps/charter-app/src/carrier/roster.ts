@@ -20,9 +20,10 @@ export interface CarrierRosterEntry {
   childName: string;
   deviceLabel: string;
   /**
-   * True only for `pairing === "paired"`. The carrier's local-network listener
+   * True for `pairing === "paired"`. The carrier's local-network listener
    * admits only paired machines at the handshake (an entry with no `paired`
-   * field, from an older console, means paired). Naming still covers devices
+   * field, from an older console, means paired; the one exception is the few
+   * seconds after a release is sent, see ../store/releaseGrace). Naming still covers devices
    * mid-pairing, so they stay in the list with `paired: false`.
    */
   paired: boolean;
@@ -47,6 +48,7 @@ export function buildCarrierRoster(
   children: Child[],
   released: unknown = undefined,
   now: number = Date.now(),
+  releasing: ReadonlySet<string> = new Set(),
 ): CarrierRosterEntry[] {
   const roster: CarrierRosterEntry[] = [];
   for (const child of children) {
@@ -67,6 +69,19 @@ export function buildCarrierRoster(
   for (const r of liveReleased(released, now)) {
     if (listed.has(r.machine)) continue;
     listed.add(r.machine);
+    // Inside the short grace after the release was sent, the entry still says
+    // paired (and not released), so the carrier keeps the ward's local-network
+    // session open for the release acknowledgement and the audits it flushes.
+    // Only this push says so; nothing else treats the device as paired.
+    if (releasing.has(r.machine)) {
+      roster.push({
+        machine: r.machine,
+        childName: r.childName,
+        deviceLabel: r.deviceLabel,
+        paired: true,
+      });
+      continue;
+    }
     roster.push({
       machine: r.machine,
       childName: r.childName,

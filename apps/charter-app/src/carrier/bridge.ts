@@ -13,6 +13,7 @@ import { DEFAULT_RELAYS } from "../signer/config";
 import { allPairingRelays } from "../signer/pairingRelays";
 import type { Child } from "../domain/types";
 import { buildCarrierRoster } from "./roster";
+import { releasingMachines } from "../store/releaseGrace";
 import { releasedRelays } from "../store/releasedDevices";
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -86,11 +87,15 @@ export function resetProvisionedForTests(): void {
  * stale), but its absence (outside the carrier, or an older shell without
  * the `roster` method) is always a silent no-op.
  */
-export function pushCarrierRoster(children: Child[], released: unknown = undefined): boolean {
+export function pushCarrierRoster(
+  children: Child[],
+  released: unknown = undefined,
+  releasing: ReadonlySet<string> = releasingMachines(),
+): boolean {
   const carrier = window.CharterCarrier;
   if (!carrier?.roster) return false;
   carrier.roster(
-    JSON.stringify({ v: 1, entries: buildCarrierRoster(children, released) }),
+    JSON.stringify({ v: 1, entries: buildCarrierRoster(children, released, Date.now(), releasing) }),
   );
   return true;
 }

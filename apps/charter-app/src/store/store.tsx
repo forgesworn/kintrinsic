@@ -140,6 +140,8 @@ import {
   withoutReleased,
   type ReleasedDevice,
 } from "./releasedDevices";
+import { endReleaseGrace, onReleaseGraceEnd, releasingMachines, startReleaseGrace } from "./releaseGrace";
+import { pushCarrierRoster } from "../carrier/bridge";
 
 export { isSetUp, statusFor } from "./statusFor";
 export type { StatusForResult } from "./statusFor";
@@ -859,6 +861,18 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     stateRef.current = state;
   }, [state]);
 
+  // When a release's short link grace ends, push the roster again so the
+  // carrier lets the machine go. Nothing else need re-render at that moment,
+  // so this does not wait for the next render (see ./releaseGrace).
+  useEffect(
+    () =>
+      onReleaseGraceEnd(() => {
+        const s = stateRef.current;
+        pushCarrierRoster(s.children, s.releasedDevices);
+      }),
+    [],
+  );
+
   // Wrap ids the carrier's home-network inbox may forget — but only once the
   // state holding what they produced has reached storage (see ./localDrain).
   const consumeQueue = useRef(new ConsumeQueue()).current;
@@ -1252,7 +1266,22 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       // device's own relays (plus the defaults) — not just the current
       // defaults, so a device paired under an older default still hears it.
       const relays = [...new Set([...deviceRelays(device!, DEFAULT_RELAYS), ...DEFAULT_RELAYS])];
-      void signer.current?.releaseDevice(pk, relays, device?.label).catch(() => {});
+      const sent = signer.current?.releaseDevice(pk, relays, device?.label);
+      if (sent) {
+        // Keep the ward's home-network link for a few seconds so its release
+        // acknowledgement and held audits can come back (see ./releaseGrace).
+        // Started before the caller's dispatch, so the push that follows it
+        // already carries the grace.
+        startReleaseGrace(pk);
+        void sent.then(
+          () => {
+            // The release is out now (a slow approval can take a while): give
+            // the answer its full time, but never bring back a link already let go.
+            if (releasingMachines().has(pk)) startReleaseGrace(pk);
+          },
+          () => endReleaseGrace(pk),
+        );
+      }
     }
   }, []);
 
