@@ -352,7 +352,8 @@ class LockActivity : Activity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         shadeFocused = hasFocus
-        if (hasFocus) callSequencer?.onClear()
+        // The phone's own lock takes the focus without pausing the shade.
+        if (hasFocus) callSequencer?.onClear() else callSequencer?.onFocusLost()
     }
 
     /**

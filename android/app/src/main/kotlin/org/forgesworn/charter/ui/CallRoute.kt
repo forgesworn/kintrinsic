@@ -183,8 +183,9 @@ object CallRoute {
  *
  * The shade is CLEAR when it is resumed, has the window focus and the screen is
  * on ([Shade.clear]); the activity calls [onClear] whenever it may have become
- * clear (from `onResume` and `onWindowFocusChanged(true)`), [onPaused] from
- * `onPause`, and [onScreenOff] when the screen goes off.
+ * clear (from `onResume` and `onWindowFocusChanged(true)`), [onFocusLost] from
+ * `onWindowFocusChanged(false)`, [onPaused] from `onPause`, and [onScreenOff]
+ * when the screen goes off.
  *
  * - **A route launches only from a clear shade.** When one is due and the
  *   shade is not clear, it waits for [onClear], bounded at [CLEAR_WAIT_MS]; at
@@ -201,13 +202,22 @@ object CallRoute {
  *   paused (refused by LockTask, or silent), the next route runs. A launch
  *   that throws runs the next route at once.
  * - **The phone's own lock** ([CallRoute.Route.BOUNCER]) is requested from a
- *   clear shade. Dismissed (now unlocked) or an error: the next route, once
- *   clear. Cancelled: settles CANCELLED. Still clear [CHECK_MS] after the
- *   request: it never appeared, and the next route runs (a late answer is
- *   ignored). Once it has covered the shade, a clear shade for [LOCK_GONE_MS]
- *   with no answer means it went away without saying how: the advice comes
- *   back and nothing is launched (a dismissal may still be on its way). No
- *   answer within [BOUNCER_WAIT_MS] of the request: FAILED.
+ *   clear shade. It takes the window focus without pausing the shade
+ *   (measured on the emulator), so what decides whether it showed is whether
+ *   the shade has lost the focus since the request (a pause counts too).
+ *   Dismissed (now unlocked): the next route, once clear; but if the shade
+ *   paused meanwhile (the lock's own Emergency call opened something, and the
+ *   ward closed it), FAILED, with nothing launched. An error: the next route,
+ *   once clear, only if the shade never lost the focus; otherwise FAILED.
+ *   Cancelled: settles CANCELLED. Still clear [CHECK_MS] after the request,
+ *   having never lost the focus: it never appeared, and the next route runs
+ *   (a late answer is ignored). Clear at the check having lost the focus: it
+ *   showed and went away before the check (perhaps the ward backed out of
+ *   it), so it is taken as gone, as below, and the next route never runs.
+ *   Once it has covered the shade, a clear shade for [LOCK_GONE_MS] with no
+ *   answer means it went away without saying how: the advice comes back and
+ *   nothing is launched (a dismissal may still be on its way). No answer
+ *   within [BOUNCER_WAIT_MS] of the request: FAILED.
  * - **Sleep.** The timers run on the device's awake time, so a device that
  *   sleeps runs them late. Every wait also has a deadline on [Timer.now]
  *   (`elapsedRealtime`, which counts the sleep): a timer that runs more than
@@ -330,6 +340,13 @@ class CallSequencer(
      *  route, never whether a route opened. */
     private var pausedSinceLaunch = false
 
+    /** The shade has lost the window focus (or paused) since the current
+     *  route launched: something showed over it. Read only for the phone's
+     *  own lock, which takes the focus without pausing the shade; it decides
+     *  only whether a clear shade at the check, or an error, may fall through
+     *  to the next route. */
+    private var focusLostSinceLaunch = false
+
     /** In [State.BOUNCER_UP], the pending timer is the "lock gone" one. */
     private var lockGoneArmed = false
 
@@ -356,9 +373,17 @@ class CallSequencer(
         }
     }
 
-    /** The shade paused (from `onPause`). */
+    /** The shade paused (from `onPause`). A pause is a loss of focus too. */
     fun onPaused() {
-        if (state != State.SETTLED) pausedSinceLaunch = true
+        if (state != State.SETTLED) {
+            pausedSinceLaunch = true
+            focusLostSinceLaunch = true
+        }
+    }
+
+    /** The shade lost the window focus (from `onWindowFocusChanged(false)`). */
+    fun onFocusLost() {
+        if (state != State.SETTLED) focusLostSinceLaunch = true
     }
 
     /** The screen went off: an unsettled press settles FAILED, with the advice
@@ -445,6 +470,7 @@ class CallSequencer(
         attempt++
         val mine = ++token
         pausedSinceLaunch = false
+        focusLostSinceLaunch = false
         lockGoneArmed = false
         listener.onRoute(route)
         val now = timer.now()
@@ -472,7 +498,12 @@ class CallSequencer(
             lockGoneArmed = false
             when (result) {
                 Launch.CANCELLED -> settle(Outcome.CANCELLED)
-                Launch.DISMISSED -> {
+                Launch.DISMISSED -> if (pausedSinceLaunch) {
+                    // The lock itself never pauses the shade: something it
+                    // opened did (its own Emergency call), and the ward has
+                    // closed it. No escalation, least of all to ACTION_CALL.
+                    settle(Outcome.FAILED)
+                } else {
                     // Unlocked now: the lock's own screen is spent, and so is the
                     // emergency dialler if it was ever going to be tried. The
                     // unlocked routes run, once the shade is clear, if the
@@ -483,7 +514,11 @@ class CallSequencer(
                     show(CallRoute.Line.ADVICE)
                     due()
                 }
-                else -> {
+                else -> if (focusLostSinceLaunch) {
+                    // The lock showed, then failed: the ward may have backed
+                    // out of it. Only a lock that never showed falls through.
+                    settle(Outcome.FAILED)
+                } else {
                     show(CallRoute.Line.ADVICE)
                     due()
                 }
@@ -517,15 +552,29 @@ class CallSequencer(
     }
 
     private fun bouncerCheck() {
-        if (shade.clear()) {
-            // The phone's own lock never covered the shade: its late answer is
-            // ignored, and the next route runs.
-            token++
-            show(CallRoute.Line.ADVICE)
-            due()
-        } else {
-            state = State.BOUNCER_UP
-            armBound()
+        when {
+            !shade.clear() -> {
+                state = State.BOUNCER_UP
+                armBound()
+            }
+            focusLostSinceLaunch -> {
+                // Clear again, having lost the focus: the lock showed and went
+                // away before the check, perhaps because the ward backed out
+                // of it and its answer is still on the way. Taken as gone: the
+                // advice, nothing launched, and its answer still taken until
+                // the bound (a cancel settles CANCELLED, a dismissal runs the
+                // unlocked routes).
+                state = State.BOUNCER_UP
+                show(CallRoute.Line.ADVICE)
+                armBound()
+            }
+            else -> {
+                // The phone's own lock never took the focus: its late answer
+                // is ignored, and the next route runs.
+                token++
+                show(CallRoute.Line.ADVICE)
+                due()
+            }
         }
     }
 

@@ -507,6 +507,156 @@ class CallSequencerTest {
         assertEquals(listOf(Route.BOUNCER), r.launched)
     }
 
+    // ---- the phone's own lock: focus lost, and a dialler it opened (final review) --
+
+    @Test
+    fun `every locked cell, the lock gone before its check having taken the focus, shows the advice and launches nothing`() {
+        for (ed in bools) for (dial in bools) {
+            val cell = "ed=$ed dial=$dial"
+            val r = rig(locked = true, ed = ed, dial = dial)
+            r.sequencer.begin()
+            r.advance(if (ed) CHECK_MS else 0) // the emergency dialler showed nothing
+            assertEquals(cell, Route.BOUNCER, r.launched.last())
+            val before = r.launched.toList()
+            r.advance(100)
+            r.covered = true
+            r.sequencer.onFocusLost() // the lock takes the focus; the shade stays resumed
+            r.advance(900)
+            r.covered = false // Back at +1 s: the focus comes back, no answer yet
+            r.sequencer.onClear()
+            r.advance(CHECK_MS - 1_000)
+            assertEquals("$cell: never the next route", before, r.launched)
+            assertTrue(cell, r.settled.isEmpty())
+            assertEquals(cell, Line.ADVICE, r.lines.last())
+            r.answers.getValue(Route.BOUNCER)(Launch.CANCELLED) // the late answer
+            assertEquals(cell, listOf(Outcome.CANCELLED), r.settled)
+            assertEquals(cell, before, r.launched)
+            assertTrue(cell, r.active.isEmpty())
+        }
+    }
+
+    @Test
+    fun `the lock gone before its check with no answer at all fails at its bound, with the advice and nothing launched`() {
+        val r = rig(locked = true, ed = false, dial = false)
+        r.sequencer.begin()
+        r.covered = true
+        r.sequencer.onFocusLost()
+        r.advance(1_000)
+        r.covered = false
+        r.sequencer.onClear()
+        r.advance(BOUNCER_WAIT_MS)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        assertEquals(Line.ADVICE, r.lines.last())
+        assertTrue(Line.NOTHING_OPENED !in r.lines)
+    }
+
+    @Test
+    fun `the lock gone before its check, then dismissed, still runs the unlocked routes`() {
+        val r = rig(locked = true, ed = false, dial = true)
+        r.sequencer.begin()
+        r.covered = true
+        r.sequencer.onFocusLost()
+        r.advance(1_000)
+        r.covered = false
+        r.sequencer.onClear()
+        r.advance(CHECK_MS)
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        assertEquals(listOf(Route.BOUNCER, Route.SYSTEM_DIAL), r.launched)
+    }
+
+    @Test
+    fun `focus lost before the lock was requested, or on an earlier route, does not count against it`() {
+        val waiting = rig(locked = true, ed = false, dial = false)
+        waiting.covered = true
+        waiting.sequencer.begin() // due, waiting for a clear shade
+        waiting.sequencer.onFocusLost()
+        waiting.covered = false
+        waiting.sequencer.onClear()
+        assertEquals(listOf(Route.BOUNCER), waiting.launched)
+        waiting.advance(CHECK_MS) // the lock never took the focus
+        assertEquals(listOf(Route.BOUNCER, Route.CALL), waiting.launched)
+
+        val earlier = rig(locked = true, ed = true, dial = false)
+        earlier.sequencer.begin()
+        earlier.sequencer.onFocusLost() // a moment's focus loss, no pause: the dialler showed nothing
+        earlier.advance(CHECK_MS)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), earlier.launched)
+        earlier.advance(CHECK_MS)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER, Route.CALL), earlier.launched)
+    }
+
+    @Test
+    fun `the lock answering with an error after it took the focus settles failed with the advice, launching nothing`() {
+        val early = rig(locked = true, ed = false, dial = false)
+        early.sequencer.begin()
+        early.covered = true
+        early.sequencer.onFocusLost()
+        early.advance(1_000)
+        early.covered = false
+        early.sequencer.onClear()
+        early.answers.getValue(Route.BOUNCER)(Launch.FAILED)
+        assertEquals(listOf(Outcome.FAILED), early.settled)
+        assertEquals(listOf(Route.BOUNCER), early.launched)
+        assertEquals(Line.ADVICE, early.lines.last())
+        assertTrue(early.active.isEmpty())
+
+        val up = rig(locked = true, ed = false, dial = true)
+        up.sequencer.begin()
+        up.covered = true
+        up.sequencer.onFocusLost()
+        up.advance(CHECK_MS) // it covered the shade at its check
+        up.covered = false
+        up.sequencer.onClear()
+        up.answers.getValue(Route.BOUNCER)(Launch.FAILED)
+        assertEquals(listOf(Outcome.FAILED), up.settled)
+        assertEquals(listOf(Route.BOUNCER), up.launched)
+    }
+
+    @Test
+    fun `every locked cell, the PIN entered at a lock that took the focus without pausing the shade, ends at the unlocked routes`() {
+        for (ed in bools) for (dial in bools) {
+            val cell = "ed=$ed dial=$dial"
+            val r = rig(locked = true, ed = ed, dial = dial)
+            r.sequencer.begin()
+            r.advance(if (ed) CHECK_MS else 0)
+            r.covered = true
+            r.sequencer.onFocusLost() // the PIN pad: the focus, and no pause
+            r.advance(4_000) // past the check
+            r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+            r.covered = false
+            r.sequencer.onClear()
+            val unlocked = CallRoute.sequence(true, locked = false, emergencyDiallerOk = false, systemDialOk = dial)
+            assertEquals(cell, unlocked.first(), r.launched.last())
+            assertTrue(cell, r.settled.isEmpty())
+        }
+    }
+
+    @Test
+    fun `every locked cell, dismissed after the lock opened a dialler the ward closed, settles failed with the advice and launches nothing`() {
+        for (ed in bools) for (dial in bools) {
+            val cell = "ed=$ed dial=$dial"
+            val r = rig(locked = true, ed = ed, dial = dial)
+            r.sequencer.begin()
+            r.advance(if (ed) CHECK_MS else 0)
+            val before = r.launched.toList()
+            r.covered = true
+            r.sequencer.onFocusLost() // the lock
+            r.advance(1_000)
+            r.sequencer.onPaused() // its own Emergency call opens a dialler over the shade
+            r.advance(5_000)
+            r.covered = false // the ward closes it
+            r.sequencer.onClear()
+            r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+            assertEquals(cell, listOf(Outcome.FAILED), r.settled)
+            assertEquals("$cell: no SYSTEM_DIAL, no CALL", before, r.launched)
+            assertEquals(cell, Line.ADVICE, r.lines.last())
+            assertTrue(cell, r.active.isEmpty())
+            r.advance(BOUNCER_WAIT_MS)
+            assertEquals(cell, before, r.launched)
+        }
+    }
+
     // ---- one settlement, and every timer invalidated ---------------------------
 
     @Test
