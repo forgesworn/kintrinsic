@@ -36,6 +36,13 @@ declare global {
       /** `[{"id":wrapId,"machine":hex,"wrap":{…},"receivedAt":unix}]` */
       localInbox?: () => string;
       localConsume?: (idsJson: string) => void;
+      /** Emergency alerts: `{"notifications":bool,"channel":bool}`, whether the
+       *  app's notifications are on and whether the Emergencies channel is on.
+       *  OPTIONAL: absent on an older shell. Prefer `./emergencyAlerts`. */
+      emergencyAlertState?: () => string;
+      /** Opens the Emergencies channel's system settings (or the app's
+       *  notification settings when notifications are off altogether). */
+      openEmergencyAlertSettings?: () => void;
     };
   }
 }
