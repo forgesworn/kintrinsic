@@ -457,6 +457,22 @@ pub struct Warden {
     /// process started has already had its moment (and still shows on the
     /// shade) — re-announcing it on every reboot would be nagging.
     announced_denials: Option<std::collections::HashSet<String>>,
+    /// Where the screen-lock reset ledger lives (`<base>/screen-lock/`),
+    /// outside everything a RELEASE clears.
+    screen_lock_store: crate::screen_lock::LedgerStore,
+    /// The screen-lock reset ledger (ring of outcomes + monotonic floor).
+    /// `None` while the stored one will not READ: no reset is accepted then,
+    /// and each one that arrives tries the read again.
+    screen_lock: Option<crate::screen_lock::Ledger>,
+    /// The accepted reset waiting for Kotlin (`charterTakeScreenLockReset`).
+    /// Memory ONLY: it holds the PIN.
+    screen_lock_pending: Option<crate::screen_lock::Pending>,
+    /// What the platform last said: a secure screen lock is set (STATUS
+    /// `screenLockSecure`). `None` until Kotlin reports it.
+    screen_lock_secure: Option<bool>,
+    /// What the platform last said: the reset token is active (STATUS
+    /// `screenLockResetReady`). `None` until Kotlin reports it.
+    screen_lock_reset_ready: Option<bool>,
 }
 
 /// Whether Free time's own (already hold-resolved) `apps` clause would let
@@ -519,6 +535,8 @@ impl Warden {
         let battery_settings = load_battery(&pairing);
         let pair_token = load_pair_token(&base);
         let boot_watch = load_boot_watch(&base).unwrap_or_default();
+        let screen_lock_store = crate::screen_lock::LedgerStore::new(&base);
+        let screen_lock = screen_lock_store.load().ok();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -583,6 +601,11 @@ impl Warden {
             last_tick_unix: None,
             ever_configured: false,
             announced_denials: None,
+            screen_lock_store,
+            screen_lock,
+            screen_lock_pending: None,
+            screen_lock_secure: None,
+            screen_lock_reset_ready: None,
         };
         w.rebuild_relay();
         Ok(w)
@@ -675,8 +698,11 @@ impl Warden {
     /// Finish a wrap the broker ingested from link generation `gen`, under
     /// the warden lock, and say what to ACK. A RELEASE goes through
     /// [`Warden::try_apply_releases`] — the same verification and epoch floor
-    /// as a polled one. After any `applied` clause the ward's clauses are
-    /// mirrored for the broker's EOD cap, as the poll path does.
+    /// as a polled one — and a SCREEN_LOCK_RESET through
+    /// [`Warden::absorb_screen_lock_reset`], as a polled one does, so its ACK
+    /// says what the device did with it (never `ignored`). After any
+    /// `applied` clause the ward's clauses are mirrored for the broker's EOD
+    /// cap, as the poll path does.
     pub(crate) fn absorb_local(
         &mut self,
         gen: u64,
@@ -697,6 +723,13 @@ impl Warden {
                 } else {
                     AckResult::Refused
                 }
+            };
+        }
+        if let Some((event, _seal_author)) = out.screen_lock_reset {
+            result = if !live {
+                AckResult::Failed
+            } else {
+                self.absorb_screen_lock_reset(&event, now)
             };
         }
         if result == AckResult::Applied {
@@ -891,6 +924,12 @@ impl Warden {
         if let Ok(mut v) = self.inbox.lock() {
             v.clear();
         }
+        // A reset not yet taken goes with the guardian's authority. The
+        // screen-lock ledger does NOT: it lives outside everything cleared
+        // above, so its floor still voids a replay after a re-pairing, and the
+        // outcomes it records are never erased by a release (the ward's own
+        // notice history is Kotlin's, also outside the cleared stores).
+        self.screen_lock_pending = None;
     }
 
     /// Every guardian-approved install currently parked, oldest-first — Kotlin
@@ -1584,6 +1623,170 @@ impl Warden {
     /// not read). Rides STATUS as `debuggingOpen`.
     pub fn set_debugging_open(&mut self, open: Option<bool>) {
         self.debugging_open = open;
+    }
+
+    // ---- screen-lock reset (contract "Screen-lock reset") ------------------
+
+    /// The screen-lock ledger, read again first if the last read failed.
+    fn screen_lock_ledger(&mut self) -> Option<&mut crate::screen_lock::Ledger> {
+        if self.screen_lock.is_none() {
+            self.screen_lock = self.screen_lock_store.load().ok();
+        }
+        self.screen_lock.as_mut()
+    }
+
+    /// Authenticate and record one SCREEN_LOCK_RESET, from a relay poll or
+    /// the local link, and say what to ACK.
+    ///
+    /// Unauthentic, malformed or from before the current pairing: nothing is
+    /// recorded (`refused`). An id already recorded: nothing changes
+    /// (`unchanged`) — the relays re-deliver every wrap for two days, and the
+    /// link may resend. Otherwise exactly one outcome is recorded for the id:
+    /// `rejected_time` (`expired`), `superseded` (`superseded`) or `accepted`
+    /// (`applied`). An accepted reset's floor and ring entry are written
+    /// BEFORE it is parked for Kotlin; if that write fails it is not parked
+    /// (`failed`), and the guardian, seeing no result, sends again. A newer
+    /// accepted reset replaces one Kotlin has not taken yet, which is then
+    /// recorded `superseded`.
+    ///
+    /// Nothing here logs or returns the event's content.
+    pub(crate) fn absorb_screen_lock_reset(
+        &mut self,
+        event: &NostrEvent,
+        now: u64,
+    ) -> charter_link::AckResult {
+        use crate::screen_lock::{audit_tags, Admission, Pending};
+        use charter_link::AckResult;
+        use charter_proto::ScreenLockResetResult as R;
+
+        let Some(guardian) = self.guardian else {
+            return AckResult::Refused;
+        };
+        let machine = self.signer.pubkey();
+        let Ok(payload) = charter_verify::authenticate_screen_lock_reset(
+            event,
+            &guardian,
+            &machine,
+            self.paired_at,
+        ) else {
+            return AckResult::Refused;
+        };
+        let Some(mut next) = self.screen_lock_ledger().cloned() else {
+            return AckResult::Failed;
+        };
+        match next.admit(&payload, now) {
+            Admission::Duplicate => AckResult::Unchanged,
+            Admission::Accepted => {
+                let replaced = self
+                    .screen_lock_pending
+                    .as_ref()
+                    .map(|old| old.id.clone())
+                    .filter(|old| next.settle(old, R::Superseded, now));
+                if !self.screen_lock_store.save(&next) {
+                    return AckResult::Failed;
+                }
+                self.screen_lock = Some(next);
+                self.screen_lock_pending = Some(Pending::from_payload(&payload));
+                if let Some(old) = replaced {
+                    self.break_glass
+                        .queue_audit(audit_tags(R::Superseded, &old, now));
+                }
+                AckResult::Applied
+            }
+            admission => {
+                let (result, ack) = if admission == Admission::RejectedTime {
+                    (R::RejectedTime, AckResult::Expired)
+                } else {
+                    (R::Superseded, AckResult::Superseded)
+                };
+                // Recorded even if the write fails: STATUS carries it for the
+                // rest of this run either way.
+                let _ = self.screen_lock_store.save(&next);
+                self.screen_lock = Some(next);
+                self.break_glass
+                    .queue_audit(audit_tags(result, &payload.id, now));
+                ack
+            }
+        }
+    }
+
+    /// Every SCREEN_LOCK_RESET a relay round delivered, through
+    /// [`Warden::absorb_screen_lock_reset`]. Returns a diagnostic for the
+    /// poll's `reason` (counts by result only; empty when every one was a
+    /// re-delivery).
+    fn absorb_screen_lock_resets(&mut self, resets: &[(NostrEvent, PubKey)], now: u64) -> String {
+        use charter_link::AckResult;
+        let mut counts: Vec<(&'static str, u32)> = Vec::new();
+        for (event, _seal_author) in resets {
+            let r = self.absorb_screen_lock_reset(event, now);
+            if r == AckResult::Unchanged {
+                continue;
+            }
+            match counts.iter_mut().find(|(k, _)| *k == r.as_str()) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((r.as_str(), 1)),
+            }
+        }
+        if counts.is_empty() {
+            return String::new();
+        }
+        let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+        format!("screen-lock resets: {}", parts.join(", "))
+    }
+
+    /// `charterTakeScreenLockReset`: the parked reset as
+    /// `{"id":"…","newPin":"…","ts":N}`, cleared as it is taken, or `""` when
+    /// none is parked.
+    pub fn take_screen_lock_reset(&mut self) -> zeroize::Zeroizing<String> {
+        self.screen_lock_pending
+            .take()
+            .map(|p| p.to_json())
+            .unwrap_or_else(|| zeroize::Zeroizing::new(String::new()))
+    }
+
+    /// `charterReportScreenLockReset`: Kotlin's final answer for a reset it
+    /// took. Replaces that id's `accepted` (and nothing else) and queues the
+    /// `screenlock.reset` AUDIT. `Ok(false)` when the ring holds no
+    /// `accepted` entry for the id: one final outcome per id, ever. `Err` for
+    /// a result outside `applied | failed | not_ready | notice_failed`, a
+    /// malformed id, or a ledger that will not read.
+    pub fn report_screen_lock_reset(
+        &mut self,
+        id: &str,
+        result: &str,
+        at: u64,
+    ) -> Result<bool, String> {
+        let Some(r) =
+            charter_proto::ScreenLockResetResult::parse(result).filter(|r| r.is_platform_report())
+        else {
+            return Err("unknown screen-lock reset result".into());
+        };
+        if !charter_proto::is_valid_reset_id(id) {
+            return Err("malformed screen-lock reset id".into());
+        }
+        let Some(mut next) = self.screen_lock_ledger().cloned() else {
+            return Err("the screen-lock record will not read".into());
+        };
+        if !next.settle(id, r, at) {
+            return Ok(false);
+        }
+        // Recorded even if the write fails, as for a rejected reset.
+        let _ = self.screen_lock_store.save(&next);
+        self.screen_lock = Some(next);
+        self.break_glass
+            .queue_audit(crate::screen_lock::audit_tags(r, id, at));
+        Ok(true)
+    }
+
+    /// `charterSetScreenLockState`: what the platform says, for STATUS
+    /// `screenLockSecure` / `screenLockResetReady`. Whether either changed
+    /// (a change goes out on the next poll, past the heartbeat throttle).
+    pub fn set_screen_lock_state(&mut self, secure: bool, reset_ready: bool) -> bool {
+        let changed = self.screen_lock_secure != Some(secure)
+            || self.screen_lock_reset_ready != Some(reset_ready);
+        self.screen_lock_secure = Some(secure);
+        self.screen_lock_reset_ready = Some(reset_ready);
+        changed
     }
 
     /// The ward-facing "your charter" mirror (spec D8): live lock state,
@@ -2658,6 +2861,14 @@ impl Warden {
                         .last_status
                         .as_ref()
                         .is_some_and(|last| last.active_time != status.active_time)
+                    // A screen-lock reset's outcome, or the lock's own state,
+                    // is what a guardian standing over "Reset screen lock"
+                    // is waiting to see; each changes only on an event.
+                    || self.last_status.as_ref().is_some_and(|last| {
+                        last.screen_lock_secure != status.screen_lock_secure
+                            || last.screen_lock_reset_ready != status.screen_lock_reset_ready
+                            || last.screen_lock_resets != status.screen_lock_resets
+                    })
             });
         // Only a status that is actually going out takes a number, stored
         // before it is published (a number spent on an emit that reaches no
@@ -2810,6 +3021,15 @@ impl Warden {
         }
         // What the platform actually did with adb, not what was sent.
         status.debugging_open = self.debugging_open;
+        // The screen lock as the platform reports it, and the outcome of each
+        // recent guardian reset (absent until one is recorded). No PIN.
+        status.screen_lock_secure = self.screen_lock_secure;
+        status.screen_lock_reset_ready = self.screen_lock_reset_ready;
+        status.screen_lock_resets = self
+            .screen_lock
+            .as_ref()
+            .map(|l| l.outcomes())
+            .filter(|v| !v.is_empty());
         // Relay health, charterd's two fields: each absent unless actually
         // true / non-zero ("absent is the ordinary state").
         status.relay_unreachable_polls =
@@ -4521,16 +4741,30 @@ pub fn poll_once_locked(lock: &Mutex<Option<Warden>>, now: u64) -> dto::PollResu
     // A guardian RELEASE wins over anything else this round — if the parent
     // unpaired the device, we must stop enforcing, not process one more clause.
     // Pull (unlocked), verify + apply (locked); on release, return immediately.
-    if let Ok(releases) = relay.poll_releases(since, now) {
-        if !releases.is_empty() {
+    // The same query brings any SCREEN_LOCK_RESET, handled next (one query
+    // for both: each one fetches and opens every wrap in the window).
+    if let Ok(commands) = relay.poll_device_commands(since, now) {
+        if !commands.releases.is_empty() {
             if let Some(w) = guard(lock).as_mut() {
-                let (applied, detail) = w.try_apply_releases(&releases, now);
+                let (applied, detail) = w.try_apply_releases(&commands.releases, now);
                 if applied {
                     out.released = true;
                     out.reason = format!("released by guardian | {detail}");
                     return out;
                 }
                 out.reason = detail;
+            }
+        }
+        if !commands.screen_lock_resets.is_empty() {
+            if let Some(w) = guard(lock).as_mut() {
+                let detail = w.absorb_screen_lock_resets(&commands.screen_lock_resets, now);
+                if !detail.is_empty() {
+                    out.reason = if out.reason.is_empty() {
+                        detail
+                    } else {
+                        format!("{} | {detail}", out.reason)
+                    };
+                }
             }
         }
     }
@@ -10905,6 +11139,85 @@ mod link_loop_tests {
             "link state wiped on unpair"
         );
     }
+
+    /// A screen-lock reset over the link alone: the ACK says what the device
+    /// did with it (never `ignored`), an accepted one is parked for Kotlin and
+    /// bumps the applied count (Kotlin's cue to tick at once), and a resend in
+    /// a fresh wrap, a forgery and a stale one each get their own answer.
+    #[test]
+    fn a_screen_lock_reset_over_the_link_is_acked_by_what_the_device_did() {
+        use charter_primitives::kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET;
+        let rig = Rig::new(concat!(module_path!(), line!()));
+        let reset = |signer: &charter_sys::signer::SeedSigner, id: &str, issued_at: u64| {
+            let payload = charter_proto::ScreenLockResetPayload {
+                v: 1,
+                id: id.into(),
+                machine: rig.machine,
+                issued_at,
+                new_pin: "123456".into(),
+            };
+            charter_verify::test_support::sign_event(
+                signer,
+                CHARTER_DEVICE_SCREEN_LOCK_RESET,
+                issued_at,
+                vec![charter_primitives::kinds::marker_tag()],
+                payload.to_json(),
+            )
+        };
+        let id = "0123456789abcdef0123456789abcdef";
+        let now = wall();
+        let genuine = reset(&rig.guardian.signer, id, now);
+        let seq_before = rig.state()["appliedSeq"].as_u64().unwrap();
+        assert_eq!(rig.send_acked(&rig.wrap(&genuine, 20)), AckResult::Applied);
+        assert_eq!(rig.state()["appliedSeq"].as_u64().unwrap(), seq_before + 1);
+        let taken = rig.with(|w| w.take_screen_lock_reset());
+        let v: serde_json::Value = serde_json::from_str(&taken).unwrap();
+        assert_eq!(v["id"], id);
+        assert_eq!(v["newPin"], "123456");
+        assert_eq!(v["ts"], now);
+
+        // The same reset again, in a fresh wrap: already answered.
+        assert_eq!(
+            rig.send_acked(&rig.wrap(&genuine, 30)),
+            AckResult::Unchanged
+        );
+        assert!(rig.with(|w| w.take_screen_lock_reset()).is_empty());
+
+        // Sealed by the guardian, signed by someone else: nothing recorded.
+        let attacker = charter_sys::signer::SeedSigner::from_seed(0x99);
+        let forged = reset(&attacker, "1123456789abcdef0123456789abcdef", now + 1);
+        assert_eq!(rig.send_acked(&rig.wrap(&forged, 40)), AckResult::Refused);
+
+        // Dated over five minutes ahead of the ward's clock (the rig paired
+        // ten minutes ago, so an hour-old one would predate the pairing and be
+        // void): recorded as `rejected_time`, ACKed expired.
+        let ahead = reset(
+            &rig.guardian.signer,
+            "2123456789abcdef0123456789abcdef",
+            now + 400,
+        );
+        assert_eq!(rig.send_acked(&rig.wrap(&ahead, 50)), AckResult::Expired);
+        let results: Vec<(String, String)> = rig.with(|w| {
+            w.build_status(wall())
+                .unwrap()
+                .screen_lock_resets
+                .unwrap()
+                .into_iter()
+                .map(|o| (o.id, o.result))
+                .collect()
+        });
+        assert_eq!(
+            results,
+            vec![
+                (
+                    "2123456789abcdef0123456789abcdef".to_string(),
+                    "rejected_time".to_string()
+                ),
+                (id.to_string(), "accepted".to_string()),
+            ]
+        );
+        assert!(rig.with(|w| w.take_screen_lock_reset()).is_empty());
+    }
 }
 
 /// Times (§Times) on the Android ward: the routing, the fail directions and the
@@ -12561,5 +12874,581 @@ mod always_available_in_times {
             "{}",
             info.come_back
         );
+    }
+}
+
+/// The guardian screen-lock reset on the ward (contract "Screen-lock reset"):
+/// the relay path end to end, every refusal, the one-outcome-per-id ring, the
+/// floor's survival across a release and a restart, the STATUS fields and
+/// their emit trigger, and that the PIN reaches none of the ward's records.
+/// The local-link path is in `link_loop_tests`.
+#[cfg(test)]
+mod screen_lock_tests {
+    use super::*;
+    use crate::screen_lock::audit_tags;
+    use charter_link::AckResult;
+    use charter_primitives::kinds::{
+        marker_tag, CHARTER_DEVICE_AUDIT, CHARTER_DEVICE_SCREEN_LOCK_RESET,
+    };
+    use charter_proto::ScreenLockResetResult as R;
+    use charter_sys::relay::{Filter, MockRelayTransport, RelayTransport};
+    use charter_sys::signer::SeedSigner;
+    use charter_transport::nip59::{self, Rumor, WrapRandomness};
+    use charter_verify::test_support::{sign_event, TestGuardian};
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const C: &str = "cccccccccccccccccccccccccccccccc";
+
+    fn guardian_sk() -> [u8; 32] {
+        let mut s = [0u8; 32];
+        s[31] = 0x11;
+        s
+    }
+
+    fn wall() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn temp_base(label: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("charter-jni-slr-{}-{}", std::process::id(), label));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    }
+
+    /// A warden paired ten minutes before `t0` (now), its guardian and machine.
+    fn ward(label: &str) -> (Warden, PathBuf, TestGuardian, PubKey, u64) {
+        let base = temp_base(label);
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let t0 = wall();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        w.pair(&uri, t0 - 600).unwrap();
+        let machine = PubKey::from_hex(&w.machine_pubkey_hex()).unwrap();
+        (w, base, guardian, machine, t0)
+    }
+
+    fn reset_content(id: &str, machine: &PubKey, issued_at: u64, pin: &str) -> String {
+        format!(
+            "{{\"v\":1,\"id\":\"{id}\",\"machine\":\"{}\",\"issuedAt\":{issued_at},\"newPin\":\"{pin}\"}}",
+            machine.to_hex()
+        )
+    }
+
+    fn reset(
+        signer: &SeedSigner,
+        machine: &PubKey,
+        id: &str,
+        issued_at: u64,
+        pin: &str,
+    ) -> NostrEvent {
+        sign_event(
+            signer,
+            CHARTER_DEVICE_SCREEN_LOCK_RESET,
+            issued_at,
+            vec![marker_tag()],
+            reset_content(id, machine, issued_at, pin),
+        )
+    }
+
+    fn wrap(ev: &NostrEvent, machine: &PubKey, seed: u8, at: u64) -> NostrEvent {
+        nip59::wrap(
+            &Rumor::from_signed_event(ev),
+            &guardian_sk(),
+            machine.as_bytes(),
+            &WrapRandomness {
+                ephemeral_secret: [seed; 32],
+                seal_nonce: [seed ^ 0x11; 32],
+                wrap_nonce: [seed ^ 0x22; 32],
+                seal_created_at: at,
+                wrap_created_at: at,
+            },
+        )
+        .expect("wrap")
+    }
+
+    fn outcomes(w: &Warden, now: u64) -> Vec<(String, String)> {
+        w.build_status(now)
+            .unwrap()
+            .screen_lock_resets
+            .unwrap_or_default()
+            .into_iter()
+            .map(|o| (o.id, o.result))
+            .collect()
+    }
+
+    fn o(id: &str, result: &str) -> (String, String) {
+        (id.to_string(), result.to_string())
+    }
+
+    /// The `screenlock.reset` audits still spooled.
+    fn spooled(w: &Warden) -> Vec<Vec<Vec<String>>> {
+        w.break_glass
+            .pending_audits()
+            .into_iter()
+            .filter(|t| t.iter().any(|kv| kv == &["op", "screenlock.reset"]))
+            .collect()
+    }
+
+    /// The `screenlock.reset` audits on the relay, opened as the guardian.
+    fn published(mock: &MockRelayTransport, guardian: &PubKey, now: u64) -> Vec<Vec<Vec<String>>> {
+        let wraps = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(mock.query(
+                &[],
+                Filter {
+                    kinds: vec![charter_primitives::kinds::GIFT_WRAP],
+                    p_tags: vec![*guardian],
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        wraps
+            .iter()
+            .filter_map(|wr| {
+                nip59::unwrap_with_author(wr, &guardian_sk(), now, nip59::MAX_JITTER_SECS).ok()
+            })
+            .map(|(r, _)| r)
+            .filter(|r| r.kind == CHARTER_DEVICE_AUDIT)
+            .map(|r| r.tags)
+            .filter(|t| t.iter().any(|kv| kv == &["op", "screenlock.reset"]))
+            .collect()
+    }
+
+    fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files_under(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+
+    fn contains(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn a_reset_over_the_relays_is_taken_once_reported_once_and_redelivery_is_a_no_op() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let mock = MockRelayTransport::new();
+        mock.inject(wrap(
+            &reset(&g.signer, &machine, A, t0, "123456"),
+            &machine,
+            40,
+            t0,
+        ));
+        w.wire_test_relay(mock.clone()).unwrap();
+        let lock = Mutex::new(Some(w));
+
+        let r = poll_once_locked(&lock, t0 + 1);
+        assert!(r.polled, "{}", r.reason);
+        assert!(
+            r.reason.contains("screen-lock resets: 1 applied"),
+            "{}",
+            r.reason
+        );
+        assert!(!r.reason.contains("123456"));
+        {
+            let mut guard = lock.lock().unwrap();
+            let w = guard.as_mut().unwrap();
+            let taken = w.take_screen_lock_reset();
+            let v: serde_json::Value = serde_json::from_str(&taken).unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!({"id": A, "newPin": "123456", "ts": t0})
+            );
+            assert!(w.take_screen_lock_reset().is_empty(), "taken once");
+            assert_eq!(outcomes(w, t0 + 1), vec![o(A, "accepted")]);
+
+            assert_eq!(w.report_screen_lock_reset(A, "applied", t0 + 2), Ok(true));
+            assert_eq!(
+                w.report_screen_lock_reset(A, "failed", t0 + 3),
+                Ok(false),
+                "one final outcome per id"
+            );
+            assert!(w.report_screen_lock_reset(A, "accepted", t0 + 3).is_err());
+            assert!(w.report_screen_lock_reset(A, "APPLIED", t0 + 3).is_err());
+            assert!(w
+                .report_screen_lock_reset("not-an-id", "applied", t0 + 3)
+                .is_err());
+            assert_eq!(outcomes(w, t0 + 3), vec![o(A, "applied")]);
+            assert_eq!(spooled(w), vec![audit_tags(R::Applied, A, t0 + 2)]);
+        }
+
+        // Two hours on the relays still serve the wrap: nothing changes, and
+        // no second audit is made (the first goes out on this round).
+        let r = poll_once_locked(&lock, t0 + 7200);
+        assert!(!r.reason.contains("screen-lock"), "{}", r.reason);
+        {
+            let mut guard = lock.lock().unwrap();
+            let w = guard.as_mut().unwrap();
+            assert!(w.take_screen_lock_reset().is_empty());
+            assert_eq!(outcomes(w, t0 + 7200), vec![o(A, "applied")]);
+            assert!(
+                spooled(w).is_empty(),
+                "published and dropped from the spool"
+            );
+        }
+        let mut expected = vec![marker_tag()];
+        expected.extend(audit_tags(R::Applied, A, t0 + 2));
+        assert_eq!(
+            published(&mock, &g.pubkey(), t0 + 7200),
+            vec![expected],
+            "exactly one audit, marked as a device event"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn each_refusal_records_what_the_contract_says_and_nothing_more() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let id = |n: u8| format!("{n:032x}");
+
+        // Unauthentic, malformed, misaddressed or void: refused, nothing recorded.
+        let attacker = SeedSigner::from_seed(0x99);
+        let other_machine = PubKey::from_bytes([0x42; 32]);
+        let refused = [
+            (
+                "wrong signer",
+                reset(&attacker, &machine, &id(1), t0, "1234"),
+            ),
+            (
+                "other machine",
+                reset(&g.signer, &other_machine, &id(2), t0, "1234"),
+            ),
+            (
+                "short id",
+                reset(&g.signer, &machine, &id(3)[..31], t0, "1234"),
+            ),
+            (
+                "uppercase id",
+                reset(&g.signer, &machine, &"AB".repeat(16), t0, "1234"),
+            ),
+            ("3-digit PIN", reset(&g.signer, &machine, &id(4), t0, "123")),
+            (
+                "17-digit PIN",
+                reset(&g.signer, &machine, &id(5), t0, "12345678901234567"),
+            ),
+            (
+                "non-digit PIN",
+                reset(&g.signer, &machine, &id(6), t0, "12a4"),
+            ),
+            (
+                "before the pairing",
+                reset(&g.signer, &machine, &id(7), t0 - 601, "1234"),
+            ),
+        ];
+        for (why, ev) in &refused {
+            assert_eq!(
+                w.absorb_screen_lock_reset(ev, t0),
+                AckResult::Refused,
+                "{why}"
+            );
+        }
+        assert_eq!(outcomes(&w, t0), vec![], "nothing recorded");
+        assert!(spooled(&w).is_empty(), "nothing audited");
+        assert!(w.take_screen_lock_reset().is_empty());
+
+        // Stale and too far ahead: authentic, recorded `rejected_time`. (The
+        // pairing is moved back so an hour-old reset is not void.)
+        w.paired_at = t0 - 7200;
+        let stale = reset(&g.signer, &machine, &id(10), t0 - 3601, "1234");
+        let ahead = reset(&g.signer, &machine, &id(11), t0 + 301, "1234");
+        assert_eq!(w.absorb_screen_lock_reset(&stale, t0), AckResult::Expired);
+        assert_eq!(w.absorb_screen_lock_reset(&ahead, t0), AckResult::Expired);
+        // Both window edges are inside.
+        let oldest = reset(&g.signer, &machine, &id(12), t0 - 3600, "1234");
+        assert_eq!(w.absorb_screen_lock_reset(&oldest, t0), AckResult::Applied);
+        let newest = reset(&g.signer, &machine, &id(13), t0 + 300, "");
+        assert_eq!(w.absorb_screen_lock_reset(&newest, t0), AckResult::Applied);
+        // Below or at the floor (now t0 + 300): superseded.
+        let replay = reset(&g.signer, &machine, &id(14), t0 + 300, "9999");
+        assert_eq!(
+            w.absorb_screen_lock_reset(&replay, t0),
+            AckResult::Superseded
+        );
+        let older = reset(&g.signer, &machine, &id(15), t0 - 5, "9999");
+        assert_eq!(
+            w.absorb_screen_lock_reset(&older, t0),
+            AckResult::Superseded
+        );
+        // Any of them again: already answered.
+        for ev in [&stale, &ahead, &oldest, &newest, &replay, &older] {
+            assert_eq!(w.absorb_screen_lock_reset(ev, t0 + 1), AckResult::Unchanged);
+        }
+
+        assert_eq!(
+            outcomes(&w, t0),
+            vec![
+                o(&id(15), "superseded"),
+                o(&id(14), "superseded"),
+                o(&id(12), "superseded"),
+                o(&id(13), "accepted"),
+                o(&id(11), "rejected_time"),
+                o(&id(10), "rejected_time"),
+            ],
+            "the untaken reset 12 was replaced by 13 (recorded as 13 landed)"
+        );
+        let taken: serde_json::Value = serde_json::from_str(&w.take_screen_lock_reset()).unwrap();
+        assert_eq!(taken["id"], id(13));
+        assert_eq!(taken["newPin"], "", "removes the screen lock");
+        let audited: Vec<(String, String)> = spooled(&w)
+            .into_iter()
+            .map(|t| (t[2][1].clone(), t[0][1].clone()))
+            .collect();
+        assert_eq!(
+            audited,
+            vec![
+                (id(10), "rejected_time".to_string()),
+                (id(11), "rejected_time".to_string()),
+                (id(12), "superseded".to_string()),
+                (id(14), "superseded".to_string()),
+                (id(15), "superseded".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_ring_and_floor_survive_a_release_and_a_restart_but_the_pending_reset_does_not() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let a = reset(&g.signer, &machine, A, t0, "1234");
+        assert_eq!(w.absorb_screen_lock_reset(&a, t0), AckResult::Applied);
+        assert_eq!(w.report_screen_lock_reset(A, "applied", t0 + 1), Ok(true));
+        let b = reset(&g.signer, &machine, B, t0 + 2, "5678");
+        assert_eq!(w.absorb_screen_lock_reset(&b, t0 + 2), AckResult::Applied);
+
+        w.apply_release();
+        assert!(!w.pairing_state().paired);
+        assert!(
+            w.take_screen_lock_reset().is_empty(),
+            "the untaken reset goes"
+        );
+        assert_eq!(
+            w.screen_lock.as_ref().unwrap().ring.len(),
+            2,
+            "the record stays"
+        );
+        assert!(base.join("screen-lock/ledger.json").exists());
+
+        // A restart reads the same record back, floor included.
+        drop(w);
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let ledger = w.screen_lock.clone().unwrap();
+        assert_eq!(ledger.floor, t0 + 2);
+        assert_eq!(
+            ledger
+                .ring
+                .iter()
+                .map(|e| (e.id.as_str(), e.result))
+                .collect::<Vec<_>>(),
+            vec![(B, R::Accepted), (A, R::Applied)]
+        );
+
+        // Re-paired to the same guardian: the old resets predate the pairing,
+        // and a new one is still held to the floor.
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            g.pubkey().to_hex()
+        );
+        w.pair(&uri, t0 + 1).unwrap();
+        assert_eq!(w.absorb_screen_lock_reset(&a, t0 + 3), AckResult::Refused);
+        let c_at_floor = reset(&g.signer, &machine, C, t0 + 2, "1111");
+        assert_eq!(
+            w.absorb_screen_lock_reset(&c_at_floor, t0 + 3),
+            AckResult::Superseded
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_unwritable_record_parks_nothing() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        // A plain file where the record's directory belongs: no write lands.
+        std::fs::write(base.join("screen-lock"), b"in the way").unwrap();
+        let a = reset(&g.signer, &machine, A, t0, "1234");
+        assert_eq!(w.absorb_screen_lock_reset(&a, t0), AckResult::Failed);
+        assert!(w.take_screen_lock_reset().is_empty(), "not parked");
+        assert_eq!(outcomes(&w, t0), vec![], "nothing recorded");
+        // Once it can be written, the guardian's resend goes through.
+        std::fs::remove_file(base.join("screen-lock")).unwrap();
+        assert_eq!(w.absorb_screen_lock_reset(&a, t0 + 1), AckResult::Applied);
+        assert!(!w.take_screen_lock_reset().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn status_carries_the_screen_lock_and_emits_on_each_change() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let mock = MockRelayTransport::new();
+        w.wire_test_relay(mock).unwrap();
+        let lock = Mutex::new(Some(w));
+        let with = |f: &mut dyn FnMut(&mut Warden)| f(lock.lock().unwrap().as_mut().unwrap());
+        let last = |lock: &Mutex<Option<Warden>>| {
+            lock.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .last_status_for_tests()
+                .cloned()
+                .unwrap()
+        };
+
+        assert!(poll_once_locked(&lock, t0).status_emitted);
+        let json = last(&lock).to_json();
+        for key in [
+            "screenLockSecure",
+            "screenLockResetReady",
+            "screenLockResets",
+        ] {
+            assert!(!json.contains(key), "{key} absent until known: {json}");
+        }
+        assert!(!poll_once_locked(&lock, t0 + 1).status_emitted, "throttled");
+
+        with(&mut |w| assert!(w.set_screen_lock_state(true, false)));
+        with(&mut |w| assert!(!w.set_screen_lock_state(true, false), "no change"));
+        assert!(
+            poll_once_locked(&lock, t0 + 2).status_emitted,
+            "change ⇒ emit"
+        );
+        let s = last(&lock);
+        assert_eq!(s.screen_lock_secure, Some(true));
+        assert_eq!(s.screen_lock_reset_ready, Some(false));
+        assert!(!poll_once_locked(&lock, t0 + 3).status_emitted, "throttled");
+
+        with(&mut |w| assert!(w.set_screen_lock_state(true, true)));
+        assert!(
+            poll_once_locked(&lock, t0 + 4).status_emitted,
+            "ready ⇒ emit"
+        );
+        assert_eq!(last(&lock).screen_lock_reset_ready, Some(true));
+
+        // A recorded outcome goes out at once, and so does its final result.
+        let a = reset(&g.signer, &machine, A, t0 + 5, "1234");
+        with(&mut |w| assert_eq!(w.absorb_screen_lock_reset(&a, t0 + 5), AckResult::Applied));
+        assert!(
+            poll_once_locked(&lock, t0 + 6).status_emitted,
+            "accepted ⇒ emit"
+        );
+        assert!(last(&lock).to_json().contains(&format!(
+            "\"screenLockResets\":[{{\"id\":\"{A}\",\"result\":\"accepted\",\"at\":{}}}]",
+            t0 + 5
+        )));
+        assert!(!poll_once_locked(&lock, t0 + 7).status_emitted, "throttled");
+        with(&mut |w| {
+            w.take_screen_lock_reset();
+            assert_eq!(w.report_screen_lock_reset(A, "not_ready", t0 + 8), Ok(true));
+        });
+        assert!(
+            poll_once_locked(&lock, t0 + 9).status_emitted,
+            "result ⇒ emit"
+        );
+        let resets = last(&lock).screen_lock_resets.unwrap();
+        assert_eq!(resets.len(), 1);
+        assert_eq!(
+            (resets[0].result.as_str(), resets[0].at),
+            ("not_ready", t0 + 8)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Test PIN 123456 (and a long one no other record could contain by
+    /// chance): after a reset is taken, reported and audited, and after
+    /// malformed ones are refused, the PIN is in no poll reason, STATUS,
+    /// audit, file under the warden's base, or Debug output.
+    #[test]
+    fn the_pin_reaches_no_record_log_or_status() {
+        const LONG: &str = "2718281828459045";
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let mock = MockRelayTransport::new();
+        mock.inject(wrap(
+            &reset(&g.signer, &machine, A, t0, "123456"),
+            &machine,
+            40,
+            t0,
+        ));
+        mock.inject(wrap(
+            &reset(&g.signer, &machine, B, t0 + 1, LONG),
+            &machine,
+            50,
+            t0,
+        ));
+        // Malformed: 17 digits, and a PIN of the wrong JSON type.
+        mock.inject(wrap(
+            &reset(&g.signer, &machine, C, t0 + 2, &format!("{LONG}1")),
+            &machine,
+            60,
+            t0,
+        ));
+        let mistyped = sign_event(
+            &g.signer,
+            CHARTER_DEVICE_SCREEN_LOCK_RESET,
+            t0 + 3,
+            vec![marker_tag()],
+            format!(
+                "{{\"v\":1,\"id\":\"{}\",\"machine\":\"{}\",\"issuedAt\":{},\"newPin\":{LONG}}}",
+                "d".repeat(32),
+                machine.to_hex(),
+                t0 + 3
+            ),
+        );
+        mock.inject(wrap(&mistyped, &machine, 70, t0));
+        w.wire_test_relay(mock.clone()).unwrap();
+        let lock = Mutex::new(Some(w));
+        lock.lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .set_screen_lock_state(true, true);
+
+        let mut reasons = vec![poll_once_locked(&lock, t0 + 4).reason];
+        {
+            let mut guard = lock.lock().unwrap();
+            let w = guard.as_mut().unwrap();
+            let pending = format!("{:?}", w.screen_lock_pending);
+            assert!(pending.contains(B), "{pending}");
+            for pin in ["123456", LONG] {
+                assert!(!pending.contains(pin), "{pending}");
+            }
+            let taken = w.take_screen_lock_reset();
+            assert!(
+                contains(taken.as_bytes(), LONG),
+                "the take body alone carries it"
+            );
+            assert_eq!(w.report_screen_lock_reset(B, "applied", t0 + 5), Ok(true));
+            let status = w.build_status(t0 + 5).unwrap().to_json();
+            for pin in ["123456", LONG] {
+                assert!(!status.contains(pin), "{status}");
+            }
+            for tags in w.break_glass.pending_audits() {
+                let flat = tags.concat().join(" ");
+                assert!(!flat.contains("123456") && !flat.contains(LONG), "{flat}");
+            }
+        }
+        reasons.push(poll_once_locked(&lock, t0 + 6).reason);
+        for r in &reasons {
+            assert!(!r.contains("123456") && !r.contains(LONG), "{r}");
+        }
+        let mut files = Vec::new();
+        files_under(&base, &mut files);
+        assert!(files.iter().any(|p| p.ends_with("screen-lock/ledger.json")));
+        for f in files {
+            let bytes = std::fs::read(&f).unwrap_or_default();
+            assert!(!contains(&bytes, LONG), "{} holds the PIN", f.display());
+        }
+        let ledger = std::fs::read_to_string(base.join("screen-lock/ledger.json")).unwrap();
+        assert!(!ledger.contains("123456"), "{ledger}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

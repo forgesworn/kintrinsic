@@ -1714,7 +1714,9 @@ Its GRANT, on allow:
 `AUDIT = 31000`; the outbound `CHARTER_DEVICE_STATUS = 31114` and the reserved
 inbound `CHARTER_DEVICE_USAGE_SYNC = 31115` (both contract-frozen but
 device-deferred — see the STATUS and consolidation subsections below) round out
-the namespace. Every charter-device event carries the marker tag
+the namespace, with the guardian's one-shot commands `CHARTER_DEVICE_RELEASE =
+31116` (the unpair) and `CHARTER_DEVICE_SCREEN_LOCK_RESET = 31119` (see
+"Screen-lock reset"). Every charter-device event carries the marker tag
 `["t", "charter-device"]`. Delivery is **NIP-59 gift-wrapped** (`SEAL = 13`,
 `GIFT_WRAP = 1059`) for private, durable store-and-forward.
 
@@ -1824,7 +1826,8 @@ gift-wrapped-to-guardian audit per decision: tags
 `["t","charter-device"]`, `["outcome", …]`, `["op", …]`; **content is always
 empty**; no child content, exec source path, `time.extend` reason, or DOB ever
 appears. The outcome vocabulary is `enacted | denied | failed | locked | thawed
-| override`.
+| override`, plus, under `["op","screenlock.reset"]`, the screen-lock reset
+results (see "Screen-lock reset").
 
 **Break-glass override event (frozen 2026-07-24; design memo
 `docs/superpowers/specs/2026-07-24-lifeline-incall-and-break-glass.md`).**
@@ -1910,6 +1913,9 @@ interface StatusPayload {
   appLockArmed?: boolean;          // Linux: the app lock (fapolicyd) is armed and enforcing right now; a Linux warden that has it always sends true/false
   debuggingOpen?: boolean;         // Android: adb is allowed right now (DISALLOW_DEBUGGING_FEATURES is not set); a ward that implements `debugging` sends true/false, or leaves it out when it cannot read the platform
   activeTime?: string;             // §Times: the named-time id in force right now; absent when Free time or locked (pre-times payloads stay byte-identical)
+  screenLockSecure?: boolean;      // Android: a secure screen lock (PIN, pattern or password) is set right now, as the platform reports it
+  screenLockResetReady?: boolean;  // Android: a guardian screen-lock reset can be applied right now (the reset token is active)
+  screenLockResets?: { id: string; result: string; at: number }[]; // Android: recent screen-lock reset outcomes, newest first, at most 16 — see "Screen-lock reset"
 }
 ```
 
@@ -2339,6 +2345,134 @@ their ephemeral outer authors, so relay allowlists must authorise authenticated
 connections rather than require the gift-wrap author to equal the stable key.
 The carrier subscribes to the union of paired-device relays and public defaults.
 
+### Screen-lock reset — `CHARTER_DEVICE_SCREEN_LOCK_RESET = 31119` (guardian → machine, Android)
+
+A guardian must always be able to get into a ward's phone. The way in is a
+**screen-lock reset**: the guardian sets the phone's own screen lock to a PIN
+they choose, or removes it. It is honest by construction: **the ward is
+always told**. No command, flag or later message can make a reset silent or
+erase the record of it. A ward with no screen lock is normal and supported;
+nothing here requires one.
+
+This is a one-shot imperative, like the RELEASE (31116, the parent-gated
+unpair), and it follows the RELEASE's rules wherever this section is silent.
+(The RELEASE has no section of its own; its rules are restated here.)
+
+**Envelope.** A fully signed NIP-01 inner event: kind `31119`, tags exactly
+`[["t","charter-device"]]`, `created_at` = `issuedAt`, signed by the **pinned
+guardian key** — the same rule as RELEASE. On the multi-key model (several
+guardian keys), any key allowed to sign CLAUSEs may sign it. It is sealed
+(13) and gift-wrapped (1059) to the one device it targets, exactly like a
+RELEASE, and never fanned out to the child's other devices. Content (JSON,
+this field order):
+
+```ts
+interface ScreenLockResetPayload {
+  v: 1;
+  id: string;       // exactly 32 lowercase hex characters: 16 fresh random bytes per reset
+  machine: Hex32;   // the device this reset targets (== that device's machine pubkey)
+  issuedAt: number; // the guardian's TRUE wall clock when it signed (unix secs)
+  newPin: string;   // "" = remove the screen lock; otherwise 4 to 16 ASCII digits
+}
+```
+
+`issuedAt` must be the guardian's real clock, never a strictly increasing
+counter that can run ahead of it: the device bounds freshness on this field,
+and never on the seal or wrap `created_at`, which are jittered. Unknown
+fields are tolerated, as on a RELEASE. Golden vector (hand-written, not
+generated): `core/crates/charter-testkit/vectors/screen_lock/screen_lock_reset_vectors.json`.
+
+**Acceptance (Android ward), in this order:**
+
+1. **Authenticate.** The kind, the payload shape (`v == 1`, the `id` and
+   `newPin` rules above), the inner event id and BIP-340 signature, the author
+   == the pinned guardian, `machine` == this device, and the **pairing epoch**:
+   `issuedAt >= paired_at`, so a reset signed before the current pairing is
+   void, as a RELEASE is. Anything that fails is refused and **nothing is
+   recorded**.
+2. **Already answered.** An `id` the device has already answered changes
+   nothing. Beyond the 16 outcomes it reports, the device remembers the ids
+   of the next 112 it has dropped (128 in all), so a re-delivery stays a
+   no-op unless that many resets arrive within the relays' two-day window.
+3. **Window.** `now - 3600 <= issuedAt <= now + 300`, both edges inclusive:
+   one hour back, five minutes forward, much tighter than a RELEASE's two
+   days, because a reset is an "I am standing here now" action. Outside it,
+   the device records `rejected_time`: its clock and the guardian's disagree,
+   or the reset arrived more than an hour late.
+4. **Floor.** `issuedAt` must be strictly greater than the `issuedAt` of the
+   last **accepted** reset. Otherwise the device records `superseded`. Two
+   resets signed in the same second: the second is superseded.
+5. **Accepted.** The floor and an `accepted` record are written durably
+   **before** the platform can see the reset. If that write fails, the reset
+   is not accepted, and the guardian, seeing no result, sends again. The
+   accepted reset waits for the platform **in memory only**. A newer accepted
+   reset replaces one the platform has not taken yet, which is then recorded
+   `superseded`. A crash before the platform takes it loses it, which is the
+   safe direction: the record stays `accepted` with no final result.
+
+The relays re-deliver every wrap for about two days, and the local link may
+resend: steps 2 to 4 make every re-delivery a no-op.
+
+**Result.** The ward app applies the reset with the platform's reset-password
+token and reports one of four results, which replaces `accepted`:
+
+| `result` | Meaning |
+|---|---|
+| `accepted` | Received and handed to the platform; no final result yet. |
+| `applied` | The screen lock was changed (or removed). |
+| `failed` | The platform refused it or threw. |
+| `not_ready` | The device's reset token is not active. On a device that already has a screen lock, it activates at the next unlock after it is set. |
+| `notice_failed` | The ward's notice could not be recorded, so the device did not reset: there is no reset without a notice. |
+| `rejected_time` | Outside the window (step 3). |
+| `superseded` | Not newer than an accepted reset (step 4), or replaced before the platform took it. |
+
+Exactly one outcome is recorded per `id`. `accepted` is the only one ever
+replaced, and only by one of the four platform results.
+
+**The ward is told.** The ward app keeps an append-only screen-lock history in
+device-protected storage, never containing a PIN, and shows a notice
+("Your guardian changed your screen lock at 19:42 on 14 Nov. Ask them for the
+new PIN." / "…removed your screen lock…") until the child acknowledges it on
+the device. Acknowledgement is only ever by the child on the device, never by
+a command.
+
+**The record survives a release.** The device keeps its last 16 outcomes
+(dropping the earliest recorded first), the answered ids and the floor in
+device-protected storage, outside everything a RELEASE clears,
+and the ward's history likewise. A re-paired device therefore still refuses a
+replay, and its outcomes stay visible on STATUS (to whichever guardian it is
+then paired with: ids and results only).
+
+**Delivery.** Relays and the local link, like a RELEASE. Over the link the
+ACK reports what the device did, never `ignored`: accepted → `applied`;
+already answered → `unchanged`; `superseded` → `superseded`; `rejected_time`
+→ `expired`; unauthentic, malformed or before the pairing → `refused`; the
+record could not be written → `failed`. A ward that predates this kind never
+polls it and ACKs it `ignored`, so the guardian offers the reset only to a ward
+whose version implements it **and** whose STATUS carries `screenLockSecure`.
+Linux has no screen lock to reset: `charterd` does not poll this kind and
+ACKs it `ignored`.
+
+**STATUS.** `screenLockSecure` (a secure screen lock is set right now),
+`screenLockResetReady` (a reset can be applied right now) and
+`screenLockResets` (the recorded outcomes, `{id, result, at}`, newest first,
+at most 16; `at` is when the device recorded the result, on its own clock).
+The guardian looks up its own `id`. A change to any of them goes out on the
+device's next poll rather than waiting for the heartbeat. Absent means a
+device with no such control, or one that has nothing to report yet.
+
+**AUDIT.** Each final outcome (`applied`, `failed`, `not_ready`,
+`notice_failed`, `rejected_time`, `superseded`; not `accepted`) emits the
+standard device audit with tags `["t","charter-device"]`,
+`["outcome",<result>]`, `["op","screenlock.reset"]`, `["id",<id>]`,
+`["at",<unix secs>]`, content empty. It is journaled durably and emitted on
+the next successful poll, like the break-glass override event.
+
+**The PIN.** It exists in the signed event, in the guardian's signing call,
+and in the ward's memory until the ward app takes it. It is never written to
+disk, never logged, and never put in STATUS or AUDIT, on either side. A
+diagnostic of a refused reset names the rule it broke, never its content.
+
 ### Multi-device usage consolidation — `CHARTER_DEVICE_USAGE_SYNC = 31115` (reserved; contract-complete)
 
 > **Coordination status (updated 2026-07-24, B3a).** IMPLEMENTED on the device
@@ -2535,7 +2669,7 @@ carry as a `p` tag.
 
 | `R` | Meaning |
 |---|---|
-| `applied` | Verified, and this delivery made it the device's state: the clause is now the stored clause for its `(subject, kind)`; the grant moved its request to Enacted or Denied; the release applied. |
+| `applied` | Verified, and this delivery made it the device's state: the clause is now the stored clause for its `(subject, kind)`; the grant moved its request to Enacted or Denied; the release applied; the screen-lock reset was accepted. |
 | `unchanged` | Verified, and already held: the same inner event is the stored clause, or the request was already answered. |
 | `superseded` | An authentic clause not newer than the stored one; the stored clause stays in effect. |
 | `expired` | A grant outside its validity window, or for an ask already expired or closed. |
@@ -2544,7 +2678,9 @@ carry as a `p` tag.
 | `ignored` | A kind the device does not act on over the link. |
 
 `applied` for `install.*` records the approval; it is not proof that the
-operating system completed an installation. An `app.open` allow is applied
+operating system completed an installation. A screen-lock reset maps its
+outcome onto the same words (see "Screen-lock reset"); `applied` there means
+accepted, and the platform's own result arrives on STATUS. An `app.open` allow is applied
 on a device only when both its GRANT and that device's `apps` CLAUSE report
 `applied` or `unchanged`.
 
@@ -2819,7 +2955,8 @@ you change it in both, or a red test tells you which stack drifted.
 | Max named-time label len | `60` | `MAX_TIME_LABEL_LEN` | `MAX_TIME_LABEL_LEN` |
 | Warn thresholds | `600` / `60` s | `enforcer` (10-/1-min) | (device-side only) |
 | STATUS heartbeat | `60` s | warden `STATUS_HEARTBEAT_SECS` | (device-side only) |
-| Kinds | 1059/13/31111/31112/31113/31114/31000/31116/31117/31118/30100 | `primitives::kinds` | `wire/*` |
+| Screen-lock reset window | `3600` back / `300` s ahead | `SCREEN_LOCK_RESET_MAX_AGE_SECS` / `SCREEN_LOCK_RESET_MAX_AHEAD_SECS` | (device-side only) |
+| Kinds | 1059/13/31111/31112/31113/31114/31000/31116/31117/31118/31119/30100 | `primitives::kinds` | `wire/*` |
 | Marker tag | `["t","charter-device"]` | `kinds::marker_tag()` | `MARKER` |
 
 ## Versioning

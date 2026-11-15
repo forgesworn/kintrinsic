@@ -93,6 +93,18 @@ pub struct ReceivedClause {
     pub seal_author: PubKey,
 }
 
+/// The guardian's one-shot device commands from one relay query
+/// ([`CharterTransport::poll_device_commands`]), each `(event, seal_author)`
+/// and unverified.
+#[derive(Default, Clone)]
+pub struct DeviceCommands {
+    /// RELEASE (31116) events.
+    pub releases: Vec<(NostrEvent, PubKey)>,
+    /// SCREEN_LOCK_RESET (31119) events. Their content carries a PIN: this
+    /// type has no `Debug` so it cannot be printed whole by accident.
+    pub screen_lock_resets: Vec<(NostrEvent, PubKey)>,
+}
+
 /// A fetched, signature-verified curator web list. Replaceable: keyed by
 /// `(curator, list_id)`, newest `created_at` wins.
 #[derive(Debug, Clone)]
@@ -481,6 +493,19 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         since: u64,
         now: u64,
     ) -> Result<Vec<(NostrEvent, PubKey)>, RelayIoError> {
+        self.poll_inner_kinds(&[inner_kind], since, now).await
+    }
+
+    /// One relay query, every opened wrap whose inner kind is in
+    /// `inner_kinds`. The relays cannot filter on an inner kind, so each
+    /// query downloads and opens every wrap in the window: callers that want
+    /// two kinds ask for both at once rather than paying for that twice.
+    async fn poll_inner_kinds(
+        &self,
+        inner_kinds: &[u16],
+        since: u64,
+        now: u64,
+    ) -> Result<Vec<(NostrEvent, PubKey)>, RelayIoError> {
         let filter = Filter {
             kinds: vec![kinds::GIFT_WRAP],
             p_tags: vec![self.machine_pk],
@@ -492,7 +517,7 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
         for wrap in wraps.into_iter().take(self.max_inbound) {
             // A tampered/foreign wrap is non-fatal — skip it.
             if let Some((ev, seal_author)) = self.open_wrap(&wrap, now) {
-                if ev.kind == inner_kind {
+                if inner_kinds.contains(&ev.kind) {
                     out.push((ev, seal_author));
                 }
             }
@@ -555,6 +580,48 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
     ) -> Result<Vec<(NostrEvent, PubKey)>, RelayIoError> {
         self.poll_inner(kinds::CHARTER_DEVICE_RELEASE, since, now)
             .await
+    }
+
+    /// Poll for delivered SCREEN_LOCK_RESET wraps (kind 31119): the
+    /// guardian's screen-lock reset. Returns `(event, seal_author)`
+    /// unverified; the warden runs `authenticate_screen_lock_reset`.
+    pub async fn poll_screen_lock_resets(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Result<Vec<(NostrEvent, PubKey)>, RelayIoError> {
+        self.poll_inner(kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET, since, now)
+            .await
+    }
+
+    /// RELEASE and SCREEN_LOCK_RESET wraps from ONE relay query: what
+    /// [`Self::poll_releases`] and [`Self::poll_screen_lock_resets`] return,
+    /// for a warden that handles both itself (Android), without fetching and
+    /// opening every wrap in the window twice per round.
+    pub async fn poll_device_commands(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Result<DeviceCommands, RelayIoError> {
+        let mut out = DeviceCommands::default();
+        for (ev, seal_author) in self
+            .poll_inner_kinds(
+                &[
+                    kinds::CHARTER_DEVICE_RELEASE,
+                    kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET,
+                ],
+                since,
+                now,
+            )
+            .await?
+        {
+            if ev.kind == kinds::CHARTER_DEVICE_RELEASE {
+                out.releases.push((ev, seal_author));
+            } else {
+                out.screen_lock_resets.push((ev, seal_author));
+            }
+        }
+        Ok(out)
     }
 
     /// Poll for delivered USAGE_SYNC wraps (kind 31115) — the guardian-signed

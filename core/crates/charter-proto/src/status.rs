@@ -299,6 +299,42 @@ pub struct StatusPayload {
     /// byte-identical and a pre-times guardian simply never sees it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_time: Option<String>,
+    /// Android: whether the device has a secure screen lock (PIN, pattern or
+    /// password) right now, as the platform reports it. A ward that
+    /// implements the screen-lock reset always sends it once the platform
+    /// has answered; absent means a device with no such control (Linux) or
+    /// one that predates it. Additive under the open STATUS field-set
+    /// decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_lock_secure: Option<bool>,
+    /// Android: whether a guardian screen-lock reset can be applied right now
+    /// (the device's reset token is active). On a device that already has a
+    /// lock this turns true after the ward's next unlock. Absent as above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_lock_reset_ready: Option<bool>,
+    /// Android: the outcomes of the most recent guardian screen-lock resets,
+    /// one per reset id, newest first, at most
+    /// [`MAX_STATUS_SCREEN_LOCK_RESETS`]. Absent until the device has
+    /// recorded one. Never carries a PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_lock_resets: Option<Vec<ScreenLockResetOutcome>>,
+}
+
+/// Most screen-lock reset outcomes a STATUS carries (the device's ring).
+pub const MAX_STATUS_SCREEN_LOCK_RESETS: usize = 16;
+
+/// The outcome the device recorded for one guardian screen-lock reset, keyed
+/// by the reset's own `id`. `result` is one of `accepted`, `applied`,
+/// `failed`, `not_ready`, `notice_failed`, `rejected_time`, `superseded`
+/// ([`crate::ScreenLockResetResult`]); it is a string here so a consumer
+/// never rejects a STATUS over a result word it has not met yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenLockResetOutcome {
+    pub id: String,
+    pub result: String,
+    /// When the device recorded this result (unix secs, device clock).
+    pub at: u64,
 }
 
 /// An account of time the device spent NOT being warded, that the warden
@@ -463,6 +499,9 @@ impl StatusPayload {
         if let Some(apps) = &mut p.apps {
             apps.truncate(MAX_STATUS_APPS);
         }
+        if let Some(resets) = &mut p.screen_lock_resets {
+            resets.truncate(MAX_STATUS_SCREEN_LOCK_RESETS);
+        }
         Ok(p)
     }
 }
@@ -514,6 +553,9 @@ mod tests {
             app_lock_armed: None,
             debugging_open: None,
             active_time: None,
+            screen_lock_secure: None,
+            screen_lock_reset_ready: None,
+            screen_lock_resets: None,
         }
     }
 
@@ -564,6 +606,54 @@ mod tests {
             );
             assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
         }
+    }
+
+    #[test]
+    fn screen_lock_fields_omit_when_none_and_round_trip_camel_case() {
+        let mut s = sample();
+        let json = s.to_json();
+        for key in [
+            "screenLockSecure",
+            "screenLockResetReady",
+            "screenLockResets",
+        ] {
+            assert!(!json.contains(key), "{key} absent when not reported");
+        }
+        s.screen_lock_secure = Some(true);
+        s.screen_lock_reset_ready = Some(false);
+        s.screen_lock_resets = Some(vec![ScreenLockResetOutcome {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            result: "applied".into(),
+            at: 1_700_000_100,
+        }]);
+        let json = s.to_json();
+        assert!(json.contains("\"screenLockSecure\":true"), "{json}");
+        assert!(json.contains("\"screenLockResetReady\":false"), "{json}");
+        assert!(
+            json.contains(
+                "\"screenLockResets\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"result\":\"applied\",\"at\":1700000100}]"
+            ),
+            "{json}"
+        );
+        assert_eq!(StatusPayload::from_json(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn screen_lock_resets_tolerate_unknown_results_and_truncate() {
+        let mut s = sample();
+        s.screen_lock_resets = Some(
+            (0..20)
+                .map(|i| ScreenLockResetOutcome {
+                    id: format!("{i:032x}"),
+                    result: "some_future_word".into(),
+                    at: i,
+                })
+                .collect(),
+        );
+        let back = StatusPayload::from_json(&s.to_json()).unwrap();
+        let resets = back.screen_lock_resets.unwrap();
+        assert_eq!(resets.len(), MAX_STATUS_SCREEN_LOCK_RESETS);
+        assert_eq!(resets[0].result, "some_future_word");
     }
 
     #[test]

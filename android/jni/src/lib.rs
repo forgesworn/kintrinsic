@@ -11,12 +11,13 @@ pub mod install;
 mod link;
 pub mod outbox;
 pub mod relay;
+mod screen_lock;
 pub mod system;
 mod times;
 mod warden;
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring, JNI_FALSE};
 use jni::JNIEnv;
 
 use warden::{Warden, WARDEN};
@@ -31,7 +32,9 @@ use warden::{Warden, WARDEN};
 ///    composed over the time running at that instant) and
 ///    `charterSetDefaultBrowser` is new.
 /// 6: the `connections` clause — `charterConnections`.
-pub const ABI_VERSION: jint = 6;
+/// 7: the guardian screen-lock reset — `charterTakeScreenLockReset`,
+///    `charterReportScreenLockReset` and `charterSetScreenLockState`.
+pub const ABI_VERSION: jint = 7;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -504,6 +507,76 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterS
     with_warden_mut(&env, |w| {
         w.set_debugging_open(open);
         "{\"ok\":true}".to_string()
+    })
+}
+
+// ---- screen-lock reset (ABI 7) ---------------------------------------------
+
+/// Take the guardian's accepted screen-lock reset, clearing it: exactly one
+/// call ever sees each one. Returns
+/// - `""` when none is waiting;
+/// - `{"id":"<32 hex>","newPin":"<empty, or 4–16 digits>","ts":<issuedAt>}`
+///   for one to apply (`newPin` `""` means remove the screen lock);
+/// - `{"error":"…"}` when the warden is not initialised (or a panic was
+///   caught). A directive never has an `error` key.
+///
+/// The PIN lives only in this answer: never on disk, in a log, in STATUS or
+/// in an AUDIT. Kotlin reports the outcome with `charterReportScreenLockReset`.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterTakeScreenLockReset(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let mut guard = WARDEN.lock().unwrap_or_else(|e| e.into_inner());
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match guard.as_mut() {
+        Some(w) => w.take_screen_lock_reset(),
+        None => zeroize::Zeroizing::new(err_json("not initialized")),
+    }))
+    .unwrap_or_else(|_| zeroize::Zeroizing::new(err_json("internal error (panic recovered)")));
+    out(&env, &res)
+}
+
+/// Report the outcome of a reset taken with `charterTakeScreenLockReset`:
+/// `result` ∈ {`applied`, `failed`, `not_ready`, `notice_failed`}, `at_unix`
+/// when it was decided. Replaces that id's `accepted` on STATUS
+/// `screenLockResets` and queues the `screenlock.reset` AUDIT. Returns
+/// `{"ok":true,"recorded":true}`; `{"ok":true,"recorded":false}` when the id
+/// has no `accepted` outcome to replace (one final outcome per id); or
+/// `{"error":"…"}` for an unknown result or a malformed id.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterReportScreenLockReset(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: JString,
+    result: JString,
+    at_unix: jlong,
+) -> jstring {
+    let id = jstr(&mut env, id).unwrap_or_default();
+    let result = jstr(&mut env, result).unwrap_or_default();
+    with_warden_mut(&env, |w| {
+        match w.report_screen_lock_reset(&id, &result, at_unix.max(0) as u64) {
+            Ok(recorded) => serde_json::json!({ "ok": true, "recorded": recorded }).to_string(),
+            Err(e) => err_json(&e),
+        }
+    })
+}
+
+/// What the platform says about the screen lock, each tick: `secure`
+/// (`KeyguardManager.isDeviceSecure`) and `reset_ready`
+/// (`DevicePolicyManager.isResetPasswordTokenActive`). Rides STATUS as
+/// `screenLockSecure` / `screenLockResetReady`. Returns
+/// `{"ok":true,"changed":bool}`; a change goes out on the next poll rather
+/// than waiting for the heartbeat.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterSetScreenLockState(
+    env: JNIEnv,
+    _class: JClass,
+    secure: jboolean,
+    reset_ready: jboolean,
+) -> jstring {
+    with_warden_mut(&env, |w| {
+        let changed = w.set_screen_lock_state(secure != JNI_FALSE, reset_ready != JNI_FALSE);
+        serde_json::json!({ "ok": true, "changed": changed }).to_string()
     })
 }
 

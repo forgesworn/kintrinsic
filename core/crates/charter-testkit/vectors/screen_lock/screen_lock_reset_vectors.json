@@ -1,0 +1,231 @@
+{
+  "note": "Hand-written cross-stack vectors for the guardian SCREEN_LOCK_RESET (kind 31119), spec/contract.md 'Screen-lock reset'. NOT generated: edit by hand, keeping both consumers green. The guardian signs a NIP-01 inner event of `kind` with exactly `tags` and content = the compact JSON in `content` (field order v, id, machine, issuedAt, newPin; created_at = issuedAt), seals it and gift-wraps it to the machine like a RELEASE. Rust consumer: core/crates/charter-verify/tests/screen_lock_reset_vectors.rs (every `content` parses to `payload` and reserializes byte-identically; every `invalid` payload is refused; `window` pins the device's acceptance window on issuedAt, both edges inclusive). TS producer: the guardian app must emit `content` byte-identically for each `payload`. `newPin` \"\" removes the screen lock.",
+  "kind": 31119,
+  "tags": [
+    [
+      "t",
+      "charter-device"
+    ]
+  ],
+  "vectors": [
+    {
+      "name": "set_pin_six_digits",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123456"
+      },
+      "content": "{\"v\":1,\"id\":\"0123456789abcdef0123456789abcdef\",\"machine\":\"abababababababababababababababababababababababababababababababab\",\"issuedAt\":1782734400,\"newPin\":\"123456\"}",
+      "removesScreenLock": false
+    },
+    {
+      "name": "remove_screen_lock",
+      "payload": {
+        "v": 1,
+        "id": "fedcba9876543210fedcba9876543210",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": ""
+      },
+      "content": "{\"v\":1,\"id\":\"fedcba9876543210fedcba9876543210\",\"machine\":\"abababababababababababababababababababababababababababababababab\",\"issuedAt\":1782734400,\"newPin\":\"\"}",
+      "removesScreenLock": true
+    },
+    {
+      "name": "shortest_pin",
+      "payload": {
+        "v": 1,
+        "id": "00000000000000000000000000000001",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "0000"
+      },
+      "content": "{\"v\":1,\"id\":\"00000000000000000000000000000001\",\"machine\":\"abababababababababababababababababababababababababababababababab\",\"issuedAt\":1782734400,\"newPin\":\"0000\"}",
+      "removesScreenLock": false
+    },
+    {
+      "name": "longest_pin",
+      "payload": {
+        "v": 1,
+        "id": "00000000000000000000000000000002",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "1234567890123456"
+      },
+      "content": "{\"v\":1,\"id\":\"00000000000000000000000000000002\",\"machine\":\"abababababababababababababababababababababababababababababababab\",\"issuedAt\":1782734400,\"newPin\":\"1234567890123456\"}",
+      "removesScreenLock": false
+    }
+  ],
+  "invalid": [
+    {
+      "name": "pin_three_digits",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123"
+      }
+    },
+    {
+      "name": "pin_seventeen_digits",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "12345678901234567"
+      }
+    },
+    {
+      "name": "pin_non_digit",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "12a4"
+      }
+    },
+    {
+      "name": "pin_with_space",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "1234 "
+      }
+    },
+    {
+      "name": "pin_non_ascii_digits",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "١٢٣٤"
+      }
+    },
+    {
+      "name": "pin_as_number",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": 123456
+      }
+    },
+    {
+      "name": "pin_missing",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400
+      }
+    },
+    {
+      "name": "id_thirty_one_chars",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcde",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123456"
+      }
+    },
+    {
+      "name": "id_thirty_three_chars",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef0",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123456"
+      }
+    },
+    {
+      "name": "id_uppercase",
+      "payload": {
+        "v": 1,
+        "id": "0123456789ABCDEF0123456789ABCDEF",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123456"
+      }
+    },
+    {
+      "name": "id_non_hex",
+      "payload": {
+        "v": 1,
+        "id": "g123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123456"
+      }
+    },
+    {
+      "name": "version_two",
+      "payload": {
+        "v": 2,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": 1782734400,
+        "newPin": "123456"
+      }
+    },
+    {
+      "name": "machine_missing",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "issuedAt": 1782734400,
+        "newPin": "1234"
+      }
+    },
+    {
+      "name": "issued_at_string",
+      "payload": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "machine": "abababababababababababababababababababababababababababababababab",
+        "issuedAt": "1782734400",
+        "newPin": "1234"
+      }
+    }
+  ],
+  "window": {
+    "maxAgeSecs": 3600,
+    "maxAheadSecs": 300,
+    "checks": [
+      {
+        "now": 1782734400,
+        "issuedAt": 1782734400,
+        "inWindow": true
+      },
+      {
+        "now": 1782734400,
+        "issuedAt": 1782730800,
+        "inWindow": true
+      },
+      {
+        "now": 1782734400,
+        "issuedAt": 1782730799,
+        "inWindow": false
+      },
+      {
+        "now": 1782734400,
+        "issuedAt": 1782734700,
+        "inWindow": true
+      },
+      {
+        "now": 1782734400,
+        "issuedAt": 1782734701,
+        "inWindow": false
+      }
+    ]
+  }
+}

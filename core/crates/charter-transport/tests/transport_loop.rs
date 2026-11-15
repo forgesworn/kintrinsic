@@ -313,3 +313,56 @@ fn try_new_rejects_an_all_zero_machine_secret() {
     .err();
     assert_eq!(err, Some(TransportError::BadMachineSecret));
 }
+
+/// RELEASE and SCREEN_LOCK_RESET wraps come back from one query, each sorted
+/// to its own list, and match what the single-kind polls return; a clause in
+/// the same window is in neither.
+#[tokio::test]
+async fn device_commands_sort_releases_and_screen_lock_resets_from_one_query() {
+    use charter_primitives::kinds;
+    use charter_verify::test_support::sign_event;
+
+    let guardian = TestGuardian::new();
+    let guardian_sk = secret(0x11);
+    let machine_sk = secret(0x22);
+    let machine_pk = PubKey::from_bytes(charter_crypto::xonly_pubkey(&machine_sk).unwrap());
+    let relay = MockRelayTransport::new();
+
+    let release = sign_event(
+        &guardian.signer,
+        kinds::CHARTER_DEVICE_RELEASE,
+        NOW,
+        vec![kinds::marker_tag()],
+        format!(
+            "{{\"v\":1,\"machine\":\"{}\",\"issuedAt\":{NOW}}}",
+            machine_pk.to_hex()
+        ),
+    );
+    let reset = sign_event(
+        &guardian.signer,
+        kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET,
+        NOW,
+        vec![kinds::marker_tag()],
+        format!(
+            "{{\"v\":1,\"id\":\"00112233445566778899aabbccddeeff\",\"machine\":\"{}\",\"issuedAt\":{NOW},\"newPin\":\"123456\"}}",
+            machine_pk.to_hex()
+        ),
+    );
+    let clause = ClauseBuilder::schedule(NOW).build(&guardian);
+    deliver(&relay, &release, &guardian_sk, &machine_pk, 0x01);
+    deliver(&relay, &reset, &guardian_sk, &machine_pk, 0x03);
+    deliver(&relay, &clause, &guardian_sk, &machine_pk, 0x05);
+
+    let t = transport(relay, machine_sk, guardian.pubkey());
+    let both = t.poll_device_commands(0, NOW).await.unwrap();
+    assert_eq!(both.releases.len(), 1);
+    assert_eq!(both.releases[0].0.id, release.id);
+    assert_eq!(both.screen_lock_resets.len(), 1);
+    assert_eq!(both.screen_lock_resets[0].0.id, reset.id);
+    assert_eq!(both.screen_lock_resets[0].1, guardian.pubkey());
+
+    let resets = t.poll_screen_lock_resets(0, NOW).await.unwrap();
+    assert_eq!(resets.len(), 1);
+    assert_eq!(resets[0].0.id, reset.id);
+    assert_eq!(t.poll_releases(0, NOW).await.unwrap().len(), 1);
+}

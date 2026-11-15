@@ -42,6 +42,15 @@ pub trait WardenRelay: Send + Sync {
         since: u64,
         now: u64,
     ) -> Result<Vec<(charter_primitives::NostrEvent, PubKey)>, String>;
+    /// Pull delivered RELEASE and SCREEN_LOCK_RESET events in ONE relay
+    /// query (each is `(event, seal_author)`, unverified): the warden handles
+    /// both itself, before the broker's round, and every query downloads and
+    /// opens every wrap in the window, so two kinds cost one query, not two.
+    fn poll_device_commands(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Result<charter_transport::DeviceCommands, String>;
     /// Gift-wrap + publish a STATUS payload. Returns how many relays accepted;
     /// zero acceptances is an Err carrying the relays' rejection text.
     fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String>;
@@ -159,6 +168,16 @@ impl<R: RelayTransport + Send + Sync + Clone> WardenRelay for BlockingRelay<R> {
         self.rt
             .block_on(self.transport.poll_releases(since, now))
             .map_err(|e| format!("relay poll (release): {e:?}"))
+    }
+
+    fn poll_device_commands(
+        &self,
+        since: u64,
+        now: u64,
+    ) -> Result<charter_transport::DeviceCommands, String> {
+        self.rt
+            .block_on(self.transport.poll_device_commands(since, now))
+            .map_err(|e| format!("relay poll (device commands): {e:?}"))
     }
 
     fn emit_status(&self, status_json: &str, now: u64) -> Result<usize, String> {
