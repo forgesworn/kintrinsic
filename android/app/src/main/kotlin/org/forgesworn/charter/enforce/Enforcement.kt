@@ -175,6 +175,23 @@ fun lockTaskAllowlist(
 ): List<String> = (listOf(self) + dialers + connections + alwaysAvailable.sorted()).distinct()
 
 /**
+ * The device owner's LockTask features with [DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD]
+ * added and every other bit kept exactly as found. The JVM-testable seam behind
+ * [org.forgesworn.charter.service.WardenController.syncLockTaskFeatures].
+ *
+ * Without the keyguard bit, the platform disables the keyguard for as long as the
+ * shade holds LockTask, even when the phone has a PIN: anyone who picked up a
+ * locked-out phone could open the Open-row apps, the dialer and Settings with no
+ * credential. With it, the phone's own lock stays, and the shade shows over it.
+ *
+ * Only this bit is added. NOTIFICATIONS, HOME and OVERVIEW would open quick
+ * settings, a launcher and recents to a locked-out ward, so they are never set
+ * here; whatever the platform default was (GLOBAL_ACTIONS) is left alone.
+ */
+fun lockTaskFeaturesWithKeyguard(current: Int): Int =
+    current or DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
+
+/**
  * Keeps only the packages that are part of the device's system image. Fail
  * closed: a package whose flags cannot be read (null, or a throw) is dropped.
  *

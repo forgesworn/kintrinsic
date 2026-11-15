@@ -143,8 +143,11 @@
                 android:value="Filtered guest hotspot for a supervised device" />
         </service>
 
+        <!-- showOnLockScreen is the pre-API-23 name for showForAllUsers (multi-user); it does NOT show this over the keyguard: LockActivity calls setShowWhenLocked(true) for that. -->
+        <!-- directBootAware: after a reboot the shade (and its lifeline) must be up before the first unlock; without it the launch fails until the PIN is entered. -->
         <activity
             android:name=".ui.LockActivity"
+            android:directBootAware="true"
             android:exported="false"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"

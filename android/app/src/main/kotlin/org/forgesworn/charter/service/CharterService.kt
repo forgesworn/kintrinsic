@@ -240,7 +240,14 @@ class CharterService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON -> repace(nowInteractive = true)
-                Intent.ACTION_SCREEN_OFF -> repace(nowInteractive = false)
+                Intent.ACTION_SCREEN_OFF -> {
+                    // Screen off re-locks: on a phone with its own screen lock,
+                    // the shade comes back in front of any app opened from it,
+                    // so waking never lands inside that app. Ahead of the
+                    // banking tick on the same worker; the tick re-checks it.
+                    handler.post { controller.raiseShade(screenOff = true) }
+                    repace(nowInteractive = false)
+                }
                 // Unlocked by the ward: the same check, in case the screen-on
                 // edge was missed (e.g. an always-on display).
                 Intent.ACTION_USER_PRESENT -> userPresent()

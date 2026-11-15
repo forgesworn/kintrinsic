@@ -1,6 +1,7 @@
 package org.forgesworn.charter.ui
 
 import android.app.Activity
+import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -44,6 +45,11 @@ class LockActivity : Activity() {
         const val TICK_MS = 1_000L
         /** Vitals move slowly; re-read every Nth tick, not every tick. */
         const val VITALS_EVERY = 5
+        /** How soon after an Open-row (or Wi-Fi, Bluetooth) launch the shade's
+         *  onStop is taken as that app covering it. */
+        const val LAUNCH_COVER_MS = 10_000L
+        /** The platform emergency dialer's action (see [callIntent]). */
+        const val ACTION_DIAL_EMERGENCY = "com.android.phone.EmergencyDialer.DIAL"
     }
 
     /** One-shot per lock: latched once the ward has asked on THIS lock spell. */
@@ -83,12 +89,16 @@ class LockActivity : Activity() {
      *  shade, even if the in-call UI fails to surface over LockTask. */
     private var endCallButton: Button? = null
 
+    /** `elapsedRealtime` when [openBehindLock] last started another app's UI,
+     *  0 = none; consumed by the next onStop (see [onStop]). */
+    private var launchedBehindAt = 0L
+
     /** The Wi-Fi and Bluetooth row of the current render, kept so [callPoll] can
      *  hide it the moment the while-locked restrictions stop being in force. */
     private var connectionsRow: android.view.View? = null
 
     /**
-     * The vital signs (2026-07-25). LockTask runs at LOCK_TASK_FEATURE_NONE,
+     * The vital signs (2026-07-25). LockTask runs without SYSTEM_INFO,
      * so the system status bar — clock, battery, signal — is gone while the
      * shade is up. A ward out of hours still needs to know the time (a phone
      * is a clock), whether it's about to die, and whether it could reach
@@ -147,6 +157,11 @@ class LockActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Over the keyguard: LockTask keeps the phone's own screen lock
+        // (LOCK_TASK_FEATURE_KEYGUARD), so on a phone with a PIN the shade has to
+        // show above it, lifeline and all. The manifest's showOnLockScreen does
+        // not do this (see there). Before any content is set.
+        setShowWhenLocked(true)
         org.forgesworn.charter.service.ActivityLockController.lockAlive = true
         askThread = android.os.HandlerThread("charter-ask").apply { start() }
         askWorker = android.os.Handler(askThread.looper)
@@ -211,6 +226,25 @@ class LockActivity : Activity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        ActivityLockController.coveredSince = 0L
+    }
+
+    override fun onStop() {
+        // Covered by an app this shade opened (not by the screen going off, a
+        // call, or the emergency dialer): the warden's tick may raise the shade
+        // back over it once the keyguard locks (ActivityLockController.raise).
+        // Only a launch from the last few seconds counts, so one that never
+        // covered the shade cannot mark whatever covers it later.
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (launchedBehindAt != 0L && now - launchedBehindAt <= LAUNCH_COVER_MS) {
+            ActivityLockController.coveredSince = now
+        }
+        launchedBehindAt = 0L
+        super.onStop()
+    }
+
     override fun onPause() {
         // Don't tick a clock nobody can see (and never hold the CPU awake for
         // it): the shade re-paints the moment it comes back.
@@ -221,6 +255,7 @@ class LockActivity : Activity() {
 
     override fun onDestroy() {
         org.forgesworn.charter.service.ActivityLockController.lockAlive = false
+        ActivityLockController.coveredSince = 0L
         runCatching { cameraManager?.unregisterTorchCallback(torchCallback) }
         ui.removeCallbacks(clockTick)
         runCatching { unregisterReceiver(hideReceiver) }
@@ -424,6 +459,41 @@ class LockActivity : Activity() {
     }.getOrNull()
 
     /**
+     * What a hold-to-call button starts. A guardian's number: ACTION_CALL, which
+     * places the call straight away, PIN or not (the in-call screen shows over
+     * the keyguard).
+     *
+     * An emergency number (the Emergency button, or a lifeline entry the
+     * platform counts as one) is different: the platform will not let an app
+     * that is not the dialer place it, and turns ACTION_CALL into the dialer's
+     * keypad, which does not show over the keyguard. With the phone's own lock
+     * kept during a lockout, that keypad would open behind the PIN. So while the
+     * keyguard is locked it opens the platform's emergency dialer instead, with
+     * the number filled in: that shows over the keyguard, LockTask lets it
+     * through, and nothing is dialled until the ward presses call. The same
+     * screen the keyguard's own Emergency button opens. [ACTION_DIAL_EMERGENCY]
+     * is the platform's action for it (Intent.ACTION_DIAL_EMERGENCY, not in the
+     * public SDK), so it is resolved first and the old path kept as the fallback.
+     */
+    private fun callIntent(number: String, emergency: Boolean): Intent {
+        val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+        val isEmergency = emergency || runCatching {
+            (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
+                .isEmergencyNumber(number)
+        }.getOrDefault(false)
+        val tel = android.net.Uri.parse("tel:" + android.net.Uri.encode(number))
+        if (locked && isEmergency) {
+            val dialer = Intent(ACTION_DIAL_EMERGENCY, tel).addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
+            )
+            // Only if this phone has one; otherwise the old path, as before.
+            if (dialer.resolveActivity(packageManager) != null) return dialer
+        }
+        return Intent(Intent.ACTION_CALL, tel)
+    }
+
+    /**
      * A lifeline button with two gates against the pocket-dial (and the
      * accidental tap): HOLD it for `holdMs` — releasing early cancels — then
      * a 3-2-1 window where any tap calls the whole thing off. Only after both
@@ -436,6 +506,7 @@ class LockActivity : Activity() {
         number: String,
         holdMs: Long,
         status: TextView,
+        emergency: Boolean = false,
     ): Button = CharterTheme.secondaryButton(this, label, onInk = true).apply {
         var holdRunnable: Runnable? = null
         var countdown: Runnable? = null
@@ -452,14 +523,7 @@ class LockActivity : Activity() {
 
         fun place() {
             reset()
-            val placed = runCatching {
-                startActivity(
-                    android.content.Intent(
-                        android.content.Intent.ACTION_CALL,
-                        android.net.Uri.parse("tel:" + android.net.Uri.encode(number)),
-                    ),
-                )
-            }.isSuccess
+            val placed = runCatching { startActivity(callIntent(number, emergency)) }.isSuccess
             if (!placed) status.text = "Couldn't start the call — tell your guardian."
         }
 
@@ -547,6 +611,59 @@ class LockActivity : Activity() {
     }
 
     /**
+     * Opens another app's UI from the shade, behind the phone's own screen lock.
+     *
+     * LockTask keeps the keyguard (LOCK_TASK_FEATURE_KEYGUARD), so on a phone
+     * with a PIN, pattern or password the shade sits over a locked keyguard. An
+     * app opened from here asks for that credential first, through the system
+     * bouncer, and opens only once it is given. Cancelled or failed, the ward
+     * stays on the shade. When nothing is locked (no screen lock, or it was
+     * already unlocked) the app opens directly: asking to dismiss a keyguard
+     * that is not there fails, and would kill the Open row on lock-free phones.
+     *
+     * Every shade control that opens another app's UI goes through here. The
+     * lifeline and emergency calls, End call and the in-call screen do not:
+     * those must work with no PIN.
+     *
+     * [stillWanted] is checked again just before the launch (after the PIN);
+     * [done] hears whether the launch went through.
+     */
+    private fun openBehindLock(
+        what: String,
+        intent: Intent,
+        stillWanted: () -> Boolean = { true },
+        done: (Boolean) -> Unit = {},
+    ) {
+        fun start() {
+            if (isDestroyed || isFinishing || !stillWanted()) return
+            val ok = runCatching { startActivity(intent) }
+                .onFailure { Log.w(TAG, "could not open $what", it) }
+                .isSuccess
+            if (ok) launchedBehindAt = android.os.SystemClock.elapsedRealtime()
+            done(ok)
+        }
+        val km = getSystemService(KeyguardManager::class.java)
+        if (km == null || !km.isKeyguardLocked) {
+            start()
+            return
+        }
+        km.requestDismissKeyguard(
+            this,
+            object : KeyguardManager.KeyguardDismissCallback() {
+                override fun onDismissSucceeded() = start()
+
+                override fun onDismissCancelled() {
+                    Log.i(TAG, "unlock to open $what cancelled: staying on the shade")
+                }
+
+                override fun onDismissError() {
+                    Log.w(TAG, "unlock to open $what failed: staying on the shade")
+                }
+            },
+        )
+    }
+
+    /**
      * The Open row: the apps the family agreed are open at any hour.
      *
      * Launching works because these packages are on the LockTask allowlist
@@ -593,8 +710,8 @@ class LockActivity : Activity() {
                         if (i == null) {
                             Log.w(TAG, "no launch intent for $pkg")
                         } else {
-                            runCatching { startActivity(i) }
-                                .onFailure { Log.w(TAG, "could not open $pkg", it) }
+                            // Behind the phone's own lock: the PIN first, if set.
+                            openBehindLock(pkg, i)
                         }
                     }
                 },
@@ -625,15 +742,20 @@ class LockActivity : Activity() {
             visibility = if (closed) android.view.View.VISIBLE else android.view.View.GONE
         }
         fun open(intent: Intent, what: String) {
-            if (!Connections.lockedSurfaceClosed(this)) {
-                container.visibility = android.view.View.GONE
-                return
+            fun closed(): Boolean = Connections.lockedSurfaceClosed(this).also {
+                if (!it) container.visibility = android.view.View.GONE
             }
-            val ok = runCatching {
-                startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }.onFailure { Log.w(TAG, "could not open $what settings", it) }.isSuccess
-            // Honest, never silent.
-            status.text = if (ok) "" else "Couldn’t open $what settings — tell your guardian."
+            if (!closed()) return
+            // Behind the phone's own lock: the PIN first, if set. The
+            // restrictions are checked again once it is given.
+            openBehindLock(
+                "$what settings",
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                stillWanted = { closed() },
+            ) { ok ->
+                // Honest, never silent.
+                status.text = if (ok) "" else "Couldn’t open $what settings — tell your guardian."
+            }
         }
         val wifi = Connections.systemPage(this, Connections.wifiIntent())
             .takeIf { Connections.hasWifi(this) }
@@ -975,6 +1097,7 @@ class LockActivity : Activity() {
                         number = emergencyNumber,
                         holdMs = EMERGENCY_HOLD_MS,
                         status = callStatus,
+                        emergency = true,
                     ),
                 )
             }
