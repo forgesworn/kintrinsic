@@ -167,13 +167,14 @@ describe("pushCarrierRoster", () => {
   it("sends a disconnected device in the roster as unpaired and released, so its held audits are named", () => {
     const roster = vi.fn();
     window.CharterCarrier = { provision: vi.fn(), roster, isCarrier: () => true };
+    const releasedAt = Date.now() - 1000;
     const released = [
-      { machine: "c".repeat(64), childId: "gone", childName: "Robin", deviceLabel: "Old laptop", relays: [], releasedAt: Date.now() - 1000 },
+      { machine: "c".repeat(64), childId: "gone", childName: "Robin", deviceLabel: "Old laptop", relays: [], releasedAt },
     ];
     expect(pushCarrierRoster(CHILDREN, released)).toBe(true);
     expect(JSON.parse(roster.mock.calls[0][0]).entries).toEqual([
       { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6", paired: true },
-      { machine: "c".repeat(64), childName: "Robin", deviceLabel: "Old laptop", paired: false, released: true },
+      { machine: "c".repeat(64), childName: "Robin", deviceLabel: "Old laptop", paired: false, released: true, releasedAt: Math.floor(releasedAt / 1000) },
     ]);
   });
 

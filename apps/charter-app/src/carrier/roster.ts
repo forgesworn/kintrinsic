@@ -35,6 +35,21 @@ export interface CarrierRosterEntry {
    * listener still admits only `paired` machines.
    */
   released?: boolean;
+  /**
+   * Unix SECONDS the guardian disconnected the device. Present on a released
+   * entry, and only there. The carrier compares a press with it (before or
+   * after the disconnect) and drops the entry 14 days after it.
+   */
+  releasedAt?: number;
+}
+
+/** What the carrier is told when a record has no name: it rejects an empty one. */
+export const UNNAMED_CHILD = "Your child";
+export const UNNAMED_DEVICE = "their phone";
+
+/** A name or label, or its fallback when it is empty or blank. Never an empty string. */
+function named(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() !== "" ? value : fallback;
 }
 
 /**
@@ -56,8 +71,8 @@ export function buildCarrierRoster(
       if (!device.devicePubkey) continue;
       roster.push({
         machine: device.devicePubkey,
-        childName: child.name,
-        deviceLabel: device.label,
+        childName: named(child.name, UNNAMED_CHILD),
+        deviceLabel: named(device.label, UNNAMED_DEVICE),
         paired: device.pairing === "paired",
       });
     }
@@ -76,18 +91,19 @@ export function buildCarrierRoster(
     if (releasing.has(r.machine)) {
       roster.push({
         machine: r.machine,
-        childName: r.childName,
-        deviceLabel: r.deviceLabel,
+        childName: named(r.childName, UNNAMED_CHILD),
+        deviceLabel: named(r.deviceLabel, UNNAMED_DEVICE),
         paired: true,
       });
       continue;
     }
     roster.push({
       machine: r.machine,
-      childName: r.childName,
-      deviceLabel: r.deviceLabel,
+      childName: named(r.childName, UNNAMED_CHILD),
+      deviceLabel: named(r.deviceLabel, UNNAMED_DEVICE),
       paired: false,
       released: true,
+      releasedAt: Math.floor(r.releasedAt / 1000),
     });
   }
   return roster;
