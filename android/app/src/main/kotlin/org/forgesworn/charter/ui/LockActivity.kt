@@ -99,6 +99,17 @@ class LockActivity : Activity() {
     private var callStatusView: TextView? = null
     private var callStatusText = ""
 
+    /**
+     * Hold-to-call presses in their 3-2-1 window, by [CallCountdown.key]. Held
+     * here, not in a button, so a render (a resume, a rotation) rebuilds each
+     * one still counting and cancellable; a countdown kept in the button it
+     * started on went on counting on a detached view, out of the ward's reach.
+     */
+    private val countdowns = mutableMapOf<String, CallCountdown>()
+
+    /** The lifeline buttons of the current render, by [CallCountdown.key]. */
+    private val callButtons = mutableMapOf<String, Button>()
+
     /** The break-glass status line of the current render (read at write time). */
     private var breakGlassStatusView: TextView? = null
 
@@ -734,11 +745,62 @@ class LockActivity : Activity() {
     }
 
     /**
+     * The shade's own emergency control is reported the moment its hold and
+     * cancel window complete, whatever the routes then do (resolve, start,
+     * throw or be refused). The press time is taken here, and the report then
+     * the local row go to a worker: the call below never waits on either (see
+     * EmergencyUse). A lifeline entry that happens to be an emergency number is
+     * not reported.
+     */
+    private fun placeCall(number: String, emergency: Boolean) {
+        if (emergency) {
+            org.forgesworn.charter.enforce.EmergencyUse.pressed(
+                applicationContext,
+                System.currentTimeMillis() / 1000,
+            )
+        }
+        startCall(number, emergency)
+    }
+
+    /** Starts [c]'s 3-2-1 window on whichever button is its own at each tick. */
+    private fun startCountdown(c: CallCountdown) {
+        countdowns.remove(c.key)?.posted?.let { ui.removeCallbacks(it) }
+        countdowns[c.key] = c
+        callButtons[c.key]?.text = c.text()
+        val tick = object : Runnable {
+            override fun run() {
+                if (countdowns[c.key] !== c || isDestroyed || isFinishing) return
+                if (c.tick()) {
+                    countdowns.remove(c.key)
+                    callButtons[c.key]?.text = c.label
+                    placeCall(c.number, c.emergency)
+                } else {
+                    callButtons[c.key]?.text = c.text()
+                    ui.postDelayed(this, 1_000L)
+                }
+            }
+        }
+        c.posted = tick
+        ui.postDelayed(tick, 1_000L)
+    }
+
+    /** A tap during the countdown: "no, stop". A sticky line already showing
+     *  stays (see [CallCountdown.lineAfterCancel]). */
+    private fun cancelCountdown(key: String) {
+        val c = countdowns.remove(key) ?: return
+        c.posted?.let { ui.removeCallbacks(it) }
+        callButtons[key]?.text = c.label
+        val kept = callStatusText
+        showCallStatus(CallCountdown.lineAfterCancel(kept), sticky = kept.isNotEmpty())
+    }
+
+    /**
      * A lifeline button with two gates against the pocket-dial (and the
      * accidental tap): HOLD it for `holdMs` — releasing early cancels — then
      * a 3-2-1 window where any tap calls the whole thing off. Only after both
      * does the call actually fire. No PIN, no reading: a child in trouble can
-     * always get through, a phone in a pocket never can.
+     * always get through, a phone in a pocket never can. The window lives at
+     * activity level (see [countdowns]), so a rebuilt button is still counting.
      */
     private fun callButton(
         label: String,
@@ -746,84 +808,50 @@ class LockActivity : Activity() {
         number: String,
         holdMs: Long,
         emergency: Boolean = false,
-    ): Button = CharterTheme.secondaryButton(this, label, onInk = true).apply {
-        var holdRunnable: Runnable? = null
-        var countdown: Runnable? = null
-        var armed = false // in the cancel window
+    ): Button {
+        val key = CallCountdown.key(label, number, emergency)
+        return CharterTheme.secondaryButton(
+            this,
+            CallCountdown.buttonText(label, countdowns[key]),
+            onInk = true,
+        ).apply {
+            callButtons[key] = this
+            var holdRunnable: Runnable? = null
 
-        fun reset() {
-            holdRunnable?.let { ui.removeCallbacks(it) }
-            countdown?.let { ui.removeCallbacks(it) }
-            holdRunnable = null
-            countdown = null
-            armed = false
-            text = label
-        }
-
-        fun place() {
-            reset()
-            // The shade's own emergency control is reported the moment its
-            // hold and cancel window complete, whatever the routes then do
-            // (resolve, start, throw or be refused). The press time is taken
-            // here, and the report then the local row go to a worker: the
-            // call below never waits on either (see EmergencyUse). A lifeline
-            // entry that happens to be an emergency number is not reported.
-            if (emergency) {
-                org.forgesworn.charter.enforce.EmergencyUse.pressed(
-                    applicationContext,
-                    System.currentTimeMillis() / 1000,
-                )
-            }
-            startCall(number, emergency)
-        }
-
-        fun startCancelWindow() {
-            armed = true
-            var left = CANCEL_WINDOW_SECS
-            val tick = object : Runnable {
-                override fun run() {
-                    if (!armed || isDestroyed || isFinishing) return
-                    if (left <= 0) {
-                        place()
-                        return
+            setOnTouchListener { v, ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        if (countdowns.containsKey(key)) {
+                            // A tap during the countdown = "no, stop".
+                            cancelCountdown(key)
+                            return@setOnTouchListener true
+                        }
+                        v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                        text = "Keep holding to call $who…"
+                        val r = Runnable {
+                            holdRunnable = null
+                            v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                            startCountdown(CallCountdown(label, who, number, emergency, CANCEL_WINDOW_SECS))
+                        }
+                        holdRunnable = r
+                        ui.postDelayed(r, holdMs)
+                        true
                     }
-                    text = "Calling $who in $left… (tap to cancel)"
-                    left--
-                    ui.postDelayed(this, 1_000L)
-                }
-            }
-            countdown = tick
-            ui.post(tick)
-        }
-
-        setOnTouchListener { v, ev ->
-            when (ev.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    if (armed) {
-                        // Second tap during the countdown = "no, stop".
-                        reset()
-                        showCallStatus("Call cancelled.")
-                        return@setOnTouchListener true
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL,
+                    -> {
+                        // Released before the hold completed: nothing happens.
+                        // Once counting, lifting the finger changes nothing.
+                        holdRunnable?.let {
+                            ui.removeCallbacks(it)
+                            holdRunnable = null
+                            text = label
+                        }
+                        v.performClick()
+                        true
                     }
-                    v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
-                    text = "Keep holding to call $who…"
-                    val r = Runnable {
-                        text = "…"
-                        v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-                        startCancelWindow()
-                    }
-                    holdRunnable = r
-                    ui.postDelayed(r, holdMs)
-                    true
+                    else -> false
                 }
-                android.view.MotionEvent.ACTION_UP,
-                android.view.MotionEvent.ACTION_CANCEL,
-                -> {
-                    if (!armed) reset() // released too early: nothing happens
-                    v.performClick()
-                    true
-                }
-                else -> false
             }
         }
     }
@@ -1103,6 +1131,7 @@ class LockActivity : Activity() {
         // The tree below replaces the old one: a status line written after this
         // point goes to a view of this render (see showCallStatus).
         callStatusView = null
+        callButtons.clear()
         breakGlassStatusView = null
         // Three deliberate zones rather than one centred blob: the clock owns
         // the top, what Kintrinsic has to say sits directly under it, and the
