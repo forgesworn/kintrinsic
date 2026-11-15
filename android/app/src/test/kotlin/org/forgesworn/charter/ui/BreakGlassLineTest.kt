@@ -14,7 +14,7 @@ import org.junit.Test
 class BreakGlassLineTest {
 
     private val told = "Your guardian has been told you need them. You can call the numbers above now."
-    private val notTold = "Your guardian may not have been told. Call them if you can."
+    private val notTold = "Your guardian may not have been told you need them. You can call the numbers above now."
     private val switchedOff = "Emergency unlock isn't switched on for this phone."
     private val tryAgain = "Couldn't use the emergency unlock. Try again."
 

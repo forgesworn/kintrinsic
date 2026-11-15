@@ -85,6 +85,10 @@ class LockActivity : Activity() {
      *  [startCall]). */
     private var shadeResumed = false
 
+    /** The shade's window focus, as last reported to [onWindowFocusChanged]; read by
+     *  the call sequencer's `clear()` so it never depends on platform call ordering. */
+    private var shadeFocused = false
+
     /**
      * The status line under the lifeline buttons, as of the CURRENT render, and
      * the text that must outlive a render (a route's instruction, the failure
@@ -322,6 +326,7 @@ class LockActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        shadeFocused = hasFocus
         if (hasFocus) callSequencer?.onClear()
     }
 
@@ -649,7 +654,7 @@ class LockActivity : Activity() {
             systemDialOk = systemDialOk,
             shade = object : CallSequencer.Shade {
                 override fun clear(): Boolean =
-                    shadeResumed && hasWindowFocus() && screenOn()
+                    shadeResumed && shadeFocused && screenOn()
 
                 // Unreadable is taken as on, so a failed read never blocks a route.
                 override fun screenOn(): Boolean =
@@ -1659,7 +1664,8 @@ internal fun breakGlassLine(res: CharterCore.BreakGlassResult?): String = when {
     res.allowed && res.scope == "full" -> "Unlocked."
     res.allowed && res.journaled ->
         "Your guardian has been told you need them. You can call the numbers above now."
-    res.allowed -> "Your guardian may not have been told. Call them if you can."
+    res.allowed ->
+        "Your guardian may not have been told you need them. You can call the numbers above now."
     res.reason == "not-enabled" -> "Emergency unlock isn't switched on for this phone."
     else -> BREAK_GLASS_TRY_AGAIN
 }
