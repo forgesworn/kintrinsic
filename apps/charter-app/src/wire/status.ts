@@ -262,6 +262,14 @@ export interface DeviceStatus {
    */
   screenLockResetReady?: boolean;
   /**
+   * Android: whether the phone will take a reset at all. `false` means Android
+   * refuses one on this device for good (it had a screen lock and was unlocked
+   * before Kintrinsic became its Device Owner); only setting it up again from
+   * a factory reset changes that, so no unlock will make it ready. Absent =
+   * unknown, never `false`.
+   */
+  screenLockResetSupported?: boolean;
+  /**
    * Android: the outcome the ward recorded for each of the last 16 screen-lock
    * resets, newest first, one entry per reset `id`. The guardian looks up the
    * `id` it sent. Absent when the ward has recorded none (or on junk); a
@@ -486,6 +494,8 @@ export function parseStatus(json: string): DeviceStatus | null {
     screenLockSecure: typeof o.screenLockSecure === "boolean" ? o.screenLockSecure : undefined,
     screenLockResetReady:
       typeof o.screenLockResetReady === "boolean" ? o.screenLockResetReady : undefined,
+    screenLockResetSupported:
+      typeof o.screenLockResetSupported === "boolean" ? o.screenLockResetSupported : undefined,
     screenLockResets: parseScreenLockResets(o.screenLockResets),
     locked: o.locked,
     lockReason: REASONS.includes(o.lockReason as StatusLockReason)

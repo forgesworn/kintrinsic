@@ -651,10 +651,11 @@ describe("screen lock fields", () => {
   const ID1 = "0123456789abcdef0123456789abcdef";
   const ID2 = "fedcba9876543210fedcba9876543210";
 
-  it("parses screenLockSecure, screenLockResetReady and screenLockResets", () => {
+  it("parses screenLockSecure, screenLockResetReady, screenLockResetSupported and screenLockResets", () => {
     const s = parse({
       screenLockSecure: false,
       screenLockResetReady: true,
+      screenLockResetSupported: false,
       screenLockResets: [
         { id: ID1, result: "applied", at: 1_700_000_100 },
         { id: ID2, result: "superseded", at: 1_700_000_000 },
@@ -662,6 +663,8 @@ describe("screen lock fields", () => {
     });
     expect(s?.screenLockSecure).toBe(false);
     expect(s?.screenLockResetReady).toBe(true);
+    expect(s?.screenLockResetSupported).toBe(false);
+    expect(parse({ screenLockResetSupported: true })?.screenLockResetSupported).toBe(true);
     expect(s?.screenLockResets).toEqual([
       { id: ID1, result: "applied", at: 1_700_000_100 },
       { id: ID2, result: "superseded", at: 1_700_000_000 },
@@ -672,6 +675,7 @@ describe("screen lock fields", () => {
     const s = parse({});
     expect(s?.screenLockSecure).toBeUndefined();
     expect(s?.screenLockResetReady).toBeUndefined();
+    expect(s?.screenLockResetSupported).toBeUndefined();
     expect(s?.screenLockResets).toBeUndefined();
   });
 
@@ -679,6 +683,7 @@ describe("screen lock fields", () => {
     for (const junk of ["true", 1, 0, null, {}, []]) {
       expect(parse({ screenLockSecure: junk })?.screenLockSecure).toBeUndefined();
       expect(parse({ screenLockResetReady: junk })?.screenLockResetReady).toBeUndefined();
+      expect(parse({ screenLockResetSupported: junk })?.screenLockResetSupported).toBeUndefined();
     }
     for (const junk of ["x", 1, true, null, {}]) {
       expect(parse({ screenLockResets: junk })?.screenLockResets).toBeUndefined();

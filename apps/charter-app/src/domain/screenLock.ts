@@ -3,8 +3,9 @@
 // outcome. Pure, so every state is testable without a screen.
 //
 // The ward reports the lock itself (`screenLockSecure`), whether it can reset
-// it now (`screenLockResetReady`) and one outcome per reset id (`screenLockResets`,
-// the last 16, newest first). The guardian keeps only the id and time of the
+// it now (`screenLockResetReady`), whether Android lets it reset this phone at
+// all (`screenLockResetSupported`) and one outcome per reset id
+// (`screenLockResets`, the last 16, newest first). The guardian keeps only the id and time of the
 // reset it sent (`Device.screenLockReset`), never the PIN, and looks its id up.
 
 import type { Device, DeviceScreenLockReset } from "./types";
@@ -30,10 +31,20 @@ export const ACCEPTED_UNCONFIRMED =
   "The device received it but didn't confirm the result. If nothing has changed, send it again.";
 export const NO_RESPONSE_IN_AN_HOUR =
   "The device didn't respond within an hour. Try again when it's online.";
+/** For a phone whose platform refuses a reset token for good
+ *  (`screenLockResetSupported: false`). */
+export const CANNOT_RESET_REMOTELY =
+  "Kintrinsic can't reset this device's screen lock. It had a screen lock before Kintrinsic was set up, and Android doesn't allow it after that. Setting the device up again from a factory reset fixes this.";
+/** A `not_ready` from a phone that can never be ready: not "try after the next unlock". */
+const NOT_READY_FOR_GOOD = "The device couldn't apply it: Android doesn't allow a remote reset on this device.";
 
 type ScreenLockStatus = Pick<
   DeviceStatus,
-  "appVersionCode" | "screenLockSecure" | "screenLockResetReady" | "screenLockResets"
+  | "appVersionCode"
+  | "screenLockSecure"
+  | "screenLockResetReady"
+  | "screenLockResetSupported"
+  | "screenLockResets"
 >;
 
 /**
@@ -85,8 +96,12 @@ export interface ScreenLockReading {
   noLock: boolean;
   /** False only when the ward says it cannot reset yet; a missing report is not "not ready". */
   ready: boolean;
-  /** Why the button is disabled; null when it is not. */
+  /** Why the button is disabled; null when it is not, or when the phone can't be reset at all. */
   notReadyNote: string | null;
+  /** False only when the ward says Android refuses a reset on it for good: the button is hidden. */
+  supported: boolean;
+  /** Why there is no button; null unless `supported` is false. */
+  unsupportedNote: string | null;
   /** The reset just sent: waiting, its outcome, or the one-hour expiry. Null when none is worth showing. */
   progress: ScreenLockProgress | null;
 }
@@ -142,7 +157,9 @@ export function screenLockReading(
   wardName: string,
 ): ScreenLockReading {
   const secure = status?.screenLockSecure === true;
-  const ready = status?.screenLockResetReady !== false;
+  // Absent is unknown, never "unsupported": only an explicit false hides the button.
+  const supported = status?.screenLockResetSupported !== false;
+  const ready = supported && status?.screenLockResetReady !== false;
 
   let progress: ScreenLockProgress | null = null;
   if (sent && nowUnix - sent.issuedAt < SENT_LINE_KEEP_SECS) {
@@ -152,7 +169,9 @@ export function screenLockReading(
       progress =
         entry.result === "accepted" && !withinHour
           ? { tone: "warn", text: ACCEPTED_UNCONFIRMED }
-          : screenLockResultText(entry.result, entry.at, wardName);
+          : entry.result === "not_ready" && !supported
+            ? { tone: "warn", text: NOT_READY_FOR_GOOD }
+            : screenLockResultText(entry.result, entry.at, wardName);
     } else if (withinHour) {
       progress = { tone: "waiting", text: sent.held ? HELD_FOR_HOME_NETWORK : WAITING_FOR_DEVICE };
     } else {
@@ -164,7 +183,10 @@ export function screenLockReading(
     state: secure ? "Screen lock: on" : "No screen lock",
     noLock: !secure,
     ready,
-    notReadyNote: ready ? null : `Ready after ${wardName} next unlocks this device.`,
+    // "Ready after the next unlock" would be untrue on a phone that never will be.
+    notReadyNote: ready || !supported ? null : `Ready after ${wardName} next unlocks this device.`,
+    supported,
+    unsupportedNote: supported ? null : CANNOT_RESET_REMOTELY,
     progress,
   };
 }

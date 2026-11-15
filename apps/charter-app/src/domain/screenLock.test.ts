@@ -3,6 +3,7 @@ import type { Device } from "./types";
 import type { DeviceStatus } from "../wire/status";
 import {
   ACCEPTED_UNCONFIRMED,
+  CANNOT_RESET_REMOTELY,
   devicesWithoutScreenLock,
   HELD_FOR_HOME_NETWORK,
   isValidScreenLockPin,
@@ -84,6 +85,47 @@ describe("screenLockReading", () => {
     expect(notReady.notReadyNote).toBe("Ready after Robin next unlocks this device.");
     expect(screenLockReading(undefined, st({ screenLockResetReady: true }), NOW, "Robin").ready).toBe(true);
     expect(screenLockReading(undefined, st(), NOW, "Robin")).toMatchObject({ ready: true, notReadyNote: null });
+  });
+
+  it("says plainly when Android won't let the ward reset this phone at all", () => {
+    expect(CANNOT_RESET_REMOTELY).toBe(
+      "Kintrinsic can't reset this device's screen lock. It had a screen lock before Kintrinsic was set up, and Android doesn't allow it after that. Setting the device up again from a factory reset fixes this.",
+    );
+    // Such a phone also reports not ready; "ready after the next unlock" would be untrue.
+    const r = screenLockReading(
+      undefined,
+      st({ screenLockResetSupported: false, screenLockResetReady: false }),
+      NOW,
+      "Robin",
+    );
+    expect(r).toMatchObject({
+      state: "Screen lock: on",
+      supported: false,
+      ready: false,
+      notReadyNote: null,
+      unsupportedNote: CANNOT_RESET_REMOTELY,
+    });
+    // The state and the no-lock flag still read as usual.
+    expect(
+      screenLockReading(undefined, st({ screenLockSecure: false, screenLockResetSupported: false }), NOW, "Robin"),
+    ).toMatchObject({ state: "No screen lock", noLock: true, supported: false });
+    // Supported, or not reported: no note.
+    for (const v of [true, undefined]) {
+      expect(screenLockReading(undefined, st({ screenLockResetSupported: v }), NOW, "Robin")).toMatchObject({
+        supported: true,
+        unsupportedNote: null,
+      });
+    }
+    // A reset sent before the ward said so, answered not_ready: not "try after the next unlock".
+    const answered = screenLockReading(
+      sent,
+      st({ screenLockResetSupported: false, screenLockResets: [{ id: ID, result: "not_ready", at: NOW }] }),
+      NOW,
+      "Robin",
+    );
+    expect(answered.progress?.tone).toBe("warn");
+    expect(answered.progress?.text).not.toContain("next unlocks");
+    expect(answered.progress?.text).toContain("Android doesn't allow");
   });
 
   it("shows nothing before anything is sent", () => {

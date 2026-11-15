@@ -91,6 +91,33 @@ describe("Screen lock card", () => {
     expect(text()).toContain("Ready after Robin next unlocks this device.");
   });
 
+  it("hides the button, and says why, when Android won't let Kintrinsic reset this phone", () => {
+    const cannot =
+      "Kintrinsic can't reset this device's screen lock. It had a screen lock before Kintrinsic was set up, and Android doesn't allow it after that. Setting the device up again from a factory reset fixes this.";
+    store.deviceStatus = { [PK]: status({ screenLockResetReady: false, screenLockResetSupported: false }) };
+    mount(phone);
+    expect(button("Reset screen lock on Robin’s phone")).toBeUndefined();
+    expect(text()).toContain("Screen lock: on");
+    expect(text()).toContain(cannot);
+    expect(text()).not.toContain("Ready after");
+    act(() => root.unmount());
+    // With no lock, the open-at-any-hour warning and the state line still show.
+    store.deviceStatus = {
+      [PK]: status({ screenLockSecure: false, screenLockResetReady: false, screenLockResetSupported: false }),
+    };
+    mount(phone);
+    expect(button("Reset screen lock on Robin’s phone")).toBeUndefined();
+    expect(text()).toContain("No screen lock");
+    expect(text()).toContain("Anyone holding this device can use its open-at-any-hour apps.");
+    expect(text()).toContain(cannot);
+    act(() => root.unmount());
+    // Supported: the button is back and there is no such sentence.
+    store.deviceStatus = { [PK]: status({ screenLockResetSupported: true }) };
+    mount(phone);
+    expect(button("Reset screen lock on Robin’s phone")?.disabled).toBe(false);
+    expect(text()).not.toContain("can't reset");
+  });
+
   it("the dialog offers both choices and always says the ward will be told", async () => {
     mount(phone);
     await click("Reset screen lock on Robin’s phone");

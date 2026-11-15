@@ -22,7 +22,9 @@ const PIN_MASK = { WebkitTextSecurity: "disc" } as React.CSSProperties;
  * One ward phone's screen-lock card: whether it has a lock, a "Reset screen
  * lock" button that sets a new PIN or removes the lock (always telling the ward),
  * and what became of the reset just sent, from the ward's own report. Android
- * wards that report `screenLockSecure` only; everything else shows nothing.
+ * wards that report `screenLockSecure` only; everything else shows nothing. A
+ * phone Android won't let Kintrinsic reset (`screenLockResetSupported: false`)
+ * gets no button, and says why.
  *
  * The PIN is held in this dialog's own state while it is typed and cleared the
  * moment it is sent or the dialog closes. It never reaches the store, which is
@@ -99,18 +101,21 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
           <div className="card-sub">{reading.state}</div>
           {reading.noLock && <div className="card-sub">{NO_SCREEN_LOCK_WARNING}</div>}
           {reading.notReadyNote && <div className="card-sub">{reading.notReadyNote}</div>}
+          {reading.unsupportedNote && <div className="card-sub">{reading.unsupportedNote}</div>}
         </div>
-        <Button
-          variant="ghost"
-          disabled={busy || !reading.ready}
-          aria-label={`Reset screen lock on ${device.label}`}
-          onClick={() => {
-            setError(null);
-            setOpen(true);
-          }}
-        >
-          Reset screen lock
-        </Button>
+        {reading.supported && (
+          <Button
+            variant="ghost"
+            disabled={busy || !reading.ready}
+            aria-label={`Reset screen lock on ${device.label}`}
+            onClick={() => {
+              setError(null);
+              setOpen(true);
+            }}
+          >
+            Reset screen lock
+          </Button>
+        )}
       </div>
       {progress && (
         <p
@@ -130,7 +135,7 @@ export default function DeviceScreenLock({ child, device }: { child: Child; devi
         </p>
       )}
 
-      {open && (
+      {open && reading.supported && (
         <div
           className="sheet-backdrop"
           role="dialog"
