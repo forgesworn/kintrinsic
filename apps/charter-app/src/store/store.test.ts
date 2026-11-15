@@ -277,3 +277,32 @@ describe("reducer — SET_DEVICE_DEBUGGING (last-sent USB debugging, per device)
     expect(next.children[0].devices[0].debugging).not.toHaveProperty("held");
   });
 });
+
+describe("reducer — SET_DEVICE_SCREEN_LOCK_RESET (last-sent screen-lock reset, per device)", () => {
+  const dev = (id: string): Device => ({ id, label: id, platform: "android", pairing: "paired", devicePubkey: id.repeat(64).slice(0, 64) });
+  const child: Child = { id: "c", name: "Robin", color: "#abc", dependantPubkey: null, devices: [dev("a"), dev("b")], policies: [] };
+  const state = (): CharterState => ({ ...emptyState(), children: [child] });
+  const sent = { id: "0123456789abcdef0123456789abcdef", issuedAt: 1000 };
+
+  it("records the id and time on ONE device only", () => {
+    const next = reducer(state(), { type: "SET_DEVICE_SCREEN_LOCK_RESET", childId: "c", deviceId: "a", reset: sent });
+    expect(next.children[0].devices[0].screenLockReset).toEqual(sent);
+    expect(next.children[0].devices[1].screenLockReset).toBeUndefined();
+  });
+
+  it("an older send never replaces a newer one", () => {
+    const first = reducer(state(), { type: "SET_DEVICE_SCREEN_LOCK_RESET", childId: "c", deviceId: "a", reset: sent });
+    const stale = reducer(first, { type: "SET_DEVICE_SCREEN_LOCK_RESET", childId: "c", deviceId: "a", reset: { id: "f".repeat(32), issuedAt: 999 } });
+    expect(stale.children[0].devices[0].screenLockReset).toEqual(sent);
+  });
+
+  it("disconnecting or re-keying drops the record; the same key keeps it", () => {
+    const first = reducer(state(), { type: "SET_DEVICE_SCREEN_LOCK_RESET", childId: "c", deviceId: "a", reset: sent });
+    const unpaired = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "unpaired", devicePubkey: null });
+    expect(unpaired.children[0].devices[0].screenLockReset).toBeUndefined();
+    const rekeyed = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", devicePubkey: "e".repeat(64) });
+    expect(rekeyed.children[0].devices[0].screenLockReset).toBeUndefined();
+    const same = reducer(first, { type: "SET_DEVICE_PAIRING", childId: "c", deviceId: "a", pairing: "paired", relays: ["wss://x"], relaysUpdatedAt: 5 });
+    expect(same.children[0].devices[0].screenLockReset).toEqual(sent);
+  });
+});

@@ -11,6 +11,8 @@ import { buildTimeExtendGrant } from "./grant";
 import type { Policy } from "../domain/types";
 import {
   CHARTER_DEVICE_RELEASE,
+  CHARTER_DEVICE_SCREEN_LOCK_RESET,
+  giftWrapScreenLockReset,
   giftWrapClause,
   giftWrapGrant,
   giftWrapRelease,
@@ -165,5 +167,23 @@ describe("giftWrapRelease", () => {
     expect(inner.kind).toBe(CHARTER_DEVICE_RELEASE);
     expect(inner.pubkey).toBe(guardian.pubkey); // guardian authored it
     expect(JSON.parse(inner.content)).toEqual({ v: 1, machine: dpk, issuedAt: AT });
+  });
+});
+
+describe("giftWrapScreenLockReset", () => {
+  it("wraps a signed SCREEN-LOCK RESET (31119) to the machine, authored by the guardian", async () => {
+    const guardian = localGuardian(generateSecretKey());
+    const dsk = generateSecretKey();
+    const dpk = getPublicKey(dsk);
+    const payload = { v: 1 as const, id: "0123456789abcdef0123456789abcdef", machine: dpk, issuedAt: AT, newPin: "123456" };
+    const wrap = await giftWrapScreenLockReset(payload, guardian);
+    expect(CHARTER_DEVICE_SCREEN_LOCK_RESET).toBe(31119);
+    expect(wrap.kind).toBe(1059);
+    expect(wrap.tags).toContainEqual(["p", dpk]);
+    const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(dsk, wrap.pubkey)));
+    const inner = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(dsk, seal.pubkey)));
+    expect(inner.kind).toBe(31119);
+    expect(inner.pubkey).toBe(guardian.pubkey);
+    expect(JSON.parse(inner.content)).toEqual(payload);
   });
 });

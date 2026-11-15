@@ -17,6 +17,7 @@ import type {
   ChildRequest,
   Device,
   DeviceDebugging,
+  DeviceScreenLockReset,
   PairingState,
   Policy,
   RequestKind,
@@ -297,6 +298,7 @@ type Action =
   | { type: "REMOVE_DEVICE"; childId: string; deviceId: string }
   | { type: "SET_DEVICE_LAST_SEEN"; machine: string; lastSeenAt: number }
   | { type: "SET_DEVICE_DEBUGGING"; childId: string; deviceId: string; debugging: DeviceDebugging }
+  | { type: "SET_DEVICE_SCREEN_LOCK_RESET"; childId: string; deviceId: string; reset: DeviceScreenLockReset }
   | { type: "SET_POLICY"; childId: string; policy: Policy }
   | { type: "ADD_POLICY"; childId: string; policy: Policy }
   | { type: "REMOVE_POLICY"; childId: string; policyId: string }
@@ -390,6 +392,12 @@ export function reducer(state: CharterState, action: Action): CharterState {
                   action.pairing === "paired" && devicePubkey === d.devicePubkey
                     ? d.debugging
                     : undefined,
+                // Likewise: a reset sent to the old key can never be answered
+                // by the new one.
+                screenLockReset:
+                  action.pairing === "paired" && devicePubkey === d.devicePubkey
+                    ? d.screenLockReset
+                    : undefined,
               };
             })
             : c,
@@ -404,6 +412,20 @@ export function reducer(state: CharterState, action: Action): CharterState {
             ? mapDevice(c, action.deviceId, (d) =>
                 action.debugging.issuedAt >= (d.debugging?.issuedAt ?? 0)
                   ? { ...d, debugging: action.debugging }
+                  : d,
+              )
+            : c,
+        ),
+      };
+    case "SET_DEVICE_SCREEN_LOCK_RESET":
+      // Newest send wins; an older one never replaces a newer record.
+      return {
+        ...state,
+        children: state.children.map((c) =>
+          c.id === action.childId
+            ? mapDevice(c, action.deviceId, (d) =>
+                action.reset.issuedAt >= (d.screenLockReset?.issuedAt ?? 0)
+                  ? { ...d, screenLockReset: action.reset }
                   : d,
               )
             : c,
@@ -632,6 +654,14 @@ export interface CharterContextValue {
     deviceId: string,
     grant: { allow: boolean; until?: number },
   ) => Promise<SendResult>;
+  /**
+   * Reset ONE ward device's screen lock to `newPin` (4 to 16 digits), or remove
+   * it (`newPin === ""`). Signs and publishes it like a RELEASE, then records
+   * only the reset's `id` and time on the device so the card can look up the
+   * ward's outcome. The PIN lives only in this call. Resolves `false` when
+   * nothing was sent (cancelled, no signer, not a paired device).
+   */
+  resetDeviceScreenLock: (childId: string, deviceId: string, newPin: string) => Promise<boolean>;
   /** QR onboarding: the outstanding pairing wait, if a QR is on screen. */
   phonePairing: { childId: string; token: string; foundMachine: string | null } | null;
   /** Mint a one-time token and start watching for its STATUS echo. */
@@ -1805,6 +1835,45 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       }
     },
     [debManifest, addActivity, queuedDelivery],
+  );
+
+  const resetDeviceScreenLock = useCallback(
+    async (childId: string, deviceId: string, newPin: string): Promise<boolean> => {
+      const s = signer.current;
+      const device = stateRef.current.children
+        .find((c) => c.id === childId)
+        ?.devices.find((d) => d.id === deviceId);
+      if (!s || !s.status().connected || !device?.devicePubkey || device.pairing !== "paired") {
+        return false;
+      }
+      try {
+        // The relays THIS device uses, plus the defaults (as a release does).
+        const relays = [...new Set([...deviceRelays(device, DEFAULT_RELAYS), ...DEFAULT_RELAYS])];
+        const out = await s.signScreenLockReset(
+          { machine: device.devicePubkey, relays, label: device.label },
+          newPin,
+        );
+        dispatch({
+          type: "SET_DEVICE_SCREEN_LOCK_RESET",
+          childId,
+          deviceId,
+          reset: { id: out.id, issuedAt: out.issuedAt },
+        });
+        // No wraps are kept: the Activity line names the act, never the PIN.
+        addActivity(
+          childId,
+          "rule-changed",
+          newPin === ""
+            ? `You removed the screen lock on ${device.label}`
+            : `You reset the screen lock on ${device.label}`,
+        );
+        return true;
+      } catch (err) {
+        if (err instanceof SignerCancelled) return false;
+        throw err;
+      }
+    },
+    [addActivity],
   );
 
   const setDeviceDebugging = useCallback(
@@ -3024,6 +3093,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       sendCharterUpdate,
       sendLinuxUpdate,
       setDeviceDebugging,
+      resetDeviceScreenLock,
       phonePairing,
       beginPhonePairing,
       cancelPhonePairing,
@@ -3082,6 +3152,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       sendCharterUpdate,
       sendLinuxUpdate,
       setDeviceDebugging,
+      resetDeviceScreenLock,
       phonePairing,
       beginPhonePairing,
       cancelPhonePairing,

@@ -8,7 +8,7 @@
 // never what is checked about it. So both routes call this one function.
 
 import type { NostrEvent } from "nostr-tools";
-import { unwrapAudit, type DeviceOverride } from "../wire/audit";
+import { unwrapDeviceAudit, type DeviceOverride } from "../wire/audit";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
 import { unwrapStatus, type DeviceStatus } from "../wire/status";
 
@@ -48,6 +48,8 @@ export type WrapIngestResult =
   | { kind: "request"; reqId: string }
   /** An emergency unlock, new or already held: it is in the Activity history. */
   | { kind: "audit"; key: string }
+  /** A ward's screen-lock reset audit: read, and nothing to record (STATUS carries the outcome). */
+  | { kind: "screenlock" }
   /** An ask or emergency unlock from a phone this guardian has not recorded
    *  yet: left unhandled so a later pass can land it. `reqId` is the ask's. */
   | { kind: "unlanded"; reqId?: string };
@@ -65,8 +67,15 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
   if (!req) {
     // Third and last, so the common status and request wraps never pay for a
     // third decrypt: the ward's emergency unlock (a device audit).
-    const audit = unwrapAudit(w, ctx.guardianSk);
-    if (audit) return ingestOverride(w, audit, ctx);
+    const audit = unwrapDeviceAudit(w, ctx.guardianSk);
+    if (audit?.op === "unlock.breakglass") return ingestOverride(w, audit.override, ctx);
+    if (audit?.op === "screenlock.reset") {
+      // The ward's own record of a reset. The Screen lock card reads the
+      // outcome from STATUS, so there is nothing to land here; it is
+      // authenticated and understood, so it is done with.
+      ctx.handledWraps.add(w.id);
+      return { kind: "screenlock" };
+    }
     // Not ours, or not readable. Neither will change with time.
     ctx.handledWraps.add(w.id);
     return { kind: "unreadable" };

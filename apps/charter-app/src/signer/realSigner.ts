@@ -17,7 +17,9 @@ import {
   giftWrapGrant,
   giftWrapPairOffer,
   giftWrapRelease,
+  giftWrapScreenLockReset,
   giftWrapUsageSync,
+  type ScreenLockResetPayload,
   type GuardianOps,
 } from "../wire/giftwrap";
 import type { UsageSyncPayload } from "../wire/usageSync";
@@ -29,7 +31,15 @@ import {
   endOfDayUnix,
   DEFAULT_STANDDOWN_GRACE_SECS,
 } from "../wire/grant";
-import type { DecisionContext, GiftOptions, SignOutcome, SignOutcomeAt, Signer } from "./Signer";
+import type {
+  DecisionContext,
+  GiftOptions,
+  ScreenLockResetOutcome,
+  ScreenLockResetTarget,
+  SignOutcome,
+  SignOutcomeAt,
+  Signer,
+} from "./Signer";
 import { FREE_TIME_ID, isValidTimeId } from "../wire/times";
 import { SignerCancelled, type ConfirmGate } from "./mockSigner";
 import { relayConfigTemplate } from "../wire/relayConfig";
@@ -875,6 +885,54 @@ export class RealSigner implements Signer {
     const wrap = await giftWrapRelease(machinePubkey, guardian, this.deps.now());
     await this.deps.publish(relays, wrap);
     return { ok: true };
+  }
+
+  /**
+   * Reset ONE device's screen lock to `newPin`, or remove it (`newPin === ""`).
+   * Sent exactly like `releaseDevice`: one wrap to the device's machine key, one
+   * publish, no batch and no retry queue of our own, and nothing of the wrap is
+   * kept.
+   *
+   * `newPin` is a secret that lives only in this call. It is not put in the
+   * confirm sheet, in any error message, or in anything returned.
+   */
+  async signScreenLockReset(
+    device: ScreenLockResetTarget,
+    newPin: string,
+  ): Promise<ScreenLockResetOutcome> {
+    const guardian = this.guardian;
+    if (!guardian) throw new Error("signer not connected");
+    if (!/^[0-9a-f]{64}$/.test(device.machine)) {
+      throw new Error("This device can't be reached yet, so its screen lock couldn't be reset.");
+    }
+    if (newPin !== "" && !/^[0-9]{4,16}$/.test(newPin)) {
+      throw new Error("A screen lock PIN is 4 to 16 digits, and nothing else.");
+    }
+    const name = device.label ?? `device ${device.machine.slice(0, 8)}…`;
+    await this.authorize(
+      "clause",
+      newPin === ""
+        ? `Remove the screen lock on ${name}`
+        : `Reset the screen lock on ${name} to a new PIN`,
+    );
+    const idBytes = new Uint8Array(16);
+    crypto.getRandomValues(idBytes);
+    const id = Array.from(idBytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    // The TRUE wall clock, never `nextIssuedAt()`: that can run ahead of the
+    // clock, and the ward accepts this only within an hour back, five minutes
+    // forward.
+    const issuedAt = this.deps.now();
+    const payload: ScreenLockResetPayload = { v: 1, id, machine: device.machine, issuedAt, newPin };
+    const wrap = await giftWrapScreenLockReset(payload, guardian);
+    try {
+      await this.deps.publish(device.relays, wrap);
+    } catch (err) {
+      // The relays failed but the carrier is HOLDING the wrap for the home
+      // network, so it will arrive: that is sent, not a failure that invites a
+      // second reset. (Any other failure propagates, as it does for a release.)
+      if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+    }
+    return { ok: true, id, issuedAt };
   }
 
   async sendPairOffer(
