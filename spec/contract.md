@@ -1884,10 +1884,11 @@ audit with tags `["t","charter-device"]`, `["outcome","override"]`,
 rides on it: **never** a number, a duration, a reason or any PII. It is reported
 on every completed press, whether or not a route to a dialler resolved, started,
 threw or was refused. A cancelled countdown, including one cancelled by the
-screen going off, emits nothing. The countdown is also cancelled, never
-completed, when the phone slept through part of it, or when the shade stops
-showing its button, since in each case the ward could not have seen or stopped
-it. While one press counts down, no other call button starts a second. It means:
+screen going off or by the shade being covered, emits nothing. The countdown is also cancelled, never
+completed, when the phone slept through part of it, when the shade stops
+showing its button, or when the shade is covered (another window takes the
+screen or the focus), since in each case the ward could not have seen or
+stopped it. While one press counts down, no other call button starts a second. It means:
 the control completed its hold and cancel window, and the ward app then tried,
 in turn and as far as each is available, the phone's emergency dialler, the
 phone's own lock screen (which has an Emergency call button), its system dialler

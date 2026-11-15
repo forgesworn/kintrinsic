@@ -128,7 +128,7 @@ class LockActivity : Activity() {
                 callButtons[key]?.text = text
             }
 
-            override fun screenOn(): Boolean = screenInteractive()
+            override fun inSight(): Boolean = shadeInSight()
 
             override fun complete(c: CallCountdown) {
                 if (isDestroyed || isFinishing) return
@@ -393,7 +393,13 @@ class LockActivity : Activity() {
         super.onWindowFocusChanged(hasFocus)
         shadeFocused = hasFocus
         // The phone's own lock takes the focus without pausing the shade.
-        if (hasFocus) callSequencer?.onClear() else callSequencer?.onFocusLost()
+        if (hasFocus) {
+            callSequencer?.onClear()
+        } else {
+            // Covered: the ward can no longer see or tap a countdown.
+            countdowns.cancelAll()
+            callSequencer?.onFocusLost()
+        }
     }
 
     /**
@@ -413,8 +419,10 @@ class LockActivity : Activity() {
         ui.removeCallbacks(clockTick)
         org.forgesworn.charter.service.RelayPollPace.hide(this)
         shadeResumed = false
-        // Something showed over the shade: a route that leaves it clear again
-        // was closed by the ward, and is not escalated (see CallSequencer).
+        // Something showed over the shade: a countdown the ward can no longer
+        // see is called off, and a route that leaves it clear again was closed
+        // by the ward, and is not escalated (see CallSequencer).
+        countdowns.cancelAll()
         callSequencer?.onPaused()
         super.onPause()
     }
@@ -727,8 +735,7 @@ class LockActivity : Activity() {
             emergencyDiallerOk = emergencyDialler != null,
             systemDialOk = systemDialOk,
             shade = object : CallSequencer.Shade {
-                override fun clear(): Boolean =
-                    shadeResumed && shadeFocused && screenOn()
+                override fun clear(): Boolean = shadeInSight()
 
                 override fun screenOn(): Boolean = screenInteractive()
 
@@ -819,6 +826,12 @@ class LockActivity : Activity() {
     private fun screenInteractive(): Boolean =
         runCatching { getSystemService(android.os.PowerManager::class.java)?.isInteractive }
             .getOrNull() != false
+
+    /** The shade is resumed, has the window focus and the screen is on: the
+     *  ward can see and tap it. The call sequencer's `clear()` and the
+     *  countdowns' `inSight()` are both this. */
+    private fun shadeInSight(): Boolean =
+        shadeResumed && shadeFocused && screenInteractive()
 
     /**
      * A lifeline button with two gates against the pocket-dial (and the

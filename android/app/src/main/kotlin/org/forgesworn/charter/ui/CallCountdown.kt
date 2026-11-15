@@ -46,12 +46,13 @@ internal class CallCountdown(
 
     /**
      * One second has passed. A tick that runs late (the device slept, so the
-     * ward never saw the countdown) or with the screen off (the ward cannot see
-     * or tap it) calls the press off, at any number, never placing it. Otherwise
-     * the number goes down, and the press is placed when it reaches 0.
+     * ward never saw the countdown) or out of sight (the screen off, or the
+     * shade covered or without the focus, so the ward cannot see or tap it)
+     * calls the press off, at any number, never placing it. Otherwise the
+     * number goes down, and the press is placed when it reaches 0.
      */
-    fun tick(now: Long, screenOn: Boolean): Step {
-        if (late(now) || !screenOn) return Step.CANCEL
+    fun tick(now: Long, inSight: Boolean): Step {
+        if (late(now) || !inSight) return Step.CANCEL
         left--
         return if (left <= 0) Step.PLACE else Step.COUNT
     }
@@ -88,8 +89,9 @@ internal class CallCountdown(
  *   can never complete in the first one's window and abandon its press. (A
  *   press begun after a countdown has completed is a new press, as ever.)
  * - **Only in sight.** A countdown is called off, as if the ward had tapped it,
- *   when the screen goes off ([cancelAll]), when a tick runs late in real time
- *   or finds the screen off (see [CallCountdown.tick]), and when a render no
+ *   when the shade is covered or the screen goes off ([cancelAll]), when a tick
+ *   runs late in real time or finds the shade out of sight (see
+ *   [CallCountdown.tick]), and when a render no
  *   longer builds its button ([keepOnly]), since no one could then cancel it.
  *   Nothing is reported for a press called off, and no route starts.
  * - **Every cancel says the same thing** ([Host.cancelled]): an existing
@@ -104,8 +106,9 @@ internal class CallCountdowns(
         /** Writes [text] on the button of the current render for [key], if there is one. */
         fun paint(key: String, text: String)
 
-        /** `PowerManager.isInteractive`; one that cannot be read is taken as on. */
-        fun screenOn(): Boolean
+        /** The shade is resumed, has the window focus and the screen is on: the
+         *  ward can see and tap the countdown. */
+        fun inSight(): Boolean
 
         /** [c]'s window completed on time and in sight: report the press, then route it. */
         fun complete(c: CallCountdown)
@@ -135,7 +138,8 @@ internal class CallCountdowns(
     /** A tap during the countdown: "no, stop". */
     fun cancel(key: String) = cancelWhere { it == key }
 
-    /** The screen went off: the ward can neither see nor tap a countdown. */
+    /** The screen went off, or the shade was covered or lost the focus: the
+     *  ward can neither see nor tap a countdown. */
     fun cancelAll() = cancelWhere { true }
 
     /** After a render: a countdown whose button was not rebuilt (it is no
@@ -166,7 +170,7 @@ internal class CallCountdowns(
             override fun run() {
                 // Cancelled, or replaced, too late to stop it running.
                 if (running[c.key] !== c || c.posted !== this) return
-                when (c.tick(timer.now(), host.screenOn())) {
+                when (c.tick(timer.now(), host.inSight())) {
                     CallCountdown.Step.CANCEL -> cancel(c.key)
                     CallCountdown.Step.COUNT -> {
                         host.paint(c.key, c.text())

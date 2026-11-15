@@ -25,11 +25,11 @@ class CallCountdownTest {
     fun `it counts 3, 2, 1 and the call is placed on the third tick`() {
         val c = countdown()
         assertEquals("Calling emergency services in 3… (tap to cancel)", c.text())
-        assertEquals(Step.COUNT, c.tick(c.dueAt, screenOn = true))
+        assertEquals(Step.COUNT, c.tick(c.dueAt, inSight = true))
         assertEquals("Calling emergency services in 2… (tap to cancel)", c.text())
-        assertEquals(Step.COUNT, c.tick(c.dueAt, screenOn = true))
+        assertEquals(Step.COUNT, c.tick(c.dueAt, inSight = true))
         assertEquals("Calling emergency services in 1… (tap to cancel)", c.text())
-        assertEquals(Step.PLACE, c.tick(c.dueAt, screenOn = true))
+        assertEquals(Step.PLACE, c.tick(c.dueAt, inSight = true))
     }
 
     @Test
@@ -38,25 +38,25 @@ class CallCountdownTest {
         c.dueAt = 5_000L
         assertFalse(c.late(5_000L + LATE_MS))
         assertTrue(c.late(5_000L + LATE_MS + 1))
-        assertEquals(Step.COUNT, c.tick(5_000L + LATE_MS, screenOn = true))
-        assertEquals(Step.CANCEL, c.tick(5_000L + LATE_MS + 1, screenOn = true))
+        assertEquals(Step.COUNT, c.tick(5_000L + LATE_MS, inSight = true))
+        assertEquals(Step.CANCEL, c.tick(5_000L + LATE_MS + 1, inSight = true))
         assertEquals("a cancelled tick does not count down", 2, c.left)
         c.left = 1
-        assertEquals("not even the last", Step.CANCEL, c.tick(2 * 60 * 60_000L, screenOn = true))
+        assertEquals("not even the last", Step.CANCEL, c.tick(2 * 60 * 60_000L, inSight = true))
     }
 
     @Test
-    fun `a tick with the screen off calls the press off, even the last`() {
+    fun `a tick out of sight calls the press off, even the last`() {
         val c = countdown()
         c.left = 1
-        assertEquals(Step.CANCEL, c.tick(c.dueAt, screenOn = false))
+        assertEquals(Step.CANCEL, c.tick(c.dueAt, inSight = false))
         assertEquals(1, c.left)
     }
 
     @Test
     fun `a button rebuilt mid-countdown shows the countdown where it is, and one with none shows its label`() {
         val c = countdown()
-        c.tick(c.dueAt, screenOn = true)
+        c.tick(c.dueAt, inSight = true)
         assertEquals("Calling emergency services in 2… (tap to cancel)", CallCountdown.buttonText("Emergency 999", c))
         assertEquals("Call Mum", CallCountdown.buttonText("Call Mum", null))
     }
@@ -88,7 +88,7 @@ class CallCountdownTest {
     private class Board {
         var clock = 0L
         var realtime = 0L
-        var screenOn = true
+        var inSight = true
         val active = mutableListOf<Pair<Runnable, Long>>()
 
         /** The text on each button, by key, as last painted. */
@@ -119,7 +119,7 @@ class CallCountdownTest {
                     buttons[key] = text
                 }
 
-                override fun screenOn(): Boolean = this@Board.screenOn
+                override fun inSight(): Boolean = this@Board.inSight
 
                 override fun complete(c: CallCountdown) {
                     completed += c
@@ -217,13 +217,13 @@ class CallCountdownTest {
         val b = Board()
         b.countdowns.start(countdown())
         b.advance(1_500)
-        b.screenOn = false
+        b.inSight = false
         b.countdowns.cancelAll()
         assertEquals("Emergency 999", b.buttons[emergencyKey])
         assertEquals(CallCountdown.CANCELLED, b.line)
         assertEquals(1, b.cancels)
         assertTrue(b.active.isEmpty())
-        b.screenOn = true
+        b.inSight = true
         b.advance(10_000)
         assertTrue("nothing reported, no route", b.completed.isEmpty())
 
@@ -243,15 +243,43 @@ class CallCountdownTest {
     }
 
     @Test
-    fun `a tick that finds the screen off calls the press off`() {
+    fun `a tick that finds the shade out of sight calls the press off`() {
         val b = Board()
         b.countdowns.start(countdown())
         b.advance(2_000)
-        b.screenOn = false // the screen-off broadcast not here yet
+        b.inSight = false // covered or screen off, the broadcast or callback not here yet
         b.advance(1_000)
         assertTrue(b.completed.isEmpty())
         assertEquals("Emergency 999", b.buttons[emergencyKey])
         assertEquals(1, b.cancels)
+    }
+
+    @Test
+    fun `the shade losing the focus mid-countdown calls the press off at once, keeping a sticky line`() {
+        val b = Board()
+        b.countdowns.start(countdown())
+        b.advance(1_500)
+        b.inSight = false // covered: the activity calls cancelAll beside the sequencer
+        b.countdowns.cancelAll()
+        assertEquals("Emergency 999", b.buttons[emergencyKey])
+        assertEquals(CallCountdown.CANCELLED, b.line)
+        assertEquals(1, b.cancels)
+        assertTrue(b.active.isEmpty())
+        b.inSight = true // the cover leaves
+        b.advance(10_000)
+        assertTrue("nothing reported, no route", b.completed.isEmpty())
+
+        val kept = Board()
+        kept.line = CallRoute.Line.ADVICE.text
+        kept.sticky = true
+        kept.countdowns.start(countdown())
+        kept.advance(1_000)
+        kept.inSight = false
+        kept.countdowns.cancelAll()
+        assertEquals(CallRoute.Line.ADVICE.text, kept.line)
+        assertTrue(kept.sticky)
+        assertEquals("Emergency 999", kept.buttons[emergencyKey])
+        assertTrue(kept.completed.isEmpty())
     }
 
     @Test
