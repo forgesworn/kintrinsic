@@ -10,6 +10,15 @@ fn drop_json(reason: &str) -> String {
     serde_json::json!({"type": "drop", "reason": reason}).to_string()
 }
 
+/// A plain decimal non-negative integer (no sign, exponent or whitespace),
+/// at most 15 digits, the same rule the console applies to `at`.
+fn parse_decimal(s: &str) -> Option<u64> {
+    if s.is_empty() || s.len() > 15 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
 /// Classify a wrap event (JSON) using the guardian secret. Total: every input
 /// maps to a JSON verdict; malformed/foreign/stale input is a "drop", never an
 /// error the service has to special-case.
@@ -63,15 +72,23 @@ pub fn classify_wrap(wrap_json: &str, guardian_sk: &[u8; 32], now_unix: u64) -> 
                     .find(|t| t.first().map(String::as_str) == Some(name))
                     .and_then(|t| t.get(1).cloned())
             };
-            serde_json::json!({
+            let mut verdict = serde_json::json!({
                 "type": "audit",
                 "machine": author.to_hex(),
                 "outcome": tag("outcome").unwrap_or_default(),
                 "op": tag("op").unwrap_or_default(),
                 "scope": tag("scope").unwrap_or_default(),
                 "durationSecs": tag("durationSecs").unwrap_or_default(),
-            })
-            .to_string()
+            });
+            // The press time the ward stamped, as a number, so a notification
+            // can say WHEN it happened rather than when this phone heard of it
+            // and a rebuilt wrap for the same press reuses its row. Absent when
+            // the tag is missing or is not a plain non-negative integer; the
+            // carrier decides whether the value is plausible.
+            if let Some(at) = tag("at").and_then(|v| parse_decimal(&v)) {
+                verdict["at"] = serde_json::json!(at);
+            }
+            verdict.to_string()
         }
         k => serde_json::json!({"type": "other", "kind": k}).to_string(),
     }
@@ -293,8 +310,28 @@ mod tests {
         // with empty strings rather than inventing them.
         assert_eq!(out["scope"], "");
         assert_eq!(out["durationSecs"], "");
-        // The carrier does not need `at`, so the verdict does not carry it.
-        assert!(out.get("at").is_none());
+        // The press time is forwarded, as a number.
+        assert_eq!(out["at"], 1_799_999_990u64);
+    }
+
+    #[test]
+    fn at_is_absent_unless_it_is_a_plain_non_negative_integer() {
+        for bad in ["", "-5", "1e9", " 12", "12.5", "abc", "1234567890123456"] {
+            let out = classify_audit(&[
+                ("outcome", "override"),
+                ("op", "call.emergency"),
+                ("at", bad),
+            ]);
+            assert!(out.get("at").is_none(), "at {bad:?} must not be forwarded");
+        }
+        let none = classify_audit(&[("outcome", "override"), ("op", "call.emergency")]);
+        assert!(none.get("at").is_none());
+        let zero = classify_audit(&[
+            ("outcome", "override"),
+            ("op", "unlock.breakglass"),
+            ("at", "0"),
+        ]);
+        assert_eq!(zero["at"], 0u64);
     }
 
     #[test]
