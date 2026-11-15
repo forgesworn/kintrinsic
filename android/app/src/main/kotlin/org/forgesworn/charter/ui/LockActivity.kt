@@ -103,6 +103,12 @@ class LockActivity : Activity() {
      *  is up, kept so [callPoll] can show and hide it as that changes. */
     private var unlockButton: Button? = null
 
+    /** Whether the user's credential-encrypted storage was unlocked at the
+     *  last [callPoll]; null before the first. The Open row cannot list apps
+     *  before the first unlock after a boot, so the shade is repainted on the
+     *  edge into unlocked, however the phone was unlocked. */
+    @Volatile private var userWasUnlocked: Boolean? = null
+
     /** The Wi-Fi and Bluetooth row of the current render, kept so [callPoll] can
      *  hide it the moment the while-locked restrictions stop being in force. */
     private var connectionsRow: android.view.View? = null
@@ -154,6 +160,15 @@ class LockActivity : Activity() {
             }.getOrNull()
             screenLockNotice = notice
             val unlock = unlockWanted()
+            val userUnlocked = runCatching {
+                getSystemService(android.os.UserManager::class.java).isUserUnlocked
+            }.getOrDefault(true)
+            val repaint = userWasUnlocked == false && userUnlocked
+            userWasUnlocked = userUnlocked
+            if (repaint) {
+                Log.i(TAG, "storage unlocked: repainting the shade")
+                runOnUiThread { if (!isDestroyed && !isFinishing) render() }
+            }
             runOnUiThread {
                 paintScreenLockLine(notice)
                 unlockButton?.visibility = if (unlock) android.view.View.VISIBLE else android.view.View.GONE
@@ -638,6 +653,10 @@ class LockActivity : Activity() {
                 override fun onDismissSucceeded() {
                     Log.i(TAG, "phone unlocked from the shade")
                     unlockButton?.visibility = android.view.View.GONE
+                    // The Open row may have been painted before the first
+                    // unlock, empty; the storage-unlocked edge in [callPoll]
+                    // repaints it too, should the storage still be locked here.
+                    render()
                 }
 
                 override fun onDismissCancelled() {
