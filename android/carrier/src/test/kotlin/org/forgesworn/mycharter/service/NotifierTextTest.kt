@@ -342,6 +342,58 @@ class NotifierTextTest {
         assertEquals((1..10).map { emergency(it, it.toLong()) }, c2)
     }
 
+    @Test fun anAskPostKeepsTheTotalWithinBudgetWhenEmergencyRowsHaveFilledMostOfTheShade() {
+        // 1 service + 14 emergency + 10 asks = 25, the platform's limit on Android 11.
+        val rows = listOf(service) + (1..14).map { emergency(it, 100L + it) } + (1..10).map { ask(it) }
+        assertEquals(25, rows.size)
+        val cancel = Notifier.asksToCancelForBudget(rows, "new", Notifier.NOTIF_ID_REQUEST, 25)
+        // Budget 22: 25 + 1 - 22 = 4 oldest asks go, and only asks.
+        assertEquals((1..4).map { ask(it) }, cancel)
+        assertTrue(rows.size - cancel.size + 1 <= 22)
+        assertFalse(service in cancel)
+        assertTrue(cancel.none { it.id == Notifier.NOTIF_ID_EMERGENCY })
+    }
+
+    @Test fun anAskPostNeverCancelsEmergencyRowsEvenWhenNoAskCanMakeTheRoom() {
+        val rows = listOf(service) + (1..24).map { emergency(it) } + ask(1)
+        assertEquals(listOf(ask(1)), Notifier.asksToCancelForBudget(rows, "new", Notifier.NOTIF_ID_REQUEST, 25))
+        val noAsks = listOf(service) + (1..24).map { emergency(it) }
+        assertEquals(emptyList<Notifier.ShadeRow>(), Notifier.asksToCancelForBudget(noAsks, "new", Notifier.NOTIF_ID_REQUEST, 25))
+    }
+
+    @Test fun anAskPostNeedsNothingCancelledWithinBudgetOrWhenItsRowIsAlreadyLive() {
+        val ok = listOf(service) + (1..10).map { emergency(it) } + (1..10).map { ask(it) }
+        assertEquals(emptyList<Notifier.ShadeRow>(), Notifier.asksToCancelForBudget(ok, "new", Notifier.NOTIF_ID_REQUEST, 25))
+        val full = listOf(service) + (1..14).map { emergency(it) } + (1..10).map { ask(it) }
+        assertEquals(emptyList<Notifier.ShadeRow>(), Notifier.asksToCancelForBudget(full, "ask3", Notifier.NOTIF_ID_REQUEST, 25))
+        // The unpaired-ask row (same id) is held to the same budget.
+        val cancel = Notifier.asksToCancelForBudget(full, Notifier.TAG_ASK_UNPAIRED, Notifier.NOTIF_ID_REQUEST, 25)
+        assertEquals((1..4).map { ask(it) }, cancel)
+    }
+
+    @Test fun waitingForRoomEndsAsSoonAsTheCancelsLandAndIsBounded() {
+        var clock = 0L
+        var live = 25
+        var sleeps = 0
+        val landed = Notifier.awaitRoom(
+            count = { live }, limit = 25, now = { clock },
+            sleep = { clock += it * 1_000_000L; sleeps++; if (sleeps == 3) live = 21 },
+        )
+        assertTrue(landed)
+        assertEquals(3, sleeps)
+        // Never lands: gives up after the budget instead of waiting for ever.
+        clock = 0L
+        sleeps = 0
+        val gaveUp = Notifier.awaitRoom(
+            count = { 25 }, limit = 25, now = { clock },
+            sleep = { clock += it * 1_000_000L; sleeps++ },
+        )
+        assertFalse(gaveUp)
+        assertEquals(Notifier.ROOM_WAIT_MS / Notifier.ROOM_POLL_MS, sleeps.toLong())
+        // A shade that cannot be read does not throw.
+        assertFalse(Notifier.awaitRoom(count = { error("x") }, limit = 25))
+    }
+
     @Test fun theLimitIsFiftyFromApi31() {
         val rows = listOf(service) + (1..46).map { ask(it) }
         // 47 live; budget 47: one more is 48 > 47, so one ask goes.

@@ -269,6 +269,8 @@ object Notifier {
             .setCategory(Notification.CATEGORY_STATUS)
             .build()
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        // The budget holds on every post, not only an emergency's: see [asksToCancelForBudget].
+        trimAsksToBudget(nm, TAG_ASK_UNPAIRED)
         nm.notify(TAG_ASK_UNPAIRED, NOTIF_ID_REQUEST, n)
     }
 
@@ -356,12 +358,79 @@ object Notifier {
         return (asks + emergencies).take(excess)
     }
 
-    /** Make room for the emergency row ([tag], [NOTIF_ID_EMERGENCY]) under the platform's cap. */
-    private fun makeRoomForEmergency(nm: NotificationManager, tag: String) {
+    /**
+     * Which live ask rows (id [NOTIF_ID_REQUEST], oldest first) to cancel so that posting
+     * the ask row ([tag], [id]) leaves the total at most [limit] minus [LIMIT_MARGIN].
+     * Only ask rows are candidates: the service row and every emergency row stay. This
+     * keeps the invariant on every ask post, so a later emergency post never meets a
+     * shade above that budget plus one, whenever the platform gets round to the cancels.
+     */
+    internal fun asksToCancelForBudget(rows: List<ShadeRow>, tag: String?, id: Int, limit: Int): List<ShadeRow> {
+        if (rows.any { it.id == id && it.tag == tag }) return emptyList()
+        val excess = rows.size + 1 - (limit - LIMIT_MARGIN)
+        if (excess <= 0) return emptyList()
+        return rows.filter { it.id == NOTIF_ID_REQUEST }.sortedBy { it.postTime }.take(excess)
+    }
+
+    /** Cancel the oldest asks that the overall budget needs gone before the ask row ([tag]) is posted. */
+    private fun trimAsksToBudget(nm: NotificationManager, tag: String, alsoCancel: List<String> = emptyList()) {
         try {
             val rows = nm.activeNotifications.map { ShadeRow(it.id, it.tag, it.postTime) }
-            rowsToCancel(rows, tag, NOTIF_ID_EMERGENCY, platformLimit(Build.VERSION.SDK_INT))
-                .forEach { nm.cancel(it.tag, it.id) }
+            val budget = asksToCancelForBudget(rows, tag, NOTIF_ID_REQUEST, platformLimit(Build.VERSION.SDK_INT))
+            (alsoCancel + budget.mapNotNull { it.tag }).distinct().forEach { nm.cancel(it, NOTIF_ID_REQUEST) }
+        } catch (_: Throwable) {
+            // Best effort: never let the trimming stop the ask itself.
+        }
+    }
+
+    /** The longest the emergency post waits for the platform to apply its queued cancels. */
+    internal const val ROOM_WAIT_MS = 200L
+
+    /** How often the shade is re-read while waiting for room. */
+    internal const val ROOM_POLL_MS = 20L
+
+    /**
+     * Wait until [count] (the live notifications) is under [limit], so one more post
+     * is not refused, for at most [budgetMs]. The platform applies a cancel on its own
+     * handler, but counts a row whose cancel is still queued against the cap. Returns
+     * whether there was room at the end. Never throws: best effort.
+     */
+    internal fun awaitRoom(
+        count: () -> Int,
+        limit: Int,
+        budgetMs: Long = ROOM_WAIT_MS,
+        pollMs: Long = ROOM_POLL_MS,
+        now: () -> Long = System::nanoTime,
+        sleep: (Long) -> Unit = Thread::sleep,
+    ): Boolean {
+        val deadline = now() + budgetMs * 1_000_000L
+        while (true) {
+            val room = try { count() < limit } catch (_: Throwable) { return false }
+            if (room) return true
+            if (now() >= deadline) return false
+            try {
+                sleep(pollMs)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+    }
+
+    /**
+     * Make room for the emergency row ([tag], [NOTIF_ID_EMERGENCY]) under the platform's
+     * cap, then wait briefly (at most [ROOM_WAIT_MS]) for the cancels to land. Runs on the
+     * carrier worker thread (CarrierService's "carrier-worker" HandlerThread), never the
+     * main thread, so the short wait is safe. The alert is posted whatever happens here.
+     */
+    private fun makeRoomForEmergency(nm: NotificationManager, tag: String) {
+        try {
+            val limit = platformLimit(Build.VERSION.SDK_INT)
+            val rows = nm.activeNotifications.map { ShadeRow(it.id, it.tag, it.postTime) }
+            val cancel = rowsToCancel(rows, tag, NOTIF_ID_EMERGENCY, limit)
+            if (cancel.isEmpty()) return
+            cancel.forEach { nm.cancel(it.tag, it.id) }
+            awaitRoom(count = { nm.activeNotifications.size }, limit = limit)
         } catch (_: Throwable) {
             // Best effort: never let the room-making stop the alert itself.
         }
@@ -438,7 +507,9 @@ object Notifier {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         // Room for this one: cancel the oldest paired-ward asks beyond the cap, so
         // a run of asks can never fill the shade and leave an emergency no place.
-        askRowsToCancel(liveRows(ctx, NOTIF_ID_REQUEST), ASK_ROW_CAP - 1).forEach { nm.cancel(it, NOTIF_ID_REQUEST) }
+        // The same post also keeps the whole shade inside the platform budget
+        // ([asksToCancelForBudget]), so an emergency never meets a full shade.
+        trimAsksToBudget(nm, reqId, alsoCancel = askRowsToCancel(liveRows(ctx, NOTIF_ID_REQUEST), ASK_ROW_CAP - 1))
         // One notification per reqId — a replayed wrap never re-alerts anyway
         // (store dedupe), but distinct asks each get their own row (the tag).
         nm.notify(reqId, NOTIF_ID_REQUEST, n)
