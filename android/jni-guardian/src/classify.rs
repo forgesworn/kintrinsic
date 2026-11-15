@@ -238,6 +238,81 @@ mod tests {
         assert_eq!(out["kind"], kinds::CHARTER_DEVICE_GRANT);
     }
 
+    /// A device audit (kind 31000) from machine seed 0x44 with exactly `tags`
+    /// (the transport's `t` marker is added first, as the ward's does), wrapped
+    /// to the guardian (seed 0x11), then classified.
+    fn classify_audit(tags: &[(&str, &str)]) -> serde_json::Value {
+        let guardian = TestGuardian::new();
+        let machine = TestGuardian::from_seed(0x44);
+        let mut all = vec![kinds::marker_tag()];
+        all.extend(
+            tags.iter()
+                .map(|(k, v)| vec![(*k).to_string(), (*v).to_string()]),
+        );
+        let ev = sign_event(
+            &machine.signer,
+            kinds::CHARTER_DEVICE_AUDIT,
+            NOW,
+            all,
+            String::new(),
+        );
+        let json = wrap_json(&ev, &sk_of(0x44), &guardian.pubkey(), NOW);
+        let out: serde_json::Value =
+            serde_json::from_str(&classify_wrap(&json, &sk_of(0x11), NOW)).unwrap();
+        assert_eq!(out["machine"], machine.pubkey().to_hex());
+        out
+    }
+
+    #[test]
+    fn classifies_a_break_glass_audit_with_its_op_scope_and_duration() {
+        let out = classify_audit(&[
+            ("outcome", "override"),
+            ("op", "unlock.breakglass"),
+            ("scope", "full"),
+            ("durationSecs", "600"),
+            ("at", "1799999990"),
+        ]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "override");
+        assert_eq!(out["op"], "unlock.breakglass");
+        assert_eq!(out["scope"], "full");
+        assert_eq!(out["durationSecs"], "600");
+    }
+
+    #[test]
+    fn classifies_an_emergency_call_audit_forwarding_its_op() {
+        let out = classify_audit(&[
+            ("outcome", "override"),
+            ("op", "call.emergency"),
+            ("at", "1799999990"),
+        ]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "override");
+        assert_eq!(out["op"], "call.emergency");
+        // No scope or duration is ever sent for a call; the verdict says so
+        // with empty strings rather than inventing them.
+        assert_eq!(out["scope"], "");
+        assert_eq!(out["durationSecs"], "");
+        // The carrier does not need `at`, so the verdict does not carry it.
+        assert!(out.get("at").is_none());
+    }
+
+    #[test]
+    fn an_audit_with_no_tags_defaults_every_field_to_empty() {
+        let out = classify_audit(&[]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "");
+        assert_eq!(out["op"], "");
+    }
+
+    #[test]
+    fn a_non_override_audit_is_still_an_audit_verdict_for_the_carrier_to_decide() {
+        let out = classify_audit(&[("outcome", "applied"), ("op", "screenlock.reset")]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "applied");
+        assert_eq!(out["op"], "screenlock.reset");
+    }
+
     #[test]
     fn garbage_json_is_a_drop_not_a_panic() {
         let out: serde_json::Value =
