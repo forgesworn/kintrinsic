@@ -634,9 +634,14 @@ class ActivityWatcher(
  */
 object EmergencyUse {
 
-    /** The report is tried again after each of these delays (1 s, 5 s, 30 s)
-     *  while the process lives, if the warden would not take it. */
-    val REPORT_RETRY_MS: List<Long> = listOf(1_000L, 5_000L, 30_000L)
+    /**
+     * The report is tried again after each of these delays (1 s, 5 s, 30 s,
+     * 65 s) while the process lives, if the warden would not take it. The last
+     * try, about 101 s after the press, comes after the minute in which the
+     * warden sets aside a journal it keeps failing to read, so a press that
+     * meets a fresh, persistent read error is still journaled.
+     */
+    val REPORT_RETRY_MS: List<Long> = listOf(1_000L, 5_000L, 30_000L, 65_000L)
 
     /** One daemon thread for the odd log write and report, so the call path
      *  never waits on disk or on the warden. The report's retries are scheduled

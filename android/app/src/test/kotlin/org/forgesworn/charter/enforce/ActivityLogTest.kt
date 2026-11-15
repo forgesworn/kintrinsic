@@ -767,8 +767,8 @@ class ActivityLogTest {
     }
 
     @Test
-    fun `a refused report is retried after 1 s, 5 s and 30 s, then given up`() {
-        assertEquals(listOf(1_000L, 5_000L, 30_000L), EmergencyUse.REPORT_RETRY_MS)
+    fun `a refused report is retried after 1 s, 5 s, 30 s and 65 s, then given up`() {
+        assertEquals(listOf(1_000L, 5_000L, 30_000L, 65_000L), EmergencyUse.REPORT_RETRY_MS)
         val tries = mutableListOf<Long>()
         val retries = Retries()
         var recorded = 0
@@ -782,15 +782,64 @@ class ActivityLogTest {
         // The row is not held up by the retries: it is written after the first try.
         assertEquals(1, recorded)
         assertEquals(listOf(9L), tries)
-        assertEquals(listOf(1_000L), retries.queued.map { it.second })
-        retries.runNext()
-        assertEquals(listOf(5_000L), retries.queued.map { it.second })
-        retries.runNext()
-        assertEquals(listOf(30_000L), retries.queued.map { it.second })
-        retries.runNext()
-        assertTrue("three retries, then it stops", retries.queued.isEmpty())
-        assertEquals(listOf(9L, 9L, 9L, 9L), tries)
+        for (delay in listOf(1_000L, 5_000L, 30_000L, 65_000L)) {
+            assertEquals(listOf(delay), retries.queued.map { it.second })
+            retries.runNext()
+        }
+        assertTrue("four retries, then it stops", retries.queued.isEmpty())
+        assertEquals(listOf(9L, 9L, 9L, 9L, 9L), tries)
         assertEquals("the row is written once", 1, recorded)
+    }
+
+    /**
+     * The warden's rule for a journal it cannot read (breakglass.rs `load_at`):
+     * every write is refused until the fourth failed read in a row that comes
+     * at least 60 s after the first, which sets the journal aside and writes
+     * to a fresh one. Time moves by the delays the press schedules.
+     */
+    private class UnreadableJournal {
+        var nowMs = 0L
+        private var failures = 0
+        private var firstFailureMs: Long? = null
+        val attemptsAt = mutableListOf<Long>()
+        var journaled = false
+
+        fun report(): Boolean {
+            attemptsAt += nowMs
+            val first = firstFailureMs ?: nowMs.also { firstFailureMs = it }
+            failures++
+            if (failures >= 4 && nowMs - first >= 60_000L) journaled = true
+            return journaled
+        }
+
+        fun run(retryDelaysMs: List<Long>) {
+            val retries = Retries()
+            EmergencyUse.pressed(
+                at = 5L,
+                report = { report() },
+                record = {},
+                runner = { it.run() },
+                schedule = retries.schedule,
+                retryDelaysMs = retryDelaysMs,
+            )
+            while (retries.queued.isNotEmpty()) {
+                nowMs += retries.queued.first().second
+                retries.runNext()
+            }
+        }
+    }
+
+    @Test
+    fun `a press that meets a journal unreadable from the start is journaled by the last retry`() {
+        val journal = UnreadableJournal()
+        journal.run(EmergencyUse.REPORT_RETRY_MS)
+        assertTrue(journal.journaled)
+        assertEquals(listOf(0L, 1_000L, 6_000L, 36_000L, 101_000L), journal.attemptsAt)
+
+        // The old schedule gave up at 36 s, inside the warden's minute.
+        val old = UnreadableJournal()
+        old.run(listOf(1_000L, 5_000L, 30_000L))
+        assertFalse(old.journaled)
     }
 
     @Test
