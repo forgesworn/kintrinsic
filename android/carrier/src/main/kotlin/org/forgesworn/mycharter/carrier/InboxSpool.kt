@@ -78,16 +78,23 @@ object InboxSpool {
             .put("wrap", wrap)
             .put("receivedAt", nowSecs)
             .put("verifiedAt", nowSecs)
+        // Decided ONCE, now, against the roster of the moment, and kept with the
+        // entry: a later roster (even an empty one, from a console that booted
+        // without its household) never moves a held press into the small group
+        // or evicts it. No roster yet means no flag, and the entry is judged by
+        // whatever roster is current when the caps next run.
+        if (known != null) entry.put("known", machine in known)
         return cap(kept + entry, known)
     }
 
-    private fun isKnown(machine: String, known: Set<String>?): Boolean =
-        known == null || machine in known
+    /** The admission-time verdict when the entry has one, else the current roster's. */
+    private fun isKnown(e: JSONObject, known: Set<String>?): Boolean =
+        if (e.has("known")) e.optBoolean("known", true) else known == null || e.optString("machine") in known
 
     /** Apply the two caps, keeping order and dropping the oldest of each group. */
     internal fun cap(all: List<JSONObject>, known: Set<String>?): String {
-        val knownEntries = all.filter { isKnown(it.optString("machine"), known) }
-        val unknownEntries = all.filterNot { isKnown(it.optString("machine"), known) }
+        val knownEntries = all.filter { isKnown(it, known) }
+        val unknownEntries = all.filterNot { isKnown(it, known) }
         val keep = HashSet<JSONObject>(
             knownEntries.takeLast(KNOWN_CAP) + unknownEntries.takeLast(UNKNOWN_CAP),
         )
@@ -101,13 +108,25 @@ object InboxSpool {
         return JSONArray(entries(parse(spool)).filter { it.optString("id") !in ids }).toString()
     }
 
-    /** The native inbox followed by every spooled entry whose id it does not already hold. */
+    /**
+     * The native inbox, then every spooled entry it does not hold. When BOTH hold
+     * the same wrap id the SPOOLED entry is emitted, in the native entry's place:
+     * it carries `verifiedAt` (the bytes the carrier itself classified), so a
+     * press that also came over the home network still lands days later.
+     */
     fun merge(nativeInbox: String, spool: String?): String {
         val native = parse(nativeInbox)
-        val held = entries(native).map { it.optString("id") }.toSet()
+        val spooled = entries(parse(spool)).associateBy { it.optString("id") }
         val out = JSONArray()
-        for (i in 0 until native.length()) out.put(native.get(i))
-        for (e in entries(parse(spool))) if (e.optString("id") !in held) out.put(e)
+        val emitted = HashSet<String>()
+        for (i in 0 until native.length()) {
+            val n = native.optJSONObject(i)
+            val id = n?.optString("id")
+            val replacement = if (id != null) spooled[id] else null
+            out.put(replacement ?: native.get(i))
+            if (id != null) emitted.add(id)
+        }
+        for ((id, e) in spooled) if (id !in emitted) out.put(e)
         return out.toString()
     }
 }

@@ -2,6 +2,7 @@ package org.forgesworn.mycharter.carrier
 
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,8 +47,25 @@ class InboxSpoolTest {
         var s = InboxSpool.add(null, "w1", "m1", wrap("w1"), now)
         s = InboxSpool.add(s, "w2", "m1", wrap("w2"), now)
         assertEquals(listOf("w1", "w2"), ids(InboxSpool.merge(link, s)))
-        // The link's own copy wins.
-        assertEquals(1L, JSONArray(InboxSpool.merge(link, s)).getJSONObject(0).getLong("receivedAt"))
+    }
+
+    @Test fun aSharedIdEmitsTheSpooledEntryWithItsVerifiedAt() {
+        // The press also came over the home network: both stores hold the id.
+        val link = """[{"id":"w1","machine":"m1","wrap":{},"receivedAt":1},{"id":"only","machine":"m1","wrap":{},"receivedAt":2}]"""
+        val s = InboxSpool.add(null, "w1", "m1", wrap("w1"), now)
+        val merged = JSONArray(InboxSpool.merge(link, s))
+        assertEquals(listOf("w1", "only"), ids(merged.toString()))
+        val shared = merged.getJSONObject(0)
+        assertEquals(now, shared.getLong("verifiedAt"))
+        assertEquals("w1", shared.getJSONObject("wrap").getString("id"))
+        // The native-only entry is untouched and has no verifiedAt.
+        assertFalse(merged.getJSONObject(1).has("verifiedAt"))
+    }
+
+    @Test fun aSharedIdIsNeverEmittedTwice() {
+        val link = """[{"id":"w1","machine":"m1","wrap":{},"receivedAt":1}]"""
+        val s = InboxSpool.add(null, "w1", "m1", wrap("w1"), now)
+        assertEquals(1, JSONArray(InboxSpool.merge(link, s)).length())
     }
 
     @Test fun mergeWorksWithTheLinkOffAndNothingSpooled() {
@@ -109,6 +127,49 @@ class InboxSpoolTest {
         assertEquals(InboxSpool.KNOWN_CAP + 1, held.size) // the 200 known plus the one unknown
         assertTrue("u" in held)
         assertTrue("a" !in held && "b" !in held)
+    }
+
+    // ---- N2: decided at admission, never re-bucketed by a later roster ----------
+
+    @Test fun anEmptyRosterLaterNeverEvictsOrDemotesHeldKnownPresses() {
+        val known = setOf(real)
+        var s: String? = null
+        for (i in 1..15) s = InboxSpool.add(s, "real$i", real, wrap("real$i"), now + i, known)
+        // The console boots without its household and pushes an empty roster;
+        // strangers keep arriving. None of the 15 held presses may go.
+        for (i in 1..40) s = InboxSpool.add(s, "spoof$i", fake(i), wrap("spoof$i"), now + 100 + i, emptySet())
+        val held = ids(s!!)
+        for (i in 1..15) assertTrue("real$i" in held)
+        assertEquals(15 + InboxSpool.UNKNOWN_CAP, held.size)
+    }
+
+    @Test fun aRosterThatDropsAMachineLeavesItsHeldEntriesInTheKnownGroup() {
+        var s = InboxSpool.add(null, "a", real, wrap("a"), now, setOf(real))
+        // The roster now names someone else entirely.
+        for (i in 1..30) s = InboxSpool.add(s, "u$i", fake(i), wrap("u$i"), now + i, setOf("someone-else"))
+        assertTrue("a" in ids(s))
+    }
+
+    @Test fun anEntryAdmittedAsUnknownStaysUnknownEvenIfTheRosterLaterNamesIt() {
+        var s: String? = null
+        for (i in 1..15) s = InboxSpool.add(s, "x$i", real, wrap("x$i"), now + i, emptySet())
+        assertEquals(InboxSpool.UNKNOWN_CAP, ids(s!!).size)
+        val flagged = JSONArray(s).getJSONObject(0)
+        assertEquals(false, flagged.getBoolean("known"))
+        // A later admission against a roster that now names the machine is known,
+        // and does not revive the old ones into the large group: they are still
+        // capped at ten among themselves.
+        s = InboxSpool.add(s, "late", real, wrap("late"), now + 99, setOf(real))
+        s = InboxSpool.add(s, "x16", real, wrap("x16"), now + 100, emptySet())
+        val held = ids(s)
+        assertTrue("late" in held)
+        assertTrue("x6" !in held)
+        assertEquals(InboxSpool.UNKNOWN_CAP + 1, held.size)
+    }
+
+    @Test fun entriesAdmittedWithNoRosterCarryNoFlagAndFollowTheCurrentRoster() {
+        val s = InboxSpool.add(null, "w1", real, wrap("w1"), now, null)
+        assertFalse(JSONArray(s).getJSONObject(0).has("known"))
     }
 
     @Test fun beforeTheFirstRosterEveryMachineCountsAsKnown() {

@@ -278,7 +278,9 @@ class CarrierService : Service() {
             if (wrapId != null && !store.markSeen("audit:$wrapId")) return
             // Has the console told us its devices yet? If so, a sender not in
             // that list is not one of this guardian's wards.
-            val rosterKnown = store.knownMachines() != null
+            // An EMPTY roster (a console that booted without its household) is not
+            // evidence that this sender is a stranger, so it keeps the old wording.
+            val rosterKnown = store.knownMachines()?.isNotEmpty() == true
             when (action) {
                 Notifier.AuditAction.UNLOCK -> Notifier.notifyOverride(
                     this,

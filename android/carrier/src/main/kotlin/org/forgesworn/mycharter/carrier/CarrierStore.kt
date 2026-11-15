@@ -91,7 +91,10 @@ class CarrierStore(context: Context) {
     }
 
     /** The relay-delivered emergency audits held for the console (see [InboxSpool]). */
-    private val spool = SpoolFile(java.io.File(context.filesDir, "inbox-spool.json"))
+    private val spool = SpoolFile(
+        java.io.File(context.filesDir, "inbox-spool.json"),
+        onDamaged = { android.util.Log.w("CarrierStore", "the emergency-audit spool was unreadable; set aside as ${it.name}") },
+    )
 
     /**
      * The device pubkeys the console has told us about, or null when it has
