@@ -1,6 +1,6 @@
 {
-  "note": "Hand-written cross-stack vectors for the guardian SCREEN_LOCK_RESET (kind 31119), spec/contract.md 'Screen-lock reset'. NOT generated: edit by hand, keeping both consumers green. The guardian signs a NIP-01 inner event of `kind` with exactly `tags` and content = the compact JSON in `content` (field order v, id, machine, issuedAt, newPin; created_at = issuedAt), seals it and gift-wraps it to the machine like a RELEASE. Rust consumer: core/crates/charter-verify/tests/screen_lock_reset_vectors.rs (every `content` parses to `payload` and reserializes byte-identically; every `invalid` payload is refused; `window` pins the device's acceptance window on issuedAt, both edges inclusive). TS producer: the guardian app must emit `content` byte-identically for each `payload`. `newPin` \"\" removes the screen lock.",
-  "kind": 31119,
+  "note": "Hand-written cross-stack vectors for the guardian SCREEN_LOCK_RESET (kind 31122), spec/contract.md 'Screen-lock reset'. NOT generated: edit by hand, keeping both consumers green. The guardian signs a NIP-01 inner event of `kind` with exactly `tags` and content = the compact JSON in `content` (field order v, id, machine, issuedAt, newPin; created_at = issuedAt), seals it and gift-wraps it to the machine like a RELEASE. Rust consumer: core/crates/charter-verify/tests/screen_lock_reset_vectors.rs (every `content` parses to `payload` and reserializes byte-identically; every `invalid` payload is refused; `window` pins the device's acceptance window on issuedAt, both edges inclusive). TS producer: the guardian app must emit `content` byte-identically for each `payload`. `newPin` \"\" removes the screen lock.",
+  "kind": 31122,
   "tags": [
     [
       "t",

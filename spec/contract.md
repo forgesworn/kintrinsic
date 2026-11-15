@@ -1715,7 +1715,7 @@ Its GRANT, on allow:
 inbound `CHARTER_DEVICE_USAGE_SYNC = 31115` (both contract-frozen but
 device-deferred — see the STATUS and consolidation subsections below) round out
 the namespace, with the guardian's one-shot commands `CHARTER_DEVICE_RELEASE =
-31116` (the unpair) and `CHARTER_DEVICE_SCREEN_LOCK_RESET = 31119` (see
+31116` (the unpair) and `CHARTER_DEVICE_SCREEN_LOCK_RESET = 31122` (see
 "Screen-lock reset"). Every charter-device event carries the marker tag
 `["t", "charter-device"]`. Delivery is **NIP-59 gift-wrapped** (`SEAL = 13`,
 `GIFT_WRAP = 1059`) for private, durable store-and-forward.
@@ -2345,7 +2345,7 @@ their ephemeral outer authors, so relay allowlists must authorise authenticated
 connections rather than require the gift-wrap author to equal the stable key.
 The carrier subscribes to the union of paired-device relays and public defaults.
 
-### Screen-lock reset — `CHARTER_DEVICE_SCREEN_LOCK_RESET = 31119` (guardian → machine, Android)
+### Screen-lock reset — `CHARTER_DEVICE_SCREEN_LOCK_RESET = 31122` (guardian → machine, Android)
 
 A guardian must always be able to get into a ward's phone. The way in is a
 **screen-lock reset**: the guardian sets the phone's own screen lock to a PIN
@@ -2358,7 +2358,7 @@ This is a one-shot imperative, like the RELEASE (31116, the parent-gated
 unpair), and it follows the RELEASE's rules wherever this section is silent.
 (The RELEASE has no section of its own; its rules are restated here.)
 
-**Envelope.** A fully signed NIP-01 inner event: kind `31119`, tags exactly
+**Envelope.** A fully signed NIP-01 inner event: kind `31122`, tags exactly
 `[["t","charter-device"]]`, `created_at` = `issuedAt`, signed by the **pinned
 guardian key** — the same rule as RELEASE. On the multi-key model (several
 guardian keys), any key allowed to sign CLAUSEs may sign it. It is sealed
@@ -2956,7 +2956,7 @@ you change it in both, or a red test tells you which stack drifted.
 | Warn thresholds | `600` / `60` s | `enforcer` (10-/1-min) | (device-side only) |
 | STATUS heartbeat | `60` s | warden `STATUS_HEARTBEAT_SECS` | (device-side only) |
 | Screen-lock reset window | `3600` back / `300` s ahead | `SCREEN_LOCK_RESET_MAX_AGE_SECS` / `SCREEN_LOCK_RESET_MAX_AHEAD_SECS` | (device-side only) |
-| Kinds | 1059/13/31111/31112/31113/31114/31000/31116/31117/31118/31119/30100 | `primitives::kinds` | `wire/*` |
+| Kinds | 1059/13/31111/31112/31113/31114/31000/31116/31117/31118/31122/30100 | `primitives::kinds` | `wire/*` |
 | Marker tag | `["t","charter-device"]` | `kinds::marker_tag()` | `MARKER` |
 
 ## Versioning

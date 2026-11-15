@@ -1,5 +1,5 @@
 //! Verify a guardian SCREEN_LOCK_RESET (kind
-//! `CHARTER_DEVICE_SCREEN_LOCK_RESET`, 31119), in two steps, because the
+//! `CHARTER_DEVICE_SCREEN_LOCK_RESET`, 31122), in two steps, because the
 //! device records an outcome for an authentic reset that arrives at the wrong
 //! time but records NOTHING for one that is not authentic:
 //!

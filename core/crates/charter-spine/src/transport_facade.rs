@@ -17,7 +17,10 @@ use charter_transport::{
 /// code as its relay copy and sorted by inner kind the way the `poll_*`
 /// methods sort relay deliveries. Every inner event is still **unverified**:
 /// the broker authenticates it exactly as it would a polled one.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written by hand: a `ScreenLockReset` event's content is a PIN,
+/// so it prints only the event's id and kind.
+#[derive(Clone)]
 pub enum LocalInbound {
     Clause(ReceivedClause),
     Grant(ReceivedGrant),
@@ -33,6 +36,25 @@ pub enum LocalInbound {
     Other {
         inner_kind: u16,
     },
+}
+
+impl std::fmt::Debug for LocalInbound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LocalInbound::Clause(c) => f.debug_tuple("Clause").field(c).finish(),
+            LocalInbound::Grant(g) => f.debug_tuple("Grant").field(g).finish(),
+            LocalInbound::Release(e, a) => f.debug_tuple("Release").field(e).field(a).finish(),
+            LocalInbound::UsageSync(e) => f.debug_tuple("UsageSync").field(e).finish(),
+            LocalInbound::ScreenLockReset(e, _) => f
+                .debug_tuple("ScreenLockReset")
+                .field(&format_args!("<redacted kind {} id {:?}>", e.kind, e.id))
+                .finish(),
+            LocalInbound::Other { inner_kind } => f
+                .debug_struct("Other")
+                .field("inner_kind", inner_kind)
+                .finish(),
+        }
+    }
 }
 
 /// Sort an unwrapped inner event into a [`LocalInbound`] by kind, matching
@@ -401,5 +423,25 @@ mod tests {
             t.poll_curator_lists(&[pk(0xaa)], 0).await.is_empty(),
             "drained"
         );
+    }
+
+    #[test]
+    fn a_screen_lock_reset_inbound_never_debug_prints_the_pin() {
+        use charter_primitives::{EventId, Sig};
+        let ev = NostrEvent {
+            id: EventId::from_bytes([0x5a; 32]),
+            pubkey: pk(0x11),
+            created_at: 1_700_000_000,
+            kind: kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET,
+            tags: vec![kinds::marker_tag()],
+            content: r#"{"v":1,"newPin":"90817263"}"#.into(),
+            sig: Sig::from_bytes([0x77; 64]),
+        };
+        let inbound = classify_inbound(ev, pk(0x11));
+        assert!(matches!(inbound, LocalInbound::ScreenLockReset(..)));
+        for shown in [format!("{inbound:?}"), format!("{inbound:#?}")] {
+            assert!(!shown.contains("90817263"), "PIN leaked: {shown}");
+            assert!(!shown.contains("newPin"), "content leaked: {shown}");
+        }
     }
 }

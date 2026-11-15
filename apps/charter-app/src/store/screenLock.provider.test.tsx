@@ -107,7 +107,7 @@ describe("resetDeviceScreenLock (provider)", () => {
     const wrap = relay.events[0] as NostrEvent;
     const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(DEVICE_SK, wrap.pubkey)));
     const inner = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(DEVICE_SK, seal.pubkey)));
-    expect(inner.kind).toBe(31119);
+    expect(inner.kind).toBe(31122);
     const payload = JSON.parse(inner.content);
     expect(payload.newPin).toBe(SECRET);
 

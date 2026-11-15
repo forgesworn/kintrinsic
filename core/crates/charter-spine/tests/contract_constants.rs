@@ -62,7 +62,7 @@ fn event_kinds() {
     assert_eq!(kinds::CHARTER_DEVICE_AUDIT, 31000);
     assert_eq!(kinds::CHARTER_DEVICE_RELEASE, 31116);
     assert_eq!(kinds::CHARTER_DEVICE_RELAYS, 31118);
-    assert_eq!(kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET, 31119);
+    assert_eq!(kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET, 31122);
     assert_eq!(kinds::CHARTER_CURATOR_WEB_LIST, 30100);
 }
 

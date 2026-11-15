@@ -1,5 +1,5 @@
 //! Hand-written cross-stack vectors for the guardian SCREEN_LOCK_RESET
-//! (kind 31119). The SAME file is asserted from the guardian app (TS
+//! (kind 31122). The SAME file is asserted from the guardian app (TS
 //! producer). This side proves the consumer: each pinned `content` parses to
 //! its `payload` and reserializes byte-identically, every `invalid` payload is
 //! refused, the inner kind and tags are the ones the device acts on, and the

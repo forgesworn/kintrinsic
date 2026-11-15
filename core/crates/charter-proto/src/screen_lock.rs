@@ -1,5 +1,5 @@
 //! The SCREEN_LOCK_RESET payload (kind `CHARTER_DEVICE_SCREEN_LOCK_RESET`,
-//! 31119): the guardian's way into a ward phone. The guardian signs it and
+//! 31122): the guardian's way into a ward phone. The guardian signs it and
 //! gift-wraps it to one machine, exactly like a RELEASE; the device
 //! authenticates the inner signature, confirms it targets THIS machine, and
 //! hands the new screen lock to the platform, which tells the ward.
@@ -325,5 +325,14 @@ mod tests {
             reports,
             vec![R::Applied, R::Failed, R::NotReady, R::NoticeFailed]
         );
+    }
+
+    #[test]
+    fn debug_never_prints_the_pin() {
+        let p = sample("90817263");
+        for shown in [format!("{p:?}"), format!("{p:#?}")] {
+            assert!(!shown.contains("90817263"), "PIN leaked: {shown}");
+            assert!(!shown.contains("new_pin") && !shown.contains("newPin"));
+        }
     }
 }

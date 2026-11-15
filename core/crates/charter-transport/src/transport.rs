@@ -100,7 +100,7 @@ pub struct ReceivedClause {
 pub struct DeviceCommands {
     /// RELEASE (31116) events.
     pub releases: Vec<(NostrEvent, PubKey)>,
-    /// SCREEN_LOCK_RESET (31119) events. Their content carries a PIN: this
+    /// SCREEN_LOCK_RESET (31122) events. Their content carries a PIN: this
     /// type has no `Debug` so it cannot be printed whole by accident.
     pub screen_lock_resets: Vec<(NostrEvent, PubKey)>,
 }
@@ -582,7 +582,7 @@ impl<R: RelayTransport, E: Entropy> CharterTransport<R, E> {
             .await
     }
 
-    /// Poll for delivered SCREEN_LOCK_RESET wraps (kind 31119): the
+    /// Poll for delivered SCREEN_LOCK_RESET wraps (kind 31122): the
     /// guardian's screen-lock reset. Returns `(event, seal_author)`
     /// unverified; the warden runs `authenticate_screen_lock_reset`.
     pub async fn poll_screen_lock_resets(

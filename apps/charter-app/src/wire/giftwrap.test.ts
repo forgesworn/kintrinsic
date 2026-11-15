@@ -171,18 +171,18 @@ describe("giftWrapRelease", () => {
 });
 
 describe("giftWrapScreenLockReset", () => {
-  it("wraps a signed SCREEN-LOCK RESET (31119) to the machine, authored by the guardian", async () => {
+  it("wraps a signed SCREEN-LOCK RESET (31122) to the machine, authored by the guardian", async () => {
     const guardian = localGuardian(generateSecretKey());
     const dsk = generateSecretKey();
     const dpk = getPublicKey(dsk);
     const payload = { v: 1 as const, id: "0123456789abcdef0123456789abcdef", machine: dpk, issuedAt: AT, newPin: "123456" };
     const wrap = await giftWrapScreenLockReset(payload, guardian);
-    expect(CHARTER_DEVICE_SCREEN_LOCK_RESET).toBe(31119);
+    expect(CHARTER_DEVICE_SCREEN_LOCK_RESET).toBe(31122);
     expect(wrap.kind).toBe(1059);
     expect(wrap.tags).toContainEqual(["p", dpk]);
     const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(dsk, wrap.pubkey)));
     const inner = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(dsk, seal.pubkey)));
-    expect(inner.kind).toBe(31119);
+    expect(inner.kind).toBe(31122);
     expect(inner.pubkey).toBe(guardian.pubkey);
     expect(JSON.parse(inner.content)).toEqual(payload);
   });

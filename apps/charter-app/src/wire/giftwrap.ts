@@ -26,7 +26,7 @@ export const CHARTER_DEVICE_CLAUSE = 31113;
 export const CHARTER_DEVICE_USAGE_SYNC = 31115;
 export const CHARTER_DEVICE_RELEASE = 31116;
 export const CHARTER_DEVICE_PAIR_OFFER = 31117;
-export const CHARTER_DEVICE_SCREEN_LOCK_RESET = 31119;
+export const CHARTER_DEVICE_SCREEN_LOCK_RESET = 31122;
 export const SEAL = 13;
 export const GIFT_WRAP = 1059;
 export const MARKER: [string, string] = ["t", "charter-device"];
@@ -181,7 +181,7 @@ export interface ScreenLockResetPayload {
 }
 
 /**
- * Build the inner SCREEN-LOCK RESET event (31119) and gift-wrap it to the
+ * Build the inner SCREEN-LOCK RESET event (31122) and gift-wrap it to the
  * MACHINE whose lock is being reset, exactly as RELEASE is wrapped. Only the
  * pinned guardian key can produce it, so a child cannot reset their own lock.
  */

@@ -73,7 +73,7 @@ describe("RealSigner.signScreenLockReset", () => {
     expect(published[0].relays).toEqual(RELAYS);
     const { inner, payload } = open(published[0].event);
     expect(inner.kind).toBe(CHARTER_DEVICE_SCREEN_LOCK_RESET);
-    expect(inner.kind).toBe(31119);
+    expect(inner.kind).toBe(31122);
     expect(inner.pubkey).toBe(GUARDIAN);
     expect(Object.keys(payload).sort()).toEqual(["id", "issuedAt", "machine", "newPin", "v"]);
     expect(payload.v).toBe(1);

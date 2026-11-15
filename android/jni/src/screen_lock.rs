@@ -308,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn debug_never_prints_the_pin() {
+        let mut payload = p(1, NOW);
+        payload.new_pin = "90817263".into();
+        let pending = Pending::from_payload(&payload);
+        for shown in [
+            format!("{pending:?}"),
+            format!("{pending:#?}"),
+            format!("{payload:?}"),
+            format!("{payload:#?}"),
+        ] {
+            assert!(!shown.contains("90817263"), "PIN leaked: {shown}");
+        }
+    }
+
+    #[test]
     fn an_accepted_reset_advances_the_floor_and_a_redelivery_is_a_no_op() {
         let mut l = Ledger::default();
         assert_eq!(l.admit(&p(1, NOW), NOW), Admission::Accepted);

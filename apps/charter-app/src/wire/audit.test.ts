@@ -202,6 +202,37 @@ describe("screen-lock reset audit (op screenlock.reset)", () => {
     expect(JSON.stringify(a)).not.toContain("246813");
   });
 
+  // The outcomes the ward emits (core/crates/charter-proto ScreenLockResetResult).
+  it.each(["applied", "failed", "not_ready", "notice_failed", "rejected_time", "superseded"])(
+    "accepts the ward's outcome %s",
+    (outcome) => {
+      const w = wrapFor({ tags: reset([["at", String(NOW - 5)]], outcome) });
+      expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+        op: "screenlock.reset",
+        reset: { machine: machinePk, id: ID, result: outcome, at: NOW - 5 },
+      });
+    },
+  );
+
+  it("ignores an unknown outcome gracefully: still a screen-lock audit, never a throw, never an unlock", () => {
+    for (const outcome of ["brand_new_outcome", "APPLIED", "applied ", "override"]) {
+      const w = wrapFor({ tags: reset([], outcome) });
+      expect(() => unwrapDeviceAudit(w, guardianSk, NOW)).not.toThrow();
+      expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+        op: "screenlock.reset",
+        reset: { machine: machinePk, id: ID, result: outcome, at: NOW },
+      });
+      expect(unwrapAudit(w, guardianSk, NOW)).toBeNull();
+    }
+  });
+
+  it("reads a missing or empty outcome as null", () => {
+    const noOutcome = wrapFor({ tags: [["t", "charter-device"], ["op", "screenlock.reset"], ["id", ID]] });
+    expect(unwrapDeviceAudit(noOutcome, guardianSk, NOW)).toMatchObject({ reset: { result: null, id: ID } });
+    const empty = wrapFor({ tags: reset([], "") });
+    expect(unwrapDeviceAudit(empty, guardianSk, NOW)).toMatchObject({ reset: { result: null } });
+  });
+
   it("rejects a forged sender and an unknown op", () => {
     expect(unwrapDeviceAudit(wrapFor({ tags: reset(), sealSk: generateSecretKey() }), guardianSk, NOW)).toBeNull();
     expect(unwrapDeviceAudit(wrapFor({ tags: [["t", "charter-device"], ["outcome", "applied"], ["op", "something.else"]] }), guardianSk, NOW)).toBeNull();

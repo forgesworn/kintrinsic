@@ -419,7 +419,10 @@ pub struct LocalIngestOptions {
 
 /// What [`Broker::ingest_local`] did with one wrap — the content of the
 /// ward's signed ACK, plus what the caller needs to act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is written by hand: `screen_lock_reset` holds an event whose
+/// content carries a PIN, so it prints only the event's id and kind.
+#[derive(Clone, PartialEq, Eq)]
 pub struct LocalIngestOutcome {
     pub result: AckResult,
     /// The inner event's kind, when the wrap opened.
@@ -440,6 +443,25 @@ pub struct LocalIngestOutcome {
     /// decides the ACK. The broker has no screen lock to reset, so on its
     /// own it reports `Ignored` (Linux).
     pub screen_lock_reset: Option<(NostrEvent, PubKey)>,
+}
+
+impl std::fmt::Debug for LocalIngestOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the reset event itself: its content is the new PIN.
+        let reset = self
+            .screen_lock_reset
+            .as_ref()
+            .map(|(event, _)| format!("<redacted kind {} id {:?}>", event.kind, event.id));
+        f.debug_struct("LocalIngestOutcome")
+            .field("result", &self.result)
+            .field("inner_kind", &self.inner_kind)
+            .field("inner_id", &self.inner_id)
+            .field("req_id", &self.req_id)
+            .field("released", &self.released)
+            .field("release", &self.release)
+            .field("screen_lock_reset", &reset)
+            .finish()
+    }
 }
 
 impl LocalIngestOutcome {
@@ -2131,5 +2153,36 @@ mod ttl_and_caps_tests {
         let counts = b.poll_once().await;
         assert_eq!(counts.publish_failed, 1);
         assert!(!counts.relays_unreachable);
+    }
+}
+
+#[cfg(test)]
+mod screen_lock_debug_tests {
+    use super::*;
+    use charter_primitives::{kinds, EventId, Sig};
+
+    const PIN: &str = "90817263";
+
+    fn reset_event() -> NostrEvent {
+        NostrEvent {
+            id: EventId::from_bytes([0x5a; 32]),
+            pubkey: PubKey::from_bytes([0x11; 32]),
+            created_at: 1_700_000_000,
+            kind: kinds::CHARTER_DEVICE_SCREEN_LOCK_RESET,
+            tags: vec![kinds::marker_tag()],
+            content: format!(r#"{{"v":1,"newPin":"{PIN}"}}"#),
+            sig: Sig::from_bytes([0x77; 64]),
+        }
+    }
+
+    #[test]
+    fn a_local_ingest_outcome_never_debug_prints_the_reset_pin() {
+        let mut out = LocalIngestOutcome::refused();
+        out.screen_lock_reset = Some((reset_event(), PubKey::from_bytes([0x11; 32])));
+        for shown in [format!("{out:?}"), format!("{out:#?}")] {
+            assert!(!shown.contains(PIN), "PIN leaked: {shown}");
+            assert!(!shown.contains("newPin"), "content leaked: {shown}");
+            assert!(shown.contains("screen_lock_reset"));
+        }
     }
 }
