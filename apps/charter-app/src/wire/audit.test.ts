@@ -308,16 +308,33 @@ describe("emergency call audit (op call.emergency)", () => {
     expect(unwrapDeviceAudit(wrapFor({ tags: t, wrapAt: NOW - MAX_WRAP_JITTER_SECS - 1 }), guardianSk, NOW)).toBeNull();
   });
 
-  it("rejects any outcome but override", () => {
-    for (const outcome of ["enacted", "applied", "failed", "OVERRIDE", ""]) {
+  // P3: the guardian is told on every use of the button, so the op alone decides.
+  it("shows the emergency-call button whatever outcome the sender stamped on it, or none", () => {
+    for (const outcome of ["enacted", "applied", "failed", "OVERRIDE", "", "dialler.unavailable"]) {
       const tags = [
         ["t", "charter-device"],
         ["outcome", outcome],
         ["op", "call.emergency"],
+        ["at", String(NOW - 5)],
       ];
-      expect(unwrapDeviceAudit(wrapFor({ tags }), guardianSk, NOW)).toBeNull();
+      expect(unwrapDeviceAudit(wrapFor({ tags }), guardianSk, NOW)).toMatchObject({
+        op: "call.emergency",
+        call: { machine: machinePk, at: NOW - 5, key: `emergencycall:${machinePk}:${NOW - 5}` },
+      });
     }
-    expect(unwrapDeviceAudit(wrapFor({ tags: [["op", "call.emergency"]] }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["op", "call.emergency"]] }), guardianSk, NOW)).toMatchObject({
+      op: "call.emergency",
+    });
+  });
+
+  it("folds a press stamped with another outcome into the same key as a conforming one", () => {
+    const a = unwrapDeviceAudit(wrapFor({ tags: call([["at", String(NOW - 5)]]) }), guardianSk, NOW);
+    const b = unwrapDeviceAudit(
+      wrapFor({ tags: [["op", "call.emergency"], ["outcome", "failed"], ["at", String(NOW - 5)]] }),
+      guardianSk,
+      NOW,
+    );
+    expect(a?.op === "call.emergency" && a.call.key).toBe(b?.op === "call.emergency" && b.call.key);
   });
 
   it("carries nothing but machine, at and key", () => {
@@ -379,9 +396,22 @@ describe("an unknown op under outcome=override", () => {
     ).toBeNull();
   });
 
-  it("leaves an empty or missing op as it always was: not shown", () => {
-    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("") }), guardianSk, NOW)).toBeNull();
-    expect(unwrapDeviceAudit(wrapFor({ tags: [["outcome", "override"]] }), guardianSk, NOW)).toBeNull();
+  // P2: the carrier alerts on an override with no op as an emergency unlock,
+  // so the console shows it as one, with less detail, rather than dropping it.
+  it("shows an empty or missing op as an emergency unlock with less detail", () => {
+    for (const tags of [ctl("", [["at", String(NOW - 5)]]), [["outcome", "override"], ["at", String(NOW - 5)]]]) {
+      const got = unwrapDeviceAudit(wrapFor({ tags }), guardianSk, NOW);
+      expect(got).toMatchObject({
+        op: "unlock.breakglass",
+        override: { machine: machinePk, scope: null, durationSecs: null, at: NOW - 5, key: `${machinePk}:${NOW - 5}` },
+      });
+    }
+  });
+
+  it("still shows nothing for an empty or missing op under any other outcome", () => {
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["outcome", "enacted"], ["op", ""]] }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["outcome", "enacted"]] }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["t", "charter-device"]] }), guardianSk, NOW)).toBeNull();
   });
 
   it("does not change the known ops", () => {

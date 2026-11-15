@@ -64,9 +64,10 @@ function parseDecimal(s: string | undefined): number | null {
 
 /**
  * One use of the ward's emergency-call button (`op=call.emergency`): the shade's
- * own control completed its hold and the emergency dialler started. It is NOT
- * proof that a call was placed or connected, and it never carries a number, a
- * duration, a reason or any PII.
+ * own control completed its hold and the ward app asked the phone to open its
+ * emergency dialler. It is NOT proof that the dialler appeared or that a call
+ * was placed or connected, and it never carries a number, a duration, a reason
+ * or any PII.
  */
 export interface DeviceEmergencyCall {
   /** The device it came from (the rumor author, verified against the seal). */
@@ -219,8 +220,9 @@ function parseScreenLock(rumor: NostrEvent): DeviceScreenLockAudit {
 
 /**
  * Decrypt, verify and parse one gift-wrapped device audit the guardian acts
- * on: an emergency unlock (`outcome=override`, `op=unlock.breakglass`), a use
- * of the emergency-call button (`outcome=override`, `op=call.emergency`) or a
+ * on: an emergency unlock (`outcome=override`, `op=unlock.breakglass`; also
+ * an `outcome=override` with an empty or missing op), a use of the
+ * emergency-call button (`op=call.emergency`, whatever the outcome) or a
  * screen-lock reset (`op=screenlock.reset`, outcome = its result, tags `id` and
  * `at`). Any other op under `outcome=override` comes back as `override.other`.
  * Anything else is `null`, as is any decrypt / verify / kind / freshness
@@ -237,16 +239,24 @@ export function unwrapDeviceAudit(
   const rumor = openAudit(wrap, recipientSk, nowSecs);
   if (!rumor) return null;
   const op = tagValue(rumor.tags, "op");
-  if (op === "unlock.breakglass" && tagValue(rumor.tags, "outcome") === "override") {
+  const overridden = tagValue(rumor.tags, "outcome") === "override";
+  if (op === "unlock.breakglass" && overridden) {
     return { op, override: parseOverride(rumor, wrap.id) };
   }
-  if (op === "call.emergency" && tagValue(rumor.tags, "outcome") === "override") {
+  // The emergency-call button is shown whatever outcome the sender stamped on
+  // it: the guardian is told on every use, and an unexpected outcome must not
+  // make a press vanish (the carrier alerts on the op alone, too).
+  if (op === "call.emergency") {
     return { op, call: parseEmergencyCall(rumor, wrap.id) };
   }
   if (op === "screenlock.reset") return { op, reset: parseScreenLock(rumor) };
-  // Any other op under outcome=override: an emergency control we do not know
-  // (an empty or missing op is left as it always was: not shown).
-  if (op !== undefined && op !== "" && tagValue(rumor.tags, "outcome") === "override") {
+  if (overridden) {
+    // An empty or missing op under outcome=override is shown as an emergency
+    // unlock with less detail (no scope, no duration), as the carrier alerts it.
+    if (op === undefined || op === "") {
+      return { op: "unlock.breakglass", override: parseOverride(rumor, wrap.id) };
+    }
+    // Any other op: an emergency control we do not know.
     return { op: "override.other", control: parseEmergencyControl(rumor, op, wrap.id) };
   }
   return null;

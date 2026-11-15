@@ -557,8 +557,9 @@ export type ActivityOutcome =
   /** The ward used their emergency unlock (break-glass). Not a failure and
    *  not a breach — a visible event to talk about. */
   | "override"
-  /** The ward used the emergency-call button on their lock screen. The
-   *  emergency dialler opened; whether a call was made is not known. */
+  /** The ward used the emergency-call button on their lock screen. The ward
+   *  app asked the phone to open its emergency dialler; that it appeared, or
+   *  that a call was made, is not known. */
   | "emergency_call"
   /** The ward used an emergency control this build does not know by name
    *  (a newer ward's `outcome=override` with another op). */

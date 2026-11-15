@@ -213,6 +213,43 @@ describe("emergency call button \u2192 Activity", () => {
     expect(lines()).toHaveLength(1);
   });
 
+  // P3: the op alone decides, whatever outcome the sender stamped on the press.
+  it("a press stamped with another outcome still lands as the emergency-call line", async () => {
+    relayHolds.wraps = [
+      overrideWrap({
+        guardianPk,
+        machineSk,
+        tags: [["t", "charter-device"], ["op", "call.emergency"], ["outcome", "dialler.unavailable"], ["at", String(pressedAt)]],
+        createdAt: Math.floor(Date.now() / 1000),
+      }),
+    ];
+    mount();
+    await settle();
+    expect(lines()).toHaveLength(1);
+    expect(lines()[0].summary).toBe(
+      "Used the emergency call button on Laptop. Kintrinsic can't see whether a call was made.",
+    );
+  });
+
+  // P2: an override with no op is the emergency-unlock line, with less detail.
+  it("an override with no op lands as the emergency-unlock line, with no scope or duration", async () => {
+    relayHolds.wraps = [
+      overrideWrap({
+        guardianPk,
+        machineSk,
+        tags: [["t", "charter-device"], ["outcome", "override"], ["at", String(pressedAt)]],
+        createdAt: Math.floor(Date.now() / 1000),
+      }),
+    ];
+    mount();
+    await settle();
+    const got = all();
+    expect(got).toHaveLength(1);
+    expect(got[0].outcome).toBe("override");
+    expect(got[0].summary).toBe("Used on Laptop");
+    expect(got[0].ts).toBe(pressedAt * 1000);
+  });
+
   it("an unknown machine is unlanded (the carrier keeps the wrap), then lands once the phone is paired", async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded({ pairing: "pairing" })));
     const w = callWrap();
