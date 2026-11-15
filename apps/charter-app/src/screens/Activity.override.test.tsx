@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import ChildPage from "./ChildPage";
-import { exactWhen } from "./Activity";
+import Activity, { exactWhen } from "./Activity";
 import { CharterProvider, STORAGE_KEY, type CharterState } from "../store/store";
 import type { Child } from "../domain/types";
 
@@ -169,5 +169,49 @@ describe("the child page", () => {
     mount([{ id: "a2", childId: "c1", ts: Date.now() - 5 * 60_000, outcome: "enacted", summary: "You set up Laptop" }]);
     const time = container.querySelector("li.row time")!;
     expect(time.textContent).toMatch(/^\dm ago$/);
+  });
+});
+
+describe("the Activity screen after the child was removed", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    localStorage.clear();
+  });
+
+  it("still shows a press the ward made before the guardian disconnected it, naming the child", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        children: [],
+        requests: [],
+        activity: [
+          {
+            id: "a1",
+            childId: "removed-child",
+            ts: Date.now() - 60_000,
+            outcome: "emergency_call",
+            summary:
+              "Used the emergency call button on Laptop, before you disconnected it from Robin. Kintrinsic can't see whether a call was made.",
+            auditKey: "k",
+          },
+        ],
+        signer: { connected: false, kind: "none", autoSign: false },
+      }),
+    );
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <CharterProvider>
+          <Activity />
+        </CharterProvider>,
+      );
+    });
+    expect(container.textContent).toContain("Emergency call button.");
+    expect(container.textContent).toContain("before you disconnected it from Robin");
   });
 });

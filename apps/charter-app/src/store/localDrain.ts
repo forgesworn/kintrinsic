@@ -112,7 +112,9 @@ export function drainLocalInbox(deps: {
     deps.queue.add(
       entry.id,
       result.kind === "request" || result.kind === "duplicate" ? result.reqId : undefined,
-      result.kind === "audit" ? result.key : undefined,
+      // A wrap already handled this session waits for the line it produced, too:
+      // the copy that landed it may not have reached storage yet.
+      result.kind === "audit" ? result.key : result.kind === "handled" ? result.auditKey : undefined,
     );
   }
   return entries.length;

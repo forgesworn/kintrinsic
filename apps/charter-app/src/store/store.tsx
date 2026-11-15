@@ -90,7 +90,7 @@ import { mintPairToken } from "../signer/guardianPairing";
 import { parseDevicePairingCode } from "../wire/deviceCode";
 import type { AppOpenWindow } from "../wire/grant";
 import type { DeviceRequest } from "../wire/request";
-import type { DeviceEmergencyCall, DeviceEmergencyControl, DeviceOverride } from "../wire/audit";
+import type { DeviceAudit, DeviceEmergencyCall, DeviceEmergencyControl, DeviceOverride } from "../wire/audit";
 import { emergencyCallSummary, emergencyControlSummary, overrideSummary } from "../domain/overrideSummary";
 import type { DeviceStatus } from "../wire/status";
 import { ingestWrap } from "./ingestWrap";
@@ -132,6 +132,14 @@ import {
 import { buildUsageSyncForDevice } from "../wire/usageSync";
 import { mergeDeviceStatus, type LiveDeviceStatus } from "./deviceStatusAdmit";
 import { isAskExpired } from "../domain/askExpiry";
+import {
+  findReleased,
+  liveReleased,
+  releasedRelays,
+  withReleased,
+  withoutReleased,
+  type ReleasedDevice,
+} from "./releasedDevices";
 
 export { isSetUp, statusFor } from "./statusFor";
 export type { StatusForResult } from "./statusFor";
@@ -151,6 +159,10 @@ export interface CharterState {
   /** Wraps handed to the carrier for home-network delivery, with what the
    *  ward's ACK said (see ./localDelivery). Bounded; absent in older saves. */
   localDeliveries?: LocalWrapRecord[];
+  /** Devices the guardian disconnected in the last 14 days (see
+   *  ./releasedDevices). Lets a press the ward made before the disconnect
+   *  still reach Activity. Absent in older saves, which means none. */
+  releasedDevices?: ReleasedDevice[];
 }
 
 // v2: the production default is now an empty (clean) state, so bump the key —
@@ -178,11 +190,11 @@ const HANDLED_WRAPS_MAX = 10_000;
 /** Drop the oldest ids once the set is over its ceiling. Sets iterate in
  *  insertion order, so the front of it is the oldest thing we know about — and
  *  anything dropped is at worst decrypted once more, never lost. */
-function trimHandled(handled: Set<string>): void {
+function trimHandled(handled: Map<string, unknown>): void {
   if (handled.size <= HANDLED_WRAPS_MAX) return;
   const excess = handled.size - HANDLED_WRAPS_MAX;
   let dropped = 0;
-  for (const id of handled) {
+  for (const id of handled.keys()) {
     if (dropped >= excess) break;
     handled.delete(id);
     dropped += 1;
@@ -354,12 +366,17 @@ export function reducer(state: CharterState, action: Action): CharterState {
       [children[from], children[to]] = [children[to], children[from]];
       return { ...state, children };
     }
-    case "REMOVE_CHILD":
+    case "REMOVE_CHILD": {
+      const gone = state.children.find((c) => c.id === action.childId);
       return {
         ...state,
         children: state.children.filter((c) => c.id !== action.childId),
         requests: state.requests.filter((r) => r.childId !== action.childId),
+        // The child's record goes, but a press its phone made just before the
+        // disconnect must still be attributable (see ./releasedDevices).
+        ...(gone ? { releasedDevices: withReleased(state.releasedDevices, gone, gone.devices, Date.now()) } : {}),
       };
+    }
     case "ADD_DEVICE":
       return {
         ...state,
@@ -369,9 +386,20 @@ export function reducer(state: CharterState, action: Action): CharterState {
             : c,
         ),
       };
-    case "SET_DEVICE_PAIRING":
+    case "SET_DEVICE_PAIRING": {
+      const owner = state.children.find((c) => c.id === action.childId);
+      const before = owner?.devices.find((d) => d.id === action.deviceId);
+      // Disconnecting a device that had a key: remember it for the grace
+      // period. Pairing a key again (this device or another) forgets it.
+      let releasedDevices = state.releasedDevices;
+      if (action.devicePubkey === null && owner && before?.devicePubkey) {
+        releasedDevices = withReleased(releasedDevices, owner, [before], Date.now());
+      } else if (typeof action.devicePubkey === "string") {
+        releasedDevices = withoutReleased(releasedDevices, action.devicePubkey) ?? releasedDevices;
+      }
       return {
         ...state,
+        ...(releasedDevices !== state.releasedDevices ? { releasedDevices } : {}),
         children: state.children.map((c) =>
           c.id === action.childId
             ? mapDevice(c, action.deviceId, (d) => {
@@ -403,6 +431,7 @@ export function reducer(state: CharterState, action: Action): CharterState {
             : c,
         ),
       };
+    }
     case "SET_DEVICE_DEBUGGING":
       // Monotonic like the ward's own rule: an older send never replaces a newer record.
       return {
@@ -431,15 +460,21 @@ export function reducer(state: CharterState, action: Action): CharterState {
             : c,
         ),
       };
-    case "REMOVE_DEVICE":
+    case "REMOVE_DEVICE": {
+      const owner = state.children.find((c) => c.id === action.childId);
+      const gone = owner?.devices.find((d) => d.id === action.deviceId);
       return {
         ...state,
+        ...(owner && gone?.devicePubkey
+          ? { releasedDevices: withReleased(state.releasedDevices, owner, [gone], Date.now()) }
+          : {}),
         children: state.children.map((c) =>
           c.id === action.childId
             ? { ...c, devices: c.devices.filter((d) => d.id !== action.deviceId) }
             : c,
         ),
       };
+    }
     // Keyed by machine pubkey (the STATUS feed's identity), not deviceId — a
     // heartbeat arrives attributed only to the emitting device's key.
     case "SET_DEVICE_LAST_SEEN":
@@ -786,6 +821,28 @@ let idCounter = 0;
 function uid(prefix: string): string {
   idCounter += 1;
   return `${prefix}_${Date.now().toString(36)}_${idCounter}`;
+}
+
+/**
+ * Whose device an audit came from. A PAIRED device always wins. Failing that,
+ * and only when the caller allows it, a device the guardian disconnected in the
+ * last 14 days: the audit is then marked `released` so its line says the press
+ * was made before the disconnect. The line keeps the original child's id (the
+ * child may be gone) and the name the child had.
+ */
+function attributeAudit(
+  s: CharterState,
+  machine: string,
+  allowReleased: boolean,
+): { childId: string; deviceLabel: string; released?: { childName: string } } | null {
+  for (const c of s.children) {
+    const d = c.devices.find((dev) => dev.pairing === "paired" && dev.devicePubkey === machine);
+    if (d) return { childId: c.id, deviceLabel: d.label };
+  }
+  if (!allowReleased) return null;
+  const r = findReleased(s.releasedDevices, machine, Date.now());
+  if (!r) return null;
+  return { childId: r.childId, deviceLabel: r.deviceLabel, released: { childName: r.childName } };
 }
 
 const CHILD_COLORS = ["#3B6FB2", "#2E7D5B", "#C4860F", "#7A4FB5", "#B23B30"];
@@ -1362,28 +1419,17 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const ingestDeviceAudit = useCallback((a: DeviceOverride): boolean => {
     const s = stateRef.current;
     if (s.activity.some((e) => e.auditKey === a.key)) return true;
-    let childId: string | undefined;
-    let device: Device | undefined;
-    for (const c of s.children) {
-      const d = c.devices.find(
-        (dev) => dev.pairing === "paired" && dev.devicePubkey === a.machine,
-      );
-      if (d) {
-        childId = c.id;
-        device = d;
-        break;
-      }
-    }
-    if (!childId || !device) return false;
+    const who = attributeAudit(s, a.machine, true);
+    if (!who) return false;
     dispatch({
       type: "ADD_ACTIVITY",
       event: {
         id: uid("act"),
-        childId,
+        childId: who.childId,
         // Never in the future: the ward's clock may run ahead of ours.
         ts: Math.min(a.at * 1000, Date.now()),
         outcome: "override",
-        summary: overrideSummary(device.label, a.scope, a.durationSecs),
+        summary: overrideSummary(who.deviceLabel, a.scope, a.durationSecs, who.released),
         auditKey: a.key,
       },
     });
@@ -1395,36 +1441,29 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * (the emergency-call button, or a control this build does not know by name).
    * Same contract as `ingestDeviceAudit`: false when no paired device claims the
    * machine (left unhandled, retried later); dated by the press, never future.
+   * `fromReleased`: whether a device the guardian recently disconnected may
+   * still land this kind of audit (the emergency call may; an unknown control
+   * may not, because nothing else from a released machine is honoured).
    */
   const landEmergencyAudit = useCallback(
     (
       a: { machine: string; at: number; key: string },
       outcome: "emergency_call" | "emergency_control",
-      summary: (deviceLabel: string) => string,
+      summary: (deviceLabel: string, released?: { childName: string }) => string,
+      fromReleased: boolean,
     ): boolean => {
       const s = stateRef.current;
       if (s.activity.some((e) => e.auditKey === a.key)) return true;
-      let childId: string | undefined;
-      let device: Device | undefined;
-      for (const c of s.children) {
-        const d = c.devices.find(
-          (dev) => dev.pairing === "paired" && dev.devicePubkey === a.machine,
-        );
-        if (d) {
-          childId = c.id;
-          device = d;
-          break;
-        }
-      }
-      if (!childId || !device) return false;
+      const who = attributeAudit(s, a.machine, fromReleased);
+      if (!who) return false;
       dispatch({
         type: "ADD_ACTIVITY",
         event: {
           id: uid("act"),
-          childId,
+          childId: who.childId,
           ts: Math.min(a.at * 1000, Date.now()),
           outcome,
-          summary: summary(device.label),
+          summary: summary(who.deviceLabel, who.released),
           auditKey: a.key,
         },
       });
@@ -1433,12 +1472,12 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     [],
   );
   const ingestDeviceEmergencyCall = useCallback(
-    (a: DeviceEmergencyCall): boolean => landEmergencyAudit(a, "emergency_call", emergencyCallSummary),
+    (a: DeviceEmergencyCall): boolean => landEmergencyAudit(a, "emergency_call", emergencyCallSummary, true),
     [landEmergencyAudit],
   );
   const ingestDeviceEmergencyControl = useCallback(
     (a: DeviceEmergencyControl): boolean =>
-      landEmergencyAudit(a, "emergency_control", emergencyControlSummary),
+      landEmergencyAudit(a, "emergency_control", emergencyControlSummary, false),
     [landEmergencyAudit],
   );
 
@@ -2080,7 +2119,24 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const pollCursor = useRef<number | null>(null);
   /** Start time of the last sweep that completed; null = none this session. */
   const lastSweepAt = useRef<number | null>(null);
-  const handledWraps = useRef<Set<string>>(new Set());
+  /** Wrap id to the audit key it produced, if any (see `WrapIngestContext`). */
+  const handledWraps = useRef<Map<string, string | undefined>>(new Map());
+  /** Audits read but not yet attributable, so they are not decrypted every tick. */
+  const unlandedAudits = useRef<Map<string, { audit: DeviceAudit; sig: string }>>(new Map());
+  /**
+   * Who an audit can be attributed to depends only on which machines are paired
+   * and which were recently disconnected, so that is what an unlanded audit
+   * waits on. (Children and devices change often for other reasons: a heartbeat
+   * moves `lastSeenAt`. None of that can attribute a press.)
+   */
+  const landingSig = useCallback((): string => {
+    const s = stateRef.current;
+    const paired = s.children.flatMap((c) =>
+      c.devices.filter((d) => d.pairing === "paired" && d.devicePubkey).map((d) => d.devicePubkey as string),
+    );
+    const released = liveReleased(s.releasedDevices, Date.now()).map((r) => r.machine);
+    return JSON.stringify([paired.sort(), released.sort()]);
+  }, []);
 
   /** The intake's view of this provider — shared by the relay poll and the
    *  home-network drain, so a wrap arriving by both is handled once. */
@@ -2088,6 +2144,8 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     (guardianSk: Uint8Array) => ({
       guardianSk,
       handledWraps: handledWraps.current,
+      unlandedAudits: unlandedAudits.current,
+      landingSig,
       seenReqIds: seenReqIds.current,
       hasRequest: (reqId: string) => stateRef.current.requests.some((r) => r.reqId === reqId),
       ingestStatus: ingestDeviceStatus,
@@ -2104,6 +2162,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       ingestDeviceAudit,
       ingestDeviceEmergencyCall,
       ingestDeviceEmergencyControl,
+      landingSig,
     ],
   );
 
@@ -2141,7 +2200,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     // still on an older default) is never left off the poll. Read fresh each
     // tick rather than closed over, so a pairing made mid-session is covered
     // on its very next poll rather than needing a reload.
-    const relays = allPairingRelays(stateRef.current.children, DEFAULT_RELAYS);
+    // Plus the relays of a device disconnected in the last 14 days: it sends the
+    // audits it was holding when it hears the release, and those must be heard.
+    const relays = [
+      ...new Set([
+        ...allPairingRelays(stateRef.current.children, DEFAULT_RELAYS),
+        ...releasedRelays(stateRef.current.releasedDevices, Date.now()),
+      ]),
+    ];
     try {
       // querySync forwards these options to subscribeEose; onauth permits
       // exactly one authenticated retry after a private relay's CLOSED.

@@ -10,6 +10,7 @@
 // 2026-08-04, part 1).
 
 import type { Child } from "../domain/types";
+import { liveReleased } from "../store/releasedDevices";
 
 export interface CarrierRosterEntry {
   /** The device's own pubkey — the same identity a carrier verdict's
@@ -25,6 +26,14 @@ export interface CarrierRosterEntry {
    * mid-pairing, so they stay in the list with `paired: false`.
    */
   paired: boolean;
+  /**
+   * True for a device the guardian disconnected (unpaired, removed, or its
+   * child removed) in the last 14 days. Absent means false. A released entry
+   * always has `paired: false`. It is listed so the carrier can name the device
+   * and keep what it sends as a known sender; the carrier's local-network
+   * listener still admits only `paired` machines.
+   */
+  released?: boolean;
 }
 
 /**
@@ -34,7 +43,11 @@ export interface CarrierRosterEntry {
  * A device with no pubkey yet has no `machine` to key a notification on and
  * is simply skipped, never padded with a placeholder.
  */
-export function buildCarrierRoster(children: Child[]): CarrierRosterEntry[] {
+export function buildCarrierRoster(
+  children: Child[],
+  released: unknown = undefined,
+  now: number = Date.now(),
+): CarrierRosterEntry[] {
   const roster: CarrierRosterEntry[] = [];
   for (const child of children) {
     for (const device of child.devices) {
@@ -46,6 +59,21 @@ export function buildCarrierRoster(children: Child[]): CarrierRosterEntry[] {
         paired: device.pairing === "paired",
       });
     }
+  }
+  // Devices disconnected in the last 14 days, so the carrier still names them
+  // and keeps what they send. Never paired, and never listed twice: a machine
+  // that is in the household again takes its household entry.
+  const listed = new Set(roster.map((e) => e.machine));
+  for (const r of liveReleased(released, now)) {
+    if (listed.has(r.machine)) continue;
+    listed.add(r.machine);
+    roster.push({
+      machine: r.machine,
+      childName: r.childName,
+      deviceLabel: r.deviceLabel,
+      paired: false,
+      released: true,
+    });
   }
   return roster;
 }
