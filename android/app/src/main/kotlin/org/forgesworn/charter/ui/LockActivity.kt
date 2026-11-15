@@ -638,18 +638,21 @@ class LockActivity : Activity() {
      * keyguard), and nothing else.
      *
      * An emergency number (the Emergency button, or a lifeline entry the
-     * platform counts as one) is different: the platform will not let an app
-     * that is not the dialer place it, so the routes are the platform's
-     * emergency dialler (the same screen the keyguard's own Emergency button
-     * opens, with the number filled in and nothing dialled until the ward
-     * presses call), the phone's own lock screen when it is showing (it
-     * carries an Emergency call button), ACTION_DIAL with the number (the system
-     * dialler is on the lockout allowlist), and only then ACTION_CALL. A route
-     * that throws, or leaves the shade clear, falls through to the next, and no
-     * route is launched from a shade that is not clear (see [CallSequencer]).
-     * The status line gives the ward the Emergency SOS advice from the start,
-     * whatever opens. This never touches the report to the guardian, which was
-     * handed to its worker before this runs.
+     * platform counts as one) is different: ACTION_CALL from an app that is not
+     * the dialer may be refused, may open a keypad, or may place the call
+     * outright (see [CallRoute]), so the routes are the platform's emergency
+     * dialler (the same screen the keyguard's own Emergency button opens, with
+     * the number filled in and nothing dialled until the ward presses call),
+     * the phone's own lock screen when it is showing (it carries an Emergency
+     * call button), ACTION_DIAL with the number (the system dialler is on the
+     * lockout allowlist), and only then ACTION_CALL. A route that throws, or
+     * leaves the shade clear without having paused it, falls through to the
+     * next; one the ward closed (it paused the shade, then left it clear) ends
+     * the press; and no route is launched from a shade that is not clear, or
+     * after a sleep (see [CallSequencer]). The status line gives the ward the
+     * Emergency SOS advice from the start, whatever opens. This never touches
+     * the report to the guardian, which was handed to its worker before this
+     * runs.
      */
     private fun startCall(number: String, emergency: Boolean) {
         // A new press: the last one's timers and late answers are void.
