@@ -148,7 +148,7 @@ import {
   withoutReleased,
   type ReleasedDevice,
 } from "./releasedDevices";
-import { endReleaseGrace, onReleaseGraceEnd, releasingMachines, startReleaseGrace } from "./releaseGrace";
+import { onReleaseGraceEnd, settleReleaseGrace, startReleaseGrace } from "./releaseGrace";
 import { pushCarrierRoster } from "../carrier/bridge";
 
 export { isSetUp, statusFor } from "./statusFor";
@@ -1286,19 +1286,14 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       const relays = [...new Set([...deviceRelays(device!, DEFAULT_RELAYS), ...DEFAULT_RELAYS])];
       const sent = signer.current?.releaseDevice(pk, relays, device?.label);
       if (sent) {
-        // Keep the ward's home-network link for a few seconds so its release
-        // acknowledgement and held audits can come back (see ./releaseGrace).
-        // Started before the caller's dispatch, so the push that follows it
-        // already carries the grace.
-        startReleaseGrace(pk);
-        void sent.then(
-          () => {
-            // The release is out now (a slow approval can take a while): give
-            // the answer its full time, but never bring back a link already let go.
-            if (releasingMachines().has(pk)) startReleaseGrace(pk);
-          },
-          () => endReleaseGrace(pk),
-        );
+        // Keep the ward's home-network link while the release goes out and for
+        // a few seconds after, so its acknowledgement and held audits can come
+        // back (see ./releaseGrace). Started before the caller's dispatch, so
+        // the push that follows it already carries the deadline.
+        const token = startReleaseGrace(pk);
+        // Whether the send resolves or fails, the answer gets its 10 seconds.
+        const settled = () => settleReleaseGrace(pk, token);
+        void sent.then(settled, settled);
       }
     }
   }, []);

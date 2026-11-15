@@ -33,7 +33,7 @@ import { CharterProvider, STORAGE_KEY, exportPersistedState, useCharter, type Ch
 import { RELEASED_GRACE_MS, type ReleasedDevice } from "./releasedDevices";
 import { buildCarrierRoster } from "../carrier/roster";
 import { pushCarrierRoster } from "../carrier/bridge";
-import { RELEASE_LINK_GRACE_MS, resetReleaseGraceForTests } from "./releaseGrace";
+import { RELEASE_LINK_GRACE_MS, RELEASE_SEND_GRACE_MS, resetReleaseGraceForTests } from "./releaseGrace";
 
 const DAY = 24 * 60 * 60 * 1000;
 const guardianSk = generateSecretKey();
@@ -536,7 +536,7 @@ describe("a press made before the guardian disconnected the device", () => {
     describe("the home-network link after a disconnect", () => {
       const roster = vi.fn();
       const lastRoster = () =>
-        (JSON.parse(roster.mock.calls.at(-1)![0] as string) as { entries: { machine: string; paired: boolean; released?: boolean }[] }).entries;
+        (JSON.parse(roster.mock.calls.at(-1)![0] as string) as { entries: { machine: string; paired: boolean; released?: boolean; linkUntil?: number }[] }).entries;
       const pushLikeTheApp = () => pushCarrierRoster(current().children, current().releasedDevices);
 
       beforeEach(() => {
@@ -544,23 +544,58 @@ describe("a press made before the guardian disconnected the device", () => {
         window.CharterCarrier = { provision: vi.fn(), roster, isCarrier: () => true };
       });
 
-      it("still lists the machine as paired for 10 seconds, then pushes it as released with no re-render", async () => {
+      const releasedAtSecs = () => Math.floor((stored().releasedDevices as ReleasedDevice[])[0].releasedAt / 1000);
+
+      it("is always sent as released, with linkUntil 2 minutes out from the click, never as paired", async () => {
         mount();
         await settle();
         act(() => api.unpairDevice("c1", "d1"));
-        // The persisted state says unpaired from the first moment.
+        // The persisted state says unpaired from the first moment, and holds no deadline.
         expect(current().children[0].devices[0].pairing).toBe("unpaired");
         expect(stored().children[0].devices[0].pairing).toBe("unpaired");
-        expect(JSON.stringify(stored())).not.toContain("releasingUntil");
+        expect(JSON.stringify(stored())).not.toContain("linkUntil");
 
+        // Nothing has settled yet (the send is still being approved): 2 minutes from the click.
         pushLikeTheApp();
-        expect(lastRoster()).toEqual([{ machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: true }]);
+        expect(lastRoster()).toEqual([
+          {
+            machine: machinePk,
+            childName: "Robin",
+            deviceLabel: "Laptop",
+            paired: false,
+            released: true,
+            releasedAt: releasedAtSecs(),
+            linkUntil: Date.now() + RELEASE_SEND_GRACE_MS,
+          },
+        ]);
+      });
+
+      it("when the send settles, linkUntil becomes that moment plus 10 seconds and the roster is pushed again; then it is omitted", async () => {
+        mount();
+        await settle();
+        act(() => api.unpairDevice("c1", "d1"));
+        roster.mockClear();
+        // The send resolves: the new deadline goes to the carrier by itself.
+        await settle(0);
+        expect(roster).toHaveBeenCalledTimes(1);
+        const settledAt = Date.now();
+        expect(lastRoster()).toEqual([
+          {
+            machine: machinePk,
+            childName: "Robin",
+            deviceLabel: "Laptop",
+            paired: false,
+            released: true,
+            releasedAt: releasedAtSecs(),
+            linkUntil: settledAt + RELEASE_LINK_GRACE_MS,
+          },
+        ]);
 
         await settle(RELEASE_LINK_GRACE_MS - 1_000);
         pushLikeTheApp();
-        expect(lastRoster()[0]).toMatchObject({ paired: true });
+        expect(lastRoster()[0]).toMatchObject({ paired: false, released: true, linkUntil: settledAt + RELEASE_LINK_GRACE_MS });
 
-        // Nothing else renders; the timer alone pushes the roster again.
+        // Nothing else renders; the timer alone pushes the roster again, with no deadline.
         roster.mockClear();
         await settle(1_001);
         expect(roster).toHaveBeenCalledTimes(1);
@@ -571,7 +606,7 @@ describe("a press made before the guardian disconnected the device", () => {
             deviceLabel: "Laptop",
             paired: false,
             released: true,
-            releasedAt: Math.floor((stored().releasedDevices as ReleasedDevice[])[0].releasedAt / 1000),
+            releasedAt: releasedAtSecs(),
           },
         ]);
       });
@@ -601,15 +636,12 @@ describe("a press made before the guardian disconnected the device", () => {
         await settle();
         act(() => api.removeDevice("c1", "d2"));
         pushLikeTheApp();
+        // The keyless device was never released: the household entry for the paired one is all there is.
         expect(lastRoster()).toEqual([
           { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: true },
         ]);
         act(() => api.removeChild("c1"));
         pushLikeTheApp();
-        expect(lastRoster()).toEqual([
-          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: true },
-        ]);
-        await settle(RELEASE_LINK_GRACE_MS + 1);
         expect(lastRoster()).toEqual([
           {
             machine: machinePk,
@@ -617,7 +649,19 @@ describe("a press made before the guardian disconnected the device", () => {
             deviceLabel: "Laptop",
             paired: false,
             released: true,
-            releasedAt: Math.floor((stored().releasedDevices as ReleasedDevice[])[0].releasedAt / 1000),
+            releasedAt: releasedAtSecs(),
+            linkUntil: Date.now() + RELEASE_SEND_GRACE_MS,
+          },
+        ]);
+        await settle(RELEASE_SEND_GRACE_MS + 1);
+        expect(lastRoster()).toEqual([
+          {
+            machine: machinePk,
+            childName: "Robin",
+            deviceLabel: "Laptop",
+            paired: false,
+            released: true,
+            releasedAt: releasedAtSecs(),
           },
         ]);
       });

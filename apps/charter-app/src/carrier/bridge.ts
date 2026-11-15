@@ -13,7 +13,7 @@ import { DEFAULT_RELAYS } from "../signer/config";
 import { allPairingRelays } from "../signer/pairingRelays";
 import type { Child } from "../domain/types";
 import { buildCarrierRoster } from "./roster";
-import { releasingMachines } from "../store/releaseGrace";
+import { releaseLinkDeadlines } from "../store/releaseGrace";
 import { releasedRelays } from "../store/releasedDevices";
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -90,12 +90,12 @@ export function resetProvisionedForTests(): void {
 export function pushCarrierRoster(
   children: Child[],
   released: unknown = undefined,
-  releasing: ReadonlySet<string> = releasingMachines(),
+  linkUntil: ReadonlyMap<string, number> = releaseLinkDeadlines(),
 ): boolean {
   const carrier = window.CharterCarrier;
   if (!carrier?.roster) return false;
   carrier.roster(
-    JSON.stringify({ v: 1, entries: buildCarrierRoster(children, released, Date.now(), releasing) }),
+    JSON.stringify({ v: 1, entries: buildCarrierRoster(children, released, Date.now(), linkUntil) }),
   );
   return true;
 }

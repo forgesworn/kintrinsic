@@ -22,8 +22,8 @@ export interface CarrierRosterEntry {
   /**
    * True for `pairing === "paired"`. The carrier's local-network listener
    * admits only paired machines at the handshake (an entry with no `paired`
-   * field, from an older console, means paired; the one exception is the few
-   * seconds after a release is sent, see ../store/releaseGrace). Naming still covers devices
+   * field, from an older console, means paired). A released machine is admitted
+   * only for the `linkUntil` grace. Naming still covers devices
    * mid-pairing, so they stay in the list with `paired: false`.
    */
   paired: boolean;
@@ -41,6 +41,14 @@ export interface CarrierRosterEntry {
    * after the disconnect) and drops the entry 14 days after it.
    */
   releasedAt?: number;
+  /**
+   * Epoch MILLISECONDS until which the carrier's local-network listener keeps
+   * admitting this released machine, so its answer to the release (the
+   * acknowledgement and the audits it held) can arrive over the home network.
+   * Only on a released entry, and only while the grace runs; absent or in the
+   * past means no link. The entry is never sent as paired for this.
+   */
+  linkUntil?: number;
 }
 
 /** What the carrier is told when a record has no name: it rejects an empty one. */
@@ -63,7 +71,7 @@ export function buildCarrierRoster(
   children: Child[],
   released: unknown = undefined,
   now: number = Date.now(),
-  releasing: ReadonlySet<string> = new Set(),
+  linkUntil: ReadonlyMap<string, number> = new Map(),
 ): CarrierRosterEntry[] {
   const roster: CarrierRosterEntry[] = [];
   for (const child of children) {
@@ -84,19 +92,11 @@ export function buildCarrierRoster(
   for (const r of liveReleased(released, now)) {
     if (listed.has(r.machine)) continue;
     listed.add(r.machine);
-    // Inside the short grace after the release was sent, the entry still says
-    // paired (and not released), so the carrier keeps the ward's local-network
-    // session open for the release acknowledgement and the audits it flushes.
-    // Only this push says so; nothing else treats the device as paired.
-    if (releasing.has(r.machine)) {
-      roster.push({
-        machine: r.machine,
-        childName: named(r.childName, UNNAMED_CHILD),
-        deviceLabel: named(r.deviceLabel, UNNAMED_DEVICE),
-        paired: true,
-      });
-      continue;
-    }
+    // Always sent as released, never as paired. While the home-network link
+    // grace runs (see ../store/releaseGrace) it also carries `linkUntil`, so the
+    // carrier keeps the machine's session open for the release acknowledgement
+    // and the audits it flushes, and lets it go at that time by itself.
+    const link = linkUntil.get(r.machine);
     roster.push({
       machine: r.machine,
       childName: named(r.childName, UNNAMED_CHILD),
@@ -104,6 +104,7 @@ export function buildCarrierRoster(
       paired: false,
       released: true,
       releasedAt: Math.floor(r.releasedAt / 1000),
+      ...(link !== undefined && link > now ? { linkUntil: link } : {}),
     });
   }
   return roster;

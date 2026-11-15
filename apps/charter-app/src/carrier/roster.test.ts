@@ -87,28 +87,48 @@ describe("buildCarrierRoster", () => {
   });
 });
 
-describe("buildCarrierRoster during the short grace after a release", () => {
+describe("buildCarrierRoster during the link grace after a release", () => {
   const machine = "c".repeat(64);
   const releasedList = (releasedAt: number) => [
     { machine, childId: "child-1", childName: "Mia", deviceLabel: "Pixel 6", relays: [], releasedAt },
   ];
 
-  it("lists the machine as paired, not released, while it is releasing", () => {
+  it("is released, never paired, and carries linkUntil (epoch ms) while the grace runs", () => {
     const now = Date.now();
-    expect(buildCarrierRoster([child()], releasedList(now), now, new Set([machine]))).toEqual([
-      { machine, childName: "Mia", deviceLabel: "Pixel 6", paired: true },
+    expect(buildCarrierRoster([child()], releasedList(now), now, new Map([[machine, now + 10_000]]))).toEqual([
+      {
+        machine,
+        childName: "Mia",
+        deviceLabel: "Pixel 6",
+        paired: false,
+        released: true,
+        releasedAt: Math.floor(now / 1000),
+        linkUntil: now + 10_000,
+      },
     ]);
   });
 
-  it("says released again once the grace is over", () => {
+  it("omits linkUntil once it is past, or when there is no grace", () => {
     const now = Date.now();
-    expect(buildCarrierRoster([], releasedList(now), now, new Set())).toEqual([
-      { machine, childName: "Mia", deviceLabel: "Pixel 6", paired: false, released: true, releasedAt: Math.floor(now / 1000) },
-    ]);
+    const bare = {
+      machine,
+      childName: "Mia",
+      deviceLabel: "Pixel 6",
+      paired: false,
+      released: true,
+      releasedAt: Math.floor(now / 1000),
+    };
+    expect(buildCarrierRoster([], releasedList(now), now, new Map())).toEqual([bare]);
+    expect(buildCarrierRoster([], releasedList(now), now, new Map([[machine, now]]))).toEqual([bare]);
+    expect(buildCarrierRoster([], releasedList(now), now, new Map([[machine, now - 1]]))).toEqual([bare]);
   });
 
-  it("never lists a machine that is not on the released record as paired", () => {
-    expect(buildCarrierRoster([], undefined, Date.now(), new Set([machine]))).toEqual([]);
+  it("never lists a machine that is not on the released record, and gives linkUntil to no other entry", () => {
+    expect(buildCarrierRoster([], undefined, Date.now(), new Map([[machine, Date.now() + 5000]]))).toEqual([]);
+    const now = Date.now();
+    const roster = buildCarrierRoster([child({ devices: [device({ devicePubkey: machine })] })], releasedList(now), now, new Map([[machine, now + 5000]]));
+    // A machine that is in the household again takes its household entry.
+    expect(roster).toEqual([{ machine, childName: "Mia", deviceLabel: "Pixel 6", paired: true }]);
   });
 });
 
@@ -131,7 +151,7 @@ describe("buildCarrierRoster never pushes an empty name or label", () => {
     const rec = (over: object) => [
       { machine, childId: "c", childName: "Mia", deviceLabel: "Pixel 6", relays: [], releasedAt: now - 5000, ...over },
     ];
-    for (const releasing of [new Set<string>(), new Set([machine])]) {
+    for (const releasing of [new Map<string, number>(), new Map([[machine, now + 5000]])]) {
       const got = buildCarrierRoster([], rec({ childName: "", deviceLabel: "" }), now, releasing);
       expect(got).toHaveLength(1);
       expect(got[0].childName).toBe(UNNAMED_CHILD);
@@ -159,9 +179,5 @@ describe("buildCarrierRoster never pushes an empty name or label", () => {
     );
     expect(roster[0]).not.toHaveProperty("releasedAt");
     expect(roster[1]).toMatchObject({ released: true, releasedAt: 1_799_999_996 });
-    // During the short link grace it is listed as paired, with neither flag.
-    const releasing = buildCarrierRoster([], [{ machine, childId: "c", childName: "Robin", deviceLabel: "Old", relays: [], releasedAt: now - 4000 }], now, new Set([machine]));
-    expect(releasing[0]).not.toHaveProperty("released");
-    expect(releasing[0]).not.toHaveProperty("releasedAt");
   });
 });
