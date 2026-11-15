@@ -1843,8 +1843,13 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       const device = stateRef.current.children
         .find((c) => c.id === childId)
         ?.devices.find((d) => d.id === deviceId);
-      if (!s || !s.status().connected || !device?.devicePubkey || device.pairing !== "paired") {
-        return false;
+      if (!device) return false;
+      // Never a silent no-op: the guardian has just typed a PIN and tapped send.
+      if (!s || !s.status().connected) {
+        throw new Error("Not sent: your signer isn't connected. Reconnect it and try again.");
+      }
+      if (!device.devicePubkey || device.pairing !== "paired") {
+        throw new Error(`Not sent: ${device.label} isn't paired with you.`);
       }
       try {
         // The relays THIS device uses, plus the defaults (as a release does).
@@ -1857,15 +1862,16 @@ export function CharterProvider({ children }: { children: ReactNode }) {
           type: "SET_DEVICE_SCREEN_LOCK_RESET",
           childId,
           deviceId,
-          reset: { id: out.id, issuedAt: out.issuedAt },
+          reset: { id: out.id, issuedAt: out.issuedAt, ...(out.held ? { held: true } : {}) },
         });
         // No wraps are kept: the Activity line names the act, never the PIN.
         addActivity(
           childId,
           "rule-changed",
-          newPin === ""
+          (newPin === ""
             ? `You removed the screen lock on ${device.label}`
-            : `You reset the screen lock on ${device.label}`,
+            : `You reset the screen lock on ${device.label}`) +
+            (out.held ? waitingAnswerNote([device.label]) : ""),
         );
         return true;
       } catch (err) {

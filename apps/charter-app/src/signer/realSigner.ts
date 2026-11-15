@@ -19,6 +19,7 @@ import {
   giftWrapRelease,
   giftWrapScreenLockReset,
   giftWrapUsageSync,
+  sealScreenLockPin,
   type ScreenLockResetPayload,
   type GuardianOps,
 } from "../wire/giftwrap";
@@ -51,6 +52,7 @@ import {
   singleRecipient,
   type FailedDevice,
   type PublishMeta,
+  type ProblemAck,
   type PublishOutcome,
 } from "./routePublish";
 
@@ -155,6 +157,21 @@ function giftTime(time: string | undefined): string | undefined {
   if (time === undefined || time === FREE_TIME_ID) return undefined;
   if (!isValidTimeId(time)) throw new Error(`"${time}" isn't a kind of time this child has.`);
   return time;
+}
+
+/** The plain words for a ward's immediate refusal of a screen-lock reset over
+ *  the home network (the ACK table in spec/contract.md, "Screen-lock reset"). */
+export function screenLockAckText(device: string, ack: ProblemAck): string {
+  switch (ack) {
+    case "refused":
+      return `${device} refused the reset.`;
+    case "failed":
+      return `${device} couldn't carry out the reset. Try again.`;
+    case "expired":
+      return `${device} turned it down: its clock and yours disagree.`;
+    case "superseded":
+      return `${device} already had a newer reset, so it didn't use this one.`;
+  }
 }
 
 export class RealSigner implements Signer {
@@ -893,8 +910,15 @@ export class RealSigner implements Signer {
    * publish, no batch and no retry queue of our own, and nothing of the wrap is
    * kept.
    *
-   * `newPin` is a secret that lives only in this call. It is not put in the
-   * confirm sheet, in any error message, or in anything returned.
+   * `newPin` is a secret that lives only in this call. It is sealed to the
+   * device with a one-use key BEFORE anything is signed, so the guardian's
+   * signer (the Signet bunker, over NIP-46) signs and encrypts ciphertext only.
+   * It is not put in the confirm sheet, in any error message, or in anything
+   * returned.
+   *
+   * A ward on the home network that answers at once with a problem ACK throws
+   * the plain reason. A send the relays could not take, but this phone's
+   * carrier is holding for the home network, resolves with `held: true`.
    */
   async signScreenLockReset(
     device: ScreenLockResetTarget,
@@ -922,15 +946,34 @@ export class RealSigner implements Signer {
     // clock, and the ward accepts this only within an hour back, five minutes
     // forward.
     const issuedAt = this.deps.now();
-    const payload: ScreenLockResetPayload = { v: 1, id, machine: device.machine, issuedAt, newPin };
+    const { epk, newPinSealed } = sealScreenLockPin(newPin, device.machine);
+    const payload: ScreenLockResetPayload = {
+      v: 1,
+      id,
+      machine: device.machine,
+      issuedAt,
+      epk,
+      newPinSealed,
+    };
     const wrap = await giftWrapScreenLockReset(payload, guardian);
+    let out: PublishOutcome | void;
     try {
-      await this.deps.publish(device.relays, wrap);
+      out = await this.deps.publish(device.relays, wrap);
     } catch (err) {
       // The relays failed but the carrier is HOLDING the wrap for the home
-      // network, so it will arrive: that is sent, not a failure that invites a
-      // second reset. (Any other failure propagates, as it does for a release.)
+      // network: it goes when the device is next there. That is not a failure
+      // that invites a second reset, but the guardian is told it is held.
+      // (Any other failure propagates, as it does for a release.)
       if (!(err instanceof QueuedForHomeNetworkError)) throw err;
+      return { ok: true, id, issuedAt, held: true };
+    }
+    // The ward answered over the home network at once and did not take it:
+    // say why now, rather than "Waiting…" for an hour. A `failed` ACK is not
+    // final: the ward may have kept nothing (a stale link, an unreadable or
+    // unwritable ledger) and the same wrap still reaches it over the relays, so
+    // keep the id and let STATUS settle what really happened.
+    if (out && isProblemAck(out.local) && out.local !== "failed") {
+      throw new Error(screenLockAckText(name, out.local));
     }
     return { ok: true, id, issuedAt };
   }

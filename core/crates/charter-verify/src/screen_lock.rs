@@ -15,8 +15,11 @@
 //! recent outcomes, so a relay or local-link re-delivery of an id it has
 //! already answered changes nothing.
 //!
-//! Nothing here formats a payload into an error: every error is a unit
-//! variant, so a PIN can never reach a log line through this path.
+//! Neither step opens the sealed PIN: the device does that with its machine
+//! key (`charter_transport::open_screen_lock_pin`) only for a reset it would
+//! otherwise accept, so a re-delivery never yields a plaintext. Nothing here
+//! formats a payload into an error: every error is a unit variant, so a
+//! payload can never reach a log line through this path.
 
 use charter_primitives::{NostrEvent, PubKey};
 use charter_proto::ScreenLockResetPayload;
@@ -138,15 +141,22 @@ mod verify_tests {
     const NOW: u64 = 1_700_000_000;
     const ID: &str = "00112233445566778899aabbccddeeff";
 
-    fn content(id: &str, machine: &PubKey, issued_at: u64, new_pin: &str) -> String {
+    /// A stand-in seal: authentication checks its shape, never its contents.
+    const SEALED: &str = "AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGh";
+
+    fn payload(id: &str, machine: &PubKey, issued_at: u64, sealed: &str) -> ScreenLockResetPayload {
         ScreenLockResetPayload {
             v: 1,
             id: id.into(),
             machine: *machine,
             issued_at,
-            new_pin: new_pin.into(),
+            epk: PubKey::from_bytes([0xCD; 32]),
+            new_pin_sealed: sealed.into(),
         }
-        .to_json()
+    }
+
+    fn content(id: &str, machine: &PubKey, issued_at: u64, sealed: &str) -> String {
+        payload(id, machine, issued_at, sealed).to_json()
     }
 
     fn reset_event(signer: &SeedSigner, content: String, issued_at: u64) -> NostrEvent {
@@ -166,26 +176,18 @@ mod verify_tests {
     #[test]
     fn a_guardian_signed_reset_for_this_machine_authenticates() {
         let g = TestGuardian::new();
-        let ev = reset_event(&g.signer, content(ID, &machine(), NOW, "123456"), NOW);
+        let ev = reset_event(&g.signer, content(ID, &machine(), NOW, SEALED), NOW);
         let p = authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), NOW - 10).unwrap();
         assert_eq!(p.id, ID);
-        assert_eq!(p.new_pin, "123456");
+        assert_eq!(p.new_pin_sealed, SEALED);
         assert_eq!(check_screen_lock_reset_time(&p, NOW, 0), Ok(()));
-    }
-
-    #[test]
-    fn a_reset_that_removes_the_lock_authenticates() {
-        let g = TestGuardian::new();
-        let ev = reset_event(&g.signer, content(ID, &machine(), NOW, ""), NOW);
-        let p = authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), 0).unwrap();
-        assert!(p.removes_screen_lock());
     }
 
     #[test]
     fn a_reset_from_another_signer_is_untrusted() {
         let g = TestGuardian::new();
         let attacker = SeedSigner::from_seed(0x99);
-        let ev = reset_event(&attacker, content(ID, &machine(), NOW, "1234"), NOW);
+        let ev = reset_event(&attacker, content(ID, &machine(), NOW, SEALED), NOW);
         assert_eq!(
             authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), 0),
             Err(ScreenLockResetError::UntrustedSigner)
@@ -196,7 +198,7 @@ mod verify_tests {
     fn a_reset_for_another_machine_is_refused() {
         let g = TestGuardian::new();
         let theirs = PubKey::from_bytes([0x88; 32]);
-        let ev = reset_event(&g.signer, content(ID, &theirs, NOW, "1234"), NOW);
+        let ev = reset_event(&g.signer, content(ID, &theirs, NOW, SEALED), NOW);
         assert_eq!(
             authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), 0),
             Err(ScreenLockResetError::WrongMachine)
@@ -206,7 +208,7 @@ mod verify_tests {
     #[test]
     fn a_reset_from_before_the_pairing_is_void() {
         let g = TestGuardian::new();
-        let ev = reset_event(&g.signer, content(ID, &machine(), NOW, "1234"), NOW);
+        let ev = reset_event(&g.signer, content(ID, &machine(), NOW, SEALED), NOW);
         assert_eq!(
             authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), NOW + 1),
             Err(ScreenLockResetError::BeforePairing)
@@ -218,8 +220,13 @@ mod verify_tests {
     #[test]
     fn a_tampered_reset_fails_signature() {
         let g = TestGuardian::new();
-        let mut ev = reset_event(&g.signer, content(ID, &machine(), NOW, "1234"), NOW);
-        ev.content = content(ID, &machine(), NOW, "0000");
+        let mut ev = reset_event(&g.signer, content(ID, &machine(), NOW, SEALED), NOW);
+        ev.content = content(
+            ID,
+            &machine(),
+            NOW,
+            "AqGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGi",
+        );
         assert_eq!(
             authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), 0),
             Err(ScreenLockResetError::BadSignature)
@@ -234,7 +241,7 @@ mod verify_tests {
             kinds::CHARTER_DEVICE_RELEASE,
             NOW,
             vec![kinds::marker_tag()],
-            content(ID, &machine(), NOW, "1234"),
+            content(ID, &machine(), NOW, SEALED),
         );
         assert_eq!(
             authenticate_screen_lock_reset(&ev, &g.pubkey(), &machine(), 0),
@@ -243,14 +250,18 @@ mod verify_tests {
     }
 
     #[test]
-    fn bad_ids_and_pins_are_malformed_even_when_signed() {
+    fn bad_ids_seals_and_plaintext_pins_are_malformed_even_when_signed() {
         let g = TestGuardian::new();
         let cases = [
-            content("0011", &machine(), NOW, "1234"),
-            content(&ID.to_uppercase(), &machine(), NOW, "1234"),
-            content(ID, &machine(), NOW, "123"),
-            content(ID, &machine(), NOW, "12345678901234567"),
-            content(ID, &machine(), NOW, "12a4"),
+            content("0011", &machine(), NOW, SEALED),
+            content(&ID.to_uppercase(), &machine(), NOW, SEALED),
+            content(ID, &machine(), NOW, ""),
+            content(ID, &machine(), NOW, "not base64!"),
+            // The pre-seal shape: a plaintext PIN and no seal.
+            format!(
+                "{{\"v\":1,\"id\":\"{ID}\",\"machine\":\"{}\",\"issuedAt\":{NOW},\"newPin\":\"123456\"}}",
+                machine().to_hex()
+            ),
         ];
         for c in cases {
             let ev = reset_event(&g.signer, c, NOW);
@@ -263,13 +274,7 @@ mod verify_tests {
 
     #[test]
     fn the_window_is_one_hour_back_and_five_minutes_forward_inclusive() {
-        let p = |issued_at| ScreenLockResetPayload {
-            v: 1,
-            id: ID.into(),
-            machine: machine(),
-            issued_at,
-            new_pin: "1234".into(),
-        };
+        let p = |issued_at| payload(ID, &machine(), issued_at, SEALED);
         assert_eq!(check_screen_lock_reset_time(&p(NOW - 3600), NOW, 0), Ok(()));
         assert_eq!(check_screen_lock_reset_time(&p(NOW + 300), NOW, 0), Ok(()));
         assert_eq!(
@@ -286,13 +291,7 @@ mod verify_tests {
 
     #[test]
     fn the_floor_is_strict_and_checked_after_the_window() {
-        let p = |issued_at| ScreenLockResetPayload {
-            v: 1,
-            id: ID.into(),
-            machine: machine(),
-            issued_at,
-            new_pin: "1234".into(),
-        };
+        let p = |issued_at| payload(ID, &machine(), issued_at, SEALED);
         assert_eq!(
             check_screen_lock_reset_time(&p(NOW), NOW, NOW),
             Err(ScreenLockResetError::NotAboveFloor),

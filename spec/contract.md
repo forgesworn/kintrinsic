@@ -2369,23 +2369,43 @@ this field order):
 ```ts
 interface ScreenLockResetPayload {
   v: 1;
-  id: string;       // exactly 32 lowercase hex characters: 16 fresh random bytes per reset
-  machine: Hex32;   // the device this reset targets (== that device's machine pubkey)
-  issuedAt: number; // the guardian's TRUE wall clock when it signed (unix secs)
-  newPin: string;   // "" = remove the screen lock; otherwise 4 to 16 ASCII digits
+  id: string;           // exactly 32 lowercase hex characters: 16 fresh random bytes per reset
+  machine: Hex32;       // the device this reset targets (== that device's machine pubkey)
+  issuedAt: number;     // the guardian's TRUE wall clock when it signed (unix secs)
+  epk: Hex32;           // x-only pubkey of the one-use key the PIN is sealed with
+  newPinSealed: string; // the new PIN, sealed to `machine` (below): 1 to 512 base64 characters
 }
 ```
+
+**The sealed PIN.** The PIN is never in the content in the clear, because
+remote signers must never see it: a guardian who signs with a NIP-46 bunker
+hands it this content to sign (`sign_event`) and the signed event to encrypt
+for the seal (`nip44_encrypt`), and the bunker's prompts, history and logs are
+outside the guardian app's control. So before anything is signed, the
+guardian app makes a fresh secp256k1 key from its own random source, sets
+`epk` to its x-only pubkey, and sets
+`newPinSealed = nip44_v2_encrypt(plaintext, conversation_key(ephemeral_sk, machine))`.
+It then discards the key. The `plaintext` is the new PIN as a JSON string:
+`"123456"`, or `""` to remove the screen lock (with the quotes; a NIP-44
+plaintext cannot be empty). It is exactly a double quote, `""` or 4 to 16
+ASCII digits, and a double quote: no escapes and no spaces. Every PIN, and a
+removal, pads to NIP-44's 32-byte minimum, so every seal is 132 base64
+characters and its length says nothing about the PIN. Only the device's
+machine key opens it, with `conversation_key(machine_sk, epk)`.
 
 `issuedAt` must be the guardian's real clock, never a strictly increasing
 counter that can run ahead of it: the device bounds freshness on this field,
 and never on the seal or wrap `created_at`, which are jittered. Unknown
 fields are tolerated, as on a RELEASE. Golden vector (hand-written, not
-generated): `core/crates/charter-testkit/vectors/screen_lock/screen_lock_reset_vectors.json`.
+generated; fixed test keys and nonces make its seals deterministic):
+`core/crates/charter-testkit/vectors/screen_lock/screen_lock_reset_vectors.json`.
 
 **Acceptance (Android ward), in this order:**
 
-1. **Authenticate.** The kind, the payload shape (`v == 1`, the `id` and
-   `newPin` rules above), the inner event id and BIP-340 signature, the author
+1. **Authenticate.** The kind, the payload shape (`v == 1`, the `id` rule
+   above, `epk` 64 lowercase hex, `newPinSealed` 1 to 512 base64
+   characters; a plaintext `newPin` with no seal is refused), the inner
+   event id and BIP-340 signature, the author
    == the pinned guardian, `machine` == this device, and the **pairing epoch**:
    `issuedAt >= paired_at`, so a reset signed before the current pairing is
    void, as a RELEASE is. Anything that fails is refused and **nothing is
@@ -2402,13 +2422,25 @@ generated): `core/crates/charter-testkit/vectors/screen_lock/screen_lock_reset_v
 4. **Floor.** `issuedAt` must be strictly greater than the `issuedAt` of the
    last **accepted** reset. Otherwise the device records `superseded`. Two
    resets signed in the same second: the second is superseded.
-5. **Accepted.** The floor and an `accepted` record are written durably
+5. **Open the seal.** Only for a reset that has passed steps 1 to 4, so a
+   re-delivery never yields a plaintext. The device opens `newPinSealed` with
+   its machine key and `epk`. If it will not open (sealed to another key, or
+   altered), or the plaintext is not exactly the form above, the device
+   records `failed`. Nothing then waits for the platform, the floor does not
+   move, and a reset the platform has not taken yet is left as it is.
+6. **Accepted.** The floor and an `accepted` record are written durably
    **before** the platform can see the reset. If that write fails, the reset
    is not accepted, and the guardian, seeing no result, sends again. The
    accepted reset waits for the platform **in memory only**. A newer accepted
    reset replaces one the platform has not taken yet, which is then recorded
    `superseded`. A crash before the platform takes it loses it, which is the
    safe direction: the record stays `accepted` with no final result.
+
+An outcome of steps 3 to 5 whose record cannot be written is not kept, even
+in memory: the device answers as if the record had failed, and the next
+delivery decides it afresh. Otherwise a restart would forget what the
+guardian was told. A platform result (below) whose write fails is kept in
+memory and written again on each tick until it lands.
 
 The relays re-deliver every wrap for about two days, and the local link may
 resend: steps 2 to 4 make every re-delivery a no-op.
@@ -2420,14 +2452,16 @@ token and reports one of four results, which replaces `accepted`:
 |---|---|
 | `accepted` | Received and handed to the platform; no final result yet. |
 | `applied` | The screen lock was changed (or removed). |
-| `failed` | The platform refused it or threw. |
+| `failed` | The platform refused it or threw; or (recorded by the device, step 5) the sealed PIN would not open with this device's key, or held no PIN. |
 | `not_ready` | The device's reset token is not active. On a device that already has a screen lock, it activates at the next unlock after it is set. |
 | `notice_failed` | The ward's notice could not be recorded, so the device did not reset: there is no reset without a notice. |
 | `rejected_time` | Outside the window (step 3). |
 | `superseded` | Not newer than an accepted reset (step 4), or replaced before the platform took it. |
 
 Exactly one outcome is recorded per `id`. `accepted` is the only one ever
-replaced, and only by one of the four platform results.
+replaced, and only by one of the four platform results. A guardian app shows
+an `accepted` still unconfirmed an hour after the send as received but not
+confirmed: the device may have restarted before the platform took it.
 
 **The ward is told.** The ward app keeps an append-only screen-lock history in
 device-protected storage, never containing a PIN, and shows a notice
@@ -2447,7 +2481,10 @@ then paired with: ids and results only).
 ACK reports what the device did, never `ignored`: accepted → `applied`;
 already answered → `unchanged`; `superseded` → `superseded`; `rejected_time`
 → `expired`; unauthentic, malformed or before the pairing → `refused`; the
-record could not be written → `failed`. A ward that predates this kind never
+sealed PIN would not open (step 5), or the record could not be written →
+`failed`. The guardian app shows a problem ACK at once rather than waiting for
+STATUS. A wrap the relays could not take, which the guardian's carrier holds
+until the device is on the home network, is shown as held. A ward that predates this kind never
 polls it and ACKs it `ignored`, so the guardian offers the reset only to a ward
 whose version implements it **and** whose STATUS carries `screenLockSecure`.
 Linux has no screen lock to reset: `charterd` does not poll this kind and
@@ -2468,9 +2505,10 @@ standard device audit with tags `["t","charter-device"]`,
 `["at",<unix secs>]`, content empty. It is journaled durably and emitted on
 the next successful poll, like the break-glass override event.
 
-**The PIN.** It exists in the signed event, in the guardian's signing call,
-and in the ward's memory until the ward app takes it. It is never written to
-disk, never logged, and never put in STATUS or AUDIT, on either side. A
+**The PIN.** It exists in the guardian app's sealing call, sealed in the
+signed event, and opened in the ward's memory until the ward app takes it.
+It never reaches the guardian's signer, local or remote. It is never written
+to disk, never logged, and never put in STATUS or AUDIT, on either side. A
 diagnostic of a refused reset names the rule it broke, never its content.
 
 ### Multi-device usage consolidation — `CHARTER_DEVICE_USAGE_SYNC = 31115` (reserved; contract-complete)

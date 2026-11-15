@@ -101,15 +101,22 @@ describe("resetDeviceScreenLock (provider)", () => {
     return ok;
   };
 
-  it("sends one wrap to the device, carrying the PIN, and records only the id and time", async () => {
-    expect(await reset(SECRET)).toBe(true);
-    expect(relay.events).toHaveLength(1);
-    const wrap = relay.events[0] as NostrEvent;
+  /** Open the wrap, then the sealed PIN, with the device key, as the ward does. */
+  const opened = (wrap: NostrEvent) => {
     const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(DEVICE_SK, wrap.pubkey)));
     const inner = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(DEVICE_SK, seal.pubkey)));
-    expect(inner.kind).toBe(31122);
     const payload = JSON.parse(inner.content);
-    expect(payload.newPin).toBe(SECRET);
+    const pin = JSON.parse(nip44.decrypt(payload.newPinSealed, nip44.getConversationKey(DEVICE_SK, payload.epk)));
+    return { inner, payload, pin };
+  };
+
+  it("sends one wrap to the device, carrying the PIN sealed, and records only the id and time", async () => {
+    expect(await reset(SECRET)).toBe(true);
+    expect(relay.events).toHaveLength(1);
+    const { inner, payload, pin } = opened(relay.events[0] as NostrEvent);
+    expect(inner.kind).toBe(31122);
+    expect(payload).not.toHaveProperty("newPin");
+    expect(pin).toBe(SECRET);
 
     const record = api.state.children[0].devices[0].screenLockReset;
     expect(record).toEqual({ id: payload.id, issuedAt: payload.issuedAt });
@@ -131,12 +138,9 @@ describe("resetDeviceScreenLock (provider)", () => {
     expect(api.state.localDeliveries ?? []).toEqual([]);
   });
 
-  it("says 'removed' for a removal, which sends an empty newPin", async () => {
+  it("says 'removed' for a removal, which seals an empty PIN", async () => {
     await reset("");
-    const wrap = relay.events[0] as NostrEvent;
-    const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(DEVICE_SK, wrap.pubkey)));
-    const inner = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(DEVICE_SK, seal.pubkey)));
-    expect(JSON.parse(inner.content).newPin).toBe("");
+    expect(opened(relay.events[0] as NostrEvent).pin).toBe("");
     expect(api.state.activity.some((a) => a.summary === "You removed the screen lock on Robin's phone")).toBe(true);
   });
 
@@ -153,6 +157,24 @@ describe("resetDeviceScreenLock (provider)", () => {
     expect((failure as Error).message).not.toContain(SECRET);
     expect(api.state.children[0].devices[0].screenLockReset).toBeUndefined();
     expect(JSON.stringify(api.state)).not.toContain(SECRET);
+  });
+
+  it("says so, and sends nothing, when the signer isn't connected", async () => {
+    await settle();
+    await act(async () => {
+      await api.disconnectSigner();
+    });
+    let failure: unknown = null;
+    await act(async () => {
+      await api.resetDeviceScreenLock("c1", "d2", SECRET).catch((e: unknown) => {
+        failure = e;
+      });
+    });
+    expect((failure as Error | null)?.message).toBe(
+      "Not sent: your signer isn't connected. Reconnect it and try again.",
+    );
+    expect(relay.events).toHaveLength(0);
+    expect(api.state.children[0].devices[0].screenLockReset).toBeUndefined();
   });
 
   it("does nothing for an unknown device", async () => {

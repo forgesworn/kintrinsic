@@ -171,6 +171,9 @@ export interface ScreenLockResetOutcome {
   id: string;
   /** Unix seconds, the guardian's true wall clock at signing. */
   issuedAt: number;
+  /** The relays couldn't take it, and this phone's carrier is holding it until
+   *  the device is on the home network (it goes then). */
+  held?: true;
 }
 
 export interface Signer {
@@ -298,7 +301,9 @@ export interface Signer {
    * (`newPin === ""`). Sent like `releaseDevice`: one wrap to the device, with
    * no home-network queue. Resolves with the fresh reset `id` and the
    * wall-clock `issuedAt` it was signed with, so the caller can match the
-   * ward's reply. Throws on a malformed PIN or a device with no real key.
+   * ward's reply, and `held` when only the carrier has it. Throws on a
+   * malformed PIN, a device with no real key, or a ward that turned it down
+   * at once over the home network.
    *
    * The PIN is a secret: implementations must not log it, store it, or put it
    * in a confirm sheet or an error message.
