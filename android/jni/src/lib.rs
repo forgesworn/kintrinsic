@@ -34,7 +34,8 @@ use warden::{Warden, WARDEN};
 /// 6: the `connections` clause — `charterConnections`.
 /// 7: the guardian screen-lock reset — `charterTakeScreenLockReset`,
 ///    `charterReportScreenLockReset` and `charterSetScreenLockState`.
-pub const ABI_VERSION: jint = 7;
+/// 8: the emergency-call report — `charterEmergencyCallUsed`.
+pub const ABI_VERSION: jint = 8;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -619,6 +620,21 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterB
     now_unix: jlong,
 ) -> jstring {
     with_warden_mut(&env, |w| w.break_glass(now_unix as u64))
+}
+
+/// The ward used the shade's emergency-call button (its hold completed and the
+/// emergency dialler started): journal the `call.emergency` audit for the
+/// guardian, dated by `now_unix`, the press. Returns `{"ok":true}`,
+/// `{"ok":false,"reason":"…"}` (unpaired, or the journal would not write) or
+/// `{"error":"not initialized"}`; Kotlin treats anything but `ok:true` as
+/// "not reported". Never touches the network.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterEmergencyCallUsed(
+    env: JNIEnv,
+    _class: JClass,
+    now_unix: jlong,
+) -> jstring {
+    with_warden_mut(&env, |w| w.emergency_call_used(now_unix.max(0) as u64))
 }
 
 /// The ward's effective web-content policy as a `DnsFilterPlan` wrapper

@@ -78,6 +78,31 @@ enum StoredAudit {
     Legacy(Vec<Vec<String>>),
 }
 
+/// Write `bytes` to `tmp`, flush them to disk, rename `tmp` over `dest`, then
+/// flush the directory entry, so a press that has been journaled survives a
+/// power cut and never leaves half a file. Whether it all landed.
+fn write_durably(tmp: &Path, dest: &Path, bytes: &[u8]) -> bool {
+    use std::io::Write;
+    let wrote = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })()
+    .is_ok();
+    if !wrote || std::fs::rename(tmp, dest).is_err() {
+        return false;
+    }
+    // The rename is only durable once the directory has been synced. Not every
+    // filesystem lets a directory be opened or synced; the data itself is
+    // already on disk, so a refusal here is not a failed write.
+    if let Some(dir) = dest.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    true
+}
+
 /// Durable store for the window + the audit spool.
 pub struct BreakGlass {
     dir: PathBuf,
@@ -100,7 +125,10 @@ impl BreakGlass {
     /// Record a fresh override window (replaces any previous one).
     pub fn open(&self, w: &Window) {
         if let Ok(json) = serde_json::to_string(w) {
-            let _ = std::fs::write(self.window_path(), json);
+            let tmp = self.dir.join("window.json.tmp");
+            if !write_durably(&tmp, &self.window_path(), json.as_bytes()) {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 
@@ -114,10 +142,10 @@ impl BreakGlass {
     /// Queue an audit for the guardian. Durable: the ward's unlock happens
     /// immediately regardless of the network, and this rides out on the next
     /// successful poll.
-    pub fn queue_audit(&self, tags: Vec<Vec<String>>) {
+    pub fn queue_audit(&self, tags: Vec<Vec<String>>) -> bool {
         let mut all = self.entries();
         all.push(SpooledAudit { tags, wrap: None });
-        self.write_entries(&all);
+        self.write_entries(&all)
     }
 
     /// The journaled audits' tags, oldest first.
@@ -153,8 +181,7 @@ impl BreakGlass {
             return false;
         };
         let tmp = self.dir.join("pending-audits.json.tmp");
-        let ok =
-            std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, self.spool_path()).is_ok();
+        let ok = write_durably(&tmp, &self.spool_path(), json.as_bytes());
         if !ok {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -243,6 +270,27 @@ pub fn audit_tags(scope: &str, duration_secs: u64, at: u64) -> Vec<Vec<String>> 
         vec!["op".into(), "unlock.breakglass".into()],
         vec!["scope".into(), scope.into()],
         vec!["durationSecs".into(), duration_secs.to_string()],
+        vec!["at".into(), at.to_string()],
+    ]
+}
+
+/// The op of the emergency-call audit (`spec/contract.md` §Emergency call
+/// event).
+pub const OP_EMERGENCY_CALL: &str = "call.emergency";
+
+/// The contract's emergency-call audit tags: outcome=override,
+/// op=call.emergency and `at`, the moment the ward's hold completed and the
+/// emergency dialler started. Nothing else: never a number, a duration, a
+/// reason or anything personal, and the content is empty. It means the
+/// dialler opened, NOT that a call was placed or connected.
+///
+/// Like [`audit_tags`], `at` is a tag because the wrap is stamped when it is
+/// built, not when the button was pressed.
+pub fn emergency_call_audit_tags(at: u64) -> Vec<Vec<String>> {
+    // NB: the transport prepends the ["t","charter-device"] marker itself.
+    vec![
+        vec!["outcome".into(), "override".into()],
+        vec!["op".into(), OP_EMERGENCY_CALL.into()],
         vec!["at".into(), at.to_string()],
     ]
 }
@@ -461,6 +509,58 @@ mod tests {
             1,
             "exactly one at tag"
         );
+    }
+
+    /// The emergency-call audit is exactly three tags: the outcome that makes
+    /// the carrier alert, the op, and the press time. Never a number.
+    #[test]
+    fn emergency_call_tags_are_exact_and_carry_nothing_else() {
+        let tags = emergency_call_audit_tags(1_782_752_461);
+        assert_eq!(
+            tags,
+            vec![
+                vec!["outcome".to_string(), "override".to_string()],
+                vec!["op".to_string(), "call.emergency".to_string()],
+                vec!["at".to_string(), "1782752461".to_string()],
+            ]
+        );
+    }
+
+    /// The durable write path leaves exactly the file the plain write did:
+    /// the spool and the window hold the same JSON, no temporary file is left
+    /// behind, and a second write replaces the first.
+    #[test]
+    fn the_durable_write_produces_the_same_files() {
+        let base = tmp("durable");
+        let bg = BreakGlass::new(&base);
+        let w = Window {
+            at: 1_000,
+            scope: SCOPE_FULL.into(),
+            duration_secs: 600,
+        };
+        bg.open(&w);
+        assert_eq!(
+            std::fs::read_to_string(bg.window_path()).unwrap(),
+            serde_json::to_string(&w).unwrap()
+        );
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert!(bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0)));
+        let expected = serde_json::to_string(&bg.entries()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bg.spool_path()).unwrap(),
+            expected,
+            "the spool is the entries, verbatim"
+        );
+        assert_eq!(bg.entries().len(), 2);
+        let mut names: Vec<String> = std::fs::read_dir(&bg.dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["pending-audits.json", "window.json"]);
+        bg.open(&Window { at: 2_000, ..w });
+        assert_eq!(bg.window().unwrap().at, 2_000);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
