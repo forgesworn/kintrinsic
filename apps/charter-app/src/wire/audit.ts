@@ -62,6 +62,26 @@ function parseDecimal(s: string | undefined): number | null {
   return Number(s);
 }
 
+/**
+ * One use of the ward's emergency-call button (`op=call.emergency`): the shade's
+ * own control completed its hold and the emergency dialler started. It is NOT
+ * proof that a call was placed or connected, and it never carries a number, a
+ * duration, a reason or any PII.
+ */
+export interface DeviceEmergencyCall {
+  /** The device it came from (the rumor author, verified against the seal). */
+  machine: string;
+  /** Unix SECONDS of the press (dated exactly as an override is). */
+  at: number;
+  /**
+   * Identity of this press, for folding copies into one line. OP-PREFIXED
+   * (`emergencycall:${machine}:${at}`) so it can never collide with a
+   * break-glass press in the same second, which keeps the bare
+   * `${machine}:${at}` key. Without an `at` tag: `emergencycall:wrap:${wrapId}`.
+   */
+  key: string;
+}
+
 /** The ward's own record of a screen-lock reset, from its audit (op `screenlock.reset`). */
 export interface DeviceScreenLockAudit {
   /** The device it came from (the rumor author, verified against the seal). */
@@ -74,9 +94,10 @@ export interface DeviceScreenLockAudit {
   at: number;
 }
 
-/** A device audit the guardian understands: an emergency unlock or a screen-lock reset. */
+/** A device audit the guardian understands: an emergency unlock, a use of the emergency-call button, or a screen-lock reset. */
 export type DeviceAudit =
   | { op: "unlock.breakglass"; override: DeviceOverride }
+  | { op: "call.emergency"; call: DeviceEmergencyCall }
   | { op: "screenlock.reset"; reset: DeviceScreenLockAudit };
 
 /**
@@ -141,6 +162,16 @@ function parseOverride(rumor: NostrEvent, wrapId: string): DeviceOverride {
   };
 }
 
+function parseEmergencyCall(rumor: NostrEvent, wrapId: string): DeviceEmergencyCall {
+  const { atTag, at } = datedBy(rumor);
+  return {
+    machine: rumor.pubkey,
+    at,
+    key:
+      atTag !== null ? `emergencycall:${rumor.pubkey}:${atTag}` : `emergencycall:wrap:${wrapId}`,
+  };
+}
+
 function parseScreenLock(rumor: NostrEvent): DeviceScreenLockAudit {
   const id = tagValue(rumor.tags, "id");
   const result = tagValue(rumor.tags, "outcome");
@@ -154,7 +185,8 @@ function parseScreenLock(rumor: NostrEvent): DeviceScreenLockAudit {
 
 /**
  * Decrypt, verify and parse one gift-wrapped device audit the guardian acts
- * on: an emergency unlock (`outcome=override`, `op=unlock.breakglass`) or a
+ * on: an emergency unlock (`outcome=override`, `op=unlock.breakglass`), a use
+ * of the emergency-call button (`outcome=override`, `op=call.emergency`) or a
  * screen-lock reset (`op=screenlock.reset`, outcome = its result, tags `id` and
  * `at`). Anything else is `null`, as is any decrypt / verify / kind / freshness
  * / shape failure (never throws).
@@ -172,6 +204,9 @@ export function unwrapDeviceAudit(
   const op = tagValue(rumor.tags, "op");
   if (op === "unlock.breakglass" && tagValue(rumor.tags, "outcome") === "override") {
     return { op, override: parseOverride(rumor, wrap.id) };
+  }
+  if (op === "call.emergency" && tagValue(rumor.tags, "outcome") === "override") {
+    return { op, call: parseEmergencyCall(rumor, wrap.id) };
   }
   if (op === "screenlock.reset") return { op, reset: parseScreenLock(rumor) };
   return null;

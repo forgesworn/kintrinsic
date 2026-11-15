@@ -28,6 +28,14 @@ export const overrideTags = (extra: string[][] = []): string[][] => [
   ...extra,
 ];
 
+/** The tags the ward emits when its emergency-call button is used, plus any extras (e.g. `at`). */
+export const emergencyCallTags = (extra: string[][] = []): string[][] => [
+  ["t", "charter-device"],
+  ["outcome", "override"],
+  ["op", "call.emergency"],
+  ...extra,
+];
+
 export function overrideWrap(o: WrapOpts): NostrEvent {
   const createdAt = o.createdAt ?? Math.floor(Date.now() / 1000);
   const sealSk = o.sealSk ?? o.machineSk;

@@ -38,6 +38,7 @@ const OUTCOME_STYLE: Record<ActivityOutcome, OutcomeStyle> = {
   // The break-glass override: warm and visible, never scolding. The ward may
   // have needed it; the point is that it's in the open.
   override: { emoji: "🚨", tone: "warn", label: "Emergency unlock" },
+  emergency_call: { emoji: "🚨", tone: "warn", label: "Emergency call" },
 };
 
 const TONE_BG: Record<Tone, string> = {
@@ -208,7 +209,7 @@ export function ActivityEventRow({
         <span className="row-sub">
           {who ? `${who} · ` : ""}
           <time dateTime={new Date(ev.ts).toISOString()}>
-            {ev.outcome === "override"
+            {ev.outcome === "override" || ev.outcome === "emergency_call"
               ? `${exactWhen(ev.ts, now)} · ${relativeTime(ev.ts, now)}`
               : relativeTime(ev.ts, now)}
           </time>
