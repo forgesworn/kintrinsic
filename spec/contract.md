@@ -1896,9 +1896,11 @@ the wrap's `created_at` or more than 30 days old, in which case it dates by
 event is journaled durably (the journal is flushed to disk as it is written, the
 same journal as the override, and one wrap per press however many rounds it
 waits) and emitted on reconnect. A journal that cannot be read is left alone
-while that may be passing; one that stays unreadable across four attempts over
-at least a minute is set aside and a fresh one started, so a press is never
-refused for good. The ward app hands the report to the warden
+while that may be passing, and a press made meanwhile is reported as not
+journaled; one that stays unreadable across four attempts over at least a
+minute (running out of memory or file descriptors does not count) is set aside
+and a fresh one started. A journal set aside this way is read again, and
+merged back and deleted once it parses. The ward app hands the report to the warden
 before it records the press on the phone, and retries a refused one a few
 times while the process lives. Consumers fold copies of one press by
 `(machine, at)` **per op**, so a break-glass press and an emergency call in the
@@ -1916,9 +1918,11 @@ guardian is ever told to the next. The journal is cleared at once and the
 release never waits for a relay: the publish carries on in the background. A
 journal the phone cannot read at that moment is set aside (kept on the phone,
 never read again by the warden, and removed if it cannot be moved) rather than
-left for a later round, and every journaled audit is stamped on the phone with
-the guardian it was made under, so an audit stamped for one guardian is never
-sent to another even if the clear failed. Each of those audits is also
+left for a later round. A phone journals an audit only while it is paired, and
+stamps it on the phone with the guardian it is paired to; an older entry with
+no stamp is stamped with the guardian paired when the warden next considers it.
+An audit stamped for one guardian is never sent to another, even if the clear
+failed. Each of those audits is also
 offered to the local link, which carries them while the guardian still accepts
 the session, so a release that arrived over the home network may carry them
 back over it while the relays are down. A release that arrives with no relay,
