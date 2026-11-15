@@ -3,6 +3,8 @@ package org.forgesworn.mycharter.service
 import org.forgesworn.mycharter.carrier.WardName
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -46,14 +48,14 @@ class NotifierTextTest {
 
     @Test fun emergencyCallHitNamesTheWardAndDevice() {
         assertEquals(
-            "Mia used the emergency call button on Pixel 6. Their phone's emergency dialler opened.",
+            "Mia used the emergency call button on Pixel 6.",
             Notifier.emergencyCallText(who),
         )
     }
 
     @Test fun emergencyCallNoHitNamesNobody() {
         assertEquals(
-            "Your ward used the emergency call button. Their phone's emergency dialler opened.",
+            "Your ward used the emergency call button.",
             Notifier.emergencyCallText(null),
         )
     }
@@ -80,6 +82,58 @@ class NotifierTextTest {
             Notifier.emergencyControlText(null),
         )
         assertFalse(Notifier.emergencyControlText(who).contains("opened"))
+    }
+
+    // ---- one row per press, and the press time ---------------------------------
+
+    @Test fun alertKeyIsPerPressWhenTheWardStampedATime() {
+        assertEquals("emergency-call-m1-100", Notifier.alertKey("emergency-call", "m1", 100L, "w"))
+        assertEquals("override-m1-100", Notifier.alertKey("override", "m1", 100L, null))
+    }
+
+    @Test fun aRebuiltWrapForTheSamePressReusesItsRow() {
+        assertEquals(
+            Notifier.alertKey("emergency-call", "m1", 100L, "wrapA"),
+            Notifier.alertKey("emergency-call", "m1", 100L, "wrapB"),
+        )
+    }
+
+    @Test fun twoPressesGetTwoRows() {
+        assertNotEquals(
+            Notifier.alertKey("emergency-call", "m1", 100L, null).hashCode(),
+            Notifier.alertKey("emergency-call", "m1", 160L, null).hashCode(),
+        )
+    }
+
+    @Test fun anUnlockAndACallNeverShareARow() {
+        assertNotEquals(
+            Notifier.alertKey("override", "m1", 100L, null),
+            Notifier.alertKey("emergency-call", "m1", 100L, null),
+        )
+    }
+
+    @Test fun withoutATimeTheRowFallsBackToTheWrapIdThenTheMachine() {
+        assertEquals("emergency-call-m1-wrap-abc", Notifier.alertKey("emergency-call", "m1", null, "abc"))
+        assertEquals("emergency-call-m1", Notifier.alertKey("emergency-call", "m1", null, null))
+    }
+
+    @Test fun whenIsThePressTimeInMillisWhenPlausible() {
+        val now = 1_800_000_000L
+        assertEquals((now - 60) * 1000, Notifier.plausibleWhenMillis(now - 60, now))
+        assertEquals(now * 1000, Notifier.plausibleWhenMillis(now, now))
+        assertEquals(
+            (now - Notifier.MAX_PRESS_AGE_SECS) * 1000,
+            Notifier.plausibleWhenMillis(now - Notifier.MAX_PRESS_AGE_SECS, now),
+        )
+    }
+
+    @Test fun whenIsLeftToThePlatformWhenImplausible() {
+        val now = 1_800_000_000L
+        assertNull(Notifier.plausibleWhenMillis(null, now))
+        assertNull(Notifier.plausibleWhenMillis(now + 1, now))
+        assertNull(Notifier.plausibleWhenMillis(now - Notifier.MAX_PRESS_AGE_SECS - 1, now))
+        assertNull(Notifier.plausibleWhenMillis(0L, now))
+        assertNull(Notifier.plausibleWhenMillis(-1L, now))
     }
 
     // ---- auditAction (the dispatch within outcome=override) ------------------

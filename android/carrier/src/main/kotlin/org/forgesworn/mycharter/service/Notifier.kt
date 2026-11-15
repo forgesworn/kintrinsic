@@ -73,30 +73,19 @@ object Notifier {
         scope: String,
         durationSecs: Long,
         roster: List<RosterEntry> = emptyList(),
-    ) {
-        val tap = PendingIntent.getActivity(
-            ctx,
-            "override".hashCode(),
-            Intent(ctx, MainActivity::class.java)
-                .putExtra(MainActivity.EXTRA_ROUTE, MainActivity.ROUTE_ACTIVITY)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val mins = (durationSecs / 60).coerceAtLeast(1)
-        val n = Notification.Builder(ctx, CH_APPROVALS)
-            .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setContentTitle("Emergency unlock used")
-            .setContentText(overrideText(scope, mins, describeWard(machine, roster)))
-            .setContentIntent(tap)
-            .setAutoCancel(true)
-            .setCategory(Notification.CATEGORY_MESSAGE)
-            .setFullScreenIntent(tap, true)
-            .build()
-        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        // Keyed by machine: a second override replaces the row rather than
-        // stacking — one live "this is happening now" per phone.
-        nm.notify("override-$machine".hashCode(), n)
-    }
+        at: Long? = null,
+        wrapId: String? = null,
+    ) = postEmergencyAlert(
+        ctx,
+        key = alertKey("override", machine, at, wrapId),
+        title = "Emergency unlock used",
+        text = overrideText(
+            scope,
+            (durationSecs / 60).coerceAtLeast(1),
+            describeWard(machine, roster),
+        ),
+        whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
+    )
 
     /**
      * The ward used the emergency-call button on their lock screen (device
@@ -108,11 +97,14 @@ object Notifier {
         ctx: Context,
         machine: String,
         roster: List<RosterEntry> = emptyList(),
+        at: Long? = null,
+        wrapId: String? = null,
     ) = postEmergencyAlert(
         ctx,
-        key = "emergency-call-$machine",
+        key = alertKey("emergency-call", machine, at, wrapId),
         title = EMERGENCY_CALL_TITLE,
         text = emergencyCallText(describeWard(machine, roster)),
+        whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
     )
 
     /**
@@ -123,14 +115,28 @@ object Notifier {
         ctx: Context,
         machine: String,
         roster: List<RosterEntry> = emptyList(),
+        at: Long? = null,
+        wrapId: String? = null,
     ) = postEmergencyAlert(
         ctx,
-        key = "emergency-control-$machine",
+        key = alertKey("emergency-control", machine, at, wrapId),
         title = EMERGENCY_CONTROL_TITLE,
         text = emergencyControlText(describeWard(machine, roster)),
+        whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
     )
 
-    private fun postEmergencyAlert(ctx: Context, key: String, title: String, text: String) {
+    /**
+     * One loud alert per PRESS: the row id is per press (see [alertKey]), so two
+     * presses stack, and a rebuilt wrap for the same press reuses its row and,
+     * with `setOnlyAlertOnce`, does not buzz again.
+     */
+    private fun postEmergencyAlert(
+        ctx: Context,
+        key: String,
+        title: String,
+        text: String,
+        whenMillis: Long?,
+    ) {
         val tap = PendingIntent.getActivity(
             ctx,
             key.hashCode(),
@@ -139,22 +145,24 @@ object Notifier {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val n = Notification.Builder(ctx, CH_APPROVALS)
+        val b = Notification.Builder(ctx, CH_APPROVALS)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setContentTitle(title)
             .setContentText(text)
+            // The whole sentence, not a truncated line.
+            .setStyle(Notification.BigTextStyle().bigText(text))
             // Shown in full on the lock screen: a guardian must be able to read
             // an emergency without unlocking their own phone.
             .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
             .setContentIntent(tap)
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setFullScreenIntent(tap, true)
-            .build()
+        // The press time, not the time the guardian's phone heard of it.
+        if (whenMillis != null) b.setWhen(whenMillis).setShowWhen(true)
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        // Keyed by kind and machine: a second press replaces the row rather than
-        // stacking, and never replaces an unlock's row.
-        nm.notify(key.hashCode(), n)
+        nm.notify(key.hashCode(), b.build())
     }
 
     /** The ask itself. Tap → the console's Approvals screen. */
@@ -211,6 +219,28 @@ object Notifier {
     internal const val EMERGENCY_CALL_TITLE = "Emergency call button used"
     internal const val EMERGENCY_CONTROL_TITLE = "Emergency control used"
 
+    /** A press timestamp is believed only when it is not in the future and not older than this. */
+    internal const val MAX_PRESS_AGE_SECS = 30L * 24 * 60 * 60
+
+    /**
+     * The row key for one press: `{kind}-{machine}-{at}` when the ward stamped a
+     * press time (a wrap rebuilt after a day carries the same `at`, so it reuses
+     * its row), else `{kind}-{machine}-wrap-{wrapId}`, else per machine.
+     */
+    internal fun alertKey(kind: String, machine: String, at: Long?, wrapId: String?): String = when {
+        at != null -> "$kind-$machine-$at"
+        wrapId != null -> "$kind-$machine-wrap-$wrapId"
+        else -> "$kind-$machine"
+    }
+
+    /**
+     * The notification's `when` in milliseconds: the press time when it is
+     * plausible (not later than now, not older than [MAX_PRESS_AGE_SECS]), else
+     * null (the platform stamps it on arrival).
+     */
+    internal fun plausibleWhenMillis(at: Long?, nowSecs: Long): Long? =
+        if (at != null && at in 0..nowSecs && nowSecs - at <= MAX_PRESS_AGE_SECS) at * 1000 else null
+
     /** What an audit wrap asks of the carrier. */
     internal enum class AuditAction { UNLOCK, EMERGENCY_CALL, OTHER_CONTROL, IGNORE }
 
@@ -234,10 +264,9 @@ object Notifier {
     /** Pure text for [notifyEmergencyCall] — see [overrideText]. */
     internal fun emergencyCallText(who: WardName?): String =
         if (who != null) {
-            "${who.childName} used the emergency call button on ${who.deviceLabel}. " +
-                "Their phone's emergency dialler opened."
+            "${who.childName} used the emergency call button on ${who.deviceLabel}."
         } else {
-            "Your ward used the emergency call button. Their phone's emergency dialler opened."
+            "Your ward used the emergency call button."
         }
 
     /** Pure text for [notifyEmergencyControl] — see [overrideText]. */

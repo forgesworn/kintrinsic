@@ -254,6 +254,19 @@ class CarrierService : Service() {
                 op = verdict.optString("op", ""),
             )
             if (action == Notifier.AuditAction.IGNORE) return
+            val machine = verdict.optString("machine", "")
+            val wrapId = RelayFraming.eventId(eventJson)
+            // KEEP the wrap for the console, before and apart from the alert:
+            // the console reads a relay for only the last day, and an alert
+            // that was dismissed (or deduped below) must not be the only trace
+            // of a press. Held until the console has persisted it; a replay of
+            // a wrap already held is a no-op.
+            if (wrapId != null) {
+                runCatching { store.spoolInboxWrap(wrapId, machine, eventJson, now) }
+                    .onFailure { Log.w(TAG, "could not hold audit for the console: ${it.message}") }
+            }
+            // The press time the ward stamped, when it is a plain number.
+            val at = if (verdict.has("at")) verdict.optLong("at", -1L).takeIf { it >= 0 } else null
             // Alert ONCE. Every reconnect resubscribes 48h back and the
             // relay replays the same wrap, so without this the guardian is
             // re-buzzed about one unlock for two days (seen live: 6 alerts
@@ -262,9 +275,7 @@ class CarrierService : Service() {
             // per audit and published to every relay, so it also folds the
             // per-relay copies into one alert. An unreadable id falls
             // through to notify: a repeated alarm beats a missed emergency.
-            val wrapId = RelayFraming.eventId(eventJson)
             if (wrapId != null && !store.markSeen("audit:$wrapId")) return
-            val machine = verdict.optString("machine", "")
             when (action) {
                 Notifier.AuditAction.UNLOCK -> Notifier.notifyOverride(
                     this,
@@ -272,11 +283,23 @@ class CarrierService : Service() {
                     scope = verdict.optString("scope", ""),
                     durationSecs = verdict.optString("durationSecs", "").toLongOrNull() ?: 0L,
                     roster = store.roster(),
+                    at = at,
+                    wrapId = wrapId,
                 )
-                Notifier.AuditAction.EMERGENCY_CALL ->
-                    Notifier.notifyEmergencyCall(this, machine = machine, roster = store.roster())
-                Notifier.AuditAction.OTHER_CONTROL ->
-                    Notifier.notifyEmergencyControl(this, machine = machine, roster = store.roster())
+                Notifier.AuditAction.EMERGENCY_CALL -> Notifier.notifyEmergencyCall(
+                    this,
+                    machine = machine,
+                    roster = store.roster(),
+                    at = at,
+                    wrapId = wrapId,
+                )
+                Notifier.AuditAction.OTHER_CONTROL -> Notifier.notifyEmergencyControl(
+                    this,
+                    machine = machine,
+                    roster = store.roster(),
+                    at = at,
+                    wrapId = wrapId,
+                )
                 Notifier.AuditAction.IGNORE -> Unit
             }
             return

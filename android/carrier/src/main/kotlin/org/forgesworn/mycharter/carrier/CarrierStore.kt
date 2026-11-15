@@ -90,6 +90,24 @@ class CarrierStore(context: Context) {
         return true
     }
 
+    /** Hold a relay-delivered emergency audit until the console consumes it (see [InboxSpool]). */
+    @Synchronized
+    fun spoolInboxWrap(id: String, machine: String, wrapJson: String, nowSecs: Long) {
+        val next = InboxSpool.add(prefs.getString(K_INBOX_SPOOL, null), id, machine, wrapJson, nowSecs)
+        prefs.edit().putString(K_INBOX_SPOOL, next).apply()
+    }
+
+    /** The spooled entries, as the console's inbox shape. Never throws. */
+    @Synchronized
+    fun inboxSpool(): String = prefs.getString(K_INBOX_SPOOL, null) ?: "[]"
+
+    /** The console has persisted these ids (a JSON array of strings): forget them. */
+    @Synchronized
+    fun consumeInboxSpool(idsJson: String) {
+        val cur = prefs.getString(K_INBOX_SPOOL, null) ?: return
+        prefs.edit().putString(K_INBOX_SPOOL, InboxSpool.remove(cur, idsJson)).apply()
+    }
+
     /**
      * The local link's DNS-SD instance name, `Kintrinsic <4 hex>`: random,
      * chosen once per install and kept, so wards and network tools see one
@@ -112,6 +130,7 @@ class CarrierStore(context: Context) {
         const val K_RELAYS = "relays"
         const val K_ROSTER = "roster"
         const val K_SEEN = "seenReqIds"
+        const val K_INBOX_SPOOL = "relayInboxSpool"
         const val K_LINK_NAME = "linkInstanceName"
         const val SEEN_CAP = 200
     }
