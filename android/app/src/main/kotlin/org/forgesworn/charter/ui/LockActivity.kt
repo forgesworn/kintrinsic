@@ -90,6 +90,16 @@ class LockActivity : Activity() {
      */
     private var callStatusView: TextView? = null
     private var callStatusText = ""
+
+    /** The break-glass status line of the current render (read at write time). */
+    private var breakGlassStatusView: TextView? = null
+
+    /** Break-glass runs here, never queued behind the ask worker's relay IO. */
+    private val breakGlassExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "break-glass").apply { isDaemon = true }
+        }
+    }
     private lateinit var askThread: android.os.HandlerThread
     private lateinit var askWorker: android.os.Handler
 
@@ -331,6 +341,8 @@ class LockActivity : Activity() {
         runCatching { cameraManager?.unregisterTorchCallback(torchCallback) }
         ui.removeCallbacks(clockTick)
         callSequencer?.abandon()
+        // A break-glass already running finishes; none can be queued after.
+        breakGlassExecutor.shutdown()
         runCatching { unregisterReceiver(hideReceiver) }
         // Release the ask worker's native thread — otherwise it leaks per lock
         // lifecycle (same pattern as CharterService.onDestroy).
@@ -1073,6 +1085,7 @@ class LockActivity : Activity() {
         // The tree below replaces the old one: a status line written after this
         // point goes to a view of this render (see showCallStatus).
         callStatusView = null
+        breakGlassStatusView = null
         // Three deliberate zones rather than one centred blob: the clock owns
         // the top, what Kintrinsic has to say sits directly under it, and the
         // ward's ways out are anchored at the BOTTOM, within thumb reach. The
@@ -1485,6 +1498,7 @@ class LockActivity : Activity() {
         val bg = lifelineView.breakGlass
         if (bg != null) {
             val bgStatus = text("", 14f, CharterTheme.INK_TEXT_2, 8)
+            breakGlassStatusView = bgStatus
             root.addView(CharterTheme.secondaryButton(this, "", onInk = true).apply {
                 val mins = bg.durationMinutes
                 val fullScope = bg.scope == "full"
@@ -1525,24 +1539,41 @@ class LockActivity : Activity() {
                                 val pressedAt = System.currentTimeMillis() / 1000
                                 fired = true
                                 // The warden's lock and the journal's fsyncs are
-                                // never taken on the main thread: the break
-                                // goes to the ask worker, at the front of its
-                                // queue, and the result comes back here. The
-                                // hold looks and feels the same.
+                                // never taken on the main thread: the break goes
+                                // to an executor of its own (never queued behind
+                                // an ask's relay IO; it may still wait for the
+                                // warden lock, which is accepted), and the
+                                // result comes back here. The hold looks and
+                                // feels the same, and says it is working.
+                                bgStatus.text = "Working…"
                                 val onWorker = Runnable {
-                                    val res = CharterCore.breakGlass(pressedAt)
+                                    val res = runCatching { CharterCore.breakGlass(pressedAt) }
+                                        .onFailure { Log.w(TAG, "break-glass failed: ${it.javaClass.simpleName}") }
+                                        .getOrNull()
+                                    if (res == null) {
+                                        ui.post {
+                                            if (isDestroyed) return@post
+                                            (breakGlassStatusView ?: bgStatus).text =
+                                                "Couldn't use the emergency unlock. Try again."
+                                        }
+                                        return@Runnable
+                                    }
                                     if (res.allowed) {
                                         // The row in "Activity on this phone",
                                         // off this thread too, dated by the
-                                        // press and carrying the scope.
-                                        org.forgesworn.charter.enforce.EmergencyUse
-                                            .recordUnlock(applicationContext, pressedAt, res.scope)
+                                        // press and carrying the scope. Best
+                                        // effort: the unlock has happened.
+                                        runCatching {
+                                            org.forgesworn.charter.enforce.EmergencyUse
+                                                .recordUnlock(applicationContext, pressedAt, res.scope)
+                                        }
                                     }
                                     ui.post {
                                         if (isDestroyed) return@post
+                                        val line = breakGlassStatusView ?: bgStatus
                                         if (res.allowed) {
                                             if (res.scope == "full") {
-                                                bgStatus.text = "Unlocked."
+                                                line.text = "Unlocked."
                                                 runCatching { stopLockTask() }
                                                 finish()
                                             } else {
@@ -1552,18 +1583,19 @@ class LockActivity : Activity() {
                                                 // while the shade sits in front
                                                 // of them is the silent lie this
                                                 // whole screen exists to avoid.
-                                                bgStatus.text =
+                                                line.text =
                                                     "Your guardian has been told you need them. " +
                                                     "You can call the numbers above now."
                                             }
                                         } else {
-                                            bgStatus.text =
+                                            line.text =
                                                 "Emergency unlock isn't switched on for this phone."
                                         }
                                     }
                                 }
-                                if (!askWorker.postAtFrontOfQueue(onWorker)) {
-                                    // The worker is gone (the shade is closing):
+                                val queued = runCatching { breakGlassExecutor.execute(onWorker) }.isSuccess
+                                if (!queued) {
+                                    // The executor is gone (the shade is closing):
                                     // nothing here may block the main thread.
                                     Thread(onWorker, "break-glass").apply { isDaemon = true }.start()
                                 }
