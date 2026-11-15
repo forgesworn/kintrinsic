@@ -12,7 +12,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@forgesworn/qr": "^0.1.0",
+    "@forgesworn/qr": "0.2.0",
     "@yume-chan/adb": "^2.6.0",
     "@yume-chan/adb-credential-web": "^2.1.0",
     "@yume-chan/adb-daemon-webusb": "^2.3.2",
