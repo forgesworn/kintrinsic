@@ -25,6 +25,12 @@ data class RosterEntry(
      *  released entry. Null when absent or unusable: the carrier then claims no
      *  order between the press and the disconnect, and cannot age the entry out. */
     val releasedAt: Long? = null,
+    /** Until when (epoch MILLISECONDS) a released device is still admitted to the
+     *  local link, so its release answer and held audits can come back over the
+     *  home network. Sent only on a released entry while the console's grace runs;
+     *  null means no grace. The carrier ends the grace itself, even if the console
+     *  is gone (see [org.forgesworn.mycharter.link.LinkJson.allowedMachines]). */
+    val linkUntil: Long? = null,
 ) {
     /** True once the 14-day grace period after the disconnect is over. */
     fun expired(nowSecs: Long): Boolean =
@@ -53,8 +59,13 @@ fun releasedField(o: JSONObject): Boolean = o.opt("released") == true
  * The roster's `releasedAt`: a non-negative JSON number of unix seconds, else
  * null (a string, a boolean, a negative or a non-finite number is unusable).
  */
-fun releasedAtField(o: JSONObject): Long? {
-    val v = o.opt("releasedAt") as? Number ?: return null
+fun releasedAtField(o: JSONObject): Long? = nonNegativeNumber(o, "releasedAt")
+
+/** The roster's `linkUntil` (epoch milliseconds), under the same rule as [releasedAtField]. */
+fun linkUntilField(o: JSONObject): Long? = nonNegativeNumber(o, "linkUntil")
+
+private fun nonNegativeNumber(o: JSONObject, key: String): Long? {
+    val v = o.opt(key) as? Number ?: return null
     val d = v.toDouble()
     return if (d.isFinite() && d >= 0) v.toLong() else null
 }
@@ -98,6 +109,7 @@ data class RosterPayload(val entries: List<RosterEntry>) {
                 paired = pairedField(e) && !released,
                 released = released,
                 releasedAt = if (released) releasedAtField(e) else null,
+                linkUntil = if (released) linkUntilField(e) else null,
             )
         }
     }

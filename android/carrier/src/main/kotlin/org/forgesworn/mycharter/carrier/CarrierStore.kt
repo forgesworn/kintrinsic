@@ -69,7 +69,10 @@ class CarrierStore internal constructor(
                     .put("deviceLabel", e.deviceLabel)
                     .put("paired", e.paired)
                     .put("released", e.released)
-                    .also { o -> e.releasedAt?.let { o.put("releasedAt", it) } },
+                    .also { o ->
+                        e.releasedAt?.let { o.put("releasedAt", it) }
+                        e.linkUntil?.let { o.put("linkUntil", it) }
+                    },
             )
         }
         prefs.edit().putString(K_ROSTER, arr.toString()).apply()

@@ -106,6 +106,7 @@ class LocalLink(
         port = bound
         startLoop()
         reconcile()
+        scheduleGraceEnd()
     }
 
     /** Stop everything this class started. Worker thread. */
@@ -117,6 +118,7 @@ class LocalLink(
             (current === this).also { if (it) current = null }
         }
         stopped = true
+        handler.removeCallbacks(graceEnd)
         netCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
         netCallback = null
         lans.clear()
@@ -129,7 +131,10 @@ class LocalLink(
         if (owner) runCatching { GuardianNative.guardianLinkStop() }
     }
 
-    /** The roster changed: re-derive the admitted machines. Any thread. */
+    /**
+     * The roster changed (or a released device's link grace ran out): re-derive the
+     * admitted machines, and arrange to do it again when the next grace ends. Any thread.
+     */
     fun refreshAllowed() {
         if (!running) return
         try {
@@ -137,6 +142,18 @@ class LocalLink(
         } catch (t: Throwable) {
             Log.w(TAG, "allow failed: ${t.message}")
         }
+        scheduleGraceEnd()
+    }
+
+    private val graceEnd = Runnable { refreshAllowed() }
+
+    /** Wake at the earliest link grace's end, so it closes even if the console is backgrounded or killed. */
+    private fun scheduleGraceEnd() {
+        handler.removeCallbacks(graceEnd)
+        val now = System.currentTimeMillis()
+        val at = LinkJson.nextGraceEndMs(store.roster(), now) ?: return
+        // A millisecond past it, so the grace has certainly run out when this fires.
+        handler.postDelayed(graceEnd, (at - now).coerceAtLeast(0) + 1)
     }
 
     // ---- event thread ------------------------------------------------------

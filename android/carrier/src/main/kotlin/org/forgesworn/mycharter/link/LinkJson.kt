@@ -18,13 +18,25 @@ object LinkJson {
     const val UNAVAILABLE_SEND = """{"state":"unavailable"}"""
     private val SEND_STATES = setOf("sent", "queued", "rejected", "unavailable")
 
-    /** The machine keys admitted at the handshake: paired roster devices with
-     *  a well-formed key, deduplicated, as a JSON array. */
-    fun allowedJson(roster: List<RosterEntry>): String =
-        JSONArray(allowedMachines(roster)).toString()
+    /** The machine keys admitted at the handshake at [nowMs]: see [allowedMachines], as a JSON array. */
+    fun allowedJson(roster: List<RosterEntry>, nowMs: Long = System.currentTimeMillis()): String =
+        JSONArray(allowedMachines(roster, nowMs)).toString()
 
-    fun allowedMachines(roster: List<RosterEntry>): List<String> =
-        roster.filter { it.paired && HEX64.matches(it.machine) }.map { it.machine }.distinct()
+    /**
+     * Paired roster devices, and released ones still inside their link grace
+     * (`released && nowMs < linkUntil`), with a well-formed key, deduplicated.
+     * The grace is judged against the clock at each call, so one that has run out
+     * is never admitted, even from a roster stored before a restart.
+     */
+    fun allowedMachines(roster: List<RosterEntry>, nowMs: Long = System.currentTimeMillis()): List<String> =
+        roster.filter { admitted(it, nowMs) && HEX64.matches(it.machine) }.map { it.machine }.distinct()
+
+    private fun admitted(e: RosterEntry, nowMs: Long): Boolean =
+        e.paired || (e.released && e.linkUntil != null && nowMs < e.linkUntil)
+
+    /** The earliest moment (epoch ms) a released device's grace ends, or null when none is running. */
+    fun nextGraceEndMs(roster: List<RosterEntry>, nowMs: Long = System.currentTimeMillis()): Long? =
+        roster.filter { !it.paired && admitted(it, nowMs) && HEX64.matches(it.machine) }.mapNotNull { it.linkUntil }.minOrNull()
 
     /** A home network's own IPv4 addresses (from its `LinkProperties`): the
      *  only local addresses the listener takes wards on. */
