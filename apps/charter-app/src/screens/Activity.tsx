@@ -38,8 +38,19 @@ const OUTCOME_STYLE: Record<ActivityOutcome, OutcomeStyle> = {
   // The break-glass override: warm and visible, never scolding. The ward may
   // have needed it; the point is that it's in the open.
   override: { emoji: "🚨", tone: "warn", label: "Emergency unlock" },
-  emergency_call: { emoji: "🚨", tone: "warn", label: "Emergency call" },
+  emergency_call: { emoji: "🚨", tone: "warn", label: "Emergency call button" },
+  emergency_control: { emoji: "🚨", tone: "warn", label: "Emergency control" },
 };
+
+/** What an outcome this build does not know (a stored line from a newer build) looks like. */
+const FALLBACK_STYLE: OutcomeStyle = { emoji: "•", tone: "neutral", label: "Activity" };
+
+const styleOf = (outcome: string): OutcomeStyle =>
+  (OUTCOME_STYLE as Record<string, OutcomeStyle | undefined>)[outcome] ?? FALLBACK_STYLE;
+
+/** Emergency lines show the exact time they happened, not just "5m ago". */
+const showsExactTime = (outcome: string): boolean =>
+  outcome === "override" || outcome === "emergency_call" || outcome === "emergency_control";
 
 const TONE_BG: Record<Tone, string> = {
   ok: "var(--ok-bg)",
@@ -133,7 +144,7 @@ function groupByDay(events: ActivityEvent[], now: number): DayGroup[] {
 }
 
 function OutcomeIcon({ outcome }: { outcome: ActivityOutcome }) {
-  const style = OUTCOME_STYLE[outcome];
+  const style = styleOf(outcome);
   return (
     <span
       aria-hidden="true"
@@ -195,7 +206,7 @@ export function ActivityEventRow({
       <span className="row-main">
         <span className="row-title" style={{ fontWeight: 500 }}>
           <span className="muted" style={{ fontWeight: 700 }}>
-            {OUTCOME_STYLE[ev.outcome].label}.{" "}
+            {styleOf(ev.outcome).label}.{" "}
           </span>
           {ev.summary}
           {applied}
@@ -209,7 +220,7 @@ export function ActivityEventRow({
         <span className="row-sub">
           {who ? `${who} · ` : ""}
           <time dateTime={new Date(ev.ts).toISOString()}>
-            {ev.outcome === "override" || ev.outcome === "emergency_call"
+            {showsExactTime(ev.outcome)
               ? `${exactWhen(ev.ts, now)} · ${relativeTime(ev.ts, now)}`
               : relativeTime(ev.ts, now)}
           </time>

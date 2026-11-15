@@ -327,3 +327,66 @@ describe("emergency call audit (op call.emergency)", () => {
     expect(JSON.stringify(a)).not.toContain("112233");
   });
 });
+
+describe("an unknown op under outcome=override", () => {
+  const ctl = (op: string, extra: string[][] = []): string[][] => [
+    ["t", "charter-device"],
+    ["outcome", "override"],
+    ["op", op],
+    ...extra,
+  ];
+
+  it("is a generic emergency control, keyed on its op, machine and press time", () => {
+    const w = wrapFor({ tags: ctl("alarm.silence", [["at", String(NOW - 20)]]) });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "override.other",
+      control: { machine: machinePk, at: NOW - 20, key: `override:alarm.silence:${machinePk}:${NOW - 20}` },
+    });
+  });
+
+  it("keys on the wrap and dates by created_at without an at tag", () => {
+    const w = wrapFor({ createdAt: NOW - 90, tags: ctl("alarm.silence") });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "override.other",
+      control: { machine: machinePk, at: NOW - 90, key: `override:alarm.silence:wrap:${w.id}` },
+    });
+  });
+
+  it("two different ops in the same second are two keys, and neither is a break-glass or call key", () => {
+    const t = String(NOW - 5);
+    const a = unwrapDeviceAudit(wrapFor({ tags: ctl("x.one", [["at", t]]) }), guardianSk, NOW);
+    const b = unwrapDeviceAudit(wrapFor({ tags: ctl("x.two", [["at", t]]) }), guardianSk, NOW);
+    const keyOf = (v: typeof a) => (v?.op === "override.other" ? v.control.key : "");
+    expect(keyOf(a)).not.toBe(keyOf(b));
+    expect(keyOf(a)).not.toBe(`${machinePk}:${t}`);
+    expect(keyOf(a)).not.toBe(`emergencycall:${machinePk}:${t}`);
+  });
+
+  it("folds a rebuilt wrap (new id, same press) into one key", () => {
+    const tags = ctl("alarm.silence", [["at", String(NOW - 600)]]);
+    const a = unwrapDeviceAudit(wrapFor({ tags }), guardianSk, NOW);
+    const b = unwrapDeviceAudit(wrapFor({ tags, createdAt: NOW + 3600 }), guardianSk, NOW + 3600);
+    expect(a?.op === "override.other" && a.control.key).toBe(b?.op === "override.other" && b.control.key);
+  });
+
+  it("cuts a very long op in the key, and rejects a bad seal or any other outcome", () => {
+    const long = "x".repeat(500);
+    const a = unwrapDeviceAudit(wrapFor({ tags: ctl(long, [["at", String(NOW - 1)]]) }), guardianSk, NOW);
+    expect(a?.op === "override.other" && a.control.key.length).toBeLessThan(200);
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("a.b"), sealSk: generateSecretKey() }), guardianSk, NOW)).toBeNull();
+    expect(
+      unwrapDeviceAudit(wrapFor({ tags: [["outcome", "enacted"], ["op", "a.b"]] }), guardianSk, NOW),
+    ).toBeNull();
+  });
+
+  it("leaves an empty or missing op as it always was: not shown", () => {
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("") }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["outcome", "override"]] }), guardianSk, NOW)).toBeNull();
+  });
+
+  it("does not change the known ops", () => {
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("unlock.breakglass") }), guardianSk, NOW)?.op).toBe("unlock.breakglass");
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("call.emergency") }), guardianSk, NOW)?.op).toBe("call.emergency");
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("screenlock.reset") }), guardianSk, NOW)?.op).toBe("screenlock.reset");
+  });
+});

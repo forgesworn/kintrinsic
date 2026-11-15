@@ -109,12 +109,12 @@ describe("the child page", () => {
   it("shows an emergency-call press with its exact time and honest wording", () => {
     const pressed = Date.now() - 5 * 60_000;
     const summary =
-      "Used the emergency call button on Laptop. The emergency dialler opened; Kintrinsic can't see whether a call was made.";
+      "Used the emergency call button on Laptop. Kintrinsic can't see whether a call was made.";
     mount([
       { id: "a3", childId: "c1", ts: pressed, outcome: "emergency_call", summary, auditKey: "emergencycall:k" },
     ]);
     const row = Array.from(container.querySelectorAll("li.row")).find((li) =>
-      li.textContent?.includes("Emergency call."),
+      li.textContent?.includes("Emergency call button."),
     );
     expect(row).toBeTruthy();
     expect(row!.textContent).toContain("\u{1F6A8}");
@@ -124,6 +124,45 @@ describe("the child page", () => {
     expect(time.getAttribute("datetime")).toBe(new Date(pressed).toISOString());
     expect(time.textContent).toContain(exactWhen(pressed, Date.now()));
     expect(time.textContent).toContain(" · ");
+  });
+
+  it("shows an unknown emergency control generically, with its exact time", () => {
+    const pressed = Date.now() - 5 * 60_000;
+    mount([
+      {
+        id: "a4",
+        childId: "c1",
+        ts: pressed,
+        outcome: "emergency_control",
+        summary: "An emergency control was used on Laptop.",
+        auditKey: "override:x:k",
+      },
+    ]);
+    const row = Array.from(container.querySelectorAll("li.row")).find((li) =>
+      li.textContent?.includes("Emergency control."),
+    );
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain("An emergency control was used on Laptop.");
+    expect(row!.querySelector("time")!.textContent).toContain(" · ");
+  });
+
+  it("never crashes on a stored outcome this build does not know", () => {
+    mount([
+      {
+        id: "a5",
+        childId: "c1",
+        ts: Date.now() - 60_000,
+        outcome: "from_a_newer_build" as never,
+        summary: "Something a newer build recorded",
+      },
+      { id: "a6", childId: "c1", ts: Date.now() - 120_000, outcome: "enacted", summary: "You set up Laptop" },
+    ]);
+    const row = Array.from(container.querySelectorAll("li.row")).find((li) =>
+      li.textContent?.includes("Something a newer build recorded"),
+    );
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain("Activity.");
+    expect(container.textContent).toContain("You set up Laptop");
   });
 
   it("leaves other rows with the relative time alone", () => {

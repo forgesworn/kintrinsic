@@ -152,7 +152,7 @@ describe("emergency call button \u2192 Activity", () => {
     expect(got[0].childId).toBe("c1");
     expect(got[0].ts).toBe(pressedAt * 1000);
     expect(got[0].summary).toBe(
-      "Used the emergency call button on Laptop. The emergency dialler opened; Kintrinsic can't see whether a call was made.",
+      "Used the emergency call button on Laptop. Kintrinsic can't see whether a call was made.",
     );
     expect(got[0].auditKey).toBe(`emergencycall:${machinePk}:${pressedAt}`);
   });
@@ -265,5 +265,30 @@ describe("emergency call button \u2192 Activity", () => {
     const got = lines();
     expect(got).toHaveLength(1);
     expect(got[0].ts).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("an unknown emergency control lands as one generic line, and a call in the same second is another", async () => {
+    const control = overrideWrap({
+      guardianPk,
+      machineSk,
+      tags: [
+        ["t", "charter-device"],
+        ["outcome", "override"],
+        ["op", "alarm.silence"],
+        ["at", String(pressedAt)],
+      ],
+      createdAt: Math.floor(Date.now() / 1000),
+    });
+    relayHolds.wraps = [control, callWrap()];
+    bridge([control]);
+    mount();
+    await settle();
+    await settle(6_000);
+    const got = all();
+    expect(got.map((l) => l.outcome).sort()).toEqual(["emergency_call", "emergency_control"]);
+    const generic = got.find((l) => l.outcome === "emergency_control")!;
+    expect(generic.summary).toBe("An emergency control was used on Laptop.");
+    expect(generic.ts).toBe(pressedAt * 1000);
+    expect(generic.auditKey).toBe(`override:alarm.silence:${machinePk}:${pressedAt}`);
   });
 });

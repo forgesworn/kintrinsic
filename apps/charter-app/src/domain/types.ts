@@ -559,7 +559,10 @@ export type ActivityOutcome =
   | "override"
   /** The ward used the emergency-call button on their lock screen. The
    *  emergency dialler opened; whether a call was made is not known. */
-  | "emergency_call";
+  | "emergency_call"
+  /** The ward used an emergency control this build does not know by name
+   *  (a newer ward's `outcome=override` with another op). */
+  | "emergency_control";
 
 export interface ActivityEvent {
   id: string;

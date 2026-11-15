@@ -22,10 +22,16 @@ export function overrideSummary(
 }
 
 /**
- * The Activity sentence for a use of the emergency-call button. The row already
- * leads with "Emergency call.". The wording is deliberately honest about what is
- * known: the dialler opened, but Kintrinsic cannot see whether a call was made.
+ * The Activity sentence for a use of the emergency-call button. The row leads
+ * with "Emergency call button.". Deliberately honest about what is known: the
+ * ward's phone started the emergency call screen, but Kintrinsic cannot see
+ * whether a call was made.
  */
 export function emergencyCallSummary(deviceLabel: string): string {
-  return `Used the emergency call button on ${deviceLabel}. The emergency dialler opened; Kintrinsic can't see whether a call was made.`;
+  return `Used the emergency call button on ${deviceLabel}. Kintrinsic can't see whether a call was made.`;
+}
+
+/** The Activity sentence for an emergency control this build does not know by name. */
+export function emergencyControlSummary(deviceLabel: string): string {
+  return `An emergency control was used on ${deviceLabel}.`;
 }

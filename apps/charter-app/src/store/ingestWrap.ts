@@ -8,7 +8,7 @@
 // never what is checked about it. So both routes call this one function.
 
 import type { NostrEvent } from "nostr-tools";
-import { unwrapDeviceAudit, type DeviceEmergencyCall, type DeviceOverride } from "../wire/audit";
+import { unwrapDeviceAudit, type DeviceEmergencyCall, type DeviceEmergencyControl, type DeviceOverride } from "../wire/audit";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
 import { unwrapStatus, type DeviceStatus } from "../wire/status";
 
@@ -40,6 +40,8 @@ export interface WrapIngestContext {
    * and `hasAudit` with the unlocks: they are op-prefixed, so they never clash.
    */
   ingestEmergencyCall: (call: DeviceEmergencyCall) => boolean;
+  /** Take in an emergency control this build does not know by name; false = retry later. */
+  ingestEmergencyControl: (control: DeviceEmergencyControl) => boolean;
 }
 
 export type WrapIngestResult =
@@ -76,6 +78,7 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
     const audit = unwrapDeviceAudit(w, ctx.guardianSk);
     if (audit?.op === "unlock.breakglass") return ingestOverride(w, audit.override, ctx);
     if (audit?.op === "call.emergency") return ingestEmergencyCall(w, audit.call, ctx);
+    if (audit?.op === "override.other") return ingestEmergencyControl(w, audit.control, ctx);
     if (audit?.op === "screenlock.reset") {
       // The ward's own record of a reset. The Screen lock card reads the
       // outcome from STATUS, so there is nothing to land here; it is
@@ -148,4 +151,20 @@ function ingestEmergencyCall(
   ctx.seenAudits.add(call.key);
   ctx.handledWraps.add(w.id);
   return { kind: "audit", key: call.key };
+}
+
+/** An emergency control this build does not know: lands exactly like a call press. */
+function ingestEmergencyControl(
+  w: NostrEvent,
+  control: DeviceEmergencyControl,
+  ctx: WrapIngestContext,
+): WrapIngestResult {
+  if (ctx.seenAudits.has(control.key) || ctx.hasAudit(control.key)) {
+    ctx.handledWraps.add(w.id);
+    return { kind: "audit", key: control.key };
+  }
+  if (!ctx.ingestEmergencyControl(control)) return { kind: "unlanded" };
+  ctx.seenAudits.add(control.key);
+  ctx.handledWraps.add(w.id);
+  return { kind: "audit", key: control.key };
 }
