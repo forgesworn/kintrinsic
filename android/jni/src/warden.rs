@@ -2179,9 +2179,15 @@ impl Warden {
     /// press still happens, but a guardian who is never told should not also
     /// be silent in the log. Whether it was journaled.
     fn journal_audit(&self, tags: Vec<Vec<String>>, what: &str) -> bool {
-        let ok = self
-            .break_glass
-            .queue_audit(tags, self.guardian_hex().as_deref());
+        // Nobody to tell: an audit journaled now would carry no guardian, and
+        // go to whoever pairs next (a screen-lock outcome that reaches the
+        // warden after a release, for one). Refuse it, as an unpaired phone
+        // spools nothing.
+        let Some(guardian) = self.guardian_hex() else {
+            eprintln!("charter: {what} audit not journaled: this phone is not paired");
+            return false;
+        };
+        let ok = self.break_glass.queue_audit(tags, Some(&guardian));
         if !ok {
             eprintln!(
                 "charter: {what} audit could not be journaled; the guardian will not be told of it"
@@ -7554,7 +7560,7 @@ mod tests {
                 .any(|e| e
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("pending-audits.json.bad-")),
+                    .starts_with("pending-audits.json.released-")),
             "it was set aside, not lost"
         );
 
@@ -14328,6 +14334,40 @@ mod screen_lock_tests {
         std::fs::remove_dir(&blocker).unwrap();
         w.tick(None, true, (t0 + 3) as i64, None);
         assert_eq!(on_disk(), R::Applied, "written on the next tick");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// R7: a screen-lock outcome that reaches the warden after a release (the
+    /// ledger survives it) is not journaled: the phone is unpaired, so the
+    /// entry would carry no guardian and go to whoever pairs next. While paired
+    /// it is journaled, and stamped with the guardian.
+    #[test]
+    fn a_screen_lock_outcome_after_a_release_is_not_journaled() {
+        let (mut w, base, g, machine, t0) = ward(concat!(module_path!(), line!()));
+        let a = reset(&g.signer, &machine, A, t0, "123456");
+        assert_eq!(w.absorb_screen_lock_reset(&a, t0), AckResult::Applied);
+        assert!(!w.take_screen_lock_reset().is_empty());
+        let b = reset(&g.signer, &machine, B, t0 + 1, "123456");
+        assert_eq!(w.absorb_screen_lock_reset(&b, t0 + 1), AckResult::Applied);
+        assert!(!w.take_screen_lock_reset().is_empty());
+
+        // Paired: journaled, and stamped.
+        assert_eq!(w.report_screen_lock_reset(A, "applied", t0 + 2), Ok(true));
+        assert_eq!(w.break_glass.entries().len(), 1);
+        assert_eq!(
+            w.break_glass.entries()[0].guardian,
+            Some(g.pubkey().to_hex())
+        );
+
+        // The release lands before Kotlin reports B's outcome.
+        w.apply_release(t0 + 3);
+        assert!(w.guardian_hex().is_none());
+        assert_eq!(w.report_screen_lock_reset(B, "applied", t0 + 4), Ok(true));
+        assert!(
+            !w.journal_audit(crate::breakglass::emergency_call_audit_tags(t0 + 5), "test"),
+            "nobody to tell"
+        );
+        assert!(w.break_glass.entries().is_empty(), "nothing left to leak");
         let _ = std::fs::remove_dir_all(&base);
     }
 
