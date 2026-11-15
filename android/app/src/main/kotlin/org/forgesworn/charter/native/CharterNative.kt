@@ -145,6 +145,11 @@ object CharterNative {
     /** The ward's emergency override: unlocks now, tells the guardian. */
     external fun charterBreakGlass(nowUnix: Long): String
 
+    /** The shade's emergency-call button started the dialler at [nowUnix]:
+     *  journal the `call.emergency` audit for the guardian. `{"ok":true}`, or
+     *  `{"ok":false,"reason":…}` / `{"error":…}` when nothing was journaled. */
+    external fun charterEmergencyCallUsed(nowUnix: Long): String
+
     /** The ward-facing "your charter" mirror (spec D8):
      *  `{"locked","minutesLeft","detail","lines"}` JSON, or "" when no charter
      *  is configured yet. Takes the warden lock — worker thread only. */

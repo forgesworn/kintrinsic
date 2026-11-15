@@ -138,7 +138,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 7
+    const val EXPECTED_ABI_VERSION = 8
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -863,6 +863,22 @@ object CharterCore {
             )
         }.getOrDefault(BreakGlassResult(false, reason = "unavailable"))
     }
+
+    /**
+     * Report that the shade's emergency-call button started the emergency
+     * dialler at [nowUnix], so the guardian is told. True only when the
+     * warden journaled it (it is then sent on the next poll, whatever the
+     * network is doing). Never throws: it reports an event and must not be able
+     * to change anything about the call. Takes the warden lock, so never call
+     * it from the main thread.
+     */
+    fun emergencyCallUsed(nowUnix: Long): Boolean =
+        runCatching { parseOk(jni().charterEmergencyCallUsed(nowUnix)) }.getOrDefault(false)
+
+    /** True only for `{"ok":true,...}`; anything else (an error, a refusal, an
+     *  empty or unreadable answer) is false. Pure. */
+    internal fun parseOk(raw: String): Boolean =
+        runCatching { org.json.JSONObject(raw).optBoolean("ok", false) }.getOrDefault(false)
 
     /** The ward-facing "your charter" mirror (spec D8). */
     data class ScheduleView(

@@ -571,19 +571,22 @@ class LockActivity : Activity() {
 
         fun place() {
             reset()
-            // The emergency entry in "Activity on this phone" is written only
-            // after startActivity has returned, off this thread, and can never
-            // change whether or how the call starts (see EmergencyUse).
+            // The emergency entry in "Activity on this phone" and the report to
+            // the guardian happen only after startActivity has returned, off
+            // this thread, and can never change whether or how the call starts
+            // (see EmergencyUse).
             val appContext = applicationContext
             val placed = org.forgesworn.charter.enforce.EmergencyUse.placeAndRecord(
                 start = {
                     val plan = callIntent(number, emergency)
                     startActivity(plan.intent)
-                    // Only the shade's own emergency control is logged: a
-                    // lifeline entry that happens to be an emergency number is not.
+                    // Only the shade's own emergency control is logged and
+                    // reported: a lifeline entry that happens to be an
+                    // emergency number is not.
                     plan.emergency && emergency
                 },
-                record = { org.forgesworn.charter.enforce.EmergencyUse.record(appContext) },
+                record = { at -> org.forgesworn.charter.enforce.EmergencyUse.record(appContext, at) },
+                report = { at -> org.forgesworn.charter.enforce.EmergencyUse.report(at) },
             )
             if (!placed) status.text = "Couldn't start the call — tell your guardian."
         }
@@ -1339,17 +1342,18 @@ class LockActivity : Activity() {
                             v.performHapticFeedback(
                                 android.view.HapticFeedbackConstants.VIRTUAL_KEY,
                             )
-                            // Say plainly what happens — the transparency IS
-                            // the mechanism, so it must never be a surprise.
+                            // Say plainly what the hold does.
                             //
                             // Only `full` actually opens the phone (the warden
-                            // lifts the lock on SCOPE_FULL alone). Under `calls`
-                            // the shade stays and the guardian is told, so the
-                            // promise has to be the one the device can keep:
-                            // calling for help, not an unlock.
+                            // lifts the lock on SCOPE_FULL alone), so that text
+                            // says only that. Under `calls` the shade stays and
+                            // telling the guardian is what the button does, so
+                            // the promise has to be the one the device can
+                            // keep: calling for help, not an unlock. That text
+                            // names it as the action, not as a warning.
                             bgStatus.text = if (fullScope) {
                                 "Keep holding: this opens your whole phone for " +
-                                    "$mins minutes, and your guardian will be told."
+                                    "$mins minutes."
                             } else {
                                 "Keep holding: this tells your guardian you need them " +
                                     "now. The phone stays locked — the numbers above " +
@@ -1359,11 +1363,14 @@ class LockActivity : Activity() {
                                 v.performHapticFeedback(
                                     android.view.HapticFeedbackConstants.LONG_PRESS,
                                 )
-                                val res = CharterCore.breakGlass(
-                                    System.currentTimeMillis() / 1000,
-                                )
+                                val pressedAt = System.currentTimeMillis() / 1000
+                                val res = CharterCore.breakGlass(pressedAt)
                                 fired = true
                                 if (res.allowed) {
+                                    // The row in "Activity on this phone", off
+                                    // the main thread, dated by the press.
+                                    org.forgesworn.charter.enforce.EmergencyUse
+                                        .recordUnlock(applicationContext, pressedAt)
                                     if (res.scope == "full") {
                                         bgStatus.text = "Unlocked. Your guardian has been told."
                                         runCatching { stopLockTask() }

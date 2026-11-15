@@ -109,6 +109,26 @@ class ActivityLogTest {
     }
 
     @Test
+    fun `the emergency unlock kind has its own cap, round-trips and is never pushed out by another kind`() {
+        val unlock = ActivityEntry(at1942, ActivityKind.EMERGENCY_UNLOCK)
+        assertEquals(
+            """{"v":1,"at":$at1942,"kind":"emergency_unlock"}""",
+            ActivityFormat.encode(unlock),
+        )
+        assertEquals(unlock, ActivityFormat.decode(ActivityFormat.encode(unlock)))
+        val entries = buildList {
+            add(unlock)
+            for (i in 0 until 300) add(ActivityEntry(100L + i, ActivityKind.EMERGENCY))
+            for (i in 0 until 250) add(ActivityEntry(1000L + i, ActivityKind.EMERGENCY_UNLOCK))
+        }
+        val kept = ActivityRetention.compact(entries)
+        assertEquals(200, kept.count { it.kind == ActivityKind.EMERGENCY })
+        assertEquals(200, kept.count { it.kind == ActivityKind.EMERGENCY_UNLOCK })
+        assertEquals(1249L, kept.last().at)
+        assertTrue(ActivityKind.ALL.size * ActivityRetention.PER_KIND < ActivityRetention.COMPACT_ABOVE_LINES)
+    }
+
+    @Test
     fun `a kind under its cap loses nothing`() {
         val entries = (0 until 50).map { ActivityEntry(it.toLong(), ActivityKind.EMERGENCY) }
         assertEquals(entries, ActivityRetention.compact(entries))
@@ -205,7 +225,7 @@ class ActivityLogTest {
         assertEquals(listOf(at1942 + 10_000, at1942 + 7200, at1942 + 3600, at1942), feed.rows.map { it.at })
         assertTrue(feed.rows[0].text.contains("Kintrinsic updated from 0.8.1 to 0.8.2"))
         assertTrue(feed.rows[1].text.contains("Screen lock changed"))
-        assertTrue(feed.rows[2].text.contains("Emergency button"))
+        assertTrue(feed.rows[2].text.contains("Emergency call button"))
     }
 
     @Test
@@ -286,7 +306,7 @@ class ActivityLogTest {
         // Only the acknowledgement time is damaged: the reset's own time, its
         // outcome and the fact that OK was tapped all stay.
         assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · Screen lock removed by your guardian · done · OK tapped (time unreadable)"))
-        assertTrue(texts.toString(), texts.contains("Emergency button used on the lock screen (time unreadable)"))
+        assertTrue(texts.toString(), texts.contains("Emergency call button used on the lock screen (time unreadable)"))
         // The row with a good time keeps it; only the bad `until` is dropped.
         assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)"))
         assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · Kintrinsic updated from 0.8.1 to 0.8.2"))
@@ -378,7 +398,8 @@ class ActivityLogTest {
     @Test
     fun `each activity row reads as the spec says`() {
         fun row(e: ActivityEntry) = ActivityCopy.row(e, london)
-        assertEquals("19:42, 14 Nov · Emergency button used on the lock screen", row(ActivityEntry(at1942, ActivityKind.EMERGENCY)))
+        assertEquals("19:42, 14 Nov · Emergency call button used on the lock screen", row(ActivityEntry(at1942, ActivityKind.EMERGENCY)))
+        assertEquals("19:42, 14 Nov · Emergency unlock used on the lock screen", row(ActivityEntry(at1942, ActivityKind.EMERGENCY_UNLOCK)))
         assertEquals(
             "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)",
             row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON)),
@@ -784,5 +805,130 @@ class ActivityLogTest {
         assertFalse(recorded)
         queued!!.run()
         assertTrue(recorded)
+    }
+
+    @Test
+    fun `the report follows the record, both get the press time taken as the call started`() {
+        val order = mutableListOf<String>()
+        var tick = 0L
+        val placed = EmergencyUse.placeAndRecord(
+            start = { order += "start"; true },
+            record = { order += "record@$it" },
+            report = { order += "report@$it" },
+            runner = { it.run() },
+            clock = { 1_000L + tick++ },
+        )
+        assertTrue(placed)
+        // The clock is read once, before the call starts.
+        assertEquals(listOf("start", "record@1000", "report@1000"), order)
+        assertEquals(1L, tick)
+    }
+
+    @Test
+    fun `the report is not run on the calling path`() {
+        var queued: Runnable? = null
+        var reported = 0L
+        assertTrue(
+            EmergencyUse.placeAndRecord(
+                start = { true },
+                record = {},
+                report = { reported = it },
+                runner = { queued = it },
+                clock = { 77L },
+            ),
+        )
+        assertEquals(0L, reported)
+        queued!!.run()
+        assertEquals(77L, reported)
+    }
+
+    @Test
+    fun `a failing record never skips the report, nor a failing report the record, and the call is unchanged`() {
+        val failures = mutableListOf<Throwable>()
+        var reported = false
+        assertTrue(
+            EmergencyUse.placeAndRecord(
+                start = { true },
+                record = { error("disk full") },
+                report = { reported = true },
+                runner = { it.run() },
+                onFailure = { failures += it },
+            ),
+        )
+        assertTrue(reported)
+        assertEquals(1, failures.size)
+
+        var recorded = false
+        assertTrue(
+            EmergencyUse.placeAndRecord(
+                start = { true },
+                record = { recorded = true },
+                report = { error("no warden") },
+                runner = { it.run() },
+                onFailure = { failures += it },
+            ),
+        )
+        assertTrue(recorded)
+        assertEquals(2, failures.size)
+
+        // Both failing, and onFailure itself throwing: still the call's result.
+        assertTrue(
+            EmergencyUse.placeAndRecord(
+                start = { true },
+                record = { error("a") },
+                report = { error("b") },
+                runner = { it.run() },
+                onFailure = { error("c") },
+            ),
+        )
+    }
+
+    @Test
+    fun `a call that did not start, or a lifeline number, reports nothing`() {
+        var reported = 0
+        assertFalse(
+            EmergencyUse.placeAndRecord(
+                start = { error("no dialer") },
+                record = {},
+                report = { reported++ },
+                runner = { it.run() },
+            ),
+        )
+        assertTrue(
+            EmergencyUse.placeAndRecord(
+                start = { false }, // a lifeline entry, even one that is an emergency number
+                record = {},
+                report = { reported++ },
+                runner = { it.run() },
+            ),
+        )
+        assertEquals(0, reported)
+    }
+
+    @Test
+    fun `the emergency unlock row is written by the runner with the press time, and a failure changes nothing`() {
+        val written = mutableListOf<ActivityEntry>()
+        var queued: Runnable? = null
+        EmergencyUse.recordUnlock(at = 5_000L, append = { written += it; true }, runner = { queued = it })
+        assertTrue("nothing written on the calling path", written.isEmpty())
+        queued!!.run()
+        assertEquals(listOf(ActivityEntry(5_000L, ActivityKind.EMERGENCY_UNLOCK)), written)
+
+        // A write that throws, a write that fails, and a runner that throws
+        // are all swallowed.
+        val failures = mutableListOf<Throwable>()
+        EmergencyUse.recordUnlock(5_001L, { error("disk") }, { it.run() }, { failures += it })
+        EmergencyUse.recordUnlock(5_002L, { false }, { it.run() }, { failures += it })
+        EmergencyUse.recordUnlock(5_003L, { true }, { throw IllegalStateException("rejected") }, { failures += it })
+        assertEquals(2, failures.size)
+    }
+
+    @Test
+    fun `only an ok true answer from the warden counts as reported`() {
+        assertTrue(CharterCore.parseOk("""{"ok":true}"""))
+        assertFalse(CharterCore.parseOk("""{"ok":false,"reason":"not-paired"}"""))
+        assertFalse(CharterCore.parseOk("""{"error":"not initialized"}"""))
+        assertFalse(CharterCore.parseOk(""))
+        assertFalse(CharterCore.parseOk("not json"))
     }
 }

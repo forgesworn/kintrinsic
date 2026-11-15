@@ -15,12 +15,12 @@ import org.junit.Test
  */
 class AbiCheckTest {
 
-    /** ABI 7: the guardian screen-lock reset (`charterTakeScreenLockReset`,
-     *  `charterReportScreenLockReset`, `charterSetScreenLockState`). Moves
-     *  together with `ABI_VERSION` in android/jni/src/lib.rs. */
+    /** ABI 8: the emergency-call report (`charterEmergencyCallUsed`), on top of
+     *  7, the guardian screen-lock reset. Moves together with `ABI_VERSION` in
+     *  android/jni/src/lib.rs. */
     @Test
-    fun thisBuildExpectsAbiSeven() {
-        assertEquals(7, CharterCore.EXPECTED_ABI_VERSION)
+    fun thisBuildExpectsAbiEight() {
+        assertEquals(8, CharterCore.EXPECTED_ABI_VERSION)
     }
 
     @Test

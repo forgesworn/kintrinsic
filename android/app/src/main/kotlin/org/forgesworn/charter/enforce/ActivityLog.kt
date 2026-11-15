@@ -19,10 +19,12 @@ import java.util.concurrent.Executors
  * "Activity on this phone": a permanent, child-visible log of the things that
  * are out of the ordinary, beside the screen-lock history.
  *
- * Everything here is local. Nothing in this log is sent to the guardian, and
- * nothing a user typed (a PIN, a phone number) ever reaches it. The events are
- * few and fixed: the emergency control on the lock shade, USB debugging
- * switching on or off, the pairing changing, and the app being updated.
+ * Everything here is local: this file is only ever read by this phone, and
+ * nothing a user typed (a PIN, a phone number) ever reaches it. (What the
+ * guardian is told is a separate matter, carried by the warden's own audits.)
+ * The events are few and fixed: the emergency controls on the lock shade, USB
+ * debugging switching on or off, the pairing changing, and the app being
+ * updated.
  *
  * The file is append-only with no delete and no command, in device-protected
  * storage OUTSIDE the warden's base dir, so a guardian's release (which wipes
@@ -31,7 +33,10 @@ import java.util.concurrent.Executors
 
 /** What happened. A small closed set; unknown kinds are skipped on read. */
 object ActivityKind {
+    /** The shade's emergency-call button started the dialler. */
     const val EMERGENCY = "emergency"
+    /** The shade's emergency unlock took effect. */
+    const val EMERGENCY_UNLOCK = "emergency_unlock"
     const val DEBUGGING_ON = "debugging_on"
     const val DEBUGGING_OFF = "debugging_off"
     const val ADB_ON = "adb_on"
@@ -44,7 +49,7 @@ object ActivityKind {
     const val UPDATED = "updated"
 
     val ALL: Set<String> = setOf(
-        EMERGENCY, DEBUGGING_ON, DEBUGGING_OFF, ADB_ON, ADB_OFF, ADB_WIFI_ON, ADB_WIFI_OFF, PAIRED, UNPAIRED, GUARDIAN_CHANGED, UPDATED,
+        EMERGENCY, EMERGENCY_UNLOCK, DEBUGGING_ON, DEBUGGING_OFF, ADB_ON, ADB_OFF, ADB_WIFI_ON, ADB_WIFI_OFF, PAIRED, UNPAIRED, GUARDIAN_CHANGED, UPDATED,
     )
 }
 
@@ -265,7 +270,8 @@ object ActivityCopy {
 
     /** What happened, without when. */
     fun what(e: ActivityEntry, zone: ZoneId = ZoneId.systemDefault()): String = when (e.kind) {
-        ActivityKind.EMERGENCY -> "Emergency button used on the lock screen"
+        ActivityKind.EMERGENCY -> "Emergency call button used on the lock screen"
+        ActivityKind.EMERGENCY_UNLOCK -> "Emergency unlock used on the lock screen"
         // The guardian's restriction, not the switch itself: allowing it does
         // not turn adb on, and blocking it does not mean it was on.
         ActivityKind.DEBUGGING_ON ->
@@ -339,7 +345,7 @@ object ActivityFeed {
     /** How many rows show before "Show all". */
     const val SHORT = 10
     const val UNREADABLE = "Some activity couldn't be read."
-    const val EMPTY = "Nothing yet. Screen lock changes, emergency calls, USB debugging and pairing changes will show here."
+    const val EMPTY = "Nothing yet. Screen lock changes, emergency button use, USB debugging and pairing changes will show here."
     const val SUB = "Things out of the ordinary. Kept on this phone for as long as Kintrinsic is on it, and nobody can delete them."
 
     /** [at] is the time the row sorts by (unix secs). [screenLock] rows are
@@ -604,31 +610,46 @@ class ActivityWatcher(
 }
 
 /**
- * The lock shade's emergency control. The log write is best-effort and after
- * the fact: it happens only once the emergency dialer or call has started, off
- * the main thread, wrapped so it can never throw, and it can never block,
- * delay or change the call path. A failed write is logged and dropped.
+ * The lock shade's emergency controls. Everything here is best-effort and
+ * after the fact: it happens only once the emergency dialler or call has
+ * started (or the emergency unlock has taken effect), off the main thread,
+ * wrapped so it can never throw, and it can never block, delay or change the
+ * call path. A failed step is logged and dropped, and one failing never skips
+ * the other.
  */
 object EmergencyUse {
 
-    /** One daemon thread for the odd log write, so the call path never waits on disk. */
+    /** One daemon thread for the odd log write and report, so the call path
+     *  never waits on disk or on the warden. */
     private val io by lazy {
         Executors.newSingleThreadExecutor { r -> Thread(r, "activity-log").apply { isDaemon = true } }
+    }
+
+    private fun clockSecs() = System.currentTimeMillis() / 1000
+
+    /** `Log` is a stub off-device (host unit tests). */
+    private fun warn(msg: String) {
+        runCatching { Log.w("ActivityLog", msg) }
     }
 
     /**
      * Runs [start], which starts the call (throwing if it could not) and
      * returns whether it was an emergency one. Returns whether the call
      * started, exactly as without any logging. When it started and was an
-     * emergency, [record] is handed to [runner]; anything either of them
-     * throws is passed to [onFailure] and dropped.
+     * emergency, [record] (the local activity row) and then [report] (tell the
+     * guardian) are handed to [runner], each in its own try block, both given
+     * the press time [clock] gave as the call started. Anything either throws
+     * is passed to [onFailure] and dropped.
      */
     fun placeAndRecord(
         start: () -> Boolean,
-        record: () -> Unit,
+        record: (nowUnix: Long) -> Unit,
+        report: (nowUnix: Long) -> Unit = {},
         runner: (Runnable) -> Unit = { io.execute(it) },
-        onFailure: (Throwable) -> Unit = { Log.w("ActivityLog", "emergency use not logged: ${it.javaClass.simpleName}") },
+        onFailure: (Throwable) -> Unit = { warn("emergency use not logged: ${it.javaClass.simpleName}") },
+        clock: () -> Long = ::clockSecs,
     ): Boolean {
+        val at = runCatching(clock).getOrDefault(0L)
         val emergency = try {
             start()
         } catch (_: Throwable) {
@@ -641,7 +662,12 @@ object EmergencyUse {
                 runner(
                     Runnable {
                         try {
-                            record()
+                            record(at)
+                        } catch (t: Throwable) {
+                            runCatching { onFailure(t) }
+                        }
+                        try {
+                            report(at)
                         } catch (t: Throwable) {
                             runCatching { onFailure(t) }
                         }
@@ -655,8 +681,50 @@ object EmergencyUse {
     }
 
     /** Appends the `emergency` entry (called by [placeAndRecord]'s runner). */
-    fun record(context: Context, nowUnix: Long = System.currentTimeMillis() / 1000) {
+    fun record(context: Context, nowUnix: Long = clockSecs()) {
         val ok = FileActivityLog.get(context).append(ActivityEntry(nowUnix, ActivityKind.EMERGENCY))
-        if (!ok) Log.w("ActivityLog", "emergency use could not be written")
+        if (!ok) warn("emergency use could not be written")
+    }
+
+    /** Tells the guardian the emergency button was used (the warden journals it
+     *  and sends it on its next poll). Runs on the runner's worker thread. */
+    fun report(nowUnix: Long) {
+        if (!CharterCore.emergencyCallUsed(nowUnix)) {
+            warn("emergency use not reported")
+        }
+    }
+
+    /**
+     * The emergency unlock took effect: hands the `emergency_unlock` row to
+     * [runner] (a worker thread by default, never the caller's), dated [at].
+     * Never throws and never changes the unlock. [append] is the log write.
+     */
+    fun recordUnlock(
+        at: Long,
+        append: (ActivityEntry) -> Boolean,
+        runner: (Runnable) -> Unit = { io.execute(it) },
+        onFailure: (Throwable) -> Unit = { warn("emergency unlock not logged: ${it.javaClass.simpleName}") },
+    ) {
+        try {
+            runner(
+                Runnable {
+                    try {
+                        if (!append(ActivityEntry(at, ActivityKind.EMERGENCY_UNLOCK))) {
+                            warn("emergency unlock could not be written")
+                        }
+                    } catch (t: Throwable) {
+                        runCatching { onFailure(t) }
+                    }
+                },
+            )
+        } catch (t: Throwable) {
+            runCatching { onFailure(t) }
+        }
+    }
+
+    /** [recordUnlock] against the real log. */
+    fun recordUnlock(context: Context, at: Long) {
+        val log = FileActivityLog.get(context)
+        recordUnlock(at, { log.append(it) })
     }
 }
