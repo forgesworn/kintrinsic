@@ -244,28 +244,40 @@ class CarrierService : Service() {
         } finally {
             sk.fill(0)
         }
-        // The break-glass override: the ward opened their phone in an
-        // emergency. Alert NOW — the whole design trades prevention for
+        // The ward's emergency controls: the break-glass unlock (the ward
+        // opened their phone) and the emergency-call button (the dialler
+        // opened). Alert NOW — the whole design trades prevention for
         // immediate transparency, so a late notification breaks the deal.
         if (verdict.optString("type") == "audit") {
-            if (verdict.optString("outcome") == "override") {
-                // Alert ONCE. Every reconnect resubscribes 48h back and the
-                // relay replays the same wrap, so without this the guardian is
-                // re-buzzed about one unlock for two days (seen live: 6 alerts
-                // for one press, 2026-08-09). The audit rumor carries no id of
-                // its own, so the key is the outer wrap id — one wrap is built
-                // per audit and published to every relay, so it also folds the
-                // per-relay copies into one alert. An unreadable id falls
-                // through to notify: a repeated alarm beats a missed emergency.
-                val wrapId = RelayFraming.eventId(eventJson)
-                if (wrapId != null && !store.markSeen("audit:$wrapId")) return
-                Notifier.notifyOverride(
+            val action = Notifier.auditAction(
+                outcome = verdict.optString("outcome", ""),
+                op = verdict.optString("op", ""),
+            )
+            if (action == Notifier.AuditAction.IGNORE) return
+            // Alert ONCE. Every reconnect resubscribes 48h back and the
+            // relay replays the same wrap, so without this the guardian is
+            // re-buzzed about one unlock for two days (seen live: 6 alerts
+            // for one press, 2026-08-09). The audit rumor carries no id of
+            // its own, so the key is the outer wrap id — one wrap is built
+            // per audit and published to every relay, so it also folds the
+            // per-relay copies into one alert. An unreadable id falls
+            // through to notify: a repeated alarm beats a missed emergency.
+            val wrapId = RelayFraming.eventId(eventJson)
+            if (wrapId != null && !store.markSeen("audit:$wrapId")) return
+            val machine = verdict.optString("machine", "")
+            when (action) {
+                Notifier.AuditAction.UNLOCK -> Notifier.notifyOverride(
                     this,
-                    machine = verdict.optString("machine", ""),
+                    machine = machine,
                     scope = verdict.optString("scope", ""),
                     durationSecs = verdict.optString("durationSecs", "").toLongOrNull() ?: 0L,
                     roster = store.roster(),
                 )
+                Notifier.AuditAction.EMERGENCY_CALL ->
+                    Notifier.notifyEmergencyCall(this, machine = machine, roster = store.roster())
+                Notifier.AuditAction.OTHER_CONTROL ->
+                    Notifier.notifyEmergencyControl(this, machine = machine, roster = store.roster())
+                Notifier.AuditAction.IGNORE -> Unit
             }
             return
         }

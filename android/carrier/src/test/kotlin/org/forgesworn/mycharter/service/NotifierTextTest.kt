@@ -2,6 +2,7 @@ package org.forgesworn.mycharter.service
 
 import org.forgesworn.mycharter.carrier.WardName
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -39,6 +40,70 @@ class NotifierTextTest {
             "Mia opened calls (Pixel 6) for 3 minutes.",
             Notifier.overrideText("calls", 3, who),
         )
+    }
+
+    // ---- emergency call button ---------------------------------------------
+
+    @Test fun emergencyCallHitNamesTheWardAndDevice() {
+        assertEquals(
+            "Mia used the emergency call button on Pixel 6. Their phone's emergency dialler opened.",
+            Notifier.emergencyCallText(who),
+        )
+    }
+
+    @Test fun emergencyCallNoHitNamesNobody() {
+        assertEquals(
+            "Your ward used the emergency call button. Their phone's emergency dialler opened.",
+            Notifier.emergencyCallText(null),
+        )
+    }
+
+    @Test fun emergencyCallTitleIsFixedAndNeverClaimsACall() {
+        assertEquals("Emergency call button used", Notifier.EMERGENCY_CALL_TITLE)
+    }
+
+    @Test fun emergencyCallNeverUsesTheUnlockWording() {
+        for (w in listOf(who, null)) {
+            val text = Notifier.emergencyCallText(w)
+            assertFalse(text.contains("opened calls"))
+            assertFalse(text.contains("minutes"))
+        }
+    }
+
+    @Test fun otherEmergencyControlIsGenericAndHonest() {
+        assertEquals(
+            "Mia: an emergency control was used on Pixel 6",
+            Notifier.emergencyControlText(who),
+        )
+        assertEquals(
+            "Your ward: an emergency control was used",
+            Notifier.emergencyControlText(null),
+        )
+        assertFalse(Notifier.emergencyControlText(who).contains("opened"))
+    }
+
+    // ---- auditAction (the dispatch within outcome=override) ------------------
+
+    @Test fun overrideWithBreakGlassOrNoOpIsTheUnlockAlert() {
+        assertEquals(Notifier.AuditAction.UNLOCK, Notifier.auditAction("override", "unlock.breakglass"))
+        assertEquals(Notifier.AuditAction.UNLOCK, Notifier.auditAction("override", ""))
+    }
+
+    @Test fun overrideWithCallEmergencyIsTheEmergencyCallAlert() {
+        assertEquals(Notifier.AuditAction.EMERGENCY_CALL, Notifier.auditAction("override", "call.emergency"))
+    }
+
+    @Test fun overrideWithAnyOtherOpIsTheGenericAlert() {
+        assertEquals(Notifier.AuditAction.OTHER_CONTROL, Notifier.auditAction("override", "something.new"))
+        assertEquals(Notifier.AuditAction.OTHER_CONTROL, Notifier.auditAction("override", "Call.Emergency"))
+    }
+
+    @Test fun anyOtherOutcomeIsIgnoredWhateverTheOp() {
+        for (op in listOf("call.emergency", "unlock.breakglass", "", "screenlock.reset")) {
+            for (outcome in listOf("applied", "failed", "enacted", "", "Override")) {
+                assertEquals(Notifier.AuditAction.IGNORE, Notifier.auditAction(outcome, op))
+            }
+        }
     }
 
     // ---- requestText ------------------------------------------------------

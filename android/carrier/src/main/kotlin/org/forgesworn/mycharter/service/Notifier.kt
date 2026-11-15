@@ -98,6 +98,65 @@ object Notifier {
         nm.notify("override-$machine".hashCode(), n)
     }
 
+    /**
+     * The ward used the emergency-call button on their lock screen (device
+     * audit `outcome=override`, `op=call.emergency`). It means the emergency
+     * dialler opened, not that a call was placed, so the words say exactly that.
+     * Same loud high-importance channel and public lockscreen as [notifyOverride].
+     */
+    fun notifyEmergencyCall(
+        ctx: Context,
+        machine: String,
+        roster: List<RosterEntry> = emptyList(),
+    ) = postEmergencyAlert(
+        ctx,
+        key = "emergency-call-$machine",
+        title = EMERGENCY_CALL_TITLE,
+        text = emergencyCallText(describeWard(machine, roster)),
+    )
+
+    /**
+     * Any other `outcome=override` op from a newer ward: honest and generic,
+     * never the unlock wording (nothing was unlocked as far as we know).
+     */
+    fun notifyEmergencyControl(
+        ctx: Context,
+        machine: String,
+        roster: List<RosterEntry> = emptyList(),
+    ) = postEmergencyAlert(
+        ctx,
+        key = "emergency-control-$machine",
+        title = EMERGENCY_CONTROL_TITLE,
+        text = emergencyControlText(describeWard(machine, roster)),
+    )
+
+    private fun postEmergencyAlert(ctx: Context, key: String, title: String, text: String) {
+        val tap = PendingIntent.getActivity(
+            ctx,
+            key.hashCode(),
+            Intent(ctx, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_ROUTE, MainActivity.ROUTE_ACTIVITY)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val n = Notification.Builder(ctx, CH_APPROVALS)
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setContentTitle(title)
+            .setContentText(text)
+            // Shown in full on the lock screen: a guardian must be able to read
+            // an emergency without unlocking their own phone.
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setFullScreenIntent(tap, true)
+            .build()
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        // Keyed by kind and machine: a second press replaces the row rather than
+        // stacking, and never replaces an unlock's row.
+        nm.notify(key.hashCode(), n)
+    }
+
     /** The ask itself. Tap → the console's Approvals screen. */
     fun notifyRequest(
         ctx: Context,
@@ -148,6 +207,46 @@ object Notifier {
             "Your ward opened $what for $mins minutes."
         }
     }
+
+    internal const val EMERGENCY_CALL_TITLE = "Emergency call button used"
+    internal const val EMERGENCY_CONTROL_TITLE = "Emergency control used"
+
+    /** What an audit wrap asks of the carrier. */
+    internal enum class AuditAction { UNLOCK, EMERGENCY_CALL, OTHER_CONTROL, IGNORE }
+
+    /**
+     * Pure dispatch for a device audit, so it is JVM-testable. Only
+     * `outcome=override` alerts (anything else, such as a screen-lock reset
+     * result, is dropped). Within it: an empty op or `unlock.breakglass` is the
+     * emergency unlock (an older ward sent no op), `call.emergency` is the
+     * emergency-call button, and any other op is a generic honest alert rather
+     * than the unlock wording.
+     */
+    internal fun auditAction(outcome: String, op: String): AuditAction {
+        if (outcome != "override") return AuditAction.IGNORE
+        return when (op) {
+            "", "unlock.breakglass" -> AuditAction.UNLOCK
+            "call.emergency" -> AuditAction.EMERGENCY_CALL
+            else -> AuditAction.OTHER_CONTROL
+        }
+    }
+
+    /** Pure text for [notifyEmergencyCall] — see [overrideText]. */
+    internal fun emergencyCallText(who: WardName?): String =
+        if (who != null) {
+            "${who.childName} used the emergency call button on ${who.deviceLabel}. " +
+                "Their phone's emergency dialler opened."
+        } else {
+            "Your ward used the emergency call button. Their phone's emergency dialler opened."
+        }
+
+    /** Pure text for [notifyEmergencyControl] — see [overrideText]. */
+    internal fun emergencyControlText(who: WardName?): String =
+        if (who != null) {
+            "${who.childName}: an emergency control was used on ${who.deviceLabel}"
+        } else {
+            "Your ward: an emergency control was used"
+        }
 
     /** Pure text for [notifyRequest] — see [overrideText]. */
     internal fun requestText(op: String, minutes: Long?, who: WardName?): String {
