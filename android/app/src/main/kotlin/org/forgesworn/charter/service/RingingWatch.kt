@@ -18,6 +18,34 @@ internal fun inCallScreenWanted(previous: Int, state: Int, lockedOut: Boolean): 
         previous != TelephonyManager.CALL_STATE_RINGING
 
 /**
+ * Register once, and never after [stop]. [ensure] runs on the tick worker and
+ * [stop] on the main thread, so both hold the lock: a stop that lands while a
+ * registration is under way waits for it and then undoes it, and nothing
+ * registers after a stop (which would leak the callback and, through it, the
+ * destroyed service). Pure apart from what it is handed.
+ */
+internal class RegisterUntilStopped {
+    private var registered = false
+    @Volatile var stopped = false
+        private set
+
+    /** [register] returns whether it took. */
+    @Synchronized
+    fun ensure(register: () -> Boolean) {
+        if (registered || stopped) return
+        registered = runCatching(register).getOrDefault(false)
+    }
+
+    @Synchronized
+    fun stop(unregister: () -> Unit) {
+        stopped = true
+        if (!registered) return
+        runCatching(unregister)
+        registered = false
+    }
+}
+
+/**
  * A call must never ring with no way to answer it during a lockout.
  *
  * With the phone unlocked and in use, an incoming call shows as a heads-up
@@ -37,7 +65,7 @@ class RingingWatch(
     private val lockedOut: () -> Boolean,
 ) {
     private val main = Handler(Looper.getMainLooper())
-    @Volatile private var registered = false
+    private val registration = RegisterUntilStopped()
     private var last = TelephonyManager.CALL_STATE_IDLE
 
     private val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
@@ -47,7 +75,10 @@ class RingingWatch(
             if (!wanted) return
             Log.i(TAG, "ringing during a lockout: showing the in-call screen")
             show()
-            main.postDelayed({ if (last == TelephonyManager.CALL_STATE_RINGING && lockedOut()) show() }, RETRY_MS)
+            main.postDelayed(
+                { if (!registration.stopped && last == TelephonyManager.CALL_STATE_RINGING && lockedOut()) show() },
+                RETRY_MS,
+            )
         }
     }
 
@@ -58,18 +89,19 @@ class RingingWatch(
     }
 
     fun ensure() {
-        if (registered) return
-        runCatching {
-            val tm = context.getSystemService(TelephonyManager::class.java) ?: return
+        registration.ensure {
+            val tm = context.getSystemService(TelephonyManager::class.java) ?: return@ensure false
             tm.registerTelephonyCallback(context.mainExecutor, callback)
-            registered = true
+            true
         }
     }
 
     fun stop() {
-        if (!registered) return
-        runCatching { context.getSystemService(TelephonyManager::class.java)?.unregisterTelephonyCallback(callback) }
-        registered = false
+        registration.stop {
+            context.getSystemService(TelephonyManager::class.java)?.unregisterTelephonyCallback(callback)
+        }
+        // The second "show" a moment after a ring must not outlive the service.
+        main.removeCallbacksAndMessages(null)
     }
 
     private companion object {
