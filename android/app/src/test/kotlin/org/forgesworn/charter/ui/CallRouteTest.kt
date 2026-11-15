@@ -200,4 +200,63 @@ class CallRouteTest {
     fun `no candidates picks nothing`() {
         assertNull(pick())
     }
+
+    // ---- the check after a launch, and the status line ---------------------------
+
+    @Test
+    fun `the check falls through only from a clear shade, and a covered one is opened unless asleep or ringing`() {
+        for (screenOn in bools) {
+            for (ringing in bools) {
+                // Clear includes the screen being on, but the verdict holds whatever it is handed.
+                assertEquals(CallRoute.Check.NEXT_ROUTE, CallRoute.check(true, screenOn, ringing))
+            }
+        }
+        assertEquals(CallRoute.Check.OPENED, CallRoute.check(clear = false, screenOn = true, ringing = false))
+        assertEquals(CallRoute.Check.FAILED, CallRoute.check(clear = false, screenOn = false, ringing = false))
+        assertEquals(CallRoute.Check.FAILED, CallRoute.check(clear = false, screenOn = true, ringing = true))
+        assertEquals(CallRoute.Check.FAILED, CallRoute.check(clear = false, screenOn = false, ringing = true))
+    }
+
+    @Test
+    fun `an emergency press keeps the advice whatever it settles on, and only a failure with the shade clear says so`() {
+        for (outcome in CallSequencer.Outcome.values()) {
+            for (clear in bools) {
+                val expected = if (outcome == CallSequencer.Outcome.FAILED && clear) {
+                    CallRoute.Line.NOTHING_OPENED
+                } else {
+                    CallRoute.Line.ADVICE
+                }
+                assertEquals("$outcome clear=$clear", expected, CallRoute.settledLine(true, outcome, clear))
+            }
+        }
+    }
+
+    @Test
+    fun `a guardian's number says nothing unless its call could not be started`() {
+        for (clear in bools) {
+            assertEquals(CallRoute.Line.BLANK, CallRoute.settledLine(false, CallSequencer.Outcome.OPENED, clear))
+            assertEquals(CallRoute.Line.BLANK, CallRoute.settledLine(false, CallSequencer.Outcome.CANCELLED, clear))
+            assertEquals(CallRoute.Line.CALL_FAILED, CallRoute.settledLine(false, CallSequencer.Outcome.FAILED, clear))
+        }
+    }
+
+    @Test
+    fun `the status lines, verbatim, and none claims a call started`() {
+        assertEquals("", CallRoute.Line.BLANK.text)
+        assertEquals(
+            "If you still need help, press the power button five times for Emergency SOS, or use another phone.",
+            CallRoute.Line.ADVICE.text,
+        )
+        assertEquals("Tap Emergency call on the next screen", CallRoute.Line.BOUNCER.text)
+        assertEquals(
+            "Couldn't open the emergency dialler. Press the power button five times for Emergency SOS, " +
+                "or use another phone.",
+            CallRoute.Line.NOTHING_OPENED.text,
+        )
+        assertEquals("Couldn't start the call — tell your guardian.", CallRoute.Line.CALL_FAILED.text)
+        for (line in CallRoute.Line.values()) {
+            val t = line.text.lowercase()
+            assertFalse(line.name, "calling" in t || "call started" in t || "connected" in t || "opened" in t)
+        }
+    }
 }

@@ -1,6 +1,10 @@
 package org.forgesworn.charter.ui
 
+import org.forgesworn.charter.ui.CallRoute.Line
 import org.forgesworn.charter.ui.CallRoute.Route
+import org.forgesworn.charter.ui.CallSequencer.Companion.BOUNCER_WAIT_MS
+import org.forgesworn.charter.ui.CallSequencer.Companion.CHECK_MS
+import org.forgesworn.charter.ui.CallSequencer.Companion.CLEAR_WAIT_MS
 import org.forgesworn.charter.ui.CallSequencer.Launch
 import org.forgesworn.charter.ui.CallSequencer.Outcome
 import org.junit.Assert.assertEquals
@@ -9,55 +13,94 @@ import org.junit.Test
 
 class CallSequencerTest {
 
-    /** A launcher that answers each route from a script, and a timer on a fake
-     *  clock: a posted task runs only when the test moves the clock past it. */
+    /**
+     * A shade whose state the test sets, a launcher that records each route and
+     * answers as [onLaunch] says, and a timer on a fake clock: a posted task
+     * runs only when the test moves the clock past it.
+     */
     private class Rig(
-        isEmergency: Boolean = true,
-        locked: Boolean,
-        ed: Boolean,
-        dial: Boolean,
-        private val script: MutableMap<Route, Launch> = mutableMapOf(),
+        val isEmergency: Boolean = true,
+        val locked: Boolean,
+        val ed: Boolean,
+        val dial: Boolean,
     ) {
+        /** Something is over the shade, or it has lost the focus. */
+        var covered = false
+        var screenOn = true
+        var ringing = false
+
         val launched = mutableListOf<Route>()
-        val announced = mutableListOf<Route>()
+        val lines = mutableListOf<Line>()
         val settled = mutableListOf<Outcome>()
-        val pendingResults = mutableMapOf<Route, (Launch) -> Unit>()
+
+        /** Whether the shade was clear at each launch. */
+        val clearAtLaunch = mutableListOf<Boolean>()
+
+        /** The answer callback of each route's latest launch. */
+        val answers = mutableMapOf<Route, (Launch) -> Unit>()
+
+        /** What a launch does, and the answer it gives at once (null: none
+         *  yet). By default an intent route starts and the phone's own lock
+         *  waits for the ward. */
+        var onLaunch: (Route) -> Launch? = { if (it == Route.BOUNCER) null else Launch.STARTED }
+
         var clock = 0L
 
         /** Tasks posted and neither run nor cancelled: (task, due time). */
         val active = mutableListOf<Pair<Runnable, Long>>()
 
-        val sequencer = CallSequencer(
+        private val shade = object : CallSequencer.Shade {
+            override fun clear(): Boolean = !covered && this@Rig.screenOn
+            override fun screenOn(): Boolean = this@Rig.screenOn
+            override fun ringing(): Boolean = this@Rig.ringing
+        }
+
+        private val timer = object : CallSequencer.Timer {
+            override fun postDelayed(task: Runnable, delayMs: Long) {
+                active += task to clock + delayMs
+            }
+
+            override fun cancel(task: Runnable) {
+                active.removeAll { it.first === task }
+            }
+        }
+
+        private val listener = object : CallSequencer.Listener {
+            override fun onRoute(route: Route) = Unit
+
+            override fun onLine(line: Line) {
+                lines += line
+            }
+
+            override fun onSettled(outcome: Outcome) {
+                settled += outcome
+            }
+        }
+
+        private fun build() = CallSequencer(
             isEmergency = isEmergency,
             locked = locked,
             emergencyDiallerOk = ed,
             systemDialOk = dial,
+            shade = shade,
             launcher = { route, result ->
                 launched += route
-                val answer = script[route]
-                if (answer != null) result(answer) else pendingResults[route] = result
+                clearAtLaunch += shade.clear()
+                answers[route] = result
+                onLaunch(route)?.let(result)
             },
-            timer = object : CallSequencer.Timer {
-                override fun postDelayed(task: Runnable, delayMs: Long) {
-                    active += task to clock + delayMs
-                }
-
-                override fun cancel(task: Runnable) {
-                    active.removeAll { it.first === task }
-                }
-
-                override fun now(): Long = clock
-            },
-            listener = object : CallSequencer.Listener {
-                override fun onRoute(route: Route) {
-                    announced += route
-                }
-
-                override fun onSettled(outcome: Outcome) {
-                    settled += outcome
-                }
-            },
+            timer = timer,
+            listener = listener,
         )
+
+        var sequencer = build()
+
+        /** A new press, as LockActivity.startCall makes one. */
+        fun press() {
+            sequencer.abandon()
+            sequencer = build()
+            sequencer.begin()
+        }
 
         /** Move the clock forward, running whatever falls due, in order. */
         fun advance(ms: Long) {
@@ -73,345 +116,499 @@ class CallSequencerTest {
 
         /** How long until the next thing falls due, or null. */
         fun nextDueIn(): Long? = active.minOfOrNull { it.second }?.minus(clock)
+
+        /** The route launched [index]th (0 = the first) covers the shade. */
+        fun opensAt(index: Int) {
+            onLaunch = { route ->
+                if (launched.size - 1 == index) covered = true
+                if (route == Route.BOUNCER) null else Launch.STARTED
+            }
+        }
     }
 
-    private fun rig(locked: Boolean, ed: Boolean, dial: Boolean, vararg answers: Pair<Route, Launch>) =
-        Rig(locked = locked, ed = ed, dial = dial, script = mutableMapOf(*answers))
+    private fun rig(locked: Boolean, ed: Boolean, dial: Boolean) = Rig(locked = locked, ed = ed, dial = dial)
 
     @Test
-    fun `an opaque dialler that pauses then stops the shade settles the press, with no fallthrough`() {
-        val r = rig(locked = false, ed = true, dial = true, Route.EMERGENCY_DIALLER to Launch.STARTED)
-        r.sequencer.begin()
-        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
-        assertTrue("not settled until the shade is stopped", r.settled.isEmpty())
-        assertEquals(1_500L, r.nextDueIn())
-        assertEquals(1_500L, CallSequencer.PAUSE_MS)
-        assertEquals(3_000L, CallSequencer.STOP_MS)
-        r.advance(200)
-        r.sequencer.onPaused()
-        assertTrue("a pause alone confirms nothing", r.settled.isEmpty())
-        assertEquals("up to 3 s in total from the launch", 2_800L, r.nextDueIn())
-        r.advance(100)
-        r.sequencer.onStopped(screenOn = true)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
-        assertTrue("the wait is cancelled", r.active.isEmpty())
-        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+    fun `the timings are the named constants`() {
+        assertEquals(2_500L, CHECK_MS)
+        assertEquals(3_000L, CLEAR_WAIT_MS)
+        assertEquals(60_000L, BOUNCER_WAIT_MS)
     }
 
+    // ---- an intent route's one check -------------------------------------------
+
     @Test
-    fun `a pause then a resume with no stop is not a confirmation, and the next route runs`() {
-        val r = rig(
-            locked = false, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.STARTED,
-            Route.SYSTEM_DIAL to Launch.STARTED,
-        )
+    fun `an emergency press shows the advice from the start, before any route is judged`() {
+        val r = rig(locked = false, ed = true, dial = true)
         r.sequencer.begin()
-        r.advance(50)
-        r.sequencer.onPaused()
-        r.advance(50)
-        r.sequencer.onResumed() // Telecom's trampoline handed the screen back
-        r.advance(2_899)
+        assertEquals(listOf(Line.ADVICE), r.lines)
         assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
         assertTrue(r.settled.isEmpty())
-        r.advance(1) // 3 s from the launch
+        assertEquals(CHECK_MS, r.nextDueIn())
+    }
+
+    @Test
+    fun `a route that leaves the shade clear at the check showed nothing, and the next route runs`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.sequencer.begin()
+        r.advance(CHECK_MS - 1)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+        r.advance(1)
         assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
         assertTrue(r.settled.isEmpty())
+        assertEquals(listOf(Line.ADVICE), r.lines)
     }
 
     @Test
-    fun `a pause then a resume then the timeout on the last route settles failed with the advice`() {
-        val r = rig(locked = false, ed = false, dial = false, Route.CALL to Launch.STARTED)
+    fun `a route that covers the shade with the screen on settles opened, and the advice stays`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.opensAt(0)
+        r.sequencer.begin()
+        r.advance(CHECK_MS - 1)
+        assertTrue("judged once, at the check", r.settled.isEmpty())
+        r.advance(1)
+        assertEquals(listOf(Outcome.OPENED), r.settled)
+        assertEquals(listOf(Line.ADVICE), r.lines)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+        assertTrue("every timer is gone", r.active.isEmpty())
+    }
+
+    @Test
+    fun `covered with the screen off settles failed, and the advice stays to be seen on waking`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.sequencer.begin()
+        r.advance(500)
+        r.screenOn = false // the power button, not a dialler
+        r.advance(CHECK_MS)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals("not the stronger line: the shade was not clear", listOf(Line.ADVICE), r.lines)
+        assertEquals("nothing more from a sleeping shade", listOf(Route.EMERGENCY_DIALLER), r.launched)
+        r.screenOn = true
+        r.sequencer.onClear()
+        r.advance(60_000)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+    }
+
+    @Test
+    fun `covered by a ringing call settles failed, and the advice is there after the call`() {
+        val r = rig(locked = false, ed = false, dial = true)
+        r.sequencer.begin()
+        r.covered = true
+        r.ringing = true
+        r.advance(CHECK_MS)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(listOf(Line.ADVICE), r.lines)
+        assertEquals("ACTION_CALL is not started into the call", listOf(Route.SYSTEM_DIAL), r.launched)
+    }
+
+    @Test
+    fun `the shade coming back during the check cuts nothing short, and the check still decides`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.sequencer.begin()
+        r.covered = true // Telecom's trampoline takes the screen ...
+        r.advance(300)
+        r.covered = false // ... and hands it back
+        r.sequencer.onClear()
+        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+        r.advance(CHECK_MS - 300)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
+    }
+
+    @Test
+    fun `a launch that throws runs the next route at once`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.onLaunch = { route -> if (route == Route.CALL) Launch.STARTED else Launch.FAILED }
+        r.sequencer.begin()
+        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL, Route.CALL), r.launched)
+        assertEquals(0L, r.clock)
+        assertTrue(r.settled.isEmpty())
+        assertEquals(CHECK_MS, r.nextDueIn())
+    }
+
+    @Test
+    fun `the last route throwing with the shade clear says the dialler could not be opened`() {
+        val r = rig(locked = false, ed = false, dial = false)
+        r.onLaunch = { Launch.FAILED }
         r.sequencer.begin()
         assertEquals(listOf(Route.CALL), r.launched)
-        r.advance(10)
-        r.sequencer.onPaused()
-        r.sequencer.onResumed()
-        r.advance(3_000)
         assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(listOf(Line.ADVICE, Line.NOTHING_OPENED), r.lines)
+        assertTrue(r.active.isEmpty())
     }
 
+    // ---- launching only from a clear shade -------------------------------------
+
     @Test
-    fun `a launch the shade never pauses for is refused after 1_5 s, and the next route runs`() {
-        val r = rig(
-            locked = false, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.STARTED,
-            Route.SYSTEM_DIAL to Launch.STARTED,
-        )
+    fun `a route due while the shade is not clear waits for it, then launches`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.covered = true
         r.sequencer.begin()
-        r.advance(1_499)
+        assertTrue(r.launched.isEmpty())
+        assertEquals(listOf(Line.ADVICE), r.lines)
+        assertEquals(CLEAR_WAIT_MS, r.nextDueIn())
+        r.advance(1_000)
+        r.sequencer.onClear() // resumed, but the focus has not come back
+        assertTrue(r.launched.isEmpty())
+        r.covered = false
+        r.sequencer.onClear()
         assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+        assertEquals("the wait's bound is gone; the check is pending", CHECK_MS, r.nextDueIn())
+        assertEquals(1, r.active.size)
+    }
+
+    @Test
+    fun `the wait for a clear shade is bounded, and settles failed with the advice and nothing launched`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.covered = true
+        r.sequencer.begin()
+        r.advance(CLEAR_WAIT_MS - 1)
+        assertTrue(r.settled.isEmpty())
         r.advance(1)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
-        assertTrue(r.settled.isEmpty())
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
-    }
-
-    @Test
-    fun `a stop with the screen off confirms nothing, and the sequence carries on`() {
-        val r = rig(
-            locked = false, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.STARTED,
-            Route.SYSTEM_DIAL to Launch.STARTED,
-        )
-        r.sequencer.begin()
-        r.advance(100)
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = false) // the power button, not a dialler
-        assertTrue(r.settled.isEmpty())
-        r.advance(2_900)
-        assertEquals("the sequence carries on", listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
-        assertTrue(r.settled.isEmpty())
-    }
-
-    @Test
-    fun `a stop with the screen off is never remembered as a stop`() {
-        val r = rig(locked = false, ed = true, dial = false, Route.EMERGENCY_DIALLER to Launch.STARTED, Route.CALL to Launch.STARTED)
-        r.sequencer.begin()
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = false)
-        r.advance(3_000)
-        // Nothing took the screen, so ACTION_CALL is still tried.
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.CALL), r.launched)
-    }
-
-    @Test
-    fun `a late stop after the route was given up on settles opened, and never starts ACTION_CALL`() {
-        val r = rig(
-            locked = false, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.STARTED,
-            Route.SYSTEM_DIAL to Launch.STARTED,
-            Route.CALL to Launch.STARTED,
-        )
-        r.sequencer.begin()
-        r.advance(1_500) // no pause in time: ACTION_DIAL is tried
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
-        // The emergency dialler turns up late and takes the screen.
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
-        r.advance(10_000)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
-    }
-
-    @Test
-    fun `a stop seen while no route was waiting turns the next timer into opened, not ACTION_CALL`() {
-        val r = rig(
-            locked = true, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.STARTED,
-        )
-        r.sequencer.begin()
-        r.advance(1_500) // the dialler was too slow: the phone's lock is requested
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.launched)
-        r.sequencer.onFocusChanged(false) // the lock screen is up
-        r.sequencer.onStopped(screenOn = true) // ... and the dialler's late stop is in
-        assertTrue("still waiting on the lock screen's answer", r.settled.isEmpty())
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.FAILED)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
-        assertEquals("ACTION_CALL is never started after a stop", listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.launched)
-    }
-
-    @Test
-    fun `a cancelled lock screen after a stop settles opened`() {
-        val r = rig(locked = true, ed = false, dial = true)
-        r.sequencer.begin()
-        r.sequencer.onFocusChanged(false)
-        r.sequencer.onStopped(screenOn = true)
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.CANCELLED)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
-    }
-
-    @Test
-    fun `a route that throws falls through at once, to ACTION_DIAL, then ACTION_CALL`() {
-        val r = rig(
-            locked = false, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.FAILED,
-            Route.SYSTEM_DIAL to Launch.FAILED,
-            Route.CALL to Launch.STARTED,
-        )
-        r.sequencer.begin()
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL, Route.CALL), r.launched)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL, Route.CALL), r.announced)
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
-    }
-
-    @Test
-    fun `every route failing settles as failed, once, after trying them all`() {
-        val r = rig(
-            locked = false, ed = true, dial = true,
-            Route.EMERGENCY_DIALLER to Launch.FAILED,
-            Route.SYSTEM_DIAL to Launch.STARTED,
-            Route.CALL to Launch.STARTED,
-        )
-        r.sequencer.begin()
-        r.advance(1_500) // ACTION_DIAL refused silently
-        r.advance(1_500) // ACTION_CALL refused silently
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL, Route.CALL), r.launched)
         assertEquals(listOf(Outcome.FAILED), r.settled)
-        // Late events change nothing.
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
+        assertTrue(r.launched.isEmpty())
+        assertEquals(listOf(Line.ADVICE), r.lines)
+        r.covered = false
+        r.sequencer.onClear()
+        assertTrue("nothing after settling", r.launched.isEmpty())
+    }
+
+    @Test
+    fun `ACTION_CALL is never started from a shade that is not clear`() {
+        // The phone's own lock errors while its window still covers the shade.
+        val r = rig(locked = true, ed = false, dial = true)
+        r.sequencer.begin()
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        r.covered = true
+        r.answers.getValue(Route.BOUNCER)(Launch.FAILED)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        r.advance(CLEAR_WAIT_MS)
         assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        assertEquals(listOf(Line.ADVICE, Line.BOUNCER, Line.ADVICE), r.lines)
     }
 
-    @Test
-    fun `an unlocked phone with no emergency dialler goes straight to ACTION_DIAL`() {
-        val r = rig(locked = false, ed = false, dial = true, Route.SYSTEM_DIAL to Launch.STARTED)
-        r.sequencer.begin()
-        assertEquals(listOf(Route.SYSTEM_DIAL), r.launched)
-    }
+    // ---- the phone's own lock --------------------------------------------------
 
     @Test
-    fun `locked, a refused emergency dialler falls to the phone's own lock, which is announced`() {
-        val r = rig(locked = true, ed = true, dial = true, Route.EMERGENCY_DIALLER to Launch.STARTED)
-        r.sequencer.begin()
-        r.advance(1_500)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.launched)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.announced)
-        assertTrue("waiting on the ward, not settled", r.settled.isEmpty())
-    }
-
-    @Test
-    fun `locked with no emergency dialler starts at the phone's own lock, never ACTION_DIAL`() {
+    fun `the phone's own lock shows its instruction, then the advice again when it is done`() {
         val r = rig(locked = true, ed = false, dial = true)
         r.sequencer.begin()
-        assertEquals(listOf(Route.BOUNCER), r.launched)
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.FAILED)
-        assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
+        assertEquals(listOf(Line.ADVICE, Line.BOUNCER), r.lines)
+        r.covered = true
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        assertEquals(listOf(Line.ADVICE, Line.BOUNCER, Line.ADVICE), r.lines)
     }
 
     @Test
-    fun `the phone's own lock that never takes the focus is failed after 1_5 s, and ACTION_CALL runs`() {
-        val r = rig(locked = true, ed = false, dial = true, Route.CALL to Launch.STARTED)
-        r.sequencer.begin()
-        assertEquals(1_500L, r.nextDueIn())
-        r.advance(1_499)
-        assertEquals(listOf(Route.BOUNCER), r.launched)
-        r.advance(1)
-        assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
-        // The lock screen answering after that is ignored.
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.DISMISSED)
-        assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
-    }
-
-    @Test
-    fun `the phone's own lock that took the focus waits for its answer, however long`() {
-        val r = rig(locked = true, ed = false, dial = true)
-        r.sequencer.begin()
-        r.advance(200)
-        r.sequencer.onFocusChanged(false)
-        assertTrue("no timer once the lock is showing", r.active.isEmpty())
-        r.advance(60_000)
-        assertEquals(listOf(Route.BOUNCER), r.launched)
-        assertTrue(r.settled.isEmpty())
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.CANCELLED)
-        assertEquals(listOf(Outcome.BOUNCER_CANCELLED), r.settled)
-    }
-
-    @Test
-    fun `focus lost before the lock route began does not count for it`() {
-        val r = rig(locked = true, ed = true, dial = true, Route.EMERGENCY_DIALLER to Launch.STARTED)
-        r.sequencer.begin()
-        r.sequencer.onFocusChanged(false) // the emergency dialler's window
-        r.advance(1_500)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.launched)
-        r.advance(1_500)
-        assertEquals("the lock screen never showed: ACTION_CALL", listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER, Route.CALL), r.launched)
-    }
-
-    @Test
-    fun `the phone's own lock dismissed carries on as unlocked, without the lock or the emergency dialler again`() {
-        val r = rig(locked = true, ed = true, dial = true, Route.EMERGENCY_DIALLER to Launch.FAILED, Route.SYSTEM_DIAL to Launch.STARTED)
+    fun `the phone's own lock dismissed runs the unlocked routes once the shade is clear, without the lock or the emergency dialler`() {
+        val r = rig(locked = true, ed = true, dial = true)
+        r.onLaunch = { route ->
+            when (route) {
+                Route.EMERGENCY_DIALLER -> Launch.FAILED
+                Route.BOUNCER -> null
+                else -> Launch.STARTED
+            }
+        }
         r.sequencer.begin()
         assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.launched)
-        r.sequencer.onFocusChanged(false)
-        r.sequencer.onStopped(screenOn = true) // the lock screen's own stop
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        r.covered = true // the PIN screen is up
+        r.advance(1_000)
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED) // before the shade is back
+        assertEquals("waits for a clear shade", listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER), r.launched)
+        assertEquals(CLEAR_WAIT_MS, r.nextDueIn())
+        r.advance(400)
+        r.covered = false
+        r.sequencer.onClear()
         assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.BOUNCER, Route.SYSTEM_DIAL), r.launched)
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
+        r.covered = true // the system dialler
+        r.advance(CHECK_MS)
         assertEquals(listOf(Outcome.OPENED), r.settled)
+        assertEquals(listOf(Line.ADVICE, Line.BOUNCER, Line.ADVICE), r.lines)
     }
 
     @Test
-    fun `the phone's own lock cancelled settles as cancelled and tries nothing more`() {
+    fun `the phone's own lock dismissed while the shade stays covered settles failed and never covers what opened`() {
         val r = rig(locked = true, ed = false, dial = true)
         r.sequencer.begin()
-        r.pendingResults.getValue(Route.BOUNCER)(Launch.CANCELLED)
-        assertEquals(listOf(Outcome.BOUNCER_CANCELLED), r.settled)
+        r.covered = true
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        r.advance(CLEAR_WAIT_MS)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
         assertEquals(listOf(Route.BOUNCER), r.launched)
+        assertEquals(Line.ADVICE, r.lines.last())
     }
 
     @Test
-    fun `the phone's own lock that cannot be shown falls through to ACTION_CALL, and failing that settles failed`() {
-        val r = rig(locked = true, ed = false, dial = false, Route.BOUNCER to Launch.FAILED, Route.CALL to Launch.FAILED)
+    fun `the phone's own lock answering with an error runs the next route`() {
+        val r = rig(locked = true, ed = false, dial = false)
+        r.sequencer.begin()
+        r.advance(1_000)
+        r.answers.getValue(Route.BOUNCER)(Launch.FAILED)
+        assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
+        assertEquals("the lock's own check is gone; ACTION_CALL's is pending", 1, r.active.size)
+        assertEquals(CHECK_MS, r.nextDueIn())
+    }
+
+    @Test
+    fun `the phone's own lock that cannot be requested runs the next route at once`() {
+        val r = rig(locked = true, ed = false, dial = false)
+        r.onLaunch = { route -> if (route == Route.BOUNCER) Launch.FAILED else Launch.STARTED }
         r.sequencer.begin()
         assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
+        assertEquals(1, r.active.size)
+        r.advance(CHECK_MS)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(Line.NOTHING_OPENED, r.lines.last())
+    }
+
+    @Test
+    fun `the phone's own lock cancelled settles cancelled with the advice, and tries nothing more`() {
+        val r = rig(locked = true, ed = false, dial = true)
+        r.sequencer.begin()
+        r.covered = true
+        r.advance(CHECK_MS) // it covered the shade: waiting on the ward
+        r.covered = false
+        r.answers.getValue(Route.BOUNCER)(Launch.CANCELLED)
+        assertEquals(listOf(Outcome.CANCELLED), r.settled)
+        assertEquals("the softer line, never the stronger", listOf(Line.ADVICE, Line.BOUNCER, Line.ADVICE), r.lines)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        assertTrue(r.active.isEmpty())
+    }
+
+    @Test
+    fun `the phone's own lock that never covers the shade is given up at the check, and its late answer is ignored`() {
+        val r = rig(locked = true, ed = false, dial = true)
+        r.sequencer.begin()
+        assertEquals(CHECK_MS, r.nextDueIn())
+        r.advance(CHECK_MS - 1)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        r.advance(1)
+        assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
+        assertEquals(listOf(Line.ADVICE, Line.BOUNCER, Line.ADVICE), r.lines)
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        r.answers.getValue(Route.BOUNCER)(Launch.CANCELLED)
+        assertEquals(listOf(Route.BOUNCER, Route.CALL), r.launched)
+        assertTrue(r.settled.isEmpty())
+    }
+
+    @Test
+    fun `the phone's own lock that covers the shade has 60 s to answer, then the press settles failed`() {
+        val r = rig(locked = true, ed = false, dial = true)
+        r.sequencer.begin()
+        r.covered = true
+        r.advance(CHECK_MS)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        assertEquals("60 s from the request", BOUNCER_WAIT_MS - CHECK_MS, r.nextDueIn())
+        r.advance(BOUNCER_WAIT_MS - CHECK_MS - 1)
+        assertTrue(r.settled.isEmpty())
+        r.advance(1)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        assertEquals("covered at the bound: the advice", listOf(Line.ADVICE, Line.BOUNCER, Line.ADVICE), r.lines)
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        assertEquals("a late answer changes nothing", listOf(Route.BOUNCER), r.launched)
         assertEquals(listOf(Outcome.FAILED), r.settled)
     }
 
     @Test
-    fun `a pause that lands before the launch is reported waits for the stop`() {
-        val r = rig(locked = false, ed = true, dial = true)
+    fun `the phone's own lock that went away without answering ends on the stronger line at 60 s`() {
+        val r = rig(locked = true, ed = false, dial = true)
         r.sequencer.begin()
-        r.sequencer.onPaused()
-        r.pendingResults.getValue(Route.EMERGENCY_DIALLER)(Launch.STARTED)
-        assertTrue("a pause alone is not enough", r.settled.isEmpty())
-        assertEquals(3_000L, r.nextDueIn())
-        r.sequencer.onStopped(screenOn = true)
-        assertEquals(listOf(Outcome.OPENED), r.settled)
+        r.covered = true
+        r.advance(CHECK_MS)
+        r.covered = false
+        r.sequencer.onClear() // the lock's wait is not a wait for a clear shade
+        assertEquals(listOf(Route.BOUNCER), r.launched)
+        r.advance(BOUNCER_WAIT_MS)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+        assertEquals(Line.NOTHING_OPENED, r.lines.last())
     }
 
+    // ---- one settlement, and every timer invalidated ---------------------------
+
     @Test
-    fun `a stop that lands before the launch is reported settles it`() {
+    fun `settling cancels every timer, and nothing later moves it`() {
         val r = rig(locked = false, ed = true, dial = true)
+        r.opensAt(0)
         r.sequencer.begin()
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
-        r.pendingResults.getValue(Route.EMERGENCY_DIALLER)(Launch.STARTED)
+        r.advance(CHECK_MS)
         assertEquals(listOf(Outcome.OPENED), r.settled)
-        assertTrue("no timer needed", r.active.isEmpty())
+        assertTrue(r.active.isEmpty())
+        r.covered = false
+        r.sequencer.onClear()
+        r.answers.getValue(Route.EMERGENCY_DIALLER)(Launch.FAILED)
+        r.advance(BOUNCER_WAIT_MS)
+        assertEquals(listOf(Outcome.OPENED), r.settled)
+        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+        assertEquals(listOf(Line.ADVICE), r.lines)
     }
 
     @Test
-    fun `a guardian's number is one ACTION_CALL, settled on start with no confirmation wait`() {
-        val ok = Rig(isEmergency = false, locked = true, ed = true, dial = true, script = mutableMapOf(Route.CALL to Launch.STARTED))
-        ok.sequencer.begin()
-        assertEquals(listOf(Route.CALL), ok.launched)
-        assertEquals(listOf(Outcome.OPENED), ok.settled)
-        assertTrue(ok.active.isEmpty())
-
-        val bad = Rig(isEmergency = false, locked = false, ed = false, dial = false, script = mutableMapOf(Route.CALL to Launch.FAILED))
-        bad.sequencer.begin()
-        assertEquals(listOf(Route.CALL), bad.launched)
-        assertEquals(listOf(Outcome.FAILED), bad.settled)
+    fun `a new press invalidates the last press's timers and late answers`() {
+        val r = rig(locked = true, ed = false, dial = true)
+        r.press()
+        val firstAnswer = r.answers.getValue(Route.BOUNCER)
+        assertEquals(1, r.active.size)
+        r.advance(1_000)
+        r.press()
+        assertEquals("only the new press's check", 1, r.active.size)
+        assertEquals(CHECK_MS, r.nextDueIn())
+        firstAnswer(Launch.CANCELLED)
+        firstAnswer(Launch.DISMISSED)
+        assertTrue(r.settled.isEmpty())
+        r.advance(CHECK_MS)
+        assertEquals("one ACTION_CALL, from the new press", listOf(Route.BOUNCER, Route.BOUNCER, Route.CALL), r.launched)
     }
 
     @Test
-    fun `abandoning cancels the wait and ignores late results`() {
-        val r = rig(locked = true, ed = true, dial = true, Route.EMERGENCY_DIALLER to Launch.STARTED)
+    fun `a new press while the last one waits for a clear shade replaces that wait`() {
+        val r = rig(locked = false, ed = true, dial = true)
+        r.covered = true
+        r.press()
+        r.advance(2_000)
+        r.press()
+        r.advance(CLEAR_WAIT_MS - 1)
+        assertTrue("the first wait's bound is gone", r.settled.isEmpty())
+        r.advance(1)
+        assertEquals(listOf(Outcome.FAILED), r.settled)
+    }
+
+    @Test
+    fun `abandoning cancels every timer and ignores late answers and a clear shade`() {
+        val r = rig(locked = true, ed = false, dial = true)
         r.sequencer.begin()
         r.sequencer.abandon()
         assertTrue(r.active.isEmpty())
-        r.sequencer.onPaused()
-        r.sequencer.onStopped(screenOn = true)
-        r.advance(10_000)
-        assertEquals(listOf(Route.EMERGENCY_DIALLER), r.launched)
+        r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+        r.sequencer.onClear()
+        r.advance(BOUNCER_WAIT_MS)
+        assertEquals(listOf(Route.BOUNCER), r.launched)
         assertTrue(r.settled.isEmpty())
+        assertEquals("nothing more is said", listOf(Line.ADVICE, Line.BOUNCER), r.lines)
+
+        val waiting = rig(locked = false, ed = true, dial = true)
+        waiting.covered = true
+        waiting.sequencer.begin()
+        waiting.sequencer.abandon()
+        assertTrue(waiting.active.isEmpty())
+        waiting.covered = false
+        waiting.sequencer.onClear()
+        assertTrue(waiting.launched.isEmpty())
     }
 
     @Test
-    fun `a stale result from an earlier route is ignored`() {
+    fun `a stale answer from an earlier route is ignored`() {
         val r = rig(locked = false, ed = true, dial = true)
+        r.onLaunch = { null }
         r.sequencer.begin()
-        val first = r.pendingResults.getValue(Route.EMERGENCY_DIALLER)
+        val first = r.answers.getValue(Route.EMERGENCY_DIALLER)
         first(Launch.FAILED)
         assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
-        // The first route answers a second time, late: nothing moves.
         first(Launch.FAILED)
+        first(Launch.STARTED)
         assertEquals(listOf(Route.EMERGENCY_DIALLER, Route.SYSTEM_DIAL), r.launched)
+        assertTrue(r.active.isEmpty())
+    }
+
+    // ---- a guardian's number ---------------------------------------------------
+
+    @Test
+    fun `a guardian's number is one ACTION_CALL, settled when it starts, with no advice`() {
+        val ok = Rig(isEmergency = false, locked = true, ed = true, dial = true)
+        ok.sequencer.begin()
+        assertEquals(listOf(Route.CALL), ok.launched)
+        assertEquals(listOf(Outcome.OPENED), ok.settled)
+        assertEquals(listOf(Line.BLANK), ok.lines)
+        assertTrue(ok.active.isEmpty())
+
+        val bad = Rig(isEmergency = false, locked = false, ed = false, dial = false)
+        bad.onLaunch = { Launch.FAILED }
+        bad.sequencer.begin()
+        assertEquals(listOf(Route.CALL), bad.launched)
+        assertEquals(listOf(Outcome.FAILED), bad.settled)
+        assertEquals(listOf(Line.BLANK, Line.CALL_FAILED), bad.lines)
+    }
+
+    @Test
+    fun `a guardian's number also launches only from a clear shade`() {
+        val r = Rig(isEmergency = false, locked = false, ed = false, dial = false)
+        r.covered = true
+        r.sequencer.begin()
+        assertTrue(r.launched.isEmpty())
+        r.covered = false
+        r.sequencer.onClear()
+        assertEquals(listOf(Route.CALL), r.launched)
+        assertEquals(listOf(Outcome.OPENED), r.settled)
+
+        val never = Rig(isEmergency = false, locked = false, ed = false, dial = false)
+        never.covered = true
+        never.sequencer.begin()
+        never.advance(CLEAR_WAIT_MS)
+        assertTrue(never.launched.isEmpty())
+        assertEquals(listOf(Outcome.FAILED), never.settled)
+        assertEquals(listOf(Line.BLANK, Line.CALL_FAILED), never.lines)
+    }
+
+    // ---- full sequences, every locked / emergency dialler / dial cell ----------
+
+    private val bools = listOf(true, false)
+
+    @Test
+    fun `every cell, nothing ever covering the shade, tries every route in order and ends on the stronger line`() {
+        for (locked in bools) for (ed in bools) for (dial in bools) {
+            val cell = "locked=$locked ed=$ed dial=$dial"
+            val seq = CallRoute.sequence(true, locked, ed, dial)
+            val r = rig(locked, ed, dial)
+            r.sequencer.begin()
+            r.advance(CHECK_MS * seq.size)
+            assertEquals(cell, seq, r.launched)
+            assertEquals(cell, listOf(Outcome.FAILED), r.settled)
+            assertEquals(cell, Line.NOTHING_OPENED, r.lines.last())
+            assertEquals(cell, CHECK_MS * seq.size, r.clock)
+            assertTrue(cell, r.active.isEmpty())
+            assertTrue(cell, r.clearAtLaunch.all { it })
+        }
+    }
+
+    @Test
+    fun `every cell, the first route that covers the shade settles it opened, with nothing after it`() {
+        for (locked in bools) for (ed in bools) for (dial in bools) {
+            val seq = CallRoute.sequence(true, locked, ed, dial)
+            for ((index, route) in seq.withIndex()) {
+                if (route == Route.BOUNCER) continue // the lock answers; it is not judged opened
+                val cell = "locked=$locked ed=$ed dial=$dial opens at $route"
+                val r = rig(locked, ed, dial)
+                r.opensAt(index)
+                r.sequencer.begin()
+                r.advance(CHECK_MS * seq.size + BOUNCER_WAIT_MS)
+                assertEquals(cell, seq.take(index + 1), r.launched)
+                assertEquals(cell, listOf(Outcome.OPENED), r.settled)
+                assertTrue(cell, Line.NOTHING_OPENED !in r.lines)
+                assertEquals(cell, Line.ADVICE, r.lines.last())
+                assertTrue(cell, r.active.isEmpty())
+                assertTrue(cell, r.clearAtLaunch.all { it })
+            }
+        }
+    }
+
+    @Test
+    fun `every locked cell, the PIN entered at the phone's own lock, ends at the unlocked routes`() {
+        for (ed in bools) for (dial in bools) {
+            val cell = "ed=$ed dial=$dial"
+            val r = rig(locked = true, ed = ed, dial = dial)
+            r.sequencer.begin()
+            r.advance(if (ed) CHECK_MS else 0) // the emergency dialler showed nothing
+            assertEquals(cell, Route.BOUNCER, r.launched.last())
+            r.covered = true
+            r.answers.getValue(Route.BOUNCER)(Launch.DISMISSED)
+            r.covered = false
+            r.sequencer.onClear()
+            val unlocked = CallRoute.sequence(true, locked = false, emergencyDiallerOk = false, systemDialOk = dial)
+            assertEquals(cell, unlocked.first(), r.launched.last())
+            r.covered = true // it opened
+            r.advance(CHECK_MS)
+            assertEquals(cell, listOf(Outcome.OPENED), r.settled)
+            assertTrue(cell, Route.EMERGENCY_DIALLER !in r.launched.drop(r.launched.indexOf(Route.BOUNCER)))
+        }
     }
 }

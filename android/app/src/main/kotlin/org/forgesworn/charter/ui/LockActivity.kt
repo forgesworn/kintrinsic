@@ -81,6 +81,10 @@ class LockActivity : Activity() {
     /** The call being started by the last hold-to-call press, if any. */
     private var callSequencer: CallSequencer? = null
 
+    /** Between onResume and onPause: one third of the shade being clear (see
+     *  [startCall]). */
+    private var shadeResumed = false
+
     /**
      * The status line under the lifeline buttons, as of the CURRENT render, and
      * the text that must outlive a render (a route's instruction, the failure
@@ -265,7 +269,10 @@ class LockActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        callSequencer?.onResumed()
+        shadeResumed = true
+        // A call route waiting for the shade to be clear (see CallSequencer).
+        // The focus usually follows, through onWindowFocusChanged.
+        callSequencer?.onClear()
         org.forgesworn.charter.service.RelayPollPace.show(this)
         ui.removeCallbacks(clockTick)
         tick = 0
@@ -310,18 +317,12 @@ class LockActivity : Activity() {
             ActivityLockController.coveredSince = now
         }
         launchedBehindAt = 0L
-        // An opaque dialler stops the shade; Telecom's transparent trampoline
-        // only pauses it. With the screen off a stop is the screen going off.
-        callSequencer?.onStopped(
-            runCatching { getSystemService(android.os.PowerManager::class.java)?.isInteractive }
-                .getOrNull() != false,
-        )
         super.onStop()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        callSequencer?.onFocusChanged(hasFocus)
+        if (hasFocus) callSequencer?.onClear()
     }
 
     /**
@@ -340,9 +341,7 @@ class LockActivity : Activity() {
         // it): the shade re-paints the moment it comes back.
         ui.removeCallbacks(clockTick)
         org.forgesworn.charter.service.RelayPollPace.hide(this)
-        // The first sign that something else is taking the screen; the stop
-        // that confirms it is [onStop] (see CallSequencer).
-        callSequencer?.onPaused()
+        shadeResumed = false
         super.onPause()
     }
 
@@ -612,12 +611,14 @@ class LockActivity : Activity() {
      * presses call), the phone's own lock screen when it is showing (it
      * carries an Emergency call button), ACTION_DIAL with the number (the system
      * dialler is on the lockout allowlist), and only then ACTION_CALL. A route
-     * that throws, or does not take the screen (see [CallSequencer]), falls
-     * through to the next. This never touches the report to the guardian,
-     * which was handed to its worker before this runs.
+     * that throws, or leaves the shade clear, falls through to the next, and no
+     * route is launched from a shade that is not clear (see [CallSequencer]).
+     * The status line gives the ward the Emergency SOS advice from the start,
+     * whatever opens. This never touches the report to the guardian, which was
+     * handed to its worker before this runs.
      */
     private fun startCall(number: String, emergency: Boolean) {
-        showCallStatus("")
+        // A new press: the last one's timers and late answers are void.
         callSequencer?.abandon()
         val isEmergency = emergency || runCatching {
             (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
@@ -646,6 +647,24 @@ class LockActivity : Activity() {
             locked = locked,
             emergencyDiallerOk = emergencyDialler != null,
             systemDialOk = systemDialOk,
+            shade = object : CallSequencer.Shade {
+                override fun clear(): Boolean =
+                    shadeResumed && hasWindowFocus() && screenOn()
+
+                // Unreadable is taken as on, so a failed read never blocks a route.
+                override fun screenOn(): Boolean =
+                    runCatching { getSystemService(android.os.PowerManager::class.java)?.isInteractive }
+                        .getOrNull() != false
+
+                // READ_PHONE_STATE is held (the Device Owner grants it); the
+                // device-wide state is what matters, so the deprecated read is
+                // the right one.
+                @Suppress("DEPRECATION")
+                override fun ringing(): Boolean = runCatching {
+                    (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
+                        .callState == android.telephony.TelephonyManager.CALL_STATE_RINGING
+                }.getOrDefault(false)
+            },
             launcher = { route, result ->
                 when (route) {
                     CallRoute.Route.EMERGENCY_DIALLER ->
@@ -663,35 +682,18 @@ class LockActivity : Activity() {
                 override fun cancel(task: Runnable) {
                     ui.removeCallbacks(task)
                 }
-
-                override fun now(): Long = android.os.SystemClock.elapsedRealtime()
             },
             listener = object : CallSequencer.Listener {
                 override fun onRoute(route: CallRoute.Route) {
-                    if (route == CallRoute.Route.BOUNCER) {
-                        showCallStatus("Tap Emergency call on the next screen", sticky = true)
-                    } else {
-                        showCallStatus("")
-                    }
+                    Log.i(TAG, "call route: $route")
+                }
+
+                override fun onLine(line: CallRoute.Line) {
+                    showCallStatus(line.text, sticky = line != CallRoute.Line.BLANK)
                 }
 
                 override fun onSettled(outcome: CallSequencer.Outcome) {
-                    when (outcome) {
-                        // Something took the screen: the instruction, if one
-                        // was showing, is spent. Nothing is said about a call.
-                        CallSequencer.Outcome.OPENED,
-                        CallSequencer.Outcome.BOUNCER_CANCELLED,
-                        -> showCallStatus("")
-                        CallSequencer.Outcome.FAILED -> showCallStatus(
-                            if (isEmergency) {
-                                "Couldn't open the emergency dialler. Press the power button five times " +
-                                    "for Emergency SOS, or use another phone."
-                            } else {
-                                "Couldn't start the call — tell your guardian."
-                            },
-                            sticky = true,
-                        )
-                    }
+                    Log.i(TAG, "call settled: $outcome")
                 }
             },
         )
