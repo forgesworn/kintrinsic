@@ -292,6 +292,15 @@ class ScreenLockResetStep(
 ) {
     private var restored = false
     private var lastRefusedAt: Long? = null
+    /** The refusals logged since the token last went in: a phone whose escrow
+     *  support the platform has switched off (one used with a screen lock
+     *  before it had a Device Owner) refuses every retry for good, so each is
+     *  said once, not every minute. */
+    private val refusalsLogged = mutableSetOf<String>()
+
+    private fun logRefusal(message: String) {
+        if (refusalsLogged.add(message)) log(message)
+    }
 
     /** Device Owner only, with the core up. */
     fun platformTick(nowUnix: Long) {
@@ -324,20 +333,22 @@ class ScreenLockResetStep(
                     // next unlock, and setting it again would change nothing.
                     restored = true
                     lastRefusedAt = null
+                    refusalsLogged.clear()
                     log("screen-lock reset token provisioned")
                 } else {
                     lastRefusedAt = nowUnix
-                    log("screen-lock reset token not provisioned (platform took it: $taken)")
+                    logRefusal("screen-lock reset token not provisioned (platform took it: $taken)")
                 }
             }
             ScreenLockTokenStep.RESTORE -> {
                 if (setToken(stored!!)) {
                     restored = true
                     lastRefusedAt = null
+                    refusalsLogged.clear()
                     log("screen-lock reset token set again (it was not active)")
                 } else {
                     lastRefusedAt = nowUnix
-                    log("screen-lock reset token refused when set again")
+                    logRefusal("screen-lock reset token refused when set again")
                 }
             }
         }
@@ -346,7 +357,7 @@ class ScreenLockResetStep(
     private fun setToken(token: ByteArray): Boolean = try {
         platform.setToken(token)
     } catch (t: Throwable) {
-        log("setting the screen-lock reset token threw ${t.javaClass.simpleName}")
+        logRefusal("setting the screen-lock reset token threw ${t.javaClass.simpleName}")
         false
     }
 
