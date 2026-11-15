@@ -150,8 +150,14 @@ impl BreakGlass {
     /// Queue an audit for the guardian. Durable: the ward's unlock happens
     /// immediately regardless of the network, and this rides out on the next
     /// successful poll.
+    ///
+    /// Refuses (false) when the spool exists but cannot be read right now:
+    /// writing would replace entries that were never read, so the caller's
+    /// retry, or the break-glass log line, takes over instead.
     pub fn queue_audit(&self, tags: Vec<Vec<String>>) -> bool {
-        let mut all = self.entries();
+        let Some(mut all) = self.load() else {
+            return false;
+        };
         all.push(SpooledAudit { tags, wrap: None });
         self.write_entries(&all)
     }
@@ -164,33 +170,65 @@ impl BreakGlass {
 
     /// The journaled audits, oldest first.
     ///
-    /// A missing spool is an empty one. A spool that cannot be read or parsed
-    /// is NOT: it is moved aside (see [`BreakGlass::set_spool_aside`]) before
-    /// this returns an empty list, so the next write can never overwrite
-    /// pending break-glass, screen-lock or emergency entries that might still
-    /// be recovered.
+    /// A missing spool is an empty one. A spool whose bytes are not UTF-8, or
+    /// do not parse, is NOT: it is moved aside (see
+    /// [`BreakGlass::set_spool_aside`]) before this returns an empty list, so
+    /// the next write can never overwrite pending break-glass, screen-lock or
+    /// emergency entries that might still be recovered.
+    ///
+    /// Any OTHER read error (a transient I/O error, a denial) is not evidence
+    /// the spool is bad: it reads as empty here and nothing is renamed, so the
+    /// next round reads it again. A caller that is about to WRITE must use
+    /// [`BreakGlass::load`] instead, so that a write never replaces a spool it
+    /// could not read.
     pub fn entries(&self) -> Vec<SpooledAudit> {
-        let raw = match std::fs::read_to_string(self.spool_path()) {
+        self.load().unwrap_or_default()
+    }
+
+    /// As [`BreakGlass::entries`], but a spool that could not be read for a
+    /// reason other than "missing", "not UTF-8" or "does not parse" is `None`
+    /// (after one retry), not empty.
+    fn load(&self) -> Option<Vec<SpooledAudit>> {
+        let path = self.spool_path();
+        let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-            Err(e) => {
-                eprintln!("charter: break-glass spool unreadable ({:?})", e.kind());
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                eprintln!("charter: break-glass spool is not valid text");
                 self.set_spool_aside();
-                return Vec::new();
+                return Some(Vec::new());
             }
+            Err(first) => match std::fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    eprintln!("charter: break-glass spool is not valid text");
+                    self.set_spool_aside();
+                    return Some(Vec::new());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "charter: break-glass spool unreadable ({:?}, then {:?}); left in place",
+                        first.kind(),
+                        e.kind()
+                    );
+                    return None;
+                }
+            },
         };
         match serde_json::from_str::<Vec<StoredAudit>>(&raw) {
-            Ok(list) => list
-                .into_iter()
-                .map(|e| match e {
-                    StoredAudit::Entry(e) => e,
-                    StoredAudit::Legacy(tags) => SpooledAudit { tags, wrap: None },
-                })
-                .collect(),
+            Ok(list) => Some(
+                list.into_iter()
+                    .map(|e| match e {
+                        StoredAudit::Entry(e) => e,
+                        StoredAudit::Legacy(tags) => SpooledAudit { tags, wrap: None },
+                    })
+                    .collect(),
+            ),
             Err(_) => {
                 eprintln!("charter: break-glass spool does not parse");
                 self.set_spool_aside();
-                Vec::new()
+                Some(Vec::new())
             }
         }
     }
@@ -692,16 +730,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// L3: a read error that is not "not found" (here the spool path is a
-    /// directory, so the read fails) is also set aside, and the next write
-    /// succeeds.
+    /// W8: bytes that are not UTF-8 are damage (`InvalidData`): set aside whole.
     #[test]
-    fn an_unreadable_spool_is_set_aside_and_the_next_press_still_journals() {
-        let base = tmp("unreadable");
+    fn a_spool_that_is_not_text_is_set_aside() {
+        let base = tmp("notutf8");
+        let bg = BreakGlass::new(&base);
+        let damaged = [0xff, 0xfe, 0x00, 0x5b, 0xc3];
+        std::fs::write(bg.spool_path(), damaged).unwrap();
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        let kept = bad_files(&bg);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(bg.dir.join(&kept[0])).unwrap(), damaged);
+        assert_eq!(bg.entries().len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// W8: a read error that says nothing about the bytes (here the spool path
+    /// is a directory, so the read fails with something other than "not
+    /// found" or "invalid data") sets nothing aside. A read-only caller sees
+    /// an empty spool and renames nothing; the spool is still there for the
+    /// next round. A write refuses rather than replace what it could not read.
+    #[test]
+    fn a_read_error_leaves_the_spool_in_place() {
+        let base = tmp("readerr");
         let bg = BreakGlass::new(&base);
         std::fs::create_dir_all(bg.spool_path()).unwrap();
+        std::fs::write(bg.spool_path().join("marker"), b"x").unwrap();
+
         assert!(bg.entries().is_empty());
-        assert_eq!(bad_files(&bg).len(), 1);
+        let wraps = bg.wraps_to_publish(T0, |_| panic!("nothing to build"), |_| panic!("nothing"));
+        assert!(wraps.is_empty());
+        bg.mark_sent(&[]);
+        assert!(!bg.queue_audit(emergency_call_audit_tags(T0)), "refused");
+
+        assert!(bad_files(&bg).is_empty(), "nothing renamed aside");
+        assert!(bg.spool_path().is_dir(), "the spool is still in place");
+        assert!(bg.spool_path().join("marker").exists());
+
+        // The error clears: the same spool path is read normally again.
+        std::fs::remove_dir_all(bg.spool_path()).unwrap();
         assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
         assert_eq!(bg.entries().len(), 1);
         let _ = std::fs::remove_dir_all(&base);

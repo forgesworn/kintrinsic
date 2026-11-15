@@ -1909,8 +1909,12 @@ the same.
 phone, the device makes one best-effort publish of every audit still held (this
 event, the override and the screen-lock outcomes) to the guardian doing the
 releasing, and then clears the journal, so nothing a ward pressed under one
-guardian is ever told to the next. A release that arrives with no relay, or to
-relays that refuse, drops them.
+guardian is ever told to the next. The journal is cleared at once and the
+release never waits for a relay: the publish carries on in the background. Each
+of those audits is also offered to the local link before it closes, so a
+release that arrived over the home network can carry them back over it while
+the relays are down. A release that arrives with no relay, or to relays that
+refuse, drops them.
 
 The outcome is `override` on purpose: a carrier notifies immediately on any
 `outcome=override` audit, so a carrier that predates this event still alerts

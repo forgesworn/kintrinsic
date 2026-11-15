@@ -897,54 +897,57 @@ impl Warden {
     /// not take it, or a phone with no relay at all, loses it: the alternative
     /// is a press made under this guardian reaching the next one.
     ///
-    /// The publish runs on a thread of its own, never the caller's: a release
-    /// can arrive on a thread that belongs to the link's async runtime, where
-    /// the relay's blocking publish must not be started, and the warden lock
-    /// is held here. The caller waits at most [`RELEASE_FLUSH_WAIT`] for it
-    /// (a relay that is slow is left to finish on its own), so a release is
-    /// never held up for long and its ACK goes out in good time.
+    /// This NEVER waits for the network, because the warden lock is held here
+    /// and every other user of it (the emergency report, break-glass, the
+    /// enforcement tick, the link's ingests) would wait too. The wraps are
+    /// built here (local crypto), each is offered to the local link, so the
+    /// retire grace that follows can carry it over the LAN when the relays are
+    /// down, and the publish then runs on a detached thread of its own (a
+    /// release can arrive on a thread that belongs to the link's async
+    /// runtime, where the relay's blocking publish must not be started). The
+    /// spool is cleared at once; the thread owns the wraps and the relay.
     fn flush_audits_on_release(&self, now: u64) {
-        /// How long a release waits for the held audits to be published.
-        const RELEASE_FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
-
         let held = self.break_glass.entries();
         if held.is_empty() {
             return;
         }
         match self.relay.clone() {
             Some(relay) => {
-                let (done, finished) = std::sync::mpsc::channel::<()>();
+                let mut wraps = Vec::with_capacity(held.len());
+                for e in held {
+                    let wrap = match e.wrap {
+                        Some(w)
+                            if now.abs_diff(w.created_at)
+                                <= crate::breakglass::REBUILD_AFTER_SECS =>
+                        {
+                            Some(w)
+                        }
+                        _ => relay.build_audit_wrap(e.tags, now),
+                    };
+                    match wrap {
+                        Some(w) => {
+                            // The link drops a wrap it already holds (same
+                            // id), so a wrap offered when it was journaled is
+                            // not duplicated.
+                            relay.offer_audit_local(&w);
+                            wraps.push(w);
+                        }
+                        None => eprintln!(
+                            "charter: a held audit could not be built for the releasing guardian"
+                        ),
+                    }
+                }
                 let spawned = std::thread::Builder::new()
                     .name("charter-release-audits".into())
                     .spawn(move || {
-                        for e in held {
-                            let wrap = match e.wrap {
-                                Some(w)
-                                    if now.abs_diff(w.created_at)
-                                        <= crate::breakglass::REBUILD_AFTER_SECS =>
-                                {
-                                    Some(w)
-                                }
-                                _ => relay.build_audit_wrap(e.tags, now),
-                            };
-                            match wrap {
-                                Some(w) => {
-                                    if relay.publish_wrap(w).is_err() {
-                                        eprintln!("charter: a held audit could not be sent to the releasing guardian");
-                                    }
-                                }
-                                None => eprintln!(
-                                    "charter: a held audit could not be built for the releasing guardian"
-                                ),
+                        for w in wraps {
+                            if relay.publish_wrap(w).is_err() {
+                                eprintln!("charter: a held audit could not be sent to the releasing guardian");
                             }
                         }
-                        let _ = done.send(());
                     });
-                match spawned {
-                    Ok(_) => {
-                        let _ = finished.recv_timeout(RELEASE_FLUSH_WAIT);
-                    }
-                    Err(_) => eprintln!("charter: held audits could not be sent on release"),
+                if spawned.is_err() {
+                    eprintln!("charter: held audits could not be sent on release");
                 }
             }
             None => eprintln!("charter: no relay: held audits are dropped on release"),
@@ -7453,6 +7456,11 @@ mod tests {
 
         w.apply_release(t0 + 10);
         assert!(!w.pairing_state().paired);
+        // The publish runs on a detached thread (W9): wait for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while futures_events(&up).len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let sent = futures_events(&up);
         assert_eq!(sent.len(), 2, "both audits published once");
         assert!(
@@ -7462,6 +7470,104 @@ mod tests {
         assert!(
             w.break_glass.entries().is_empty(),
             "nothing is left for the next guardian"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A relay whose publish never answers and whose queries are unreachable.
+    #[derive(Clone)]
+    struct HangRelay;
+
+    #[async_trait::async_trait]
+    impl charter_sys::relay::RelayTransport for HangRelay {
+        async fn publish(
+            &self,
+            _relays: &[charter_sys::relay::RelayUrl],
+            _ev: NostrEvent,
+        ) -> Vec<(
+            charter_sys::relay::RelayUrl,
+            charter_sys::relay::PublishOutcome,
+        )> {
+            std::future::pending().await
+        }
+        async fn query(
+            &self,
+            _relays: &[charter_sys::relay::RelayUrl],
+            _filter: charter_sys::relay::Filter,
+        ) -> Result<Vec<NostrEvent>, charter_sys::relay::RelayIoError> {
+            Err(charter_sys::relay::RelayIoError::Unreachable(
+                "no route".into(),
+            ))
+        }
+    }
+
+    /// W9 + W10: a release never waits under the warden lock for a relay that
+    /// does not answer: `apply_release` returns promptly, the spool is cleared
+    /// at once, and every held audit (one already wrapped, one not yet built)
+    /// was offered to the local link before the pairing closed, so the retire
+    /// grace can carry it over the LAN.
+    #[test]
+    fn a_release_does_not_wait_for_a_silent_relay_and_offers_the_audits_to_the_link() {
+        use charter_link::{LocalOffer, LocalSink};
+        use charter_primitives::kinds::CHARTER_DEVICE_AUDIT;
+        use std::sync::Arc;
+
+        struct Offers(Mutex<Vec<LocalOffer>>);
+        impl LocalSink for Offers {
+            fn offer(&self, o: LocalOffer) {
+                self.0.lock().unwrap().push(o);
+            }
+        }
+
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        let t0 = IN_WINDOW as u64;
+        w.pair(&uri, t0 - 100).unwrap();
+        let sk = *w.machine_sk.clone().expect("machine key");
+        let relays = vec!["wss://relay.example".to_string()];
+        let sink = Arc::new(Offers(Mutex::new(Vec::new())));
+        let relay = Arc::new(
+            crate::relay::BlockingRelay::new(HangRelay, sk, guardian.pubkey(), relays)
+                .unwrap()
+                .with_local_sink(Some(sink.clone() as Arc<dyn LocalSink>)),
+        );
+        w.inject_relay(relay.clone());
+
+        assert_eq!(w.emergency_call_used(t0), r#"{"ok":true}"#);
+        let held = w.break_glass.wraps_to_publish(
+            t0,
+            |tags| relay.build_audit_wrap(tags.to_vec(), t0),
+            |_| {},
+        );
+        assert_eq!(held.len(), 1);
+        assert_eq!(w.emergency_call_used(t0 + 5), r#"{"ok":true}"#);
+        assert_eq!(w.break_glass.entries().len(), 2);
+
+        let started = std::time::Instant::now();
+        w.apply_release(t0 + 10);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the release must not wait for the relay (took {:?})",
+            started.elapsed()
+        );
+        assert!(w.break_glass.entries().is_empty(), "cleared at once");
+        let offered: Vec<NostrEvent> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.inner_kind == CHARTER_DEVICE_AUDIT)
+            .map(|o| o.wrap.clone())
+            .collect();
+        assert_eq!(offered.len(), 2, "both held audits offered to the link");
+        assert!(
+            offered.iter().any(|e| e.id == held[0].id),
+            "the already-built wrap is offered as it is"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
