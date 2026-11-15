@@ -91,8 +91,10 @@ object Notifier {
 
     /**
      * The ward used the emergency-call button on their lock screen (device
-     * audit `outcome=override`, `op=call.emergency`). It means the emergency
-     * dialler opened, not that a call was placed, so the words say exactly that.
+     * audit `outcome=override`, `op=call.emergency`). It means the button's
+     * hold and cancel window completed and the ward app asked the phone to open
+     * its emergency dialler: not proof the dialler appeared, nor that a call was
+     * placed, so the words claim only that the button was used.
      * Same loud high-importance channel and public lockscreen as [notifyOverride].
      */
     fun notifyEmergencyCall(
