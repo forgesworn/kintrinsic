@@ -36,20 +36,23 @@ object ActivityKind {
     const val DEBUGGING_OFF = "debugging_off"
     const val ADB_ON = "adb_on"
     const val ADB_OFF = "adb_off"
+    const val ADB_WIFI_ON = "adb_wifi_on"
+    const val ADB_WIFI_OFF = "adb_wifi_off"
     const val PAIRED = "paired"
     const val UNPAIRED = "unpaired"
     const val GUARDIAN_CHANGED = "guardian_changed"
     const val UPDATED = "updated"
 
     val ALL: Set<String> = setOf(
-        EMERGENCY, DEBUGGING_ON, DEBUGGING_OFF, ADB_ON, ADB_OFF, PAIRED, UNPAIRED, GUARDIAN_CHANGED, UPDATED,
+        EMERGENCY, DEBUGGING_ON, DEBUGGING_OFF, ADB_ON, ADB_OFF, ADB_WIFI_ON, ADB_WIFI_OFF, PAIRED, UNPAIRED, GUARDIAN_CHANGED, UPDATED,
     )
 }
 
 /**
  * One entry. [at] is unix secs. `debugging_on` / `debugging_off` are the
  * guardian's restriction (USB debugging allowed or blocked); `adb_on` /
- * `adb_off` are the phone's real adb switch. Per kind: `debugging_on` may carry [until]
+ * `adb_off` are the phone's real adb switch, and `adb_wifi_on` / `adb_wifi_off`
+ * its wireless-debugging switch. Per kind: `debugging_on` may carry [until]
  * (when known); the pairing kinds carry the short guardian key in [guardian]
  * (and the previous one in [was] for `guardian_changed`); `updated` carries
  * the version names in [from] and [to]. There is deliberately no field for
@@ -115,7 +118,7 @@ object ActivityRetention {
 
     /** The file is rewritten only once it passes this many lines. It must stay
      *  above [PER_KIND] times the number of kinds, or compaction would loop. */
-    const val COMPACT_ABOVE_LINES = 2_000
+    const val COMPACT_ABOVE_LINES = 3_000
 
     /**
      * The newest [perKind] entries of EACH kind, in their original order. The
@@ -272,6 +275,9 @@ object ActivityCopy {
         // The phone's real adb switch.
         ActivityKind.ADB_ON -> "USB debugging switched on (a computer plugged in can ask to control this phone)"
         ActivityKind.ADB_OFF -> "USB debugging switched off"
+        ActivityKind.ADB_WIFI_ON ->
+            "Wireless debugging switched on (a computer on the same Wi-Fi can ask to control this phone)"
+        ActivityKind.ADB_WIFI_OFF -> "Wireless debugging switched off"
         ActivityKind.PAIRED -> e.guardian?.let { "Paired with guardian $it" } ?: "Paired with a guardian"
         ActivityKind.UNPAIRED -> e.guardian?.let { "Unpaired from guardian $it" } ?: "Unpaired from your guardian"
         ActivityKind.GUARDIAN_CHANGED -> when {
@@ -296,12 +302,11 @@ object ActivityCopy {
      * says "not seen yet". A failed or not-ready reset had no notice, so it
      * has no OK part.
      */
-    fun screenLockRow(r: ScreenLockRecord, zone: ZoneId): String =
-        runCatching { screenLockRowUnguarded(r, zone) }
-            .getOrElse { "Screen lock ${if (r.kind == ScreenLockChange.REMOVED) "removed" else "changed"} by your guardian (time unreadable)" }
-
-    private fun screenLockRowUnguarded(r: ScreenLockRecord, zone: ZoneId): String {
+    fun screenLockRow(r: ScreenLockRecord, zone: ZoneId): String {
         val what = if (r.kind == ScreenLockChange.REMOVED) "removed" else "changed"
+        // Only a reset's own time that will not format loses the whole row.
+        val stamp = runCatching { stamp(r.at, zone) }.getOrNull()
+            ?: return "Screen lock $what by your guardian (time unreadable)"
         val how = when (r.outcome) {
             ScreenLockOutcome.APPLIED -> "done"
             ScreenLockOutcome.FAILED -> "it didn't work, nothing changed"
@@ -312,11 +317,13 @@ object ActivityCopy {
         val hadNotice = r.outcome == ScreenLockOutcome.PENDING || r.outcome == ScreenLockOutcome.APPLIED
         val ok = when {
             !hadNotice -> null
-            r.acknowledgedAt != null -> "OK tapped ${sameDayStamp(r.at, r.acknowledgedAt, zone)}"
+            // A damaged acknowledgement time degrades only this part.
+            r.acknowledgedAt != null ->
+                "OK tapped " + (runCatching { sameDayStamp(r.at, r.acknowledgedAt, zone) }.getOrNull() ?: "(time unreadable)")
             r.acknowledged -> "OK tapped"
             else -> "not seen yet"
         }
-        return listOfNotNull("${stamp(r.at, zone)} · Screen lock $what by your guardian", how, ok).joinToString(" · ")
+        return listOfNotNull("$stamp · Screen lock $what by your guardian", how, ok).joinToString(" · ")
     }
 
     /** "14:03" when [laterAt] is on the same day as [baseAt], else "09:12, 16 Nov". */
@@ -408,12 +415,19 @@ object ActivityTriggers {
 
     /** [enabled] is the phone's real adb switch (`Settings.Global.ADB_ENABLED`),
      *  null when it would not read. Same rules as [debugging]. */
-    fun adb(last: Boolean?, enabled: Boolean?, nowUnix: Long): Observation<Boolean> = when {
-        enabled == null -> Observation(null, null)
-        last == null -> Observation(null, enabled)
-        last == enabled -> Observation(null, null)
-        enabled -> Observation(ActivityEntry(nowUnix, ActivityKind.ADB_ON), true)
-        else -> Observation(ActivityEntry(nowUnix, ActivityKind.ADB_OFF), false)
+    fun adb(last: Boolean?, enabled: Boolean?, nowUnix: Long): Observation<Boolean> =
+        edge(last, enabled, ActivityEntry(nowUnix, ActivityKind.ADB_ON), ActivityEntry(nowUnix, ActivityKind.ADB_OFF))
+
+    /** The wireless-debugging switch (`adb_wifi_enabled`), the same way. */
+    fun adbWifi(last: Boolean?, enabled: Boolean?, nowUnix: Long): Observation<Boolean> =
+        edge(last, enabled, ActivityEntry(nowUnix, ActivityKind.ADB_WIFI_ON), ActivityEntry(nowUnix, ActivityKind.ADB_WIFI_OFF))
+
+    private fun edge(last: Boolean?, now: Boolean?, on: ActivityEntry, off: ActivityEntry): Observation<Boolean> = when {
+        now == null -> Observation(null, null)
+        last == null -> Observation(null, now)
+        last == now -> Observation(null, null)
+        now -> Observation(on, true)
+        else -> Observation(off, false)
     }
 
     fun pairing(last: PairingMemory?, state: CharterCore.PairingState?, nowUnix: Long): Observation<PairingMemory> {
@@ -456,6 +470,8 @@ interface ActivityMemory {
     fun setDebugging(open: Boolean): Boolean
     fun adb(): Boolean?
     fun setAdb(enabled: Boolean): Boolean
+    fun adbWifi(): Boolean?
+    fun setAdbWifi(enabled: Boolean): Boolean
     fun pairing(): PairingMemory?
     fun setPairing(p: PairingMemory): Boolean
     fun version(): VersionMemory?
@@ -474,6 +490,9 @@ class PrefsActivityMemory(context: Context) : ActivityMemory {
     override fun adb(): Boolean? = if (prefs.contains(ADB)) prefs.getBoolean(ADB, false) else null
     override fun setAdb(enabled: Boolean) = prefs.edit().putBoolean(ADB, enabled).commit()
 
+    override fun adbWifi(): Boolean? = if (prefs.contains(ADB_WIFI)) prefs.getBoolean(ADB_WIFI, false) else null
+    override fun setAdbWifi(enabled: Boolean) = prefs.edit().putBoolean(ADB_WIFI, enabled).commit()
+
     override fun pairing(): PairingMemory? =
         if (prefs.contains(PAIRED)) PairingMemory(prefs.getBoolean(PAIRED, false), prefs.getString(GUARDIAN, null)) else null
 
@@ -491,6 +510,7 @@ class PrefsActivityMemory(context: Context) : ActivityMemory {
     private companion object {
         const val DEBUGGING = "debuggingOpen"
         const val ADB = "adbEnabled"
+        const val ADB_WIFI = "adbWifiEnabled"
         const val PAIRED = "paired"
         const val GUARDIAN = "guardian"
         const val VERSION_NAME = "versionName"
@@ -514,6 +534,7 @@ class ActivityWatcher(
 ) {
     private var lastDebugging: Boolean? = null
     private var lastAdb: Boolean? = null
+    private var lastAdbWifi: Boolean? = null
     private var lastPairing: PairingMemory? = null
     private var lastVersion: VersionMemory? = null
 
@@ -530,6 +551,14 @@ class ActivityWatcher(
         guarded("adb") {
             val obs = ActivityTriggers.adb(lastAdb ?: memory.adb(), enabled, nowUnix)
             settle(obs, { lastAdb = it }) { memory.setAdb(it) }
+        }
+    }
+
+    @Synchronized
+    fun observeAdbWifi(enabled: Boolean?, nowUnix: Long) {
+        guarded("adbWifi") {
+            val obs = ActivityTriggers.adbWifi(lastAdbWifi ?: memory.adbWifi(), enabled, nowUnix)
+            settle(obs, { lastAdbWifi = it }) { memory.setAdbWifi(it) }
         }
     }
 

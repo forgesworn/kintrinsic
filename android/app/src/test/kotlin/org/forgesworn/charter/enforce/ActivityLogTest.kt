@@ -36,6 +36,8 @@ class ActivityLogTest {
             ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF),
             ActivityEntry(at1942, ActivityKind.ADB_ON),
             ActivityEntry(at1942, ActivityKind.ADB_OFF),
+            ActivityEntry(at1942, ActivityKind.ADB_WIFI_ON),
+            ActivityEntry(at1942, ActivityKind.ADB_WIFI_OFF),
             ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234"),
             ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234"),
             ActivityEntry(at1942, ActivityKind.GUARDIAN_CHANGED, guardian = "ef567890", was = "abcd1234"),
@@ -281,7 +283,9 @@ class ActivityLogTest {
         assertEquals(5, feed.rows.size)
         val texts = feed.rows.map { it.text }
         assertTrue(texts.toString(), texts.contains("Screen lock changed by your guardian (time unreadable)"))
-        assertTrue(texts.toString(), texts.contains("Screen lock removed by your guardian (time unreadable)"))
+        // Only the acknowledgement time is damaged: the reset's own time, its
+        // outcome and the fact that OK was tapped all stay.
+        assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · Screen lock removed by your guardian · done · OK tapped (time unreadable)"))
         assertTrue(texts.toString(), texts.contains("Emergency button used on the lock screen (time unreadable)"))
         // The row with a good time keeps it; only the bad `until` is dropped.
         assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)"))
@@ -290,6 +294,26 @@ class ActivityLogTest {
         val notice = ScreenLockCopy.noticeOrFallback(sl[0], london)
         assertTrue(notice, notice.contains("changed your screen lock"))
         assertTrue(ScreenLockCopy.noticeOrFallback(reset("c", max, ScreenLockOutcome.APPLIED, kind = ScreenLockChange.REMOVED), london).contains("removed"))
+    }
+
+    @Test
+    fun `a damaged acknowledgement time degrades only the OK part`() {
+        val r = reset("a", at1942, ScreenLockOutcome.PENDING, ackAt = Long.MAX_VALUE)
+        assertEquals(
+            "19:42, 14 Nov · Screen lock changed by your guardian · may have happened · OK tapped (time unreadable)",
+            ActivityCopy.screenLockRow(r, london),
+        )
+        // Not tapped stays "not seen yet", never "OK tapped".
+        assertTrue(ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.APPLIED), london).endsWith("not seen yet"))
+    }
+
+    @Test
+    fun `the notice for a damaged newest reset still reaches the lock screen`() {
+        val damaged = reset("a", Long.MAX_VALUE, ScreenLockOutcome.APPLIED)
+        val older = reset("b", at1942, ScreenLockOutcome.APPLIED)
+        val text = ScreenLockCopy.currentNotice(listOf(older, damaged), london)
+        assertNotNull(text)
+        assertTrue(text!!.contains("time unreadable"))
     }
 
     @Test
@@ -373,6 +397,11 @@ class ActivityLogTest {
             row(ActivityEntry(at1942, ActivityKind.ADB_ON)),
         )
         assertEquals("19:42, 14 Nov · USB debugging switched off", row(ActivityEntry(at1942, ActivityKind.ADB_OFF)))
+        assertEquals(
+            "19:42, 14 Nov · Wireless debugging switched on (a computer on the same Wi-Fi can ask to control this phone)",
+            row(ActivityEntry(at1942, ActivityKind.ADB_WIFI_ON)),
+        )
+        assertEquals("19:42, 14 Nov · Wireless debugging switched off", row(ActivityEntry(at1942, ActivityKind.ADB_WIFI_OFF)))
         assertEquals("19:42, 14 Nov · Paired with guardian abcd1234", row(ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234")))
         assertEquals("19:42, 14 Nov · Unpaired from guardian abcd1234", row(ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234")))
         assertEquals(
@@ -423,6 +452,28 @@ class ActivityLogTest {
         assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(null, null, at1942))
         assertEquals(ActivityEntry(at1942, ActivityKind.ADB_ON), ActivityTriggers.adb(false, true, at1942).entry)
         assertEquals(ActivityEntry(at1942, ActivityKind.ADB_OFF), ActivityTriggers.adb(true, false, at1942).entry)
+    }
+
+    @Test
+    fun `wireless debugging follows the same edge rules`() {
+        assertEquals(Observation<Boolean>(null, true), ActivityTriggers.adbWifi(null, true, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adbWifi(true, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adbWifi(false, false, at1942))
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_WIFI_ON), ActivityTriggers.adbWifi(false, true, at1942).entry)
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_WIFI_OFF), ActivityTriggers.adbWifi(true, false, at1942).entry)
+    }
+
+    @Test
+    fun `the watcher keeps USB and wireless debugging apart`() {
+        val log = FakeLog()
+        val w = ActivityWatcher(log, FakeMemory()) {}
+        w.observeAdb(true, at1942)
+        w.observeAdbWifi(false, at1942)
+        assertTrue(log.written.isEmpty())
+        w.observeAdbWifi(true, at1942 + 1)
+        w.observeAdbWifi(null, at1942 + 2)
+        w.observeAdb(false, at1942 + 3)
+        assertEquals(listOf(ActivityKind.ADB_WIFI_ON, ActivityKind.ADB_OFF), log.written.map { it.kind })
     }
 
     private fun pairing(paired: Boolean, guardian: String?, error: String? = null, unreadable: Boolean = false) =
@@ -517,6 +568,9 @@ class ActivityLogTest {
         override fun setDebugging(open: Boolean): Boolean { if (commitOk) dbg = open; return commitOk }
         override fun adb() = adbState
         override fun setAdb(enabled: Boolean): Boolean { if (commitOk) adbState = enabled; return commitOk }
+        var wifiState: Boolean? = null
+        override fun adbWifi() = wifiState
+        override fun setAdbWifi(enabled: Boolean): Boolean { if (commitOk) wifiState = enabled; return commitOk }
         override fun pairing() = pair
         override fun setPairing(p: PairingMemory): Boolean { if (commitOk) pair = p; return commitOk }
         override fun version() = ver
@@ -671,27 +725,28 @@ class ActivityLogTest {
     @Test
     fun `nothing escapes the runnable handed to a real executor`() {
         val escaped = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
-        val ran = java.util.concurrent.CountDownLatch(1)
+        lateinit var worker: Thread
         val pool = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-            Thread(r).apply {
-                isDaemon = true
-                setUncaughtExceptionHandler { _, t -> escaped.set(t) }
+            Thread(r).also {
+                it.isDaemon = true
+                it.setUncaughtExceptionHandler { _, t -> escaped.set(t) }
+                worker = it
             }
         }
-        try {
-            assertTrue(
-                EmergencyUse.placeAndRecord(
-                    start = { true },
-                    record = { error("disk full") },
-                    runner = { r -> pool.execute { try { r.run() } finally { ran.countDown() } } },
-                    onFailure = { error("logging failed too") },
-                ),
-            )
-            assertTrue(ran.await(5, java.util.concurrent.TimeUnit.SECONDS))
-        } finally {
-            pool.shutdown()
-            pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
-        }
+        assertTrue(
+            EmergencyUse.placeAndRecord(
+                start = { true },
+                record = { error("disk full") },
+                runner = { r -> pool.execute(r) },
+                onFailure = { error("logging failed too") },
+            ),
+        )
+        // Joining the worker is deterministic: a thread dies only after its
+        // uncaught-exception handler has run, so a throw that escaped the
+        // Runnable is always in `escaped` by now.
+        pool.shutdown()
+        worker.join(5_000)
+        assertFalse(worker.isAlive)
         assertNull(escaped.get())
     }
 

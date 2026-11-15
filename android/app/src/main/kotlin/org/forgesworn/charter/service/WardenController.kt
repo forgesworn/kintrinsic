@@ -1009,6 +1009,16 @@ class WardenController(
      */
     private var versionObserved = false
 
+    /** A `Settings.Global` on/off switch: true for 1, false for 0, null for
+     *  anything else, missing or unreadable (never an observation). */
+    private fun globalSwitch(name: String): Boolean? = runCatching {
+        when (android.provider.Settings.Global.getInt(context.contentResolver, name, -1)) {
+            1 -> true
+            0 -> false
+            else -> null
+        }
+    }.getOrNull()
+
     /** Pairing (once the core is up, so a failed init is never read as an
      *  unpairing) and, once per process, the app version. The pure decisions
      *  and the baseline rules are in [org.forgesworn.charter.enforce.ActivityTriggers]. */
@@ -1047,16 +1057,10 @@ class WardenController(
             if (initialized) {
                 activity?.observeDebugging(open, until.takeIf { it > 0 }, nowUnix)
                 // The phone's real adb switch, a separate fact from the restriction.
-                activity?.observeAdb(
-                    runCatching {
-                        when (android.provider.Settings.Global.getInt(context.contentResolver, android.provider.Settings.Global.ADB_ENABLED, -1)) {
-                            1 -> true
-                            0 -> false
-                            else -> null
-                        }
-                    }.getOrNull(),
-                    nowUnix,
-                )
+                activity?.observeAdb(globalSwitch(android.provider.Settings.Global.ADB_ENABLED), nowUnix)
+                // Wireless debugging is its own switch (not in the public SDK,
+                // so read by name); a missing or unreadable value is no observation.
+                activity?.observeAdbWifi(globalSwitch("adb_wifi_enabled"), nowUnix)
             }
         }
     }

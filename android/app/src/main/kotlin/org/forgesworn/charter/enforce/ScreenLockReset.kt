@@ -197,7 +197,7 @@ object ScreenLockCopy {
 
     /** The notice to show now (the newest unacknowledged reset), or null. */
     fun currentNotice(records: List<ScreenLockRecord>, zone: ZoneId): String? =
-        ScreenLockHistoryFormat.unacknowledged(records).firstOrNull()?.let { notice(it, zone) }
+        ScreenLockHistoryFormat.unacknowledged(records).firstOrNull()?.let { noticeOrFallback(it, zone) }
 
     /** One row of the old "Screen lock history" card. The home screen now
      *  shows [ActivityCopy.screenLockRow] in "Activity on this phone". */
