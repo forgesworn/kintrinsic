@@ -91,6 +91,16 @@ function makeStore(opts: { knownMachine?: boolean } = {}) {
       if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
       return true;
     },
+    ingestEmergencyCall: (a) => {
+      if (!known) return false;
+      if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
+      return true;
+    },
+    ingestEmergencyControl: (a) => {
+      if (!known) return false;
+      if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
+      return true;
+    },
   };
   return {
     ctx,

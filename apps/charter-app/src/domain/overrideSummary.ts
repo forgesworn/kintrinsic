@@ -20,3 +20,18 @@ export function overrideSummary(
   const forHowLong = mins === null ? "" : ` for ${mins} ${mins === 1 ? "minute" : "minutes"}`;
   return `${what} on ${deviceLabel}${forHowLong}`;
 }
+
+/**
+ * The Activity sentence for a use of the emergency-call button. The row leads
+ * with "Emergency call button.". Deliberately honest about what is known: the
+ * ward's phone started the emergency call screen, but Kintrinsic cannot see
+ * whether a call was made.
+ */
+export function emergencyCallSummary(deviceLabel: string): string {
+  return `Used the emergency call button on ${deviceLabel}. Kintrinsic can't see whether a call was made.`;
+}
+
+/** The Activity sentence for an emergency control this build does not know by name. */
+export function emergencyControlSummary(deviceLabel: string): string {
+  return `An emergency control was used on ${deviceLabel}.`;
+}

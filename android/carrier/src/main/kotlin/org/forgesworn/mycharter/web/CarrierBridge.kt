@@ -2,6 +2,7 @@ package org.forgesworn.mycharter.web
 
 import android.webkit.JavascriptInterface
 import org.forgesworn.mycharter.carrier.CarrierStore
+import org.forgesworn.mycharter.carrier.InboxSpool
 import org.forgesworn.mycharter.carrier.ProvisionPayload
 import org.forgesworn.mycharter.carrier.RosterPayload
 import org.forgesworn.mycharter.link.LinkJson
@@ -142,12 +143,16 @@ class CarrierBridge(
      *  wraps received over the link, held until [localConsume]. */
     @JavascriptInterface
     fun localInbox(): String {
-        if (link() == null) return "[]"
-        return native("[]") { GuardianNative.guardianLinkInbox() }
+        val fromLink = if (link() == null) "[]" else native("[]") { GuardianNative.guardianLinkInbox() }
+        // Plus the emergency audits that arrived over a relay (the carrier
+        // holds them until consumed, so a press reaches Activity however late
+        // the console is opened). Works with the home-network link off.
+        return native(fromLink) { InboxSpool.merge(fromLink, store.inboxSpool()) }
     }
 
     @JavascriptInterface
     fun localConsume(idsJson: String) {
+        native("") { store.consumeInboxSpool(idsJson); "" }
         if (link() == null) return
         native("") { GuardianNative.guardianLinkConsume(idsJson) }
     }

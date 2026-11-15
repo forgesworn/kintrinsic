@@ -2,6 +2,11 @@ package org.forgesworn.mycharter.service
 
 import org.forgesworn.mycharter.carrier.WardName
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.forgesworn.mycharter.carrier.RosterEntry
 import org.junit.Test
 
 /**
@@ -39,6 +44,142 @@ class NotifierTextTest {
             "Mia opened calls (Pixel 6) for 3 minutes.",
             Notifier.overrideText("calls", 3, who),
         )
+    }
+
+    // ---- emergency call button ---------------------------------------------
+
+    @Test fun emergencyCallHitNamesTheWardAndDevice() {
+        assertEquals(
+            "Mia used the emergency call button on Pixel 6.",
+            Notifier.emergencyCallText(who),
+        )
+    }
+
+    @Test fun emergencyCallNoHitNamesNobody() {
+        assertEquals(
+            "Your ward used the emergency call button.",
+            Notifier.emergencyCallText(null),
+        )
+    }
+
+    @Test fun emergencyCallTitleIsFixedAndNeverClaimsACall() {
+        assertEquals("Emergency call button used", Notifier.EMERGENCY_CALL_TITLE)
+    }
+
+    @Test fun emergencyCallNeverUsesTheUnlockWording() {
+        for (w in listOf(who, null)) {
+            val text = Notifier.emergencyCallText(w)
+            assertFalse(text.contains("opened calls"))
+            assertFalse(text.contains("minutes"))
+        }
+    }
+
+    @Test fun otherEmergencyControlIsGenericAndHonest() {
+        assertEquals(
+            "Mia: an emergency control was used on Pixel 6",
+            Notifier.emergencyControlText(who),
+        )
+        assertEquals(
+            "Your ward: an emergency control was used",
+            Notifier.emergencyControlText(null),
+        )
+        assertFalse(Notifier.emergencyControlText(who).contains("opened"))
+    }
+
+    // ---- a roster miss (L6) -------------------------------------------------
+
+    @Test fun anUnpairedSenderIsNeverCalledYourWard() {
+        val text = "A device you haven't paired reported an emergency control."
+        assertEquals(text, Notifier.UNPAIRED_TEXT)
+        assertEquals(text, Notifier.emergencyCallText(null, unpaired = true))
+        assertEquals(text, Notifier.emergencyControlText(null, unpaired = true))
+        assertEquals(text, Notifier.overrideText("full", 10, null, unpaired = true))
+    }
+
+    @Test fun onlyAKnownRosterWithNoEntryMakesASenderUnpaired() {
+        val roster = listOf(RosterEntry("m1", "Mia", "Pixel 6"))
+        assertFalse(Notifier.isUnpaired("m1", roster, rosterKnown = true))
+        assertTrue(Notifier.isUnpaired("m2", roster, rosterKnown = true))
+        // No roster pushed yet: the old "Your ward" wording, never "unpaired".
+        assertFalse(Notifier.isUnpaired("m2", roster, rosterKnown = false))
+        assertFalse(Notifier.isUnpaired("m2", emptyList(), rosterKnown = false))
+        assertTrue(Notifier.isUnpaired("m2", emptyList(), rosterKnown = true))
+    }
+
+    // ---- one row per press, and the press time ---------------------------------
+
+    @Test fun alertKeyIsPerPressWhenTheWardStampedATime() {
+        assertEquals("emergency-call-m1-100", Notifier.alertKey("emergency-call", "m1", 100L, "w"))
+        assertEquals("override-m1-100", Notifier.alertKey("override", "m1", 100L, null))
+    }
+
+    @Test fun aRebuiltWrapForTheSamePressReusesItsRow() {
+        assertEquals(
+            Notifier.alertKey("emergency-call", "m1", 100L, "wrapA"),
+            Notifier.alertKey("emergency-call", "m1", 100L, "wrapB"),
+        )
+    }
+
+    @Test fun twoPressesGetTwoRows() {
+        assertNotEquals(
+            Notifier.alertKey("emergency-call", "m1", 100L, null).hashCode(),
+            Notifier.alertKey("emergency-call", "m1", 160L, null).hashCode(),
+        )
+    }
+
+    @Test fun anUnlockAndACallNeverShareARow() {
+        assertNotEquals(
+            Notifier.alertKey("override", "m1", 100L, null),
+            Notifier.alertKey("emergency-call", "m1", 100L, null),
+        )
+    }
+
+    @Test fun withoutATimeTheRowFallsBackToTheWrapIdThenTheMachine() {
+        assertEquals("emergency-call-m1-wrap-abc", Notifier.alertKey("emergency-call", "m1", null, "abc"))
+        assertEquals("emergency-call-m1", Notifier.alertKey("emergency-call", "m1", null, null))
+    }
+
+    @Test fun whenIsThePressTimeInMillisWhenPlausible() {
+        val now = 1_800_000_000L
+        assertEquals((now - 60) * 1000, Notifier.plausibleWhenMillis(now - 60, now))
+        assertEquals(now * 1000, Notifier.plausibleWhenMillis(now, now))
+        assertEquals(
+            (now - Notifier.MAX_PRESS_AGE_SECS) * 1000,
+            Notifier.plausibleWhenMillis(now - Notifier.MAX_PRESS_AGE_SECS, now),
+        )
+    }
+
+    @Test fun whenIsLeftToThePlatformWhenImplausible() {
+        val now = 1_800_000_000L
+        assertNull(Notifier.plausibleWhenMillis(null, now))
+        assertNull(Notifier.plausibleWhenMillis(now + 1, now))
+        assertNull(Notifier.plausibleWhenMillis(now - Notifier.MAX_PRESS_AGE_SECS - 1, now))
+        assertNull(Notifier.plausibleWhenMillis(0L, now))
+        assertNull(Notifier.plausibleWhenMillis(-1L, now))
+    }
+
+    // ---- auditAction (the dispatch within outcome=override) ------------------
+
+    @Test fun overrideWithBreakGlassOrNoOpIsTheUnlockAlert() {
+        assertEquals(Notifier.AuditAction.UNLOCK, Notifier.auditAction("override", "unlock.breakglass"))
+        assertEquals(Notifier.AuditAction.UNLOCK, Notifier.auditAction("override", ""))
+    }
+
+    @Test fun overrideWithCallEmergencyIsTheEmergencyCallAlert() {
+        assertEquals(Notifier.AuditAction.EMERGENCY_CALL, Notifier.auditAction("override", "call.emergency"))
+    }
+
+    @Test fun overrideWithAnyOtherOpIsTheGenericAlert() {
+        assertEquals(Notifier.AuditAction.OTHER_CONTROL, Notifier.auditAction("override", "something.new"))
+        assertEquals(Notifier.AuditAction.OTHER_CONTROL, Notifier.auditAction("override", "Call.Emergency"))
+    }
+
+    @Test fun anyOtherOutcomeIsIgnoredWhateverTheOp() {
+        for (op in listOf("call.emergency", "unlock.breakglass", "", "screenlock.reset")) {
+            for (outcome in listOf("applied", "failed", "enacted", "", "Override")) {
+                assertEquals(Notifier.AuditAction.IGNORE, Notifier.auditAction(outcome, op))
+            }
+        }
     }
 
     // ---- requestText ------------------------------------------------------

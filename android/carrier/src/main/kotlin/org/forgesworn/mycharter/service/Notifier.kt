@@ -73,29 +73,108 @@ object Notifier {
         scope: String,
         durationSecs: Long,
         roster: List<RosterEntry> = emptyList(),
+        at: Long? = null,
+        wrapId: String? = null,
+        rosterKnown: Boolean = false,
+    ) = postEmergencyAlert(
+        ctx,
+        key = alertKey("override", machine, at, wrapId),
+        title = "Emergency unlock used",
+        text = overrideText(
+            scope,
+            (durationSecs / 60).coerceAtLeast(1),
+            describeWard(machine, roster),
+            unpaired = isUnpaired(machine, roster, rosterKnown),
+        ),
+        whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
+    )
+
+    /**
+     * The ward used the emergency-call button on their lock screen (device
+     * audit `outcome=override`, `op=call.emergency`). It means the button's
+     * hold and cancel window completed and the ward app asked the phone to open
+     * its emergency dialler: not proof the dialler appeared, nor that a call was
+     * placed, so the words claim only that the button was used.
+     * Same loud high-importance channel and public lockscreen as [notifyOverride].
+     */
+    fun notifyEmergencyCall(
+        ctx: Context,
+        machine: String,
+        roster: List<RosterEntry> = emptyList(),
+        at: Long? = null,
+        wrapId: String? = null,
+        rosterKnown: Boolean = false,
+    ) = postEmergencyAlert(
+        ctx,
+        key = alertKey("emergency-call", machine, at, wrapId),
+        title = EMERGENCY_CALL_TITLE,
+        text = emergencyCallText(
+            describeWard(machine, roster),
+            unpaired = isUnpaired(machine, roster, rosterKnown),
+        ),
+        whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
+    )
+
+    /**
+     * Any other `outcome=override` op from a newer ward: honest and generic,
+     * never the unlock wording (nothing was unlocked as far as we know).
+     */
+    fun notifyEmergencyControl(
+        ctx: Context,
+        machine: String,
+        roster: List<RosterEntry> = emptyList(),
+        at: Long? = null,
+        wrapId: String? = null,
+        rosterKnown: Boolean = false,
+    ) = postEmergencyAlert(
+        ctx,
+        key = alertKey("emergency-control", machine, at, wrapId),
+        title = EMERGENCY_CONTROL_TITLE,
+        text = emergencyControlText(
+            describeWard(machine, roster),
+            unpaired = isUnpaired(machine, roster, rosterKnown),
+        ),
+        whenMillis = plausibleWhenMillis(at, System.currentTimeMillis() / 1000),
+    )
+
+    /**
+     * One loud alert per PRESS: the row id is per press (see [alertKey]), so two
+     * presses stack, and a rebuilt wrap for the same press reuses its row and,
+     * with `setOnlyAlertOnce`, does not buzz again.
+     */
+    private fun postEmergencyAlert(
+        ctx: Context,
+        key: String,
+        title: String,
+        text: String,
+        whenMillis: Long?,
     ) {
         val tap = PendingIntent.getActivity(
             ctx,
-            "override".hashCode(),
+            key.hashCode(),
             Intent(ctx, MainActivity::class.java)
                 .putExtra(MainActivity.EXTRA_ROUTE, MainActivity.ROUTE_ACTIVITY)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val mins = (durationSecs / 60).coerceAtLeast(1)
-        val n = Notification.Builder(ctx, CH_APPROVALS)
+        val b = Notification.Builder(ctx, CH_APPROVALS)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setContentTitle("Emergency unlock used")
-            .setContentText(overrideText(scope, mins, describeWard(machine, roster)))
+            .setContentTitle(title)
+            .setContentText(text)
+            // The whole sentence, not a truncated line.
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            // Shown in full on the lock screen: a guardian must be able to read
+            // an emergency without unlocking their own phone.
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setOnlyAlertOnce(true)
             .setContentIntent(tap)
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setFullScreenIntent(tap, true)
-            .build()
+        // The press time, not the time the guardian's phone heard of it.
+        if (whenMillis != null) b.setWhen(whenMillis).setShowWhen(true)
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        // Keyed by machine: a second override replaces the row rather than
-        // stacking — one live "this is happening now" per phone.
-        nm.notify("override-$machine".hashCode(), n)
+        nm.notify(key.hashCode(), b.build())
     }
 
     /** The ask itself. Tap → the console's Approvals screen. */
@@ -140,7 +219,8 @@ object Notifier {
      * [Notification]. `who == null` (empty/stale/no-hit roster) MUST render
      * verbatim what shipped before the roster existed — never a guessed name.
      */
-    internal fun overrideText(scope: String, mins: Long, who: WardName?): String {
+    internal fun overrideText(scope: String, mins: Long, who: WardName?, unpaired: Boolean = false): String {
+        if (unpaired) return UNPAIRED_TEXT
         val what = if (scope == "full") "their phone" else "calls"
         return if (who != null) {
             "${who.childName} opened $what (${who.deviceLabel}) for $mins minutes."
@@ -148,6 +228,83 @@ object Notifier {
             "Your ward opened $what for $mins minutes."
         }
     }
+
+    /**
+     * What a roster miss says once the console has told us its devices: the
+     * sender is validly sealed to this guardian but is not one of theirs, so
+     * the alert must not claim it is "your ward". Still loud: failing towards
+     * alerting.
+     */
+    internal const val UNPAIRED_TEXT = "A device you haven't paired reported an emergency control."
+
+    /** True when the roster is known (the console has pushed one) and has no entry for [machine]. */
+    internal fun isUnpaired(machine: String, roster: List<RosterEntry>, rosterKnown: Boolean): Boolean =
+        rosterKnown && describeWard(machine, roster) == null
+
+    internal const val EMERGENCY_CALL_TITLE = "Emergency call button used"
+    internal const val EMERGENCY_CONTROL_TITLE = "Emergency control used"
+
+    /** A press timestamp is believed only when it is not in the future and not older than this. */
+    internal const val MAX_PRESS_AGE_SECS = 30L * 24 * 60 * 60
+
+    /**
+     * The row key for one press: `{kind}-{machine}-{at}` when the ward stamped a
+     * press time (a wrap rebuilt after a day carries the same `at`, so it reuses
+     * its row), else `{kind}-{machine}-wrap-{wrapId}`, else per machine.
+     */
+    internal fun alertKey(kind: String, machine: String, at: Long?, wrapId: String?): String = when {
+        at != null -> "$kind-$machine-$at"
+        wrapId != null -> "$kind-$machine-wrap-$wrapId"
+        else -> "$kind-$machine"
+    }
+
+    /**
+     * The notification's `when` in milliseconds: the press time when it is
+     * plausible (not later than now, not older than [MAX_PRESS_AGE_SECS]), else
+     * null (the platform stamps it on arrival).
+     */
+    internal fun plausibleWhenMillis(at: Long?, nowSecs: Long): Long? =
+        if (at != null && at in 0..nowSecs && nowSecs - at <= MAX_PRESS_AGE_SECS) at * 1000 else null
+
+    /** What an audit wrap asks of the carrier. */
+    internal enum class AuditAction { UNLOCK, EMERGENCY_CALL, OTHER_CONTROL, IGNORE }
+
+    /**
+     * Pure dispatch for a device audit, so it is JVM-testable. Only
+     * `outcome=override` alerts (anything else, such as a screen-lock reset
+     * result, is dropped). Within it: an empty op or `unlock.breakglass` is the
+     * emergency unlock (an older ward sent no op), `call.emergency` is the
+     * emergency-call button, and any other op is a generic honest alert rather
+     * than the unlock wording.
+     */
+    internal fun auditAction(outcome: String, op: String): AuditAction {
+        if (outcome != "override") return AuditAction.IGNORE
+        return when (op) {
+            "", "unlock.breakglass" -> AuditAction.UNLOCK
+            "call.emergency" -> AuditAction.EMERGENCY_CALL
+            else -> AuditAction.OTHER_CONTROL
+        }
+    }
+
+    /** Pure text for [notifyEmergencyCall] — see [overrideText]. */
+    internal fun emergencyCallText(who: WardName?, unpaired: Boolean = false): String =
+        if (unpaired) {
+            UNPAIRED_TEXT
+        } else if (who != null) {
+            "${who.childName} used the emergency call button on ${who.deviceLabel}."
+        } else {
+            "Your ward used the emergency call button."
+        }
+
+    /** Pure text for [notifyEmergencyControl] — see [overrideText]. */
+    internal fun emergencyControlText(who: WardName?, unpaired: Boolean = false): String =
+        if (unpaired) {
+            UNPAIRED_TEXT
+        } else if (who != null) {
+            "${who.childName}: an emergency control was used on ${who.deviceLabel}"
+        } else {
+            "Your ward: an emergency control was used"
+        }
 
     /** Pure text for [notifyRequest] — see [overrideText]. */
     internal fun requestText(op: String, minutes: Long?, who: WardName?): String {

@@ -4,7 +4,7 @@ import { generateSecretKey, getPublicKey, type NostrEvent } from "nostr-tools";
 import { unwrapAudit, unwrapDeviceAudit } from "./audit";
 import { CHARTER_DEVICE_REQUEST, MAX_WRAP_JITTER_SECS } from "./request";
 import { CHARTER_DEVICE_STATUS } from "./status";
-import { overrideTags as override, overrideWrap, type WrapOpts } from "../test/overrideWrap";
+import { emergencyCallTags as call, overrideTags as override, overrideWrap, type WrapOpts } from "../test/overrideWrap";
 
 const guardianSk = generateSecretKey();
 const guardianPk = getPublicKey(guardianSk);
@@ -236,5 +236,157 @@ describe("screen-lock reset audit (op screenlock.reset)", () => {
   it("rejects a forged sender and an unknown op", () => {
     expect(unwrapDeviceAudit(wrapFor({ tags: reset(), sealSk: generateSecretKey() }), guardianSk, NOW)).toBeNull();
     expect(unwrapDeviceAudit(wrapFor({ tags: [["t", "charter-device"], ["outcome", "applied"], ["op", "something.else"]] }), guardianSk, NOW)).toBeNull();
+  });
+});
+
+describe("emergency call audit (op call.emergency)", () => {
+  const day = 24 * 60 * 60;
+
+  it("is accepted, with the press time, and keyed op-prefixed on the at tag", () => {
+    const w = wrapFor({ tags: call([["at", String(NOW - 30)]]) });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "call.emergency",
+      call: { machine: machinePk, at: NOW - 30, key: `emergencycall:${machinePk}:${NOW - 30}` },
+    });
+  });
+
+  it("is not an emergency unlock", () => {
+    expect(unwrapAudit(wrapFor({ tags: call([["at", String(NOW - 30)]]) }), guardianSk, NOW)).toBeNull();
+  });
+
+  it("keys on the wrap, and dates by created_at, when there is no at tag", () => {
+    const w = wrapFor({ createdAt: NOW - 90, tags: call() });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "call.emergency",
+      call: { machine: machinePk, at: NOW - 90, key: `emergencycall:wrap:${w.id}` },
+    });
+  });
+
+  it("never collides with a break-glass press in the same second", () => {
+    const t = String(NOW - 60);
+    const unlock = unwrapDeviceAudit(wrapFor({ tags: override([["at", t]]) }), guardianSk, NOW);
+    const emergency = unwrapDeviceAudit(wrapFor({ tags: call([["at", t]]) }), guardianSk, NOW);
+    expect(unlock?.op === "unlock.breakglass" && unlock.override.key).toBe(`${machinePk}:${t}`);
+    expect(emergency?.op === "call.emergency" && emergency.call.key).toBe(`emergencycall:${machinePk}:${t}`);
+  });
+
+  it("folds a rebuilt wrap (new id, same press) into one key", () => {
+    const first = wrapFor({ tags: call([["at", String(NOW - 600)]]) });
+    const rebuilt = wrapFor({ tags: call([["at", String(NOW - 600)]]), createdAt: NOW + 3600 });
+    const a = unwrapDeviceAudit(first, guardianSk, NOW);
+    const b = unwrapDeviceAudit(rebuilt, guardianSk, NOW + 3600);
+    expect(first.id).not.toBe(rebuilt.id);
+    expect(a?.op === "call.emergency" && a.call.key).toBe(b?.op === "call.emergency" && b.call.key);
+    expect(a?.op === "call.emergency" && a.call.at).toBe(NOW - 600);
+  });
+
+  it("uses an at up to 30 days old, and not beyond, but still keys on it", () => {
+    const ok = unwrapDeviceAudit(wrapFor({ tags: call([["at", String(NOW - 29 * day)]]) }), guardianSk, NOW);
+    expect(ok).toMatchObject({ call: { at: NOW - 29 * day } });
+    const old = unwrapDeviceAudit(wrapFor({ tags: call([["at", String(NOW - 31 * day)]]) }), guardianSk, NOW);
+    expect(old).toMatchObject({ call: { at: NOW, key: `emergencycall:${machinePk}:${NOW - 31 * day}` } });
+  });
+
+  it("clamps a future at to the wrap's own time", () => {
+    const w = wrapFor({ tags: call([["at", String(NOW + 1)]]) });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toMatchObject({
+      call: { at: NOW, key: `emergencycall:${machinePk}:${NOW + 1}` },
+    });
+  });
+
+  it.each(["-5", "1e9", " 12", "abc", ""])("ignores an unparseable at tag %j", (bad) => {
+    const w = wrapFor({ tags: call([["at", bad]]) });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toMatchObject({
+      call: { at: NOW, key: `emergencycall:wrap:${w.id}` },
+    });
+  });
+
+  it("rejects a bad seal, a forged author, and a wrap outside the jitter window", () => {
+    const t = call([["at", String(NOW - 5)]]);
+    expect(unwrapDeviceAudit(wrapFor({ tags: t, sealSk: generateSecretKey() }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: t, rumorPk: getPublicKey(generateSecretKey()) }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: t, wrapAt: NOW - MAX_WRAP_JITTER_SECS - 1 }), guardianSk, NOW)).toBeNull();
+  });
+
+  it("rejects any outcome but override", () => {
+    for (const outcome of ["enacted", "applied", "failed", "OVERRIDE", ""]) {
+      const tags = [
+        ["t", "charter-device"],
+        ["outcome", outcome],
+        ["op", "call.emergency"],
+      ];
+      expect(unwrapDeviceAudit(wrapFor({ tags }), guardianSk, NOW)).toBeNull();
+    }
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["op", "call.emergency"]] }), guardianSk, NOW)).toBeNull();
+  });
+
+  it("carries nothing but machine, at and key", () => {
+    const w = wrapFor({ tags: call([["at", String(NOW - 5)], ["number", "112233"], ["durationSecs", "9"]]) });
+    const a = unwrapDeviceAudit(w, guardianSk, NOW);
+    expect(a?.op === "call.emergency" && Object.keys(a.call).sort()).toEqual(["at", "key", "machine"]);
+    expect(JSON.stringify(a)).not.toContain("112233");
+  });
+});
+
+describe("an unknown op under outcome=override", () => {
+  const ctl = (op: string, extra: string[][] = []): string[][] => [
+    ["t", "charter-device"],
+    ["outcome", "override"],
+    ["op", op],
+    ...extra,
+  ];
+
+  it("is a generic emergency control, keyed on its op, machine and press time", () => {
+    const w = wrapFor({ tags: ctl("alarm.silence", [["at", String(NOW - 20)]]) });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "override.other",
+      control: { machine: machinePk, at: NOW - 20, key: `override:alarm.silence:${machinePk}:${NOW - 20}` },
+    });
+  });
+
+  it("keys on the wrap and dates by created_at without an at tag", () => {
+    const w = wrapFor({ createdAt: NOW - 90, tags: ctl("alarm.silence") });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "override.other",
+      control: { machine: machinePk, at: NOW - 90, key: `override:alarm.silence:wrap:${w.id}` },
+    });
+  });
+
+  it("two different ops in the same second are two keys, and neither is a break-glass or call key", () => {
+    const t = String(NOW - 5);
+    const a = unwrapDeviceAudit(wrapFor({ tags: ctl("x.one", [["at", t]]) }), guardianSk, NOW);
+    const b = unwrapDeviceAudit(wrapFor({ tags: ctl("x.two", [["at", t]]) }), guardianSk, NOW);
+    const keyOf = (v: typeof a) => (v?.op === "override.other" ? v.control.key : "");
+    expect(keyOf(a)).not.toBe(keyOf(b));
+    expect(keyOf(a)).not.toBe(`${machinePk}:${t}`);
+    expect(keyOf(a)).not.toBe(`emergencycall:${machinePk}:${t}`);
+  });
+
+  it("folds a rebuilt wrap (new id, same press) into one key", () => {
+    const tags = ctl("alarm.silence", [["at", String(NOW - 600)]]);
+    const a = unwrapDeviceAudit(wrapFor({ tags }), guardianSk, NOW);
+    const b = unwrapDeviceAudit(wrapFor({ tags, createdAt: NOW + 3600 }), guardianSk, NOW + 3600);
+    expect(a?.op === "override.other" && a.control.key).toBe(b?.op === "override.other" && b.control.key);
+  });
+
+  it("cuts a very long op in the key, and rejects a bad seal or any other outcome", () => {
+    const long = "x".repeat(500);
+    const a = unwrapDeviceAudit(wrapFor({ tags: ctl(long, [["at", String(NOW - 1)]]) }), guardianSk, NOW);
+    expect(a?.op === "override.other" && a.control.key.length).toBeLessThan(200);
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("a.b"), sealSk: generateSecretKey() }), guardianSk, NOW)).toBeNull();
+    expect(
+      unwrapDeviceAudit(wrapFor({ tags: [["outcome", "enacted"], ["op", "a.b"]] }), guardianSk, NOW),
+    ).toBeNull();
+  });
+
+  it("leaves an empty or missing op as it always was: not shown", () => {
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("") }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["outcome", "override"]] }), guardianSk, NOW)).toBeNull();
+  });
+
+  it("does not change the known ops", () => {
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("unlock.breakglass") }), guardianSk, NOW)?.op).toBe("unlock.breakglass");
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("call.emergency") }), guardianSk, NOW)?.op).toBe("call.emergency");
+    expect(unwrapDeviceAudit(wrapFor({ tags: ctl("screenlock.reset") }), guardianSk, NOW)?.op).toBe("screenlock.reset");
   });
 });

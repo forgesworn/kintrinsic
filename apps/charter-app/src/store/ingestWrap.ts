@@ -8,7 +8,7 @@
 // never what is checked about it. So both routes call this one function.
 
 import type { NostrEvent } from "nostr-tools";
-import { unwrapDeviceAudit, type DeviceOverride } from "../wire/audit";
+import { unwrapDeviceAudit, type DeviceEmergencyCall, type DeviceEmergencyControl, type DeviceOverride } from "../wire/audit";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
 import { unwrapStatus, type DeviceStatus } from "../wire/status";
 
@@ -34,6 +34,14 @@ export interface WrapIngestContext {
   hasAudit: (key: string) => boolean;
   /** Take in an emergency unlock; false = nobody to attribute it to yet (retry later). */
   ingestAudit: (audit: DeviceOverride) => boolean;
+  /**
+   * Take in a use of the emergency-call button; false = nobody to attribute it
+   * to yet (retry later). Its keys (`DeviceEmergencyCall.key`) share `seenAudits`
+   * and `hasAudit` with the unlocks: they are op-prefixed, so they never clash.
+   */
+  ingestEmergencyCall: (call: DeviceEmergencyCall) => boolean;
+  /** Take in an emergency control this build does not know by name; false = retry later. */
+  ingestEmergencyControl: (control: DeviceEmergencyControl) => boolean;
 }
 
 export type WrapIngestResult =
@@ -46,7 +54,7 @@ export type WrapIngestResult =
   | { kind: "duplicate"; reqId: string }
   /** A new ask, recorded now (it is persisted with the next state write). */
   | { kind: "request"; reqId: string }
-  /** An emergency unlock, new or already held: it is in the Activity history. */
+  /** An emergency unlock or emergency-call press, new or already held: it is in the Activity history. */
   | { kind: "audit"; key: string }
   /** A ward's screen-lock reset audit: read, and nothing to record (STATUS carries the outcome). */
   | { kind: "screenlock" }
@@ -54,7 +62,22 @@ export type WrapIngestResult =
    *  yet: left unhandled so a later pass can land it. `reqId` is the ask's. */
   | { kind: "unlanded"; reqId?: string };
 
-export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
+/**
+ * `verifiedAt`: when the carrier vetted this wrap, for an entry it held from a
+ * relay. The device audit's two-day freshness window is then judged from that
+ * moment, not from now, because the carrier already enforced it on arrival and
+ * a guardian may open the console days later. Never later than now.
+ */
+export function ingestWrap(
+  w: NostrEvent,
+  ctx: WrapIngestContext,
+  verifiedAt?: number,
+): WrapIngestResult {
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const auditNow =
+    verifiedAt !== undefined && Number.isInteger(verifiedAt) && verifiedAt > 0
+      ? Math.min(verifiedAt, nowSecs)
+      : nowSecs;
   // The one line that saves the battery: everything below this decrypts.
   if (ctx.handledWraps.has(w.id)) return { kind: "handled" };
   const s = unwrapStatus(w, ctx.guardianSk);
@@ -67,8 +90,10 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
   if (!req) {
     // Third and last, so the common status and request wraps never pay for a
     // third decrypt: the ward's emergency unlock (a device audit).
-    const audit = unwrapDeviceAudit(w, ctx.guardianSk);
+    const audit = unwrapDeviceAudit(w, ctx.guardianSk, auditNow);
     if (audit?.op === "unlock.breakglass") return ingestOverride(w, audit.override, ctx);
+    if (audit?.op === "call.emergency") return ingestEmergencyCall(w, audit.call, ctx);
+    if (audit?.op === "override.other") return ingestEmergencyControl(w, audit.control, ctx);
     if (audit?.op === "screenlock.reset") {
       // The ward's own record of a reset. The Screen lock card reads the
       // outcome from STATUS, so there is nothing to land here; it is
@@ -121,4 +146,40 @@ function ingestOverride(
   ctx.seenAudits.add(audit.key);
   ctx.handledWraps.add(w.id);
   return { kind: "audit", key: audit.key };
+}
+
+/**
+ * A use of the emergency-call button lands exactly like an emergency unlock:
+ * only once it is recorded, so one from a phone this guardian has not set up
+ * yet stays unhandled and holds the cursor open until it can be attributed.
+ */
+function ingestEmergencyCall(
+  w: NostrEvent,
+  call: DeviceEmergencyCall,
+  ctx: WrapIngestContext,
+): WrapIngestResult {
+  if (ctx.seenAudits.has(call.key) || ctx.hasAudit(call.key)) {
+    ctx.handledWraps.add(w.id);
+    return { kind: "audit", key: call.key };
+  }
+  if (!ctx.ingestEmergencyCall(call)) return { kind: "unlanded" };
+  ctx.seenAudits.add(call.key);
+  ctx.handledWraps.add(w.id);
+  return { kind: "audit", key: call.key };
+}
+
+/** An emergency control this build does not know: lands exactly like a call press. */
+function ingestEmergencyControl(
+  w: NostrEvent,
+  control: DeviceEmergencyControl,
+  ctx: WrapIngestContext,
+): WrapIngestResult {
+  if (ctx.seenAudits.has(control.key) || ctx.hasAudit(control.key)) {
+    ctx.handledWraps.add(w.id);
+    return { kind: "audit", key: control.key };
+  }
+  if (!ctx.ingestEmergencyControl(control)) return { kind: "unlanded" };
+  ctx.seenAudits.add(control.key);
+  ctx.handledWraps.add(w.id);
+  return { kind: "audit", key: control.key };
 }

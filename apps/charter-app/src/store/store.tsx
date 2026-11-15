@@ -90,8 +90,8 @@ import { mintPairToken } from "../signer/guardianPairing";
 import { parseDevicePairingCode } from "../wire/deviceCode";
 import type { AppOpenWindow } from "../wire/grant";
 import type { DeviceRequest } from "../wire/request";
-import type { DeviceOverride } from "../wire/audit";
-import { overrideSummary } from "../domain/overrideSummary";
+import type { DeviceEmergencyCall, DeviceEmergencyControl, DeviceOverride } from "../wire/audit";
+import { emergencyCallSummary, emergencyControlSummary, overrideSummary } from "../domain/overrideSummary";
 import type { DeviceStatus } from "../wire/status";
 import { ingestWrap } from "./ingestWrap";
 import { ConsumeQueue, drainLocalInbox } from "./localDrain";
@@ -1390,6 +1390,58 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     return true;
   }, []);
 
+  /**
+   * Take in a use of one of the ward's emergency controls as an Activity line
+   * (the emergency-call button, or a control this build does not know by name).
+   * Same contract as `ingestDeviceAudit`: false when no paired device claims the
+   * machine (left unhandled, retried later); dated by the press, never future.
+   */
+  const landEmergencyAudit = useCallback(
+    (
+      a: { machine: string; at: number; key: string },
+      outcome: "emergency_call" | "emergency_control",
+      summary: (deviceLabel: string) => string,
+    ): boolean => {
+      const s = stateRef.current;
+      if (s.activity.some((e) => e.auditKey === a.key)) return true;
+      let childId: string | undefined;
+      let device: Device | undefined;
+      for (const c of s.children) {
+        const d = c.devices.find(
+          (dev) => dev.pairing === "paired" && dev.devicePubkey === a.machine,
+        );
+        if (d) {
+          childId = c.id;
+          device = d;
+          break;
+        }
+      }
+      if (!childId || !device) return false;
+      dispatch({
+        type: "ADD_ACTIVITY",
+        event: {
+          id: uid("act"),
+          childId,
+          ts: Math.min(a.at * 1000, Date.now()),
+          outcome,
+          summary: summary(device.label),
+          auditKey: a.key,
+        },
+      });
+      return true;
+    },
+    [],
+  );
+  const ingestDeviceEmergencyCall = useCallback(
+    (a: DeviceEmergencyCall): boolean => landEmergencyAudit(a, "emergency_call", emergencyCallSummary),
+    [landEmergencyAudit],
+  );
+  const ingestDeviceEmergencyControl = useCallback(
+    (a: DeviceEmergencyControl): boolean =>
+      landEmergencyAudit(a, "emergency_control", emergencyControlSummary),
+    [landEmergencyAudit],
+  );
+
   // A phone asking to install an app ("this app, this once" — the Approvals
   // card renders it with single-use semantics). Approving is LOCAL-ONLY until
   // the signer can pin the APK's cert digest (the grant REQUIRES
@@ -2043,8 +2095,16 @@ export function CharterProvider({ children }: { children: ReactNode }) {
       seenAudits: seenAudits.current,
       hasAudit: (key: string) => stateRef.current.activity.some((a) => a.auditKey === key),
       ingestAudit: ingestDeviceAudit,
+      ingestEmergencyCall: ingestDeviceEmergencyCall,
+      ingestEmergencyControl: ingestDeviceEmergencyControl,
     }),
-    [ingestDeviceStatus, ingestDeviceRequest, ingestDeviceAudit],
+    [
+      ingestDeviceStatus,
+      ingestDeviceRequest,
+      ingestDeviceAudit,
+      ingestDeviceEmergencyCall,
+      ingestDeviceEmergencyControl,
+    ],
   );
 
   /** One relay read: STATUS heartbeats + the children's asks. Hoisted out of
@@ -2152,7 +2212,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     }
     drainLocalInbox({
       inbox: localInbox,
-      ingest: (w) => ingestWrap(w, wrapContext(guardianSk)),
+      ingest: (w, verifiedAt) => ingestWrap(w, wrapContext(guardianSk), verifiedAt),
       queue: consumeQueue,
     });
     trimHandled(handledWraps.current);

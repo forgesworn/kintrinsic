@@ -90,6 +90,31 @@ class CarrierStore(context: Context) {
         return true
     }
 
+    /** The relay-delivered emergency audits held for the console (see [InboxSpool]). */
+    private val spool = SpoolFile(
+        java.io.File(context.filesDir, "inbox-spool.json"),
+        onDamaged = { android.util.Log.w("CarrierStore", "the emergency-audit spool was unreadable; set aside as ${it.name}") },
+    )
+
+    /**
+     * The device pubkeys the console has told us about, or null when it has
+     * never pushed a roster (an older console, or before first launch). Null
+     * means "unknown, so treat everything as known": failing towards keeping.
+     */
+    fun knownMachines(): Set<String>? =
+        if (prefs.contains(K_ROSTER)) roster().map { it.machine }.toSet() else null
+
+    /** Hold a relay-delivered emergency audit until the console consumes it.
+     *  Synchronous (never `apply()`), so it is on disk before the alert. Throws on failure. */
+    fun spoolInboxWrap(id: String, machine: String, wrapJson: String, nowSecs: Long) =
+        spool.add(id, machine, wrapJson, nowSecs, knownMachines())
+
+    /** The spooled entries, as the console's inbox shape. Never throws. */
+    fun inboxSpool(): String = spool.read()
+
+    /** The console has persisted these ids (a JSON array of strings): forget them. */
+    fun consumeInboxSpool(idsJson: String) = spool.remove(idsJson)
+
     /**
      * The local link's DNS-SD instance name, `Kintrinsic <4 hex>`: random,
      * chosen once per install and kept, so wards and network tools see one
