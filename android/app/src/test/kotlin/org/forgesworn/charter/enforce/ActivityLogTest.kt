@@ -697,50 +697,137 @@ class ActivityLogTest {
 
     // ---- the emergency control ---------------------------------------------------
 
-    @Test
-    fun `an emergency start is logged after it, and a failing log changes nothing`() {
-        val order = mutableListOf<String>()
-        val placed = EmergencyUse.placeAndRecord(
-            start = { order += "start"; true },
-            record = { order += "record" },
-            runner = { it.run() },
-            onFailure = { order += "failure" },
-        )
-        assertTrue(placed)
-        assertEquals(listOf("start", "record"), order)
+    /** A scheduler that only records: a retry runs when the test runs it. */
+    private class Retries {
+        val queued = mutableListOf<Pair<Runnable, Long>>()
+        val schedule: (Runnable, Long) -> Unit = { r, ms -> queued += r to ms }
+        fun runNext() = queued.removeAt(0).first.run()
+    }
 
-        // The write throws: the call still reports success.
-        val failures = mutableListOf<Throwable>()
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { error("disk full") },
-                runner = { it.run() },
-                onFailure = { failures += it },
-            ),
+    @Test
+    fun `the report goes before the local row, both given the press time`() {
+        val order = mutableListOf<String>()
+        EmergencyUse.pressed(
+            at = 1_000L,
+            report = { order += "report@$it"; true },
+            record = { order += "record@$it" },
+            runner = { it.run() },
         )
+        assertEquals(listOf("report@1000", "record@1000"), order)
+    }
+
+    @Test
+    fun `nothing runs on the calling path, the job is handed to the runner`() {
+        var queued: Runnable? = null
+        var reported = 0L
+        var recorded = 0L
+        EmergencyUse.pressed(
+            at = 77L,
+            report = { reported = it; true },
+            record = { recorded = it },
+            runner = { queued = it },
+        )
+        assertEquals(0L, reported)
+        assertEquals(0L, recorded)
+        queued!!.run()
+        assertEquals(77L, reported)
+        assertEquals(77L, recorded)
+    }
+
+    @Test
+    fun `a failing report never skips the row, nor a failing row the report, and nothing throws`() {
+        val failures = mutableListOf<Throwable>()
+        var reported = false
+        EmergencyUse.pressed(
+            at = 1L,
+            report = { reported = true; true },
+            record = { error("disk full") },
+            runner = { it.run() },
+            onFailure = { failures += it },
+        )
+        assertTrue(reported)
         assertEquals(1, failures.size)
 
-        // The runner itself throws (no thread to hand it to): still success.
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = {},
-                runner = { throw IllegalStateException("rejected") },
-                onFailure = { failures += it },
-            ),
+        var recorded = false
+        EmergencyUse.pressed(
+            at = 1L,
+            report = { error("no warden") },
+            record = { recorded = true },
+            runner = { it.run() },
+            schedule = { _, _ -> },
+            onFailure = { failures += it },
         )
+        assertTrue(recorded)
         assertEquals(2, failures.size)
 
-        // Even an onFailure that throws cannot change the result.
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { error("x") },
-                runner = { it.run() },
-                onFailure = { error("y") },
-            ),
+        // Both failing, and onFailure itself throwing, and a runner that throws.
+        EmergencyUse.pressed(1L, { error("a") }, { error("b") }, { it.run() }, { _, _ -> }, onFailure = { error("c") })
+        EmergencyUse.pressed(1L, { true }, {}, { throw IllegalStateException("rejected") }, onFailure = { failures += it })
+        assertEquals(3, failures.size)
+    }
+
+    @Test
+    fun `a refused report is retried after 1 s, 5 s and 30 s, then given up`() {
+        assertEquals(listOf(1_000L, 5_000L, 30_000L), EmergencyUse.REPORT_RETRY_MS)
+        val tries = mutableListOf<Long>()
+        val retries = Retries()
+        var recorded = 0
+        EmergencyUse.pressed(
+            at = 9L,
+            report = { tries += it; false },
+            record = { recorded++ },
+            runner = { it.run() },
+            schedule = retries.schedule,
         )
+        // The row is not held up by the retries: it is written after the first try.
+        assertEquals(1, recorded)
+        assertEquals(listOf(9L), tries)
+        assertEquals(listOf(1_000L), retries.queued.map { it.second })
+        retries.runNext()
+        assertEquals(listOf(5_000L), retries.queued.map { it.second })
+        retries.runNext()
+        assertEquals(listOf(30_000L), retries.queued.map { it.second })
+        retries.runNext()
+        assertTrue("three retries, then it stops", retries.queued.isEmpty())
+        assertEquals(listOf(9L, 9L, 9L, 9L), tries)
+        assertEquals("the row is written once", 1, recorded)
+    }
+
+    @Test
+    fun `a report that lands on a retry stops retrying, and a throwing report counts as refused`() {
+        val retries = Retries()
+        var calls = 0
+        EmergencyUse.pressed(
+            at = 3L,
+            report = { calls++; if (calls == 1) error("warden busy") else true },
+            record = {},
+            runner = { it.run() },
+            schedule = retries.schedule,
+            onFailure = {},
+        )
+        assertEquals(1, retries.queued.size)
+        retries.runNext()
+        assertEquals(2, calls)
+        assertTrue(retries.queued.isEmpty())
+
+        // A first try that lands schedules nothing.
+        val none = Retries()
+        EmergencyUse.pressed(3L, { true }, {}, { it.run() }, none.schedule)
+        assertTrue(none.queued.isEmpty())
+    }
+
+    @Test
+    fun `a scheduler that refuses cannot make the press throw`() {
+        val failures = mutableListOf<Throwable>()
+        EmergencyUse.pressed(
+            at = 3L,
+            report = { false },
+            record = {},
+            runner = { it.run() },
+            schedule = { _, _ -> throw IllegalStateException("shut down") },
+            onFailure = { failures += it },
+        )
+        assertEquals(1, failures.size)
     }
 
     @Test
@@ -754,13 +841,13 @@ class ActivityLogTest {
                 worker = it
             }
         }
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { error("disk full") },
-                runner = { r -> pool.execute(r) },
-                onFailure = { error("logging failed too") },
-            ),
+        EmergencyUse.pressed(
+            at = 1L,
+            report = { error("no warden") },
+            record = { error("disk full") },
+            runner = { r -> pool.execute(r) },
+            schedule = { _, _ -> },
+            onFailure = { error("logging failed too") },
         )
         // Joining the worker is deterministic: a thread dies only after its
         // uncaught-exception handler has run, so a throw that escaped the
@@ -772,155 +859,40 @@ class ActivityLogTest {
     }
 
     @Test
-    fun `a call that did not start, or was not an emergency, is not logged`() {
-        var recorded = 0
-        assertFalse(
-            EmergencyUse.placeAndRecord(
-                start = { error("no dialer") },
-                record = { recorded++ },
-                runner = { it.run() },
-            ),
-        )
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { false }, // the lifeline: a guardian's number
-                record = { recorded++ },
-                runner = { it.run() },
-            ),
-        )
-        assertEquals(0, recorded)
-    }
-
-    @Test
-    fun `the record is handed to the runner, not run on the calling path`() {
-        var queued: Runnable? = null
-        var recorded = false
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { recorded = true },
-                runner = { queued = it },
-            ),
-        )
-        assertFalse(recorded)
-        queued!!.run()
-        assertTrue(recorded)
-    }
-
-    @Test
-    fun `the report follows the record, both get the press time taken as the call started`() {
-        val order = mutableListOf<String>()
-        var tick = 0L
-        val placed = EmergencyUse.placeAndRecord(
-            start = { order += "start"; true },
-            record = { order += "record@$it" },
-            report = { order += "report@$it" },
-            runner = { it.run() },
-            clock = { 1_000L + tick++ },
-        )
-        assertTrue(placed)
-        // The clock is read once, before the call starts.
-        assertEquals(listOf("start", "record@1000", "report@1000"), order)
-        assertEquals(1L, tick)
-    }
-
-    @Test
-    fun `the report is not run on the calling path`() {
-        var queued: Runnable? = null
-        var reported = 0L
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = {},
-                report = { reported = it },
-                runner = { queued = it },
-                clock = { 77L },
-            ),
-        )
-        assertEquals(0L, reported)
-        queued!!.run()
-        assertEquals(77L, reported)
-    }
-
-    @Test
-    fun `a failing record never skips the report, nor a failing report the record, and the call is unchanged`() {
-        val failures = mutableListOf<Throwable>()
-        var reported = false
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { error("disk full") },
-                report = { reported = true },
-                runner = { it.run() },
-                onFailure = { failures += it },
-            ),
-        )
-        assertTrue(reported)
-        assertEquals(1, failures.size)
-
-        var recorded = false
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { recorded = true },
-                report = { error("no warden") },
-                runner = { it.run() },
-                onFailure = { failures += it },
-            ),
-        )
-        assertTrue(recorded)
-        assertEquals(2, failures.size)
-
-        // Both failing, and onFailure itself throwing: still the call's result.
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { true },
-                record = { error("a") },
-                report = { error("b") },
-                runner = { it.run() },
-                onFailure = { error("c") },
-            ),
-        )
-    }
-
-    @Test
-    fun `a call that did not start, or a lifeline number, reports nothing`() {
-        var reported = 0
-        assertFalse(
-            EmergencyUse.placeAndRecord(
-                start = { error("no dialer") },
-                record = {},
-                report = { reported++ },
-                runner = { it.run() },
-            ),
-        )
-        assertTrue(
-            EmergencyUse.placeAndRecord(
-                start = { false }, // a lifeline entry, even one that is an emergency number
-                record = {},
-                report = { reported++ },
-                runner = { it.run() },
-            ),
-        )
-        assertEquals(0, reported)
-    }
-
-    @Test
-    fun `the emergency unlock row is written by the runner with the press time, and a failure changes nothing`() {
+    fun `the emergency unlock row is written by the runner with the press time and scope, and a failure changes nothing`() {
         val written = mutableListOf<ActivityEntry>()
         var queued: Runnable? = null
-        EmergencyUse.recordUnlock(at = 5_000L, append = { written += it; true }, runner = { queued = it })
+        EmergencyUse.recordUnlock(at = 5_000L, scope = "calls", append = { written += it; true }, runner = { queued = it })
         assertTrue("nothing written on the calling path", written.isEmpty())
         queued!!.run()
-        assertEquals(listOf(ActivityEntry(5_000L, ActivityKind.EMERGENCY_UNLOCK)), written)
+        assertEquals(listOf(ActivityEntry(5_000L, ActivityKind.EMERGENCY_UNLOCK, scope = "calls")), written)
 
         // A write that throws, a write that fails, and a runner that throws
         // are all swallowed.
         val failures = mutableListOf<Throwable>()
-        EmergencyUse.recordUnlock(5_001L, { error("disk") }, { it.run() }, { failures += it })
-        EmergencyUse.recordUnlock(5_002L, { false }, { it.run() }, { failures += it })
-        EmergencyUse.recordUnlock(5_003L, { true }, { throw IllegalStateException("rejected") }, { failures += it })
+        EmergencyUse.recordUnlock(5_001L, "full", { error("disk") }, { it.run() }, { failures += it })
+        EmergencyUse.recordUnlock(5_002L, "full", { false }, { it.run() }, { failures += it })
+        EmergencyUse.recordUnlock(5_003L, null, { true }, { throw IllegalStateException("rejected") }, { failures += it })
         assertEquals(2, failures.size)
+    }
+
+    @Test
+    fun `the unlock row carries its scope through the file format, and words the calls scope as the help button`() {
+        val calls = ActivityEntry(10L, ActivityKind.EMERGENCY_UNLOCK, scope = "calls")
+        val full = ActivityEntry(11L, ActivityKind.EMERGENCY_UNLOCK, scope = "full")
+        assertEquals(calls, ActivityFormat.decode(ActivityFormat.encode(calls)))
+        assertEquals(full, ActivityFormat.decode(ActivityFormat.encode(full)))
+        assertTrue(ActivityFormat.encode(calls).contains("\"scope\":\"calls\""))
+        // No scope in the line when there is none (an entry of any other kind).
+        assertFalse(ActivityFormat.encode(ActivityEntry(1L, ActivityKind.EMERGENCY)).contains("scope"))
+        assertEquals("Emergency help button used on the lock screen", ActivityCopy.what(calls))
+        assertEquals("Emergency unlock used on the lock screen", ActivityCopy.what(full))
+        // A row written before the scope was recorded still reads as the unlock.
+        assertEquals(
+            "Emergency unlock used on the lock screen",
+            ActivityCopy.what(ActivityEntry(12L, ActivityKind.EMERGENCY_UNLOCK)),
+        )
+        assertEquals("Emergency call button used on the lock screen", ActivityCopy.what(ActivityEntry(13L, ActivityKind.EMERGENCY)))
     }
 
     @Test

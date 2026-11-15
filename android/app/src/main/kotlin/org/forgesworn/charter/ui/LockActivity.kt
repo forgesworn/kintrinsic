@@ -48,7 +48,7 @@ class LockActivity : Activity() {
         /** How soon after an Open-row (or Wi-Fi, Bluetooth) launch the shade's
          *  onStop is taken as that app covering it. */
         const val LAUNCH_COVER_MS = 10_000L
-        /** The platform emergency dialer's action (see [callIntent]). */
+        /** The platform emergency dialer's action (see [startCall]). */
         const val ACTION_DIAL_EMERGENCY = "com.android.phone.EmergencyDialer.DIAL"
     }
 
@@ -77,6 +77,9 @@ class LockActivity : Activity() {
     private var askStatusView: TextView? = null
     private var askButton: Button? = null
     private var pairedNow = false
+
+    /** The call being started by the last hold-to-call press, if any. */
+    private var callSequencer: CallSequencer? = null
     private lateinit var askThread: android.os.HandlerThread
     private lateinit var askWorker: android.os.Handler
 
@@ -294,6 +297,9 @@ class LockActivity : Activity() {
         // it): the shade re-paints the moment it comes back.
         ui.removeCallbacks(clockTick)
         org.forgesworn.charter.service.RelayPollPace.hide(this)
+        // Something else took the screen: a call route that was waiting to see
+        // that has its answer (see CallSequencer).
+        callSequencer?.onPaused()
         super.onPause()
     }
 
@@ -302,6 +308,7 @@ class LockActivity : Activity() {
         ActivityLockController.coveredSince = 0L
         runCatching { cameraManager?.unregisterTorchCallback(torchCallback) }
         ui.removeCallbacks(clockTick)
+        callSequencer?.abandon()
         runCatching { unregisterReceiver(hideReceiver) }
         // Release the ask worker's native thread — otherwise it leaks per lock
         // lifecycle (same pattern as CharterService.onDestroy).
@@ -503,25 +510,62 @@ class LockActivity : Activity() {
     }.getOrNull()
 
     /**
-     * What a hold-to-call button starts. A guardian's number: ACTION_CALL, which
-     * places the call straight away, PIN or not (the in-call screen shows over
-     * the keyguard).
+     * The emergency dialler action (Intent.ACTION_DIAL_EMERGENCY, not in the
+     * public SDK), resolved against the system image only, and its component
+     * if LockTask will let a lockout launch it: the platform's own emergency
+     * dialler, the system or default dialler's package, or a package on the
+     * lockout allowlist (see [CallRoute.emergencyDiallerUsable]). Null when this
+     * phone has none that qualifies, so the next route runs instead. Binder
+     * reads, as `resolveActivity` always was.
+     */
+    private fun usableEmergencyDialler(tel: android.net.Uri): android.content.ComponentName? = runCatching {
+        val probe = Intent(ACTION_DIAL_EMERGENCY, tel)
+        val info = packageManager.resolveActivity(
+            probe,
+            android.content.pm.PackageManager.ResolveInfoFlags.of(
+                android.content.pm.PackageManager.MATCH_SYSTEM_ONLY.toLong(),
+            ),
+        )?.activityInfo ?: return@runCatching null
+        val telecom = getSystemService(Context.TELECOM_SERVICE) as? android.telecom.TelecomManager
+        val platform = runCatching {
+            android.telecom.TelecomManager::class.java.getField("EMERGENCY_DIALER_COMPONENT")
+                .get(null) as? android.content.ComponentName
+        }.getOrNull()
+        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as? android.app.admin.DevicePolicyManager
+        val usable = CallRoute.emergencyDiallerUsable(
+            resolvedPackage = info.packageName,
+            resolvedClass = info.name,
+            platformPackage = platform?.packageName ?: CallRoute.FALLBACK_EMERGENCY_DIALLER_PACKAGE,
+            platformClass = platform?.className ?: CallRoute.FALLBACK_EMERGENCY_DIALLER_CLASS,
+            dialerPackages = listOf(
+                runCatching { telecom?.systemDialerPackage }.getOrNull(),
+                runCatching { telecom?.defaultDialerPackage }.getOrNull(),
+            ),
+            lockTaskPermitted = runCatching { dpm?.isLockTaskPermitted(info.packageName) }.getOrNull() == true,
+        )
+        if (usable) android.content.ComponentName(info.packageName, info.name) else null
+    }.getOrNull()
+
+    /**
+     * Starts a hold-to-call button's call, by [CallRoute]'s order, and says
+     * what the ward should know. A guardian's number: ACTION_CALL, which places
+     * the call straight away, PIN or not (the in-call screen shows over the
+     * keyguard), and nothing else.
      *
      * An emergency number (the Emergency button, or a lifeline entry the
      * platform counts as one) is different: the platform will not let an app
-     * that is not the dialer place it, and turns ACTION_CALL into the dialer's
-     * keypad, which LockTask refuses to launch during a lockout (and which does
-     * not show over the keyguard). So whether or not the keyguard is locked it
-     * opens the platform's emergency dialer, with the number filled in: that
-     * shows over the keyguard, LockTask lets it through, and nothing is dialled
-     * until the ward presses call. The same screen the keyguard's own Emergency
-     * button opens. [ACTION_DIAL_EMERGENCY] is the platform's action for it
-     * (Intent.ACTION_DIAL_EMERGENCY, not in the public SDK), so it is resolved
-     * first; if this phone has none, ACTION_DIAL with the number (the system
-     * dialler is on the lockout allowlist), and only then the old ACTION_CALL.
-     * The choice itself is [CallRoute.choose].
+     * that is not the dialer place it, so the routes are the platform's
+     * emergency dialler (the same screen the keyguard's own Emergency button
+     * opens, with the number filled in and nothing dialled until the ward
+     * presses call), the phone's own lock screen when it is showing (it
+     * carries an Emergency call button), ACTION_DIAL with the number (the system
+     * dialler is on the lockout allowlist), and only then ACTION_CALL. A route
+     * that throws, or does not take the screen within [CallSequencer.CONFIRM_MS],
+     * falls through to the next. This never touches the report to the guardian,
+     * which was handed to its worker before this runs.
      */
-    private fun callIntent(number: String, emergency: Boolean): CallPlan {
+    private fun startCall(number: String, emergency: Boolean, status: TextView) {
+        callSequencer?.abandon()
         val isEmergency = emergency || runCatching {
             (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
                 .isEmergencyNumber(number)
@@ -529,24 +573,93 @@ class LockActivity : Activity() {
         val tel = android.net.Uri.parse("tel:" + android.net.Uri.encode(number))
         val newTask = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or
             Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-        val emergencyDialler = Intent(ACTION_DIAL_EMERGENCY, tel).addFlags(newTask)
+        val emergencyDialler = if (isEmergency) usableEmergencyDialler(tel) else null
         val systemDial = Intent(Intent.ACTION_DIAL, tel).addFlags(newTask)
-        val route = CallRoute.choose(
-            isEmergency = isEmergency,
-            emergencyDiallerResolves = isEmergency && emergencyDialler.resolveActivity(packageManager) != null,
-            systemDialResolves = isEmergency && systemDial.resolveActivity(packageManager) != null,
-        )
-        val intent = when (route) {
-            CallRoute.Route.EMERGENCY_DIALLER -> emergencyDialler
-            CallRoute.Route.SYSTEM_DIAL -> systemDial
-            CallRoute.Route.CALL -> Intent(Intent.ACTION_CALL, tel)
+        val systemDialOk = isEmergency &&
+            runCatching { systemDial.resolveActivity(packageManager) != null }.getOrDefault(false)
+        val locked = isEmergency && runCatching {
+            getSystemService(KeyguardManager::class.java).isKeyguardLocked
+        }.getOrDefault(false)
+
+        fun start(intent: Intent, result: (CallSequencer.Launch) -> Unit) {
+            val ok = runCatching { startActivity(intent) }
+                .onFailure { Log.w(TAG, "call route refused: ${it.javaClass.simpleName}") }
+                .isSuccess
+            result(if (ok) CallSequencer.Launch.STARTED else CallSequencer.Launch.FAILED)
         }
-        return CallPlan(intent, isEmergency)
+
+        val sequencer = CallSequencer(
+            isEmergency = isEmergency,
+            locked = locked,
+            emergencyDiallerOk = emergencyDialler != null,
+            systemDialOk = systemDialOk,
+            launcher = { route, result ->
+                when (route) {
+                    CallRoute.Route.EMERGENCY_DIALLER ->
+                        start(Intent(ACTION_DIAL_EMERGENCY, tel).setComponent(emergencyDialler).addFlags(newTask), result)
+                    CallRoute.Route.SYSTEM_DIAL -> start(systemDial, result)
+                    CallRoute.Route.CALL -> start(Intent(Intent.ACTION_CALL, tel), result)
+                    CallRoute.Route.BOUNCER -> openPhoneLock(result)
+                }
+            },
+            timer = object : CallSequencer.Timer {
+                override fun postDelayed(task: Runnable, delayMs: Long) {
+                    ui.postDelayed(task, delayMs)
+                }
+
+                override fun cancel(task: Runnable) {
+                    ui.removeCallbacks(task)
+                }
+            },
+            listener = object : CallSequencer.Listener {
+                override fun onRoute(route: CallRoute.Route) {
+                    status.text = if (route == CallRoute.Route.BOUNCER) "Tap Emergency call on the next screen" else ""
+                }
+
+                override fun onSettled(outcome: CallSequencer.Outcome) {
+                    when (outcome) {
+                        CallSequencer.Outcome.OPENED -> Unit
+                        CallSequencer.Outcome.BOUNCER_CANCELLED -> status.text = ""
+                        CallSequencer.Outcome.FAILED -> status.text = if (isEmergency) {
+                            "Couldn't open the emergency dialler. Press the power button five times " +
+                                "for Emergency SOS, or use another phone."
+                        } else {
+                            "Couldn't start the call — tell your guardian."
+                        }
+                    }
+                }
+            },
+        )
+        callSequencer = sequencer
+        sequencer.begin()
     }
 
-    /** What a hold-to-call button starts, and whether that is an emergency
-     *  dialer or call (for "Activity on this phone"). */
-    private class CallPlan(val intent: Intent, val emergency: Boolean)
+    /**
+     * The phone's own lock screen, whose PIN pad carries an Emergency call
+     * button. [result] says how it ended: dismissed (no credential needed, or
+     * it was entered), cancelled (the ward left it, perhaps for that button), or
+     * failed (it could not be shown).
+     */
+    private fun openPhoneLock(result: (CallSequencer.Launch) -> Unit) {
+        val km = getSystemService(KeyguardManager::class.java)
+        if (km == null) {
+            result(CallSequencer.Launch.FAILED)
+            return
+        }
+        val requested = runCatching {
+            km.requestDismissKeyguard(
+                this,
+                object : KeyguardManager.KeyguardDismissCallback() {
+                    override fun onDismissSucceeded() = result(CallSequencer.Launch.DISMISSED)
+
+                    override fun onDismissCancelled() = result(CallSequencer.Launch.CANCELLED)
+
+                    override fun onDismissError() = result(CallSequencer.Launch.FAILED)
+                },
+            )
+        }.isSuccess
+        if (!requested) result(CallSequencer.Launch.FAILED)
+    }
 
     /**
      * A lifeline button with two gates against the pocket-dial (and the
@@ -578,24 +691,19 @@ class LockActivity : Activity() {
 
         fun place() {
             reset()
-            // The emergency entry in "Activity on this phone" and the report to
-            // the guardian happen only after startActivity has returned, off
-            // this thread, and can never change whether or how the call starts
-            // (see EmergencyUse).
-            val appContext = applicationContext
-            val placed = org.forgesworn.charter.enforce.EmergencyUse.placeAndRecord(
-                start = {
-                    val plan = callIntent(number, emergency)
-                    startActivity(plan.intent)
-                    // Only the shade's own emergency control is logged and
-                    // reported: a lifeline entry that happens to be an
-                    // emergency number is not.
-                    plan.emergency && emergency
-                },
-                record = { at -> org.forgesworn.charter.enforce.EmergencyUse.record(appContext, at) },
-                report = { at -> org.forgesworn.charter.enforce.EmergencyUse.report(at) },
-            )
-            if (!placed) status.text = "Couldn't start the call — tell your guardian."
+            // The shade's own emergency control is reported the moment its
+            // hold and cancel window complete, whatever the routes then do
+            // (resolve, start, throw or be refused). The press time is taken
+            // here, and the report then the local row go to a worker: the
+            // call below never waits on either (see EmergencyUse). A lifeline
+            // entry that happens to be an emergency number is not reported.
+            if (emergency) {
+                org.forgesworn.charter.enforce.EmergencyUse.pressed(
+                    applicationContext,
+                    System.currentTimeMillis() / 1000,
+                )
+            }
+            startCall(number, emergency, status)
         }
 
         fun startCancelWindow() {
@@ -1371,30 +1479,49 @@ class LockActivity : Activity() {
                                     android.view.HapticFeedbackConstants.LONG_PRESS,
                                 )
                                 val pressedAt = System.currentTimeMillis() / 1000
-                                val res = CharterCore.breakGlass(pressedAt)
                                 fired = true
-                                if (res.allowed) {
-                                    // The row in "Activity on this phone", off
-                                    // the main thread, dated by the press.
-                                    org.forgesworn.charter.enforce.EmergencyUse
-                                        .recordUnlock(applicationContext, pressedAt)
-                                    if (res.scope == "full") {
-                                        bgStatus.text = "Unlocked."
-                                        runCatching { stopLockTask() }
-                                        finish()
-                                    } else {
-                                        // NOT "Unlocked" — nothing about
-                                        // enforcement changed, and telling a
-                                        // child otherwise while the shade sits
-                                        // in front of them is the silent lie
-                                        // this whole screen exists to avoid.
-                                        bgStatus.text =
-                                            "Your guardian has been told you need them. " +
-                                            "You can call the numbers above now."
+                                // The warden's lock and the journal's fsyncs are
+                                // never taken on the main thread: the break
+                                // goes to the ask worker, at the front of its
+                                // queue, and the result comes back here. The
+                                // hold looks and feels the same.
+                                val onWorker = Runnable {
+                                    val res = CharterCore.breakGlass(pressedAt)
+                                    if (res.allowed) {
+                                        // The row in "Activity on this phone",
+                                        // off this thread too, dated by the
+                                        // press and carrying the scope.
+                                        org.forgesworn.charter.enforce.EmergencyUse
+                                            .recordUnlock(applicationContext, pressedAt, res.scope)
                                     }
-                                } else {
-                                    bgStatus.text =
-                                        "Emergency unlock isn't switched on for this phone."
+                                    ui.post {
+                                        if (isDestroyed) return@post
+                                        if (res.allowed) {
+                                            if (res.scope == "full") {
+                                                bgStatus.text = "Unlocked."
+                                                runCatching { stopLockTask() }
+                                                finish()
+                                            } else {
+                                                // NOT "Unlocked" — nothing
+                                                // about enforcement changed, and
+                                                // telling a child otherwise
+                                                // while the shade sits in front
+                                                // of them is the silent lie this
+                                                // whole screen exists to avoid.
+                                                bgStatus.text =
+                                                    "Your guardian has been told you need them. " +
+                                                    "You can call the numbers above now."
+                                            }
+                                        } else {
+                                            bgStatus.text =
+                                                "Emergency unlock isn't switched on for this phone."
+                                        }
+                                    }
+                                }
+                                if (!askWorker.postAtFrontOfQueue(onWorker)) {
+                                    // The worker is gone (the shade is closing):
+                                    // nothing here may block the main thread.
+                                    Thread(onWorker, "break-glass").apply { isDaemon = true }.start()
                                 }
                             }
                             holdRunnable = r

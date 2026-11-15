@@ -848,7 +848,8 @@ object CharterCore {
     /**
      * The ward's emergency override: unlocks NOW (no approval, no network
      * needed) and journals it for the guardian. Refused only when the family
-     * hasn't enabled it.
+     * hasn't enabled it. Takes the warden lock and fsyncs the journal, so call
+     * it from a worker, never the main thread.
      */
     fun breakGlass(nowUnix: Long): BreakGlassResult {
         val raw = jni().charterBreakGlass(nowUnix)
@@ -865,8 +866,11 @@ object CharterCore {
     }
 
     /**
-     * Report that the shade's emergency-call button started the emergency
-     * dialler at [nowUnix], so the guardian is told. True only when the
+     * Report that the shade's emergency-call button completed its hold and
+     * cancel window at [nowUnix], so the guardian is told. What it says is
+     * only that: the control completed its hold and cancel window, and the ward
+     * app asked the phone to open its emergency dialler. It is not proof that
+     * the dialler appeared or that a call was placed. True only when the
      * warden journaled it (it is then sent on the next poll, whatever the
      * network is doing). Never throws: it reports an event and must not be able
      * to change anything about the call. Takes the warden lock, so never call
