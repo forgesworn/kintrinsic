@@ -880,7 +880,7 @@ impl Warden {
                 ));
                 continue;
             }
-            self.apply_release();
+            self.apply_release(now);
             return (
                 true,
                 format!("{detail} | APPLIED: issued_at={}", payload.issued_at),
@@ -889,13 +889,78 @@ impl Warden {
         (false, detail)
     }
 
+    /// A guardian is releasing this phone: make ONE best-effort publish of
+    /// every audit still held (break-glass, screen-lock outcomes, emergency
+    /// calls) to the releasing guardian, then clear the spool. A held wrap is
+    /// published as it is; one with none, or one that has waited over a day, is
+    /// built afresh for the pairing that is still in place. A relay that does
+    /// not take it, or a phone with no relay at all, loses it: the alternative
+    /// is a press made under this guardian reaching the next one.
+    ///
+    /// The publish runs on a thread of its own, never the caller's: a release
+    /// can arrive on a thread that belongs to the link's async runtime, where
+    /// the relay's blocking publish must not be started, and the warden lock
+    /// is held here. The caller waits at most [`RELEASE_FLUSH_WAIT`] for it
+    /// (a relay that is slow is left to finish on its own), so a release is
+    /// never held up for long and its ACK goes out in good time.
+    fn flush_audits_on_release(&self, now: u64) {
+        /// How long a release waits for the held audits to be published.
+        const RELEASE_FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+        let held = self.break_glass.entries();
+        if held.is_empty() {
+            return;
+        }
+        match self.relay.clone() {
+            Some(relay) => {
+                let (done, finished) = std::sync::mpsc::channel::<()>();
+                let spawned = std::thread::Builder::new()
+                    .name("charter-release-audits".into())
+                    .spawn(move || {
+                        for e in held {
+                            let wrap = match e.wrap {
+                                Some(w)
+                                    if now.abs_diff(w.created_at)
+                                        <= crate::breakglass::REBUILD_AFTER_SECS =>
+                                {
+                                    Some(w)
+                                }
+                                _ => relay.build_audit_wrap(e.tags, now),
+                            };
+                            match wrap {
+                                Some(w) => {
+                                    if relay.publish_wrap(w).is_err() {
+                                        eprintln!("charter: a held audit could not be sent to the releasing guardian");
+                                    }
+                                }
+                                None => eprintln!(
+                                    "charter: a held audit could not be built for the releasing guardian"
+                                ),
+                            }
+                        }
+                        let _ = done.send(());
+                    });
+                match spawned {
+                    Ok(_) => {
+                        let _ = finished.recv_timeout(RELEASE_FLUSH_WAIT);
+                    }
+                    Err(_) => eprintln!("charter: held audits could not be sent on release"),
+                }
+            }
+            None => eprintln!("charter: no relay: held audits are dropped on release"),
+        }
+        if !self.break_glass.clear_audits() {
+            eprintln!("charter: the audit spool could not be cleared on release");
+        }
+    }
+
     /// Apply a guardian-signed RELEASE: the parent-gated unpair. Drops the
     /// pairing, forgets every clause, resets enforcement, and clears the
     /// pin-once — the device returns to "waiting to pair" and can be re-paired,
     /// including to a DIFFERENT guardian. The next tick emits the inert +
     /// unlocked decision, so Kotlin lifts all restrictions. Caller has already
     /// authenticated the event via `verify_release`.
-    fn apply_release(&mut self) {
+    fn apply_release(&mut self, now: u64) {
         // The broker first, before anything is wiped: a relay round or a
         // local-link ingest may be inside one of its handlers right now (the
         // link runs beside the poll thread). `mark_released` waits for that
@@ -904,6 +969,10 @@ impl Warden {
         if let Some(b) = &self.broker {
             b.mark_released();
         }
+        // Whatever the ward pressed that this guardian has not yet been told
+        // goes to THIS guardian, once, before the pairing is wiped; the spool
+        // is then cleared, so it can never be sent to the next guardian.
+        self.flush_audits_on_release(now);
         if let Some(subject) = self.subject {
             let _ = self.child_clauses.clear_for(&subject.to_hex());
         }
@@ -1748,12 +1817,10 @@ impl Warden {
         if let Some(pin) = opened {
             self.screen_lock_pending = Some(Pending::new(&payload, pin));
             if let Some(old) = replaced {
-                self.break_glass
-                    .queue_audit(audit_tags(R::Superseded, &old, now));
+                self.journal_audit(audit_tags(R::Superseded, &old, now), "screen-lock");
             }
         } else {
-            self.break_glass
-                .queue_audit(audit_tags(result, &payload.id, now));
+            self.journal_audit(audit_tags(result, &payload.id, now), "screen-lock");
         }
         ack
     }
@@ -1825,8 +1892,7 @@ impl Warden {
             self.screen_lock_dirty = true;
         }
         self.screen_lock = Some(next);
-        self.break_glass
-            .queue_audit(crate::screen_lock::audit_tags(r, id, at));
+        self.journal_audit(crate::screen_lock::audit_tags(r, id, at), "screen-lock");
         Ok(true)
     }
 
@@ -2054,8 +2120,10 @@ impl Warden {
         // (or immediately after, if the phone is online).
         // `now` rides in the audit so the guardian sees when it was pressed,
         // not when the wrap was eventually built and published.
-        self.break_glass
-            .queue_audit(crate::breakglass::audit_tags(&scope, duration_secs, now));
+        self.journal_audit(
+            crate::breakglass::audit_tags(&scope, duration_secs, now),
+            "break-glass",
+        );
         serde_json::json!({
             "allowed": true,
             "scope": scope,
@@ -2064,8 +2132,10 @@ impl Warden {
         .to_string()
     }
 
-    /// The ward used the shade's own emergency-call control: its hold
-    /// completed and the emergency dialler started. Journals the
+    /// The ward used the shade's own emergency-call control: its hold and cancel
+    /// window completed, and the ward app asked the phone to open its
+    /// emergency dialler (not proof the dialler appeared or a call was
+    /// placed). Journals the
     /// `call.emergency` audit, `at` = the press time, for the next poll to
     /// build and send, whatever the network is doing. Returns
     /// `{"ok":true}`, or `{"ok":false,"reason":"not-paired"}` when there is no
@@ -2076,13 +2146,27 @@ impl Warden {
         if self.subject.is_none() {
             return serde_json::json!({"ok": false, "reason": "not-paired"}).to_string();
         }
-        if !self
-            .break_glass
-            .queue_audit(crate::breakglass::emergency_call_audit_tags(now))
-        {
+        if !self.journal_audit(
+            crate::breakglass::emergency_call_audit_tags(now),
+            "emergency-call",
+        ) {
             return serde_json::json!({"ok": false, "reason": "not-journaled"}).to_string();
         }
         "{\"ok\":true}".to_string()
+    }
+
+    /// Journal a device audit for the next poll, and say so when the journal
+    /// would not write (a full disk, a missing directory): the unlock or the
+    /// press still happens, but a guardian who is never told should not also
+    /// be silent in the log. Whether it was journaled.
+    fn journal_audit(&self, tags: Vec<Vec<String>>, what: &str) -> bool {
+        let ok = self.break_glass.queue_audit(tags);
+        if !ok {
+            eprintln!(
+                "charter: {what} audit could not be journaled; the guardian will not be told of it"
+            );
+        }
+        ok
     }
 
     /// The guardian-configured break-glass, if enabled: `(scope, secs)`.
@@ -6782,7 +6866,7 @@ mod tests {
 
         // A release forgets the web clause too: re-paired, the phone starts
         // unrestricted instead of enforcing the old pairing's web rules.
-        w.apply_release();
+        w.apply_release(t0);
         w.pair(&uri, t0 - 60).unwrap();
         let v: serde_json::Value = serde_json::from_str(&w.web_dns_plan()).unwrap();
         assert_eq!(
@@ -7324,6 +7408,100 @@ mod tests {
             .break_glass
             .entries()
             .is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L4: a guardian's release makes one best-effort publish of every held
+    /// audit, to the guardian doing the releasing (a held wrap as it is, one
+    /// with none built for the pairing still in place), then clears the spool,
+    /// so none of it can reach the next guardian. A relay that refuses, or no
+    /// relay at all, still clears it.
+    #[test]
+    fn a_release_publishes_the_held_audits_once_then_clears_the_spool() {
+        use charter_sys::relay::MockRelayTransport;
+        use std::sync::Arc;
+
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        let t0 = IN_WINDOW as u64;
+        w.pair(&uri, t0 - 100).unwrap();
+        let sk = *w.machine_sk.clone().expect("machine key");
+        let relays = vec!["wss://relay.example".to_string()];
+        let up = MockRelayTransport::new();
+        let relay = Arc::new(
+            crate::relay::BlockingRelay::new(up.clone(), sk, guardian.pubkey(), relays).unwrap(),
+        );
+        w.inject_relay(relay.clone());
+
+        // One press already journaled with its wrap (offline earlier), one not
+        // yet built.
+        assert_eq!(w.emergency_call_used(t0), r#"{"ok":true}"#);
+        let held = w.break_glass.wraps_to_publish(
+            t0,
+            |tags| relay.build_audit_wrap(tags.to_vec(), t0),
+            |_| {},
+        );
+        assert_eq!(held.len(), 1);
+        assert_eq!(w.emergency_call_used(t0 + 5), r#"{"ok":true}"#);
+        assert_eq!(w.break_glass.entries().len(), 2);
+        assert!(futures_events(&up).is_empty());
+
+        w.apply_release(t0 + 10);
+        assert!(!w.pairing_state().paired);
+        let sent = futures_events(&up);
+        assert_eq!(sent.len(), 2, "both audits published once");
+        assert!(
+            sent.iter().any(|e| e.id == held[0].id),
+            "the held wrap went out verbatim"
+        );
+        assert!(
+            w.break_glass.entries().is_empty(),
+            "nothing is left for the next guardian"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L4: a release with no relay, or one that takes nothing, still clears
+    /// the spool; and a release with nothing held is a no-op.
+    #[test]
+    fn a_release_clears_the_spool_even_when_nothing_can_be_sent() {
+        use charter_sys::relay::MockRelayTransport;
+        use std::sync::Arc;
+
+        let base = temp_base(concat!(module_path!(), line!()));
+        let guardian = TestGuardian::new();
+        let mut w = Warden::init(base.to_str().unwrap(), "enforce", 20).unwrap();
+        let uri = format!(
+            "bunker://{}?relay=wss://relay.example&kind=charter",
+            guardian.pubkey().to_hex()
+        );
+        let t0 = IN_WINDOW as u64;
+        w.pair(&uri, t0 - 100).unwrap();
+        let sk = *w.machine_sk.clone().expect("machine key");
+        let relays = vec!["wss://relay.example".to_string()];
+
+        let down = MockRelayTransport::new().with_failing_relay("wss://relay.example");
+        let relay = crate::relay::BlockingRelay::new(down, sk, guardian.pubkey(), relays).unwrap();
+        w.inject_relay(Arc::new(relay));
+        assert_eq!(w.emergency_call_used(t0), r#"{"ok":true}"#);
+        w.apply_release(t0 + 1);
+        assert!(w.break_glass.entries().is_empty(), "a refused publish");
+
+        w.pair(&uri, t0 + 2).unwrap();
+        assert_eq!(w.emergency_call_used(t0 + 3), r#"{"ok":true}"#);
+        w.relay = None;
+        w.apply_release(t0 + 4);
+        assert!(w.break_glass.entries().is_empty(), "no relay");
+
+        // Nothing held: nothing happens, and it does not matter that there
+        // is no relay.
+        w.apply_release(t0 + 5);
+        assert!(w.break_glass.entries().is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -13501,7 +13679,7 @@ mod screen_lock_tests {
         let b = reset(&g.signer, &machine, B, t0 + 2, "5678");
         assert_eq!(w.absorb_screen_lock_reset(&b, t0 + 2), AckResult::Applied);
 
-        w.apply_release();
+        w.apply_release(t0 + 3);
         assert!(!w.pairing_state().paired);
         assert!(
             w.take_screen_lock_reset().is_empty(),

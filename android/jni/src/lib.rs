@@ -622,8 +622,9 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterB
     with_warden_mut(&env, |w| w.break_glass(now_unix as u64))
 }
 
-/// The ward used the shade's emergency-call button (its hold completed and the
-/// emergency dialler started): journal the `call.emergency` audit for the
+/// The ward used the shade's emergency-call button (its hold and cancel window
+/// completed, and the ward app asked the phone to open its emergency dialler;
+/// not proof the dialler appeared or a call was placed): journal the `call.emergency` audit for the
 /// guardian, dated by `now_unix`, the press. Returns `{"ok":true}`,
 /// `{"ok":false,"reason":"…"}` (unpaired, or the journal would not write) or
 /// `{"error":"not initialized"}`; Kotlin treats anything but `ok:true` as

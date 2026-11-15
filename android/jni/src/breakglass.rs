@@ -94,14 +94,22 @@ fn write_durably(tmp: &Path, dest: &Path, bytes: &[u8]) -> bool {
     }
     // The rename is only durable once the directory has been synced. Not every
     // filesystem lets a directory be opened or synced; the data itself is
-    // already on disk, so a refusal here is not a failed write.
+    // already on disk, so a refusal here is not a failed write, but it is
+    // logged: on such a filesystem a power cut can undo the rename.
     if let Some(dir) = dest.parent() {
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
+        match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+            Ok(()) => {}
+            Err(e) => eprintln!(
+                "charter: break-glass directory sync refused ({:?}); the rename may not survive a power cut",
+                e.kind()
+            ),
         }
     }
     true
 }
+
+/// How many moved-aside unreadable spools are kept.
+const KEEP_BAD_SPOOLS: usize = 3;
 
 /// Durable store for the window + the audit spool.
 pub struct BreakGlass {
@@ -155,17 +163,80 @@ impl BreakGlass {
     }
 
     /// The journaled audits, oldest first.
+    ///
+    /// A missing spool is an empty one. A spool that cannot be read or parsed
+    /// is NOT: it is moved aside (see [`BreakGlass::set_spool_aside`]) before
+    /// this returns an empty list, so the next write can never overwrite
+    /// pending break-glass, screen-lock or emergency entries that might still
+    /// be recovered.
     pub fn entries(&self) -> Vec<SpooledAudit> {
-        std::fs::read_to_string(self.spool_path())
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Vec<StoredAudit>>(&raw).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| match e {
-                StoredAudit::Entry(e) => e,
-                StoredAudit::Legacy(tags) => SpooledAudit { tags, wrap: None },
-            })
-            .collect()
+        let raw = match std::fs::read_to_string(self.spool_path()) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                eprintln!("charter: break-glass spool unreadable ({:?})", e.kind());
+                self.set_spool_aside();
+                return Vec::new();
+            }
+        };
+        match serde_json::from_str::<Vec<StoredAudit>>(&raw) {
+            Ok(list) => list
+                .into_iter()
+                .map(|e| match e {
+                    StoredAudit::Entry(e) => e,
+                    StoredAudit::Legacy(tags) => SpooledAudit { tags, wrap: None },
+                })
+                .collect(),
+            Err(_) => {
+                eprintln!("charter: break-glass spool does not parse");
+                self.set_spool_aside();
+                Vec::new()
+            }
+        }
+    }
+
+    /// Rename an unusable spool to `pending-audits.json.bad-<unix>` (never
+    /// overwriting an earlier one), keeping the newest [`KEEP_BAD_SPOOLS`] of
+    /// them, so the data stays on the phone for recovery and the next write
+    /// starts a fresh file.
+    fn set_spool_aside(&self) {
+        const PREFIX: &str = "pending-audits.json.bad-";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let existing = |dir: &Path| -> Vec<(u64, PathBuf)> {
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let n = name.strip_prefix(PREFIX)?.parse::<u64>().ok()?;
+                    Some((n, e.path()))
+                })
+                .collect()
+        };
+        // Always newer than every one already kept, even if the clock stood
+        // still or stepped back, so the newest is never the one pruned.
+        let stamp = existing(&self.dir)
+            .iter()
+            .map(|(n, _)| n.saturating_add(1))
+            .fold(now, u64::max);
+        let aside = self.dir.join(format!("{PREFIX}{stamp}"));
+        if let Err(e) = std::fs::rename(self.spool_path(), &aside) {
+            eprintln!(
+                "charter: break-glass spool could not be set aside ({:?})",
+                e.kind()
+            );
+            return;
+        }
+        eprintln!("charter: break-glass spool set aside as {PREFIX}{stamp}");
+        let mut bad = existing(&self.dir);
+        bad.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+        for (_, path) in bad.into_iter().skip(KEEP_BAD_SPOOLS) {
+            let _ = std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path));
+        }
     }
 
     /// Write the spool (atomically: a temporary file renamed over it, so a
@@ -245,10 +316,10 @@ impl BreakGlass {
         }
     }
 
-    /// Drain the spool.
-    #[cfg(test)]
-    pub fn clear_audits(&self) {
-        let _ = std::fs::remove_file(self.spool_path());
+    /// Drain the spool (a guardian's release, once its held audits have had
+    /// their one publish). Whether it is gone.
+    pub fn clear_audits(&self) -> bool {
+        self.write_entries(&[])
     }
 }
 
@@ -279,10 +350,12 @@ pub fn audit_tags(scope: &str, duration_secs: u64, at: u64) -> Vec<Vec<String>> 
 pub const OP_EMERGENCY_CALL: &str = "call.emergency";
 
 /// The contract's emergency-call audit tags: outcome=override,
-/// op=call.emergency and `at`, the moment the ward's hold completed and the
-/// emergency dialler started. Nothing else: never a number, a duration, a
-/// reason or anything personal, and the content is empty. It means the
-/// dialler opened, NOT that a call was placed or connected.
+/// op=call.emergency and `at`, the moment the ward's hold and cancel window
+/// completed. Nothing else: never a number, a duration, a reason or anything
+/// personal, and the content is empty. It means the control completed its
+/// hold and cancel window, and the ward app asked the phone to open its
+/// emergency dialler. It is not proof that the dialler appeared or that a call
+/// was placed.
 ///
 /// Like [`audit_tags`], `at` is a tag because the wrap is stamped when it is
 /// built, not when the button was pressed.
@@ -560,6 +633,114 @@ mod tests {
         assert_eq!(names, ["pending-audits.json", "window.json"]);
         bg.open(&Window { at: 2_000, ..w });
         assert_eq!(bg.window().unwrap().at, 2_000);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn bad_files(bg: &BreakGlass) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(&bg.dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("pending-audits.json.bad-"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// L3: no spool at all is an empty spool and leaves nothing behind.
+    #[test]
+    fn a_missing_spool_is_empty_and_sets_nothing_aside() {
+        let base = tmp("nospool");
+        let bg = BreakGlass::new(&base);
+        assert!(bg.entries().is_empty());
+        assert!(bad_files(&bg).is_empty());
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert_eq!(bg.entries().len(), 1);
+        assert!(bad_files(&bg).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L3: a spool that does not parse is moved aside, whole, before the next
+    /// press writes a fresh one; the damaged bytes are never overwritten.
+    #[test]
+    fn a_corrupt_spool_is_set_aside_not_overwritten() {
+        let base = tmp("corrupt");
+        let bg = BreakGlass::new(&base);
+        let damaged = b"[[[\"outcome\",\"override\"],[\"op\",\"unlock.bre";
+        std::fs::write(bg.spool_path(), damaged).unwrap();
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        let kept = bad_files(&bg);
+        assert_eq!(kept.len(), 1, "the damaged spool is kept");
+        assert_eq!(std::fs::read(bg.dir.join(&kept[0])).unwrap(), damaged);
+        // The new spool holds only the new press and reads cleanly.
+        let now = bg.entries();
+        assert_eq!(now.len(), 1);
+        assert_eq!(now[0].tags, emergency_call_audit_tags(T0));
+        assert_eq!(bad_files(&bg).len(), 1, "a good spool sets nothing aside");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L3: an empty file is damage too (a crash between create and write on a
+    /// filesystem without the rename), not "no entries".
+    #[test]
+    fn an_empty_spool_file_is_set_aside() {
+        let base = tmp("emptyfile");
+        let bg = BreakGlass::new(&base);
+        std::fs::write(bg.spool_path(), b"").unwrap();
+        assert!(bg.entries().is_empty());
+        assert_eq!(bad_files(&bg).len(), 1);
+        assert!(!bg.spool_path().exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L3: a read error that is not "not found" (here the spool path is a
+    /// directory, so the read fails) is also set aside, and the next write
+    /// succeeds.
+    #[test]
+    fn an_unreadable_spool_is_set_aside_and_the_next_press_still_journals() {
+        let base = tmp("unreadable");
+        let bg = BreakGlass::new(&base);
+        std::fs::create_dir_all(bg.spool_path()).unwrap();
+        assert!(bg.entries().is_empty());
+        assert_eq!(bad_files(&bg).len(), 1);
+        assert!(bg.queue_audit(emergency_call_audit_tags(T0)));
+        assert_eq!(bg.entries().len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L3: the newest three moved-aside spools are kept and older ones go; two
+    /// in the same second do not replace each other.
+    #[test]
+    fn only_the_three_newest_damaged_spools_are_kept() {
+        let base = tmp("keep3");
+        let bg = BreakGlass::new(&base);
+        for i in 0..5u8 {
+            std::fs::write(bg.spool_path(), format!("bad{i}")).unwrap();
+            assert!(bg.entries().is_empty());
+        }
+        let kept = bad_files(&bg);
+        assert_eq!(kept.len(), 3);
+        let mut contents: Vec<String> = kept
+            .iter()
+            .map(|n| std::fs::read_to_string(bg.dir.join(n)).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, ["bad2", "bad3", "bad4"], "the newest three");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// L4: clearing the spool for a release leaves nothing behind and is not
+    /// an error when there is nothing to clear.
+    #[test]
+    fn clearing_the_spool_empties_it() {
+        let base = tmp("clear");
+        let bg = BreakGlass::new(&base);
+        assert!(bg.clear_audits());
+        bg.queue_audit(emergency_call_audit_tags(T0));
+        bg.queue_audit(audit_tags(SCOPE_FULL, 600, T0));
+        assert_eq!(bg.entries().len(), 2);
+        assert!(bg.clear_audits());
+        assert!(bg.entries().is_empty());
+        assert!(!bg.spool_path().exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
