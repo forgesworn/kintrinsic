@@ -34,6 +34,8 @@ class ActivityLogTest {
             ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 3600),
             ActivityEntry(at1942, ActivityKind.DEBUGGING_ON),
             ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF),
+            ActivityEntry(at1942, ActivityKind.ADB_ON),
+            ActivityEntry(at1942, ActivityKind.ADB_OFF),
             ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234"),
             ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234"),
             ActivityEntry(at1942, ActivityKind.GUARDIAN_CHANGED, guardian = "ef567890", was = "abcd1234"),
@@ -211,8 +213,8 @@ class ActivityLogTest {
             ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF),
         )
         val rows = ActivityFeed.merge(emptyList(), act, london).rows
-        assertTrue(rows[0].text.contains("turned off"))
-        assertTrue(rows[1].text.contains("turned on"))
+        assertTrue(rows[0].text.contains("blocked"))
+        assertTrue(rows[1].text.contains("allowed"))
     }
 
     @Test
@@ -233,13 +235,66 @@ class ActivityLogTest {
     }
 
     @Test
-    fun `ten rows show, the rest wait for Show all`() {
+    fun `ten other rows show, the rest wait for Show all`() {
         val rows = (0 until 25).map { ActivityFeed.Row(it.toLong(), "r$it") }
         assertTrue(ActivityFeed.needsToggle(rows))
         assertEquals(10, ActivityFeed.visible(rows, showAll = false).size)
         assertEquals(25, ActivityFeed.visible(rows, showAll = true).size)
         assertFalse(ActivityFeed.needsToggle(rows.take(10)))
         assertEquals(10, ActivityFeed.visible(rows.take(10), showAll = false).size)
+    }
+
+    @Test
+    fun `a reset is never pushed below the fold by other entries`() {
+        val sl = listOf(reset("a", at1942, ScreenLockOutcome.APPLIED))
+        val act = (1..20).map { ActivityEntry(at1942 + it * 10L, ActivityKind.DEBUGGING_ON) }
+        val rows = ActivityFeed.merge(sl, act, london).rows
+        assertEquals(21, rows.size)
+        val short = ActivityFeed.visible(rows, showAll = false)
+        assertEquals(10, short.count { !it.screenLock })
+        assertEquals(1, short.count { it.screenLock })
+        // Merged newest first: the reset is the oldest, so it comes last.
+        assertTrue(short.last().screenLock)
+        assertTrue(ActivityFeed.needsToggle(rows))
+        assertEquals(21, ActivityFeed.visible(rows, showAll = true).size)
+        // Only older other rows are behind "Show all".
+        assertFalse(ActivityFeed.needsToggle(rows.filter { it.screenLock }))
+        // Screen-lock rows alone never need the toggle, however many.
+        val many = (0 until 30).map { ActivityFeed.Row(it.toLong(), "s$it", screenLock = true) }
+        assertEquals(30, ActivityFeed.visible(many, showAll = false).size)
+        assertFalse(ActivityFeed.needsToggle(many))
+    }
+
+    @Test
+    fun `a time that will not format never hides or crashes a row`() {
+        val max = Long.MAX_VALUE
+        val sl = listOf(
+            reset("a", max, ScreenLockOutcome.APPLIED, ackAt = max),
+            reset("b", at1942, ScreenLockOutcome.APPLIED, ackAt = max, kind = ScreenLockChange.REMOVED),
+        )
+        val act = listOf(
+            ActivityEntry(max, ActivityKind.EMERGENCY),
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = max),
+            ActivityEntry(at1942, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2"),
+        )
+        val feed = ActivityFeed.merge(sl, act, london)
+        assertEquals(5, feed.rows.size)
+        val texts = feed.rows.map { it.text }
+        assertTrue(texts.toString(), texts.contains("Screen lock changed by your guardian (time unreadable)"))
+        assertTrue(texts.toString(), texts.contains("Screen lock removed by your guardian (time unreadable)"))
+        assertTrue(texts.toString(), texts.contains("Emergency button used on the lock screen (time unreadable)"))
+        // The row with a good time keeps it; only the bad `until` is dropped.
+        assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)"))
+        assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · Kintrinsic updated from 0.8.1 to 0.8.2"))
+        // The notice for a damaged record still says something.
+        val notice = ScreenLockCopy.noticeOrFallback(sl[0], london)
+        assertTrue(notice, notice.contains("changed your screen lock"))
+        assertTrue(ScreenLockCopy.noticeOrFallback(reset("c", max, ScreenLockOutcome.APPLIED, kind = ScreenLockChange.REMOVED), london).contains("removed"))
+    }
+
+    @Test
+    fun `every kind at its cap stays under the compaction threshold`() {
+        assertTrue(ActivityKind.ALL.size * ActivityRetention.PER_KIND < ActivityRetention.COMPACT_ABOVE_LINES)
     }
 
     // ---- the words ---------------------------------------------------------------
@@ -301,10 +356,23 @@ class ActivityLogTest {
         fun row(e: ActivityEntry) = ActivityCopy.row(e, london)
         assertEquals("19:42, 14 Nov · Emergency button used on the lock screen", row(ActivityEntry(at1942, ActivityKind.EMERGENCY)))
         assertEquals(
-            "19:42, 14 Nov · USB debugging turned on (a computer can control this phone)",
+            "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)",
             row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON)),
         )
-        assertEquals("19:42, 14 Nov · USB debugging turned off", row(ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF)))
+        assertEquals(
+            "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings) until 20:42",
+            row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 3600)),
+        )
+        assertEquals(
+            "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings) until 09:00, 15 Nov",
+            row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 47_880)),
+        )
+        assertEquals("19:42, 14 Nov · USB debugging blocked", row(ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF)))
+        assertEquals(
+            "19:42, 14 Nov · USB debugging switched on (a computer plugged in can ask to control this phone)",
+            row(ActivityEntry(at1942, ActivityKind.ADB_ON)),
+        )
+        assertEquals("19:42, 14 Nov · USB debugging switched off", row(ActivityEntry(at1942, ActivityKind.ADB_OFF)))
         assertEquals("19:42, 14 Nov · Paired with guardian abcd1234", row(ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234")))
         assertEquals("19:42, 14 Nov · Unpaired from guardian abcd1234", row(ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234")))
         assertEquals(
@@ -344,6 +412,17 @@ class ActivityLogTest {
         assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(null, null, null, at1942))
         assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(true, null, null, at1942))
         assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(false, null, null, at1942))
+    }
+
+    @Test
+    fun `the real adb switch follows the same edge rules`() {
+        assertEquals(Observation<Boolean>(null, true), ActivityTriggers.adb(null, true, at1942))
+        assertEquals(Observation<Boolean>(null, false), ActivityTriggers.adb(null, false, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(true, true, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(true, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(null, null, at1942))
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_ON), ActivityTriggers.adb(false, true, at1942).entry)
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_OFF), ActivityTriggers.adb(true, false, at1942).entry)
     }
 
     private fun pairing(paired: Boolean, guardian: String?, error: String? = null, unreadable: Boolean = false) =
@@ -430,14 +509,18 @@ class ActivityLogTest {
 
     private class FakeMemory : ActivityMemory {
         var dbg: Boolean? = null
+        var adbState: Boolean? = null
+        var commitOk = true
         var pair: PairingMemory? = null
         var ver: VersionMemory? = null
         override fun debugging() = dbg
-        override fun setDebugging(open: Boolean): Boolean { dbg = open; return true }
+        override fun setDebugging(open: Boolean): Boolean { if (commitOk) dbg = open; return commitOk }
+        override fun adb() = adbState
+        override fun setAdb(enabled: Boolean): Boolean { if (commitOk) adbState = enabled; return commitOk }
         override fun pairing() = pair
-        override fun setPairing(p: PairingMemory): Boolean { pair = p; return true }
+        override fun setPairing(p: PairingMemory): Boolean { if (commitOk) pair = p; return commitOk }
         override fun version() = ver
-        override fun setVersion(v: VersionMemory): Boolean { ver = v; return true }
+        override fun setVersion(v: VersionMemory): Boolean { if (commitOk) ver = v; return commitOk }
     }
 
     @Test
@@ -469,6 +552,46 @@ class ActivityLogTest {
         w.observeDebugging(true, null, at1942 + 2)
         assertEquals(1, log.written.size)
         assertEquals(true, mem.dbg)
+    }
+
+    @Test
+    fun `a prefs commit that keeps failing fires an edge once per process, not every tick`() {
+        val log = FakeLog()
+        val mem = FakeMemory().apply { dbg = false; adbState = false; commitOk = false }
+        val w = ActivityWatcher(log, mem) {}
+        for (i in 0 until 5) w.observeDebugging(true, null, at1942 + i)
+        for (i in 0 until 5) w.observeAdb(true, at1942 + i)
+        assertEquals(listOf(ActivityKind.DEBUGGING_ON, ActivityKind.ADB_ON), log.written.map { it.kind })
+        // A later real edge still fires.
+        w.observeAdb(false, at1942 + 9)
+        assertEquals(ActivityKind.ADB_OFF, log.written.last().kind)
+    }
+
+    @Test
+    fun `the watcher logs adb edges and takes a silent baseline`() {
+        val log = FakeLog()
+        val w = ActivityWatcher(log, FakeMemory()) {}
+        w.observeAdb(true, at1942)
+        assertTrue(log.written.isEmpty())
+        w.observeAdb(null, at1942 + 1)
+        w.observeAdb(false, at1942 + 2)
+        assertEquals(listOf(ActivityKind.ADB_OFF), log.written.map { it.kind })
+    }
+
+    @Test
+    fun `observeVersion says whether it settled`() {
+        val log = FakeLog()
+        val mem = FakeMemory().apply { ver = VersionMemory("0.8.0", 56) }
+        val w = ActivityWatcher(log, mem) {}
+        log.ok = false
+        assertFalse(w.observeVersion("0.8.1", 57, at1942))
+        log.ok = true
+        assertTrue(w.observeVersion("0.8.1", 57, at1942 + 1))
+        assertEquals(1, log.written.size)
+        // Nothing to write is settled too.
+        assertTrue(w.observeVersion("0.8.1", 57, at1942 + 2))
+        assertFalse(ActivityWatcher(FakeLog(throwing = true), FakeMemory().apply { ver = VersionMemory("0.8.0", 56) }) {}
+            .observeVersion("0.8.1", 57, at1942))
     }
 
     @Test
@@ -543,6 +666,33 @@ class ActivityLogTest {
                 onFailure = { error("y") },
             ),
         )
+    }
+
+    @Test
+    fun `nothing escapes the runnable handed to a real executor`() {
+        val escaped = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val ran = java.util.concurrent.CountDownLatch(1)
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r).apply {
+                isDaemon = true
+                setUncaughtExceptionHandler { _, t -> escaped.set(t) }
+            }
+        }
+        try {
+            assertTrue(
+                EmergencyUse.placeAndRecord(
+                    start = { true },
+                    record = { error("disk full") },
+                    runner = { r -> pool.execute { try { r.run() } finally { ran.countDown() } } },
+                    onFailure = { error("logging failed too") },
+                ),
+            )
+            assertTrue(ran.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        } finally {
+            pool.shutdown()
+            pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        assertNull(escaped.get())
     }
 
     @Test

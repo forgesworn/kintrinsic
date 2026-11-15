@@ -85,6 +85,9 @@ class MainActivity : Activity() {
     private lateinit var activityToggle: TextView
     private var activityShowAll = false
     private var activityRows: List<org.forgesworn.charter.enforce.ActivityFeed.Row> = emptyList()
+    /** False until the first read lands: the empty-state words must never
+     *  flash before the files have been read. */
+    private var activityLoaded = false
     /** The unacknowledged reset ids the card is showing, for its OK. */
     private var screenLockShown: List<String> = emptyList()
     /** "Time limits can't count yet" + the switch to fix it (QR setup). */
@@ -494,17 +497,14 @@ class MainActivity : Activity() {
         val copy = org.forgesworn.charter.enforce.ScreenLockCopy
         val open = org.forgesworn.charter.enforce.ScreenLockHistoryFormat.unacknowledged(records)
         screenLockShown = open.map { it.id }
-        screenLockNoticeText.text = open.joinToString("\n\n") { copy.notice(it, zone) }
+        screenLockNoticeText.text = open.joinToString("\n\n") { copy.noticeOrFallback(it, zone) }
         screenLockNoticeCard.visibility = if (open.isEmpty()) View.GONE else View.VISIBLE
     }
 
     /** Both sources merged, newest first. Read independently: one that will
      *  not read never hides the other's rows, and says so. */
-    private fun renderActivity(
-        screenLock: List<org.forgesworn.charter.enforce.ScreenLockRecord>?,
-        activity: List<org.forgesworn.charter.enforce.ActivityEntry>?,
-    ) {
-        val feed = org.forgesworn.charter.enforce.ActivityFeed.merge(screenLock, activity, java.time.ZoneId.systemDefault())
+    private fun renderActivity(feed: org.forgesworn.charter.enforce.ActivityFeed.Feed) {
+        activityLoaded = true
         activityRows = feed.rows
         activityNote.text = org.forgesworn.charter.enforce.ActivityFeed.UNREADABLE
         activityNote.visibility = if (feed.unreadable) View.VISIBLE else View.GONE
@@ -513,7 +513,9 @@ class MainActivity : Activity() {
 
     private fun renderActivityRows() {
         val feed = org.forgesworn.charter.enforce.ActivityFeed
-        activityText.text = if (activityRows.isEmpty()) {
+        activityText.text = if (!activityLoaded) {
+            ""
+        } else if (activityRows.isEmpty()) {
             if (activityNote.visibility == View.VISIBLE) "" else feed.EMPTY
         } else {
             feed.visible(activityRows, activityShowAll).joinToString("\n") { it.text }
@@ -672,11 +674,16 @@ class MainActivity : Activity() {
             val activity = runCatching {
                 org.forgesworn.charter.enforce.FileActivityLog.get(this).entries()
             }.getOrNull()
+            // Built here, off the main thread: every row is date-formatted, and
+            // each row is guarded on its own (see ActivityCopy).
+            val feed = runCatching {
+                org.forgesworn.charter.enforce.ActivityFeed.merge(screenLock, activity, java.time.ZoneId.systemDefault())
+            }.getOrNull()
             runOnUiThread {
                 render(state, view, tether, groups, askFirst, requests, holds, now, debugging)
                 renderUsageAccess(usageNeeded)
                 screenLock?.let { renderScreenLock(it) }
-                renderActivity(screenLock, activity)
+                feed?.let { renderActivity(it) }
             }
         }
     }

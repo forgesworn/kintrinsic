@@ -184,6 +184,17 @@ object ScreenLockCopy {
         }
     }
 
+    /** [notice], but a time that will not format never hides the notice (a
+     *  damaged record must still be told). */
+    fun noticeOrFallback(r: ScreenLockRecord, zone: ZoneId): String =
+        runCatching { notice(r, zone) }.getOrElse {
+            if (r.kind == ScreenLockChange.REMOVED) {
+                "Your guardian may have removed your screen lock (time unreadable)."
+            } else {
+                "Your guardian may have changed your screen lock (time unreadable). If your PIN doesn't work, ask them for the new one."
+            }
+        }
+
     /** The notice to show now (the newest unacknowledged reset), or null. */
     fun currentNotice(records: List<ScreenLockRecord>, zone: ZoneId): String? =
         ScreenLockHistoryFormat.unacknowledged(records).firstOrNull()?.let { notice(it, zone) }

@@ -579,7 +579,9 @@ class LockActivity : Activity() {
                 start = {
                     val plan = callIntent(number, emergency)
                     startActivity(plan.intent)
-                    plan.emergency
+                    // Only the shade's own emergency control is logged: a
+                    // lifeline entry that happens to be an emergency number is not.
+                    plan.emergency && emergency
                 },
                 record = { org.forgesworn.charter.enforce.EmergencyUse.record(appContext) },
             )

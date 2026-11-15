@@ -1015,8 +1015,8 @@ class WardenController(
     private fun observeActivity(watcher: org.forgesworn.charter.enforce.ActivityWatcher, nowUnix: Long) {
         if (!versionObserved) {
             val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
-            if (info != null) {
-                watcher.observeVersion(info.versionName, info.longVersionCode, nowUnix)
+            // Settled only once any entry is written; otherwise tried again next tick.
+            if (info != null && watcher.observeVersion(info.versionName, info.longVersionCode, nowUnix)) {
                 versionObserved = true
             }
         }
@@ -1041,8 +1041,23 @@ class WardenController(
             val open = runCatching { !restrictions.isRestrictionActive(debugKey) }.getOrNull()
             runCatching { CharterCore.setDebuggingOpen(open) }
             // The same read-back, for the ward's own log. A null is not an
-            // observation. [until] is only a window end when it is positive.
-            activity?.observeDebugging(open, until.takeIf { it > 0 }, nowUnix)
+            // observation, and nothing is observed while the warden is down:
+            // a failed init blocks debugging (fail-closed), which is no
+            // one's action. [until] is only a window end when it is positive.
+            if (initialized) {
+                activity?.observeDebugging(open, until.takeIf { it > 0 }, nowUnix)
+                // The phone's real adb switch, a separate fact from the restriction.
+                activity?.observeAdb(
+                    runCatching {
+                        when (android.provider.Settings.Global.getInt(context.contentResolver, android.provider.Settings.Global.ADB_ENABLED, -1)) {
+                            1 -> true
+                            0 -> false
+                            else -> null
+                        }
+                    }.getOrNull(),
+                    nowUnix,
+                )
+            }
         }
     }
 
