@@ -54,10 +54,10 @@ object CallRoute {
         attempt: Int,
     ): Route? = sequence(isEmergency, locked, emergencyDiallerOk, systemDialOk).getOrNull(attempt)
 
-    /** The platform's emergency dialler component when the framework will not
-     *  say (AOSP: `TelecomManager.EMERGENCY_DIALER_COMPONENT`). */
-    const val FALLBACK_EMERGENCY_DIALLER_PACKAGE = "com.android.phone"
-    const val FALLBACK_EMERGENCY_DIALLER_CLASS = "com.android.phone.EmergencyDialer"
+    /** The platform's emergency dialler component (AOSP's `com.android.phone/.EmergencyDialer`,
+     *  the one LockTask itself exempts). The framework has no public constant for it. */
+    const val PLATFORM_EMERGENCY_DIALLER_PACKAGE = "com.android.phone"
+    const val PLATFORM_EMERGENCY_DIALLER_CLASS = "com.android.phone.EmergencyDialer"
 
     /**
      * Whether an emergency dialler that resolved (from the system image only)
@@ -80,19 +80,56 @@ object CallRoute {
         if (dialerPackages.any { it != null && it == resolvedPackage }) return true
         return lockTaskPermitted
     }
+
+    /**
+     * Which of the system-image activities that answer the emergency dialler
+     * action to launch, as (package, class), or null when none qualifies. The
+     * platform's own component wins whenever it is among them; otherwise the
+     * first candidate [emergencyDiallerUsable] accepts. A phone on which two
+     * system packages claim the action therefore still gets its emergency
+     * dialler, instead of a chooser (package `android`) that would make the
+     * route skip.
+     */
+    fun pickEmergencyDialler(
+        candidates: List<Pair<String, String>>,
+        platformPackage: String?,
+        platformClass: String?,
+        dialerPackages: Collection<String?>,
+        lockTaskPermitted: (String) -> Boolean,
+    ): Pair<String, String>? {
+        val platform = candidates.firstOrNull { it.first == platformPackage && it.second == platformClass }
+        if (platform != null) return platform
+        return candidates.firstOrNull { (pkg, cls) ->
+            emergencyDiallerUsable(pkg, cls, platformPackage, platformClass, dialerPackages, lockTaskPermitted(pkg))
+        }
+    }
 }
 
 /**
  * Walks [CallRoute]'s routes for one press until one is confirmed, with every
  * collaborator injected so it is host-testable. Single-threaded: every call
- * comes from the main thread.
+ * comes from the main thread, and the activity feeds it the shade's lifecycle
+ * through [onPaused], [onResumed], [onStopped] and [onFocusChanged].
  *
  * A launch that returns is not yet a success: LockTask can refuse a launch
- * without throwing. For an emergency number a started launch is confirmed only
- * when the shade is paused (something else took the screen) within [confirmMs]
- * of it; otherwise the route is treated as refused and the next one runs. The
+ * without throwing, and Telecom's transparent trampoline pauses the shade for
+ * a moment and hands it straight back. For an emergency number a started
+ * launch is confirmed only when the shade is STOPPED (an opaque dialler took
+ * the screen, while the screen is on). The wait has two stages:
+ *
+ * - no pause within [pauseMs] of the launch: the route was refused, try the
+ *   next one;
+ * - once a pause is seen, wait for the stop until [stopMs] in total from the
+ *   launch. A pause followed by a resume, with no stop, is not a confirmation
+ *   (a trampoline), and when the time runs out the next route is tried.
+ *
+ * A stop is remembered across routes: a dialler that took the screen late (a
+ * loaded phone) settles the press as opened instead of being followed by
+ * another route, and [CallRoute.Route.CALL], which targets the shade's own
+ * task, is never started once a stop has been seen. The
  * [CallRoute.Route.BOUNCER] route is asynchronous: the launcher reports how
- * the phone's own lock ended.
+ * the phone's own lock ended, and if the shade's window has not lost focus
+ * within [pauseMs] the lock screen never appeared and the route has failed.
  */
 class CallSequencer(
     private val isEmergency: Boolean,
@@ -102,7 +139,8 @@ class CallSequencer(
     private val launcher: Launcher,
     private val timer: Timer,
     private val listener: Listener,
-    private val confirmMs: Long = CONFIRM_MS,
+    private val pauseMs: Long = PAUSE_MS,
+    private val stopMs: Long = STOP_MS,
 ) {
     /** How one route's launch went. */
     enum class Launch {
@@ -126,6 +164,9 @@ class CallSequencer(
     interface Timer {
         fun postDelayed(task: Runnable, delayMs: Long)
         fun cancel(task: Runnable)
+
+        /** A monotonic clock in milliseconds. */
+        fun now(): Long
     }
 
     interface Listener {
@@ -139,75 +180,163 @@ class CallSequencer(
     private var attempt = 0
     private var epoch = 0
     private var settled = false
+    private var launchedAt = 0L
     private var pausedSinceLaunch = false
-    private var confirming: Runnable? = null
+    private var focusLostSinceLaunch = false
+
+    /** A stop (screen on) has been seen since the first launch, on any route. */
+    private var stopSeen = false
+    private var waitingFor: Wait = Wait.NOTHING
+    private var pending: Runnable? = null
+
+    private enum class Wait { NOTHING, PAUSE, STOP, BOUNCER_FOCUS }
 
     fun begin() = next()
 
-    /** The shade went to the background (called from `onPause`). */
+    /** The shade is paused (called from `onPause`). */
     fun onPaused() {
+        if (settled) return
         pausedSinceLaunch = true
-        val waiting = confirming ?: return
-        timer.cancel(waiting)
-        confirming = null
-        settle(Outcome.OPENED)
+        if (waitingFor == Wait.PAUSE) waitForStop()
+    }
+
+    /** The shade is back in the foreground (called from `onResume`). A pause
+     *  followed by a resume, with no stop, confirms nothing. */
+    fun onResumed() {
+        if (settled) return
+        pausedSinceLaunch = false
+    }
+
+    /**
+     * The shade is stopped (called from `onStop`), [screenOn] being
+     * `PowerManager.isInteractive`. A stop with the screen off is the screen
+     * going off, not a dialler: it confirms nothing and the sequence carries on.
+     */
+    fun onStopped(screenOn: Boolean) {
+        if (settled || !screenOn) return
+        stopSeen = true
+        if (waitingFor == Wait.PAUSE || waitingFor == Wait.STOP) {
+            cancelPending()
+            settle(Outcome.OPENED)
+        }
+    }
+
+    /** The shade's window gained or lost focus (called from `onWindowFocusChanged`). */
+    fun onFocusChanged(hasFocus: Boolean) {
+        if (settled || hasFocus) return
+        focusLostSinceLaunch = true
+        // The phone's own lock took the focus: it is showing, and the launcher
+        // now reports how it ends.
+        if (waitingFor == Wait.BOUNCER_FOCUS) cancelPending()
     }
 
     /** The shade is going away: nothing more is tried. */
     fun abandon() {
         settled = true
-        confirming?.let { timer.cancel(it) }
-        confirming = null
+        cancelPending()
+    }
+
+    private fun cancelPending() {
+        pending?.let { timer.cancel(it) }
+        pending = null
+        waitingFor = Wait.NOTHING
+    }
+
+    private fun arm(wait: Wait, delayMs: Long, onFire: () -> Unit) {
+        cancelPending()
+        val task = Runnable {
+            pending = null
+            waitingFor = Wait.NOTHING
+            if (!settled) onFire()
+        }
+        pending = task
+        waitingFor = wait
+        timer.postDelayed(task, delayMs.coerceAtLeast(0L))
+    }
+
+    private fun waitForStop() {
+        arm(Wait.STOP, launchedAt + stopMs - timer.now()) { advance() }
     }
 
     private fun settle(outcome: Outcome) {
         if (settled) return
         settled = true
+        cancelPending()
         listener.onSettled(outcome)
+    }
+
+    /** The current route did not take the screen: the next one runs, unless a
+     *  stop has been seen, in which case something did and the press is opened. */
+    private fun advance() {
+        if (stopSeen) settle(Outcome.OPENED) else next()
     }
 
     private fun next() {
         if (settled) return
+        cancelPending()
         val route = CallRoute.choose(isEmergency, locked, emergencyDiallerOk, systemDialOk, attempt)
         if (route == null) {
             settle(Outcome.FAILED)
             return
         }
+        // ACTION_CALL targets the shade's own task: after a stop it would pull
+        // the shade back over whatever took the screen.
+        if (route == CallRoute.Route.CALL && isEmergency && stopSeen) {
+            settle(Outcome.OPENED)
+            return
+        }
         attempt++
         pausedSinceLaunch = false
+        focusLostSinceLaunch = false
         val mine = ++epoch
         listener.onRoute(route)
+        if (route == CallRoute.Route.BOUNCER) {
+            arm(Wait.BOUNCER_FOCUS, pauseMs) {
+                // The shade kept the focus: the phone's own lock never showed.
+                if (!focusLostSinceLaunch) {
+                    epoch++ // a late answer from the lock screen is ignored
+                    advance()
+                }
+            }
+        }
         launcher.launch(route) { result -> if (mine == epoch && !settled) onLaunched(result) }
     }
 
     private fun onLaunched(result: Launch) {
+        cancelPending()
         when (result) {
-            Launch.FAILED -> next()
-            Launch.CANCELLED -> settle(Outcome.BOUNCER_CANCELLED)
+            Launch.FAILED -> advance()
+            Launch.CANCELLED -> if (stopSeen) settle(Outcome.OPENED) else settle(Outcome.BOUNCER_CANCELLED)
             Launch.DISMISSED -> {
                 // Unlocked now: the lock's own screen is spent, and so is the
-                // emergency dialler if it was ever going to be tried.
+                // emergency dialler if it was ever going to be tried. The
+                // lock screen's own stop is spent with it.
                 locked = false
                 emergencyDiallerOk = false
                 attempt = 0
+                stopSeen = false
                 next()
             }
             Launch.STARTED -> when {
-                !isEmergency || pausedSinceLaunch -> settle(Outcome.OPENED)
+                !isEmergency -> settle(Outcome.OPENED)
+                stopSeen -> settle(Outcome.OPENED)
                 else -> {
-                    val check = Runnable {
-                        confirming = null
-                        next()
+                    launchedAt = timer.now()
+                    if (pausedSinceLaunch) {
+                        waitForStop()
+                    } else {
+                        arm(Wait.PAUSE, pauseMs) { advance() }
                     }
-                    confirming = check
-                    timer.postDelayed(check, confirmMs)
                 }
             }
         }
     }
 
     companion object {
-        /** How long a started emergency launch has to take the screen. */
-        const val CONFIRM_MS = 1_500L
+        /** How long a started emergency launch has to pause the shade. */
+        const val PAUSE_MS = 1_500L
+
+        /** How long, in total from the launch, a paused shade has to stop. */
+        const val STOP_MS = 3_000L
     }
 }

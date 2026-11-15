@@ -80,6 +80,16 @@ class LockActivity : Activity() {
 
     /** The call being started by the last hold-to-call press, if any. */
     private var callSequencer: CallSequencer? = null
+
+    /**
+     * The status line under the lifeline buttons, as of the CURRENT render, and
+     * the text that must outlive a render (a route's instruction, the failure
+     * advice). [renderViews] rebuilds the whole tree, so a view captured by an
+     * earlier press would be detached by the time a late route reports: every
+     * write goes through [showCallStatus], which reads the live view then.
+     */
+    private var callStatusView: TextView? = null
+    private var callStatusText = ""
     private lateinit var askThread: android.os.HandlerThread
     private lateinit var askWorker: android.os.Handler
 
@@ -245,6 +255,7 @@ class LockActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        callSequencer?.onResumed()
         org.forgesworn.charter.service.RelayPollPace.show(this)
         ui.removeCallbacks(clockTick)
         tick = 0
@@ -289,7 +300,18 @@ class LockActivity : Activity() {
             ActivityLockController.coveredSince = now
         }
         launchedBehindAt = 0L
+        // An opaque dialler stops the shade; Telecom's transparent trampoline
+        // only pauses it. With the screen off a stop is the screen going off.
+        callSequencer?.onStopped(
+            runCatching { getSystemService(android.os.PowerManager::class.java)?.isInteractive }
+                .getOrNull() != false,
+        )
         super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        callSequencer?.onFocusChanged(hasFocus)
     }
 
     override fun onPause() {
@@ -297,8 +319,8 @@ class LockActivity : Activity() {
         // it): the shade re-paints the moment it comes back.
         ui.removeCallbacks(clockTick)
         org.forgesworn.charter.service.RelayPollPace.hide(this)
-        // Something else took the screen: a call route that was waiting to see
-        // that has its answer (see CallSequencer).
+        // The first sign that something else is taking the screen; the stop
+        // that confirms it is [onStop] (see CallSequencer).
         callSequencer?.onPaused()
         super.onPause()
     }
@@ -512,39 +534,46 @@ class LockActivity : Activity() {
     /**
      * The emergency dialler action (Intent.ACTION_DIAL_EMERGENCY, not in the
      * public SDK), resolved against the system image only, and its component
-     * if LockTask will let a lockout launch it: the platform's own emergency
-     * dialler, the system or default dialler's package, or a package on the
-     * lockout allowlist (see [CallRoute.emergencyDiallerUsable]). Null when this
-     * phone has none that qualifies, so the next route runs instead. Binder
-     * reads, as `resolveActivity` always was.
+     * if LockTask will let a lockout launch it: the platform's own
+     * `com.android.phone/.EmergencyDialer`, the system or default dialler's
+     * package, or a package on the lockout allowlist (see
+     * [CallRoute.pickEmergencyDialler]). Every system activity that answers the
+     * action is considered, the platform's own first, so a chooser never makes
+     * the route skip. Null when this phone has none that qualifies, so the next
+     * route runs instead. Binder reads, as `resolveActivity` always was.
      */
     private fun usableEmergencyDialler(tel: android.net.Uri): android.content.ComponentName? = runCatching {
         val probe = Intent(ACTION_DIAL_EMERGENCY, tel)
-        val info = packageManager.resolveActivity(
+        val candidates = packageManager.queryIntentActivities(
             probe,
             android.content.pm.PackageManager.ResolveInfoFlags.of(
                 android.content.pm.PackageManager.MATCH_SYSTEM_ONLY.toLong(),
             ),
-        )?.activityInfo ?: return@runCatching null
+        ).mapNotNull { it.activityInfo }.map { it.packageName to it.name }
         val telecom = getSystemService(Context.TELECOM_SERVICE) as? android.telecom.TelecomManager
-        val platform = runCatching {
-            android.telecom.TelecomManager::class.java.getField("EMERGENCY_DIALER_COMPONENT")
-                .get(null) as? android.content.ComponentName
-        }.getOrNull()
         val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as? android.app.admin.DevicePolicyManager
-        val usable = CallRoute.emergencyDiallerUsable(
-            resolvedPackage = info.packageName,
-            resolvedClass = info.name,
-            platformPackage = platform?.packageName ?: CallRoute.FALLBACK_EMERGENCY_DIALLER_PACKAGE,
-            platformClass = platform?.className ?: CallRoute.FALLBACK_EMERGENCY_DIALLER_CLASS,
+        CallRoute.pickEmergencyDialler(
+            candidates = candidates,
+            platformPackage = CallRoute.PLATFORM_EMERGENCY_DIALLER_PACKAGE,
+            platformClass = CallRoute.PLATFORM_EMERGENCY_DIALLER_CLASS,
             dialerPackages = listOf(
                 runCatching { telecom?.systemDialerPackage }.getOrNull(),
                 runCatching { telecom?.defaultDialerPackage }.getOrNull(),
             ),
-            lockTaskPermitted = runCatching { dpm?.isLockTaskPermitted(info.packageName) }.getOrNull() == true,
-        )
-        if (usable) android.content.ComponentName(info.packageName, info.name) else null
+            lockTaskPermitted = { pkg -> runCatching { dpm?.isLockTaskPermitted(pkg) }.getOrNull() == true },
+        )?.let { (pkg, cls) -> android.content.ComponentName(pkg, cls) }
     }.getOrNull()
+
+    /**
+     * Writes the status line under the lifeline buttons: to the view of the
+     * CURRENT render, read now, never one an earlier press captured. A
+     * [sticky] text (a route's instruction, the failure advice) is also kept,
+     * so a later render, which rebuilds the view, shows it again.
+     */
+    private fun showCallStatus(text: String, sticky: Boolean = false) {
+        callStatusText = if (sticky) text else ""
+        callStatusView?.text = text
+    }
 
     /**
      * Starts a hold-to-call button's call, by [CallRoute]'s order, and says
@@ -560,11 +589,12 @@ class LockActivity : Activity() {
      * presses call), the phone's own lock screen when it is showing (it
      * carries an Emergency call button), ACTION_DIAL with the number (the system
      * dialler is on the lockout allowlist), and only then ACTION_CALL. A route
-     * that throws, or does not take the screen within [CallSequencer.CONFIRM_MS],
-     * falls through to the next. This never touches the report to the guardian,
+     * that throws, or does not take the screen (see [CallSequencer]), falls
+     * through to the next. This never touches the report to the guardian,
      * which was handed to its worker before this runs.
      */
-    private fun startCall(number: String, emergency: Boolean, status: TextView) {
+    private fun startCall(number: String, emergency: Boolean) {
+        showCallStatus("")
         callSequencer?.abandon()
         val isEmergency = emergency || runCatching {
             (getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager)
@@ -610,22 +640,34 @@ class LockActivity : Activity() {
                 override fun cancel(task: Runnable) {
                     ui.removeCallbacks(task)
                 }
+
+                override fun now(): Long = android.os.SystemClock.elapsedRealtime()
             },
             listener = object : CallSequencer.Listener {
                 override fun onRoute(route: CallRoute.Route) {
-                    status.text = if (route == CallRoute.Route.BOUNCER) "Tap Emergency call on the next screen" else ""
+                    if (route == CallRoute.Route.BOUNCER) {
+                        showCallStatus("Tap Emergency call on the next screen", sticky = true)
+                    } else {
+                        showCallStatus("")
+                    }
                 }
 
                 override fun onSettled(outcome: CallSequencer.Outcome) {
                     when (outcome) {
-                        CallSequencer.Outcome.OPENED -> Unit
-                        CallSequencer.Outcome.BOUNCER_CANCELLED -> status.text = ""
-                        CallSequencer.Outcome.FAILED -> status.text = if (isEmergency) {
-                            "Couldn't open the emergency dialler. Press the power button five times " +
-                                "for Emergency SOS, or use another phone."
-                        } else {
-                            "Couldn't start the call — tell your guardian."
-                        }
+                        // Something took the screen: the instruction, if one
+                        // was showing, is spent. Nothing is said about a call.
+                        CallSequencer.Outcome.OPENED,
+                        CallSequencer.Outcome.BOUNCER_CANCELLED,
+                        -> showCallStatus("")
+                        CallSequencer.Outcome.FAILED -> showCallStatus(
+                            if (isEmergency) {
+                                "Couldn't open the emergency dialler. Press the power button five times " +
+                                    "for Emergency SOS, or use another phone."
+                            } else {
+                                "Couldn't start the call — tell your guardian."
+                            },
+                            sticky = true,
+                        )
                     }
                 }
             },
@@ -673,7 +715,6 @@ class LockActivity : Activity() {
         who: String,
         number: String,
         holdMs: Long,
-        status: TextView,
         emergency: Boolean = false,
     ): Button = CharterTheme.secondaryButton(this, label, onInk = true).apply {
         var holdRunnable: Runnable? = null
@@ -703,7 +744,7 @@ class LockActivity : Activity() {
                     System.currentTimeMillis() / 1000,
                 )
             }
-            startCall(number, emergency, status)
+            startCall(number, emergency)
         }
 
         fun startCancelWindow() {
@@ -731,7 +772,7 @@ class LockActivity : Activity() {
                     if (armed) {
                         // Second tap during the countdown = "no, stop".
                         reset()
-                        status.text = "Call cancelled."
+                        showCallStatus("Call cancelled.")
                         return@setOnTouchListener true
                     }
                     v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
@@ -1029,6 +1070,9 @@ class LockActivity : Activity() {
         lockedSurfaceClosed: Boolean = false,
     ) {
         val lifeline = lifelineView.numbers
+        // The tree below replaces the old one: a status line written after this
+        // point goes to a view of this render (see showCallStatus).
+        callStatusView = null
         // Three deliberate zones rather than one centred blob: the clock owns
         // the top, what Kintrinsic has to say sits directly under it, and the
         // ward's ways out are anchored at the BOTTOM, within thumb reach. The
@@ -1308,7 +1352,6 @@ class LockActivity : Activity() {
                         who = entry.label,
                         number = entry.number,
                         holdMs = HOLD_MS,
-                        status = callStatus,
                     ),
                 )
             }
@@ -1321,11 +1364,12 @@ class LockActivity : Activity() {
                         who = "emergency services",
                         number = emergencyNumber,
                         holdMs = EMERGENCY_HOLD_MS,
-                        status = callStatus,
                         emergency = true,
                     ),
                 )
             }
+            callStatus.text = callStatusText
+            callStatusView = callStatus
             root.addView(callStatus)
         }
 

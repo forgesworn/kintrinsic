@@ -148,4 +148,56 @@ class CallRouteTest {
         assertTrue(usable(dialers = emptyList()))
         assertFalse(usable(pkg = "com.x", cls = "y", dialers = listOf(null, null)))
     }
+
+    private val platform = "com.android.phone" to "com.android.phone.EmergencyDialer"
+
+    private fun pick(
+        vararg candidates: Pair<String, String>,
+        dialers: List<String?> = listOf("com.google.android.dialer"),
+        allowed: Set<String> = emptySet(),
+    ) = CallRoute.pickEmergencyDialler(
+        candidates = candidates.toList(),
+        platformPackage = CallRoute.PLATFORM_EMERGENCY_DIALLER_PACKAGE,
+        platformClass = CallRoute.PLATFORM_EMERGENCY_DIALLER_CLASS,
+        dialerPackages = dialers,
+        lockTaskPermitted = { it in allowed },
+    )
+
+    @Test
+    fun `the platform component is the one named by the constants`() {
+        assertEquals("com.android.phone", CallRoute.PLATFORM_EMERGENCY_DIALLER_PACKAGE)
+        assertEquals("com.android.phone.EmergencyDialer", CallRoute.PLATFORM_EMERGENCY_DIALLER_CLASS)
+    }
+
+    @Test
+    fun `one platform candidate is picked`() {
+        assertEquals(platform, pick(platform))
+    }
+
+    @Test
+    fun `the platform component wins over another system candidate, in either order`() {
+        val oem = "com.google.android.dialer" to "com.google.android.dialer.Emergency"
+        assertEquals(platform, pick(oem, platform))
+        assertEquals(platform, pick(platform, oem))
+    }
+
+    @Test
+    fun `with two system packages claiming the action and no platform component, the first usable one is picked`() {
+        val chooser = "android" to "com.android.internal.app.ResolverActivity"
+        val dialler = "com.google.android.dialer" to "x.Emergency"
+        assertEquals(dialler, pick(chooser, dialler))
+        assertNull("a chooser alone never qualifies", pick(chooser))
+    }
+
+    @Test
+    fun `an unlisted candidate is skipped unless the lock task allowlist has it`() {
+        val oem = "com.oem.emergency" to "com.oem.emergency.Main"
+        assertNull(pick(oem))
+        assertEquals(oem, pick(oem, allowed = setOf("com.oem.emergency")))
+    }
+
+    @Test
+    fun `no candidates picks nothing`() {
+        assertNull(pick())
+    }
 }
