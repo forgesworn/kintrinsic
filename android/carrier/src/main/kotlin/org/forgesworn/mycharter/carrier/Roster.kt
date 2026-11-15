@@ -16,6 +16,11 @@ data class RosterEntry(
     /** Only paired devices are admitted to the local link's handshake.
      *  Absent on the wire (an older console) means paired; see [pairedField]. */
     val paired: Boolean = true,
+    /** A device the guardian disconnected (unpaired, removed, or its child removed)
+     *  in the last 14 days. The console keeps it in the roster for that grace
+     *  period so the carrier can still name it and hold its audits as known; the
+     *  local link never admits it. A released entry is never [paired]. */
+    val released: Boolean = false,
 )
 
 /**
@@ -25,6 +30,13 @@ data class RosterEntry(
  * malformed value must deny, never admit.
  */
 fun pairedField(o: JSONObject): Boolean = !o.has("paired") || o.opt("paired") == true
+
+/**
+ * The roster's `released` flag. Absent means false; anything present that is not
+ * the JSON boolean `true` is also false (a malformed value never promotes an
+ * entry, and admission is decided by [pairedField], which a release overrides).
+ */
+fun releasedField(o: JSONObject): Boolean = o.opt("released") == true
 
 /** What a resolved roster hit gives [org.forgesworn.mycharter.service.Notifier]
  *  to compose text with. */
@@ -48,7 +60,9 @@ data class RosterPayload(val entries: List<RosterEntry>) {
                 val childName = e.optString("childName", "")
                 val deviceLabel = e.optString("deviceLabel", "")
                 if (machine.isEmpty() || childName.isEmpty() || deviceLabel.isEmpty()) return null
-                RosterEntry(machine, childName, deviceLabel, pairedField(e))
+                val released = releasedField(e)
+                // A released device is never admitted, whatever `paired` says.
+                RosterEntry(machine, childName, deviceLabel, paired = pairedField(e) && !released, released = released)
             }
             return RosterPayload(entries)
         }
@@ -64,6 +78,20 @@ data class RosterPayload(val entries: List<RosterEntry>) {
  */
 fun describeWard(machine: String, roster: List<RosterEntry>): WardName? {
     if (machine.isEmpty()) return null
-    val hit = roster.firstOrNull { it.machine == machine } ?: return null
+    // A live pairing outranks a released one for the same machine.
+    val hit = roster.firstOrNull { it.machine == machine && !it.released }
+        ?: roster.firstOrNull { it.machine == machine }
+        ?: return null
     return WardName(hit.childName, hit.deviceLabel)
+}
+
+/**
+ * True when the roster names [machine] only as a RELEASED device: the guardian
+ * disconnected it, so its press happened before that. A machine that is also
+ * paired (re-paired since) is not released.
+ */
+fun isReleased(machine: String, roster: List<RosterEntry>): Boolean {
+    if (machine.isEmpty()) return false
+    val hits = roster.filter { it.machine == machine }
+    return hits.isNotEmpty() && hits.all { it.released }
 }

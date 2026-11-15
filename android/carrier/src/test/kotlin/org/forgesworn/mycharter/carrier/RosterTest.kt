@@ -80,4 +80,50 @@ class RosterTest {
         val roster = listOf(RosterEntry(machine, "Mia", "Pixel 6"))
         assertNull(describeWard("", roster))
     }
+
+    // ---- released ---------------------------------------------------------------
+
+    private fun releasedEntry(extra: String) =
+        """{"machine":"$machine","childName":"Mia","deviceLabel":"Pixel 6"$extra}"""
+
+    @Test fun absentReleasedMeansNotReleased() {
+        assertEquals(false, RosterPayload.parse(json())!!.entries[0].released)
+    }
+
+    @Test fun aReleasedEntryIsNeverPairedWhateverItSays() {
+        for (paired in listOf("", ",\"paired\":true", ",\"paired\":false")) {
+            val e = RosterPayload.parse(json(entries = "[${releasedEntry("$paired,\"released\":true")}]"))!!.entries[0]
+            assertTrue(paired, e.released)
+            assertEquals(paired, false, e.paired)
+        }
+    }
+
+    @Test fun aMalformedReleasedIsNotReleased() {
+        for (bad in listOf("\"true\"", "1", "null", "{}")) {
+            val e = RosterPayload.parse(json(entries = "[${releasedEntry(",\"released\":$bad")}]"))!!.entries[0]
+            assertEquals(bad, false, e.released)
+            assertTrue(bad, e.paired)
+        }
+    }
+
+    @Test fun aReleasedMachineIsNamedAndReportedAsReleased() {
+        val roster = listOf(RosterEntry(machine, "Mia", "Pixel 6", paired = false, released = true))
+        assertEquals(WardName("Mia", "Pixel 6"), describeWard(machine, roster))
+        assertTrue(isReleased(machine, roster))
+    }
+
+    @Test fun aPairedMachineIsNotReleasedEvenIfAnOldReleasedEntrySharesItsKey() {
+        val roster = listOf(
+            RosterEntry(machine, "Old name", "Old phone", paired = false, released = true),
+            RosterEntry(machine, "Mia", "Pixel 6"),
+        )
+        assertEquals(WardName("Mia", "Pixel 6"), describeWard(machine, roster))
+        assertEquals(false, isReleased(machine, roster))
+    }
+
+    @Test fun anUnknownOrEmptyMachineIsNotReleased() {
+        val roster = listOf(RosterEntry(machine, "Mia", "Pixel 6", paired = false, released = true))
+        assertEquals(false, isReleased("b".repeat(64), roster))
+        assertEquals(false, isReleased("", roster))
+    }
 }
