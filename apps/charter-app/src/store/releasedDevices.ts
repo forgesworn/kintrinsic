@@ -118,3 +118,46 @@ export function releasedRelays(list: unknown, now: number): string[] {
   for (const r of liveReleased(list, now)) for (const u of r.relays) set.add(u);
   return [...set];
 }
+
+/** Where a press falls against the disconnect: before, after, or no claim. */
+export type PressOrder = "before" | "after" | "unknown";
+
+/**
+ * Compare a press with the moment the guardian disconnected the device.
+ * `press.at` is unix seconds and counts only when the ward stamped it itself
+ * (`atStamped`): the stand-in for a missing tag is the time the wrap was built,
+ * which for a held press is after the disconnect whatever the true order. A
+ * press at the same second as the disconnect counts as before it. The carrier
+ * compares the same way, with `releasedAt` in whole seconds.
+ */
+export function pressOrder(press: { at: number; atStamped?: boolean }, releasedAtMs: number): PressOrder {
+  if (press.atStamped !== true || !Number.isFinite(press.at) || press.at <= 0) return "unknown";
+  if (!Number.isFinite(releasedAtMs)) return "unknown";
+  return press.at <= Math.floor(releasedAtMs / 1000) ? "before" : "after";
+}
+
+/**
+ * The state with its expired released records removed, so a removed child's
+ * name, the device labels and the relay URLs do not stay in storage and in
+ * backups once nothing can read them. Returns the SAME object when nothing
+ * expired (and when there is no list at all), so a caller can tell.
+ */
+export function pruneReleased<S extends { releasedDevices?: ReleasedDevice[] }>(state: S, now: number): S {
+  const list: unknown = state.releasedDevices;
+  if (list === undefined) return state;
+  const live = liveReleased(list, now);
+  if (Array.isArray(list) && live.length === list.length) return state;
+  return { ...state, releasedDevices: live };
+}
+
+/** The same pruning for a persisted JSON blob (the full backup). Anything unreadable is returned as it is. */
+export function withoutExpiredReleased(raw: string, now: number): string {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return raw;
+    const pruned = pruneReleased(parsed as { releasedDevices?: ReleasedDevice[] }, now);
+    return pruned === parsed ? raw : JSON.stringify(pruned);
+  } catch {
+    return raw;
+  }
+}

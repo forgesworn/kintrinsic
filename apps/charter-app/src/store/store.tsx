@@ -91,7 +91,12 @@ import { parseDevicePairingCode } from "../wire/deviceCode";
 import type { AppOpenWindow } from "../wire/grant";
 import type { DeviceRequest } from "../wire/request";
 import type { DeviceAudit, DeviceEmergencyCall, DeviceEmergencyControl, DeviceOverride } from "../wire/audit";
-import { emergencyCallSummary, emergencyControlSummary, overrideSummary } from "../domain/overrideSummary";
+import {
+  emergencyCallSummary,
+  emergencyControlSummary,
+  overrideSummary,
+  type ReleasedNote,
+} from "../domain/overrideSummary";
 import type { DeviceStatus } from "../wire/status";
 import { ingestWrap } from "./ingestWrap";
 import { ConsumeQueue, drainLocalInbox } from "./localDrain";
@@ -135,6 +140,9 @@ import { isAskExpired } from "../domain/askExpiry";
 import {
   findReleased,
   liveReleased,
+  pressOrder,
+  pruneReleased,
+  withoutExpiredReleased,
   releasedRelays,
   withReleased,
   withoutReleased,
@@ -216,8 +224,11 @@ function loadState(): CharterState {
       // migration. Persist immediately so a later manual relay choice survives
       // reloads even if nothing else in the household changes.
       const { children, changed } = backfillLegacyRelays(revived.state.children);
-      if (!changed) return revived.state;
-      const migrated = { ...revived.state, children };
+      // A disconnected device's record (and the child's name in it) is dropped
+      // once its 14 days are up, so it does not linger in storage or backups.
+      const pruned = pruneReleased(revived.state, Date.now());
+      if (!changed && pruned === revived.state) return revived.state;
+      const migrated = { ...pruned, children };
       persist(migrated);
       return migrated;
     }
@@ -248,7 +259,8 @@ function loadState(): CharterState {
 /** Raw persisted-state passthrough for the FULL backup (key + household). */
 export function exportPersistedState(): string | null {
   try {
-    return localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw === null ? null : withoutExpiredReleased(raw, Date.now());
   } catch {
     return null;
   }
@@ -278,7 +290,7 @@ export function importPersistedState(json: string): void {
 function persist(state: CharterState): boolean {
   if (persistenceFrozen) return false; // a restored household is on disk — reload owns the truth
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(pruneReleased(state, Date.now())));
     return true;
   } catch {
     // Storage full / private mode — non-fatal for the demo.
@@ -829,14 +841,16 @@ function uid(prefix: string): string {
  * Whose device an audit came from. A PAIRED device always wins. Failing that,
  * and only when the caller allows it, a device the guardian disconnected in the
  * last 14 days: the audit is then marked `released` so its line says the press
- * was made before the disconnect. The line keeps the original child's id (the
+ * says whether the press was made before or after the disconnect, or claims no
+ * order when the press carries no usable time of its own. The line keeps the original child's id (the
  * child may be gone) and the name the child had.
  */
 function attributeAudit(
   s: CharterState,
   machine: string,
   allowReleased: boolean,
-): { childId: string; deviceLabel: string; released?: { childName: string } } | null {
+  press: { at: number; atStamped?: boolean },
+): { childId: string; deviceLabel: string; released?: ReleasedNote } | null {
   for (const c of s.children) {
     const d = c.devices.find((dev) => dev.pairing === "paired" && dev.devicePubkey === machine);
     if (d) return { childId: c.id, deviceLabel: d.label };
@@ -844,7 +858,11 @@ function attributeAudit(
   if (!allowReleased) return null;
   const r = findReleased(s.releasedDevices, machine, Date.now());
   if (!r) return null;
-  return { childId: r.childId, deviceLabel: r.deviceLabel, released: { childName: r.childName } };
+  return {
+    childId: r.childId,
+    deviceLabel: r.deviceLabel,
+    released: { childName: r.childName, order: pressOrder(press, r.releasedAt) },
+  };
 }
 
 const CHILD_COLORS = ["#3B6FB2", "#2E7D5B", "#C4860F", "#7A4FB5", "#B23B30"];
@@ -1448,7 +1466,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   const ingestDeviceAudit = useCallback((a: DeviceOverride): boolean => {
     const s = stateRef.current;
     if (s.activity.some((e) => e.auditKey === a.key)) return true;
-    const who = attributeAudit(s, a.machine, true);
+    const who = attributeAudit(s, a.machine, true, a);
     if (!who) return false;
     dispatch({
       type: "ADD_ACTIVITY",
@@ -1471,19 +1489,20 @@ export function CharterProvider({ children }: { children: ReactNode }) {
    * Same contract as `ingestDeviceAudit`: false when no paired device claims the
    * machine (left unhandled, retried later); dated by the press, never future.
    * `fromReleased`: whether a device the guardian recently disconnected may
-   * still land this kind of audit (the emergency call may; an unknown control
-   * may not, because nothing else from a released machine is honoured).
+   * still land this kind of audit (every emergency audit may: the emergency
+   * unlock, the emergency-call button and an emergency control this build does
+   * not know by name. Nothing else from a released machine is honoured).
    */
   const landEmergencyAudit = useCallback(
     (
-      a: { machine: string; at: number; key: string },
+      a: { machine: string; at: number; atStamped?: boolean; key: string },
       outcome: "emergency_call" | "emergency_control",
-      summary: (deviceLabel: string, released?: { childName: string }) => string,
+      summary: (deviceLabel: string, released?: ReleasedNote) => string,
       fromReleased: boolean,
     ): boolean => {
       const s = stateRef.current;
       if (s.activity.some((e) => e.auditKey === a.key)) return true;
-      const who = attributeAudit(s, a.machine, fromReleased);
+      const who = attributeAudit(s, a.machine, fromReleased, a);
       if (!who) return false;
       dispatch({
         type: "ADD_ACTIVITY",
@@ -1506,7 +1525,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
   );
   const ingestDeviceEmergencyControl = useCallback(
     (a: DeviceEmergencyControl): boolean =>
-      landEmergencyAudit(a, "emergency_control", emergencyControlSummary, false),
+      landEmergencyAudit(a, "emergency_control", emergencyControlSummary, true),
     [landEmergencyAudit],
   );
 

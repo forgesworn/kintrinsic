@@ -38,6 +38,14 @@ export interface DeviceOverride {
   /** Unix SECONDS the ward pressed it (or, for an older ward, when it was reported). */
   at: number;
   /**
+   * True when `at` is the press time the ward stamped, false when it is only the
+   * wrap's own time (the stand-in for a missing or unfit tag). A wrap reaches
+   * the guardian after it was built, so that stand-in says nothing about whether
+   * the press came before or after a disconnect. Absent means not known to be
+   * stamped.
+   */
+  atStamped?: boolean;
+  /**
    * Identity of this override, for folding copies into one line. When the ward
    * stamped a press time it is `${machine}:${at}`: a wrap rebuilt after a day
    * offline has a new id and a new `created_at` but the same `at`, so the copies
@@ -75,6 +83,14 @@ export interface DeviceEmergencyCall {
   /** Unix SECONDS of the press (dated exactly as an override is). */
   at: number;
   /**
+   * True when `at` is the press time the ward stamped, false when it is only the
+   * wrap's own time (the stand-in for a missing or unfit tag). A wrap reaches
+   * the guardian after it was built, so that stand-in says nothing about whether
+   * the press came before or after a disconnect. Absent means not known to be
+   * stamped.
+   */
+  atStamped?: boolean;
+  /**
    * Identity of this press, for folding copies into one line. OP-PREFIXED
    * (`emergencycall:${machine}:${at}`) so it can never collide with a
    * break-glass press in the same second, which keeps the bare
@@ -94,6 +110,14 @@ export interface DeviceEmergencyControl {
   machine: string;
   /** Unix SECONDS of the press (dated exactly as an override is). */
   at: number;
+  /**
+   * True when `at` is the press time the ward stamped, false when it is only the
+   * wrap's own time (the stand-in for a missing or unfit tag). A wrap reaches
+   * the guardian after it was built, so that stand-in says nothing about whether
+   * the press came before or after a disconnect. Absent means not known to be
+   * stamped.
+   */
+  atStamped?: boolean;
   /**
    * Identity of this press: `override:${op}:${machine}:${at}`, or
    * `override:${op}:wrap:${wrapId}` without an `at` tag. The op is part of it so
@@ -163,11 +187,11 @@ function openAudit(wrap: NostrEvent, recipientSk: Uint8Array, nowSecs: number): 
  *  - dating: `at` is used only when it is not after its own wrap (a press
  *    cannot postdate the wrap reporting it) and not absurdly old.
  */
-function datedBy(rumor: NostrEvent): { atTag: number | null; at: number } {
+function datedBy(rumor: NostrEvent): { atTag: number | null; at: number; stamped: boolean } {
   const created = rumor.created_at;
   const atTag = parseDecimal(tagValue(rumor.tags, "at"));
   const usable = atTag !== null && atTag <= created && created - atTag <= MAX_PRESS_AGE_SECS;
-  return { atTag, at: usable ? atTag : created };
+  return { atTag, at: usable ? atTag : created, stamped: usable };
 }
 
 function parseOverride(rumor: NostrEvent, wrapId: string): DeviceOverride {
@@ -175,21 +199,23 @@ function parseOverride(rumor: NostrEvent, wrapId: string): DeviceOverride {
   const scope: OverrideScope | null = scopeTag === "calls" || scopeTag === "full" ? scopeTag : null;
   const secs = parseDecimal(tagValue(rumor.tags, "durationSecs"));
   const durationSecs = secs !== null && secs > 0 ? secs : null;
-  const { atTag, at } = datedBy(rumor);
+  const { atTag, at, stamped } = datedBy(rumor);
   return {
     machine: rumor.pubkey,
     scope,
     durationSecs,
     at,
+    atStamped: stamped,
     key: atTag !== null ? `${rumor.pubkey}:${atTag}` : `wrap:${wrapId}`,
   };
 }
 
 function parseEmergencyCall(rumor: NostrEvent, wrapId: string): DeviceEmergencyCall {
-  const { atTag, at } = datedBy(rumor);
+  const { atTag, at, stamped } = datedBy(rumor);
   return {
     machine: rumor.pubkey,
     at,
+    atStamped: stamped,
     key:
       atTag !== null ? `emergencycall:${rumor.pubkey}:${atTag}` : `emergencycall:wrap:${wrapId}`,
   };
@@ -198,11 +224,12 @@ function parseEmergencyCall(rumor: NostrEvent, wrapId: string): DeviceEmergencyC
 const MAX_OP_KEY_CHARS = 64;
 
 function parseEmergencyControl(rumor: NostrEvent, op: string, wrapId: string): DeviceEmergencyControl {
-  const { atTag, at } = datedBy(rumor);
+  const { atTag, at, stamped } = datedBy(rumor);
   const o = op.slice(0, MAX_OP_KEY_CHARS);
   return {
     machine: rumor.pubkey,
     at,
+    atStamped: stamped,
     key: atTag !== null ? `override:${o}:${rumor.pubkey}:${atTag}` : `override:${o}:wrap:${wrapId}`,
   };
 }

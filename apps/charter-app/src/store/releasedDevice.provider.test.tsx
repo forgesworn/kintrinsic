@@ -29,7 +29,7 @@ vi.mock("nostr-tools", async (importOriginal) => {
   return { ...real, SimplePool: FakePool };
 });
 
-import { CharterProvider, STORAGE_KEY, useCharter, type CharterState } from "./store";
+import { CharterProvider, STORAGE_KEY, exportPersistedState, useCharter, type CharterState } from "./store";
 import { RELEASED_GRACE_MS, type ReleasedDevice } from "./releasedDevices";
 import { buildCarrierRoster } from "../carrier/roster";
 import { pushCarrierRoster } from "../carrier/bridge";
@@ -316,8 +316,9 @@ describe("a press made before the guardian disconnected the device", () => {
         ],
       });
 
-    it("an unknown emergency control from it is not landed, and the carrier is not told to forget it", async () => {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(seededReleased()));
+    it("an unknown emergency control from it lands too, and the carrier is told to forget it once stored", async () => {
+      // Disconnected an hour ago; the press was ten minutes ago, so it came after.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seededReleased(Date.now() - 60 * 60 * 1000)));
       const w = controlWrap();
       relayHolds.wraps = [w];
       const consume = vi.fn();
@@ -325,8 +326,14 @@ describe("a press made before the guardian disconnected the device", () => {
       mount();
       await settle();
       await settle(6_000);
-      expect(presses()).toHaveLength(0);
-      expect(consume).not.toHaveBeenCalled();
+      const got = presses();
+      expect(got).toHaveLength(1);
+      expect(got[0]).toMatchObject({ childId: "c1", outcome: "emergency_control" });
+      expect(got[0].summary).toBe(
+        "An emergency control was used on Laptop, after you disconnected it from Robin. The phone may not have received the disconnect.",
+      );
+      expect(stored().activity.some((l) => l.outcome === "emergency_control")).toBe(true);
+      expect(consume).toHaveBeenCalledWith([w.id]);
     });
 
     it("an ask from it is not landed", async () => {
@@ -370,14 +377,158 @@ describe("a press made before the guardian disconnected the device", () => {
     });
   });
 
+  describe("what the line says about the order of the press and the disconnect", () => {
+    const releasedAtMs = () => Date.now() - 3_600_000; // an hour ago
+    const seededReleasedAt = (at: number): CharterState =>
+      seeded({
+        children: [{ ...seeded().children[0], devices: [] }],
+        releasedDevices: [
+          { machine: machinePk, childId: "c1", childName: "Robin", deviceLabel: "Laptop", relays: [OWN_RELAY], releasedAt: at },
+        ],
+      });
+    const NOT_RECEIVED = "The phone may not have received the disconnect.";
+
+    it("a press made after the disconnect says so, for the call button, the unlock and another control", async () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seededReleasedAt(releasedAtMs())));
+      relayHolds.wraps = [callWrap(pressedAt), unlockWrap(pressedAt + 1), controlWrap()];
+      mount();
+      await settle();
+      await settle(31_000);
+      const byOutcome = Object.fromEntries(presses().map((l) => [l.outcome, l.summary]));
+      expect(byOutcome.emergency_call).toBe(
+        `Used the emergency call button on Laptop, after you disconnected it from Robin. ${NOT_RECEIVED} Kintrinsic can't see whether a call was made.`,
+      );
+      expect(byOutcome.override).toBe(
+        `Opened their phone on Laptop for 5 minutes, after you disconnected it from Robin. ${NOT_RECEIVED}`,
+      );
+      expect(byOutcome.emergency_control).toBe(
+        `An emergency control was used on Laptop, after you disconnected it from Robin. ${NOT_RECEIVED}`,
+      );
+    });
+
+    it("a press stamped in the same second as the disconnect counts as before it", async () => {
+      const at = Math.floor(Date.now() / 1000) - 300;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seededReleasedAt(at * 1000 + 700)));
+      relayHolds.wraps = [callWrap(at)];
+      mount();
+      await settle();
+      await settle(31_000);
+      expect(presses()[0].summary).toContain("before you disconnected it from Robin.");
+    });
+
+    it("a press with no time of its own (no at tag) claims no order, even though its wrap is newer than the disconnect", async () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seededReleasedAt(releasedAtMs())));
+      const noAt = overrideWrap({
+        guardianPk,
+        machineSk,
+        tags: emergencyCallTags(),
+        createdAt: Math.floor(Date.now() / 1000),
+      });
+      relayHolds.wraps = [noAt];
+      mount();
+      await settle();
+      await settle(31_000);
+      const got = presses();
+      expect(got).toHaveLength(1);
+      expect(got[0].summary).toBe(
+        "Used the emergency call button on Laptop, a phone you have disconnected. Kintrinsic can't see whether a call was made.",
+      );
+    });
+
+    it("an at tag later than its own wrap is not trusted either", async () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seededReleasedAt(releasedAtMs())));
+      const nowSecs = Math.floor(Date.now() / 1000);
+      relayHolds.wraps = [
+        overrideWrap({
+          guardianPk,
+          machineSk,
+          tags: emergencyCallTags([["at", String(nowSecs + 500)]]),
+          createdAt: nowSecs,
+        }),
+      ];
+      mount();
+      await settle();
+      await settle(31_000);
+      expect(presses()[0].summary).toContain("a phone you have disconnected");
+      expect(presses()[0].summary).not.toContain("after you disconnected");
+    });
+  });
+
+  describe("a disconnected device's record does not outlive its 14 days in storage", () => {
+    const expired: ReleasedDevice = {
+      machine: "b".repeat(64),
+      childId: "gone",
+      childName: "Wren-the-removed",
+      deviceLabel: "Old tablet",
+      relays: ["wss://old.example"],
+      releasedAt: Date.now() - RELEASED_GRACE_MS - DAY,
+    };
+    const live = (): ReleasedDevice => ({
+      machine: machinePk,
+      childId: "c1",
+      childName: "Robin",
+      deviceLabel: "Laptop",
+      relays: [OWN_RELAY],
+      releasedAt: Date.now() - 1000,
+    });
+
+    it("on load: an expired record is gone from storage (and its name with it), a live one is kept", async () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded({ releasedDevices: [expired, live()] })));
+      mount();
+      await settle();
+      expect(localStorage.getItem(STORAGE_KEY)).not.toContain("Wren-the-removed");
+      expect((stored().releasedDevices ?? []).map((r) => r.machine)).toEqual([machinePk]);
+      expect(JSON.stringify(current())).not.toContain("Wren-the-removed");
+    });
+
+    it("on persist: a record that expires while the page stays open is gone at the next write", async () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded({ releasedDevices: [{ ...live(), releasedAt: Date.now() - RELEASED_GRACE_MS + 60_000 }] })));
+      mount();
+      await settle();
+      expect(stored().releasedDevices).toHaveLength(1);
+      await settle(120_000);
+      act(() => {
+        api.addChild("Newcomer");
+      });
+      expect(stored().children.map((c) => c.name)).toContain("Newcomer");
+      expect(stored().releasedDevices).toEqual([]);
+    });
+
+    it("in the backup: an expired record is left out even when nothing has been written since", () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded({ releasedDevices: [expired, live()] })));
+      const out = exportPersistedState()!;
+      expect(out).not.toContain("Wren-the-removed");
+      expect(out).not.toContain("old.example");
+      expect((JSON.parse(out) as CharterState).releasedDevices?.map((r) => r.machine)).toEqual([machinePk]);
+      // The stored blob itself is untouched by an export.
+      expect(localStorage.getItem(STORAGE_KEY)).toContain("Wren-the-removed");
+    });
+
+    it("in the backup: a household with no list, or text that is not JSON, comes back unchanged", () => {
+      const raw = JSON.stringify(seeded());
+      localStorage.setItem(STORAGE_KEY, raw);
+      expect(exportPersistedState()).toBe(raw);
+      localStorage.setItem(STORAGE_KEY, "{broken");
+      expect(exportPersistedState()).toBe("{broken");
+    });
+  });
+
   describe("what is still done for a released machine", () => {
     it("is held in the roster the carrier gets, unpaired and marked released, and drops out after 14 days", async () => {
       mount();
       await settle();
       act(() => api.unpairDevice("c1", "d1"));
       const roster = buildCarrierRoster(current().children, current().releasedDevices);
+      const releasedAtMs = (stored().releasedDevices as ReleasedDevice[])[0].releasedAt;
       expect(roster).toEqual([
-        { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: false, released: true },
+        {
+          machine: machinePk,
+          childName: "Robin",
+          deviceLabel: "Laptop",
+          paired: false,
+          released: true,
+          releasedAt: Math.floor(releasedAtMs / 1000),
+        },
       ]);
       expect(buildCarrierRoster(current().children, current().releasedDevices, Date.now() + RELEASED_GRACE_MS + DAY)).toEqual([]);
     });
@@ -414,7 +565,14 @@ describe("a press made before the guardian disconnected the device", () => {
         await settle(1_001);
         expect(roster).toHaveBeenCalledTimes(1);
         expect(lastRoster()).toEqual([
-          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: false, released: true },
+          {
+            machine: machinePk,
+            childName: "Robin",
+            deviceLabel: "Laptop",
+            paired: false,
+            released: true,
+            releasedAt: Math.floor((stored().releasedDevices as ReleasedDevice[])[0].releasedAt / 1000),
+          },
         ]);
       });
 
@@ -453,7 +611,14 @@ describe("a press made before the guardian disconnected the device", () => {
         ]);
         await settle(RELEASE_LINK_GRACE_MS + 1);
         expect(lastRoster()).toEqual([
-          { machine: machinePk, childName: "Robin", deviceLabel: "Laptop", paired: false, released: true },
+          {
+            machine: machinePk,
+            childName: "Robin",
+            deviceLabel: "Laptop",
+            paired: false,
+            released: true,
+            releasedAt: Math.floor((stored().releasedDevices as ReleasedDevice[])[0].releasedAt / 1000),
+          },
         ]);
       });
     });

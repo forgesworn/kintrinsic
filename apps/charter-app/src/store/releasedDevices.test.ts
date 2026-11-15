@@ -4,9 +4,12 @@ import {
   RELEASED_GRACE_MS,
   findReleased,
   liveReleased,
+  pressOrder,
+  pruneReleased,
   releasedOf,
   releasedRelays,
   withReleased,
+  withoutExpiredReleased,
   withoutReleased,
 } from "./releasedDevices";
 import { buildCarrierRoster } from "../carrier/roster";
@@ -119,7 +122,7 @@ describe("the roster names a released device but never as paired", () => {
   const rec = { machine: A, childId: "c1", childName: "Mia", deviceLabel: "Phone d1", relays: [], releasedAt: NOW };
   it("adds it as unpaired and released", () => {
     expect(buildCarrierRoster([], [rec], NOW)).toEqual([
-      { machine: A, childName: "Mia", deviceLabel: "Phone d1", paired: false, released: true },
+      { machine: A, childName: "Mia", deviceLabel: "Phone d1", paired: false, released: true, releasedAt: Math.floor(NOW / 1000) },
     ]);
   });
   it("a machine in the household again takes its household entry, once", () => {
@@ -131,5 +134,61 @@ describe("the roster names a released device but never as paired", () => {
   it("an ordinary entry carries no `released` key at all (an older carrier is unaffected)", () => {
     const roster = buildCarrierRoster(base().children, [], NOW);
     expect(roster.every((e) => !("released" in e))).toBe(true);
+  });
+});
+
+describe("pressOrder", () => {
+  const releasedAtMs = 1_800_000_000_500;
+  const releasedAtSecs = 1_800_000_000;
+  it("a stamped press at or before the disconnect is before it, a later one after", () => {
+    expect(pressOrder({ at: releasedAtSecs - 60, atStamped: true }, releasedAtMs)).toBe("before");
+    expect(pressOrder({ at: releasedAtSecs, atStamped: true }, releasedAtMs)).toBe("before");
+    expect(pressOrder({ at: releasedAtSecs + 1, atStamped: true }, releasedAtMs)).toBe("after");
+  });
+  it("claims no order without a press time of the ward's own", () => {
+    expect(pressOrder({ at: releasedAtSecs + 60, atStamped: false }, releasedAtMs)).toBe("unknown");
+    expect(pressOrder({ at: releasedAtSecs - 60 }, releasedAtMs)).toBe("unknown");
+    expect(pressOrder({ at: 0, atStamped: true }, releasedAtMs)).toBe("unknown");
+    expect(pressOrder({ at: Number.NaN, atStamped: true }, releasedAtMs)).toBe("unknown");
+    expect(pressOrder({ at: releasedAtSecs, atStamped: true }, Number.NaN)).toBe("unknown");
+  });
+});
+
+describe("pruneReleased", () => {
+  const live = { machine: A, childId: "c1", childName: "Mia", deviceLabel: "Phone", relays: [], releasedAt: NOW - 1000 };
+  const old = { machine: B, childId: "c2", childName: "Robin", deviceLabel: "Old", relays: [], releasedAt: NOW - RELEASED_GRACE_MS - 1000 };
+  const state = (list?: unknown) => ({ ...base(), ...(list === undefined ? {} : { releasedDevices: list as never }) });
+
+  it("drops an expired record and keeps a live one", () => {
+    const pruned = pruneReleased(state([old, live]), NOW);
+    expect(pruned.releasedDevices).toEqual([live]);
+  });
+  it("returns the same object when nothing expired, or there is no list", () => {
+    const s = state([live]);
+    expect(pruneReleased(s, NOW)).toBe(s);
+    const none = state();
+    expect(pruneReleased(none, NOW)).toBe(none);
+  });
+  it("a list whose records are all expired becomes an empty one, with no name left", () => {
+    const pruned = pruneReleased(state([old]), NOW);
+    expect(pruned.releasedDevices).toEqual([]);
+    expect(JSON.stringify(pruned)).not.toContain("Robin");
+  });
+  it("a mis-shaped list is replaced by an empty one", () => {
+    expect(pruneReleased(state("nonsense"), NOW).releasedDevices).toEqual([]);
+  });
+
+  describe("withoutExpiredReleased (the backup)", () => {
+    it("prunes the JSON blob", () => {
+      const out = withoutExpiredReleased(JSON.stringify(state([old, live])), NOW);
+      expect(JSON.parse(out).releasedDevices).toEqual([live]);
+      expect(out).not.toContain("Robin");
+    });
+    it("returns the very same text when nothing expired, and passes anything unreadable through", () => {
+      const raw = JSON.stringify(state([live]));
+      expect(withoutExpiredReleased(raw, NOW)).toBe(raw);
+      expect(withoutExpiredReleased("{not json", NOW)).toBe("{not json");
+      expect(withoutExpiredReleased("[1]", NOW)).toBe("[1]");
+    });
   });
 });

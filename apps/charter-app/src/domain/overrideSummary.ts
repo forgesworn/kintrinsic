@@ -1,17 +1,43 @@
 import type { OverrideScope } from "../wire/audit";
 
-/** Set when the device had already been disconnected by the guardian: the press was made before that. */
+/** Where a press falls against the guardian's disconnect of the phone. */
+export type DisconnectOrder = "before" | "after" | "unknown";
+
+/** Set when the device had already been disconnected by the guardian. */
 export interface ReleasedNote {
   /** The name the child had when the device was disconnected (the child may since have been removed). */
   childName: string;
+  /**
+   * Whether the press was made before or after the disconnect. "unknown" when
+   * either time is unusable: no order is then claimed.
+   */
+  order: DisconnectOrder;
 }
 
-/** ", before you disconnected it from Mia", or nothing for a device still connected. */
-function beforeDisconnect(released?: ReleasedNote): string {
-  if (!released) return "";
-  return released.childName
-    ? `, before you disconnected it from ${released.childName}`
-    : ", before you disconnected it";
+/**
+ * The disconnect wording, in two parts: a clause that follows the device name,
+ * and a sentence that follows the end of the line. Nothing for a device still
+ * connected. The three forms mirror the carrier's alerts:
+ *  - before: ", before you disconnected it from Mia";
+ *  - after:  ", after you disconnected it from Mia" and "The phone may not have
+ *    received the disconnect." (the press is the only sign the phone is still
+ *    governed, so it is said plainly);
+ *  - unknown: ", a phone you have disconnected", claiming no order.
+ */
+function disconnectWords(released?: ReleasedNote): { clause: string; tail: string } {
+  if (!released) return { clause: "", tail: "" };
+  const from = released.childName ? ` from ${released.childName}` : "";
+  switch (released.order) {
+    case "before":
+      return { clause: `, before you disconnected it${from}`, tail: "" };
+    case "after":
+      return {
+        clause: `, after you disconnected it${from}`,
+        tail: "The phone may not have received the disconnect.",
+      };
+    default:
+      return { clause: ", a phone you have disconnected", tail: "" };
+  }
 }
 
 /**
@@ -33,7 +59,8 @@ export function overrideSummary(
   const what = scope === "full" ? "Opened their phone" : scope === "calls" ? "Opened calls" : "Used";
   const mins = durationSecs === null ? null : Math.max(1, Math.floor(durationSecs / 60));
   const forHowLong = mins === null ? "" : ` for ${mins} ${mins === 1 ? "minute" : "minutes"}`;
-  return `${what} on ${deviceLabel}${forHowLong}${beforeDisconnect(released)}`;
+  const { clause, tail } = disconnectWords(released);
+  return `${what} on ${deviceLabel}${forHowLong}${clause}${tail ? `. ${tail}` : ""}`;
 }
 
 /**
@@ -43,10 +70,12 @@ export function overrideSummary(
  * was made.
  */
 export function emergencyCallSummary(deviceLabel: string, released?: ReleasedNote): string {
-  return `Used the emergency call button on ${deviceLabel}${beforeDisconnect(released)}. Kintrinsic can't see whether a call was made.`;
+  const { clause, tail } = disconnectWords(released);
+  return `Used the emergency call button on ${deviceLabel}${clause}. ${tail ? `${tail} ` : ""}Kintrinsic can't see whether a call was made.`;
 }
 
 /** The Activity sentence for an emergency control this build does not know by name. */
-export function emergencyControlSummary(deviceLabel: string): string {
-  return `An emergency control was used on ${deviceLabel}.`;
+export function emergencyControlSummary(deviceLabel: string, released?: ReleasedNote): string {
+  const { clause, tail } = disconnectWords(released);
+  return `An emergency control was used on ${deviceLabel}${clause}.${tail ? ` ${tail}` : ""}`;
 }

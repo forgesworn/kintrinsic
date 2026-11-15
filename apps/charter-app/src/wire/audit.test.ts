@@ -22,6 +22,7 @@ describe("unwrapAudit", () => {
       scope: "full",
       durationSecs: 300,
       at: NOW,
+      atStamped: false,
       key: `wrap:${w.id}`,
     });
   });
@@ -246,7 +247,7 @@ describe("emergency call audit (op call.emergency)", () => {
     const w = wrapFor({ tags: call([["at", String(NOW - 30)]]) });
     expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
       op: "call.emergency",
-      call: { machine: machinePk, at: NOW - 30, key: `emergencycall:${machinePk}:${NOW - 30}` },
+      call: { machine: machinePk, at: NOW - 30, atStamped: true, key: `emergencycall:${machinePk}:${NOW - 30}` },
     });
   });
 
@@ -258,7 +259,7 @@ describe("emergency call audit (op call.emergency)", () => {
     const w = wrapFor({ createdAt: NOW - 90, tags: call() });
     expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
       op: "call.emergency",
-      call: { machine: machinePk, at: NOW - 90, key: `emergencycall:wrap:${w.id}` },
+      call: { machine: machinePk, at: NOW - 90, atStamped: false, key: `emergencycall:wrap:${w.id}` },
     });
   });
 
@@ -340,7 +341,7 @@ describe("emergency call audit (op call.emergency)", () => {
   it("carries nothing but machine, at and key", () => {
     const w = wrapFor({ tags: call([["at", String(NOW - 5)], ["number", "112233"], ["durationSecs", "9"]]) });
     const a = unwrapDeviceAudit(w, guardianSk, NOW);
-    expect(a?.op === "call.emergency" && Object.keys(a.call).sort()).toEqual(["at", "key", "machine"]);
+    expect(a?.op === "call.emergency" && Object.keys(a.call).sort()).toEqual(["at", "atStamped", "key", "machine"]);
     expect(JSON.stringify(a)).not.toContain("112233");
   });
 });
@@ -357,7 +358,7 @@ describe("an unknown op under outcome=override", () => {
     const w = wrapFor({ tags: ctl("alarm.silence", [["at", String(NOW - 20)]]) });
     expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
       op: "override.other",
-      control: { machine: machinePk, at: NOW - 20, key: `override:alarm.silence:${machinePk}:${NOW - 20}` },
+      control: { machine: machinePk, at: NOW - 20, atStamped: true, key: `override:alarm.silence:${machinePk}:${NOW - 20}` },
     });
   });
 
@@ -365,8 +366,20 @@ describe("an unknown op under outcome=override", () => {
     const w = wrapFor({ createdAt: NOW - 90, tags: ctl("alarm.silence") });
     expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
       op: "override.other",
-      control: { machine: machinePk, at: NOW - 90, key: `override:alarm.silence:wrap:${w.id}` },
+      control: { machine: machinePk, at: NOW - 90, atStamped: false, key: `override:alarm.silence:wrap:${w.id}` },
     });
+  });
+
+  it("marks the press time as the ward's own only when its at tag is fit to date by", () => {
+    const stamped = (tags: string[][], createdAt = NOW) => {
+      const a = unwrapDeviceAudit(wrapFor({ createdAt, tags }), guardianSk, NOW);
+      return a?.op === "override.other" && a.control.atStamped;
+    };
+    expect(stamped(ctl("alarm.silence", [["at", String(NOW - 20)]]))).toBe(true);
+    // No tag, a tag after its own wrap, or one absurdly old: the wrap's time stands in.
+    expect(stamped(ctl("alarm.silence"))).toBe(false);
+    expect(stamped(ctl("alarm.silence", [["at", String(NOW + 50)]]))).toBe(false);
+    expect(stamped(ctl("alarm.silence", [["at", "5"]]))).toBe(false);
   });
 
   it("two different ops in the same second are two keys, and neither is a break-glass or call key", () => {
