@@ -1895,7 +1895,10 @@ the wrap's `created_at` or more than 30 days old, in which case it dates by
 `created_at`. Like the override, it **never waits on the wire**: offline, the
 event is journaled durably (the journal is flushed to disk as it is written, the
 same journal as the override, and one wrap per press however many rounds it
-waits) and emitted on reconnect. The ward app hands the report to the warden
+waits) and emitted on reconnect. A journal that cannot be read is left alone
+while that may be passing; one that stays unreadable across four attempts over
+at least a minute is set aside and a fresh one started, so a press is never
+refused for good. The ward app hands the report to the warden
 before it records the press on the phone, and retries a refused one a few
 times while the process lives. Consumers fold copies of one press by
 `(machine, at)` **per op**, so a break-glass press and an emergency call in the
@@ -1910,11 +1913,16 @@ phone, the device makes one best-effort publish of every audit still held (this
 event, the override and the screen-lock outcomes) to the guardian doing the
 releasing, and then clears the journal, so nothing a ward pressed under one
 guardian is ever told to the next. The journal is cleared at once and the
-release never waits for a relay: the publish carries on in the background. Each
-of those audits is also offered to the local link before it closes, so a
-release that arrived over the home network can carry them back over it while
-the relays are down. A release that arrives with no relay, or to relays that
-refuse, drops them.
+release never waits for a relay: the publish carries on in the background. A
+journal the phone cannot read at that moment is set aside (kept on the phone,
+never read again by the warden, and removed if it cannot be moved) rather than
+left for a later round, and every journaled audit is stamped on the phone with
+the guardian it was made under, so an audit stamped for one guardian is never
+sent to another even if the clear failed. Each of those audits is also
+offered to the local link, which carries them while the guardian still accepts
+the session, so a release that arrived over the home network may carry them
+back over it while the relays are down. A release that arrives with no relay,
+or to relays that refuse, drops them.
 
 The outcome is `override` on purpose: a carrier notifies immediately on any
 `outcome=override` audit, so a carrier that predates this event still alerts
