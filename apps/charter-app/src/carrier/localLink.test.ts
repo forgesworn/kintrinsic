@@ -189,3 +189,26 @@ describe("what the screens say", () => {
     expect(readLocalRoute()).toMatchObject({ gap: "old-carrier" });
   });
 });
+
+describe("localInbox verifiedAt", () => {
+  const withInbox = (entries: unknown[]) => {
+    window.CharterCarrier = {
+      provision: () => {},
+      isCarrier: () => true,
+      localInbox: () => JSON.stringify(entries),
+    } as unknown as typeof window.CharterCarrier;
+  };
+
+  it("carries a positive integer verifiedAt through, and nothing else", () => {
+    withInbox([
+      { id: "a", machine: M, wrap: WRAP, receivedAt: 3, verifiedAt: 1_800_000_000 },
+      { id: "b", machine: M, wrap: WRAP, receivedAt: 3 },
+      { id: "c", machine: M, wrap: WRAP, receivedAt: 3, verifiedAt: -1 },
+      { id: "d", machine: M, wrap: WRAP, receivedAt: 3, verifiedAt: 1.5 },
+      { id: "e", machine: M, wrap: WRAP, receivedAt: 3, verifiedAt: "1800000000" },
+    ]);
+    const got = localInbox()!;
+    expect(got[0].verifiedAt).toBe(1_800_000_000);
+    for (const e of got.slice(1)) expect("verifiedAt" in e).toBe(false);
+  });
+});

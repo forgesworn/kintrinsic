@@ -66,6 +66,14 @@ export interface LocalInboxEntry {
   machine: string;
   wrap: NostrEvent;
   receivedAt: number;
+  /**
+   * Unix seconds the carrier itself checked this wrap (seal, author, two-day
+   * freshness) before holding it for us. Present only on entries the carrier
+   * kept from a relay; the native home-network inbox has none. When present,
+   * the wrap's freshness is judged against it rather than against now, so a
+   * press the carrier kept still lands when the console is opened days later.
+   */
+  verifiedAt?: number;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -195,6 +203,9 @@ export function localInbox(): LocalInboxEntry[] | null {
         machine: typeof e.machine === "string" ? e.machine : "",
         wrap: e.wrap as unknown as NostrEvent,
         receivedAt: typeof e.receivedAt === "number" ? e.receivedAt : 0,
+        ...(typeof e.verifiedAt === "number" && Number.isInteger(e.verifiedAt) && e.verifiedAt > 0
+          ? { verifiedAt: e.verifiedAt }
+          : {}),
       });
     }
     return out;

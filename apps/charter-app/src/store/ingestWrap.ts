@@ -62,7 +62,22 @@ export type WrapIngestResult =
    *  yet: left unhandled so a later pass can land it. `reqId` is the ask's. */
   | { kind: "unlanded"; reqId?: string };
 
-export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
+/**
+ * `verifiedAt`: when the carrier vetted this wrap, for an entry it held from a
+ * relay. The device audit's two-day freshness window is then judged from that
+ * moment, not from now, because the carrier already enforced it on arrival and
+ * a guardian may open the console days later. Never later than now.
+ */
+export function ingestWrap(
+  w: NostrEvent,
+  ctx: WrapIngestContext,
+  verifiedAt?: number,
+): WrapIngestResult {
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const auditNow =
+    verifiedAt !== undefined && Number.isInteger(verifiedAt) && verifiedAt > 0
+      ? Math.min(verifiedAt, nowSecs)
+      : nowSecs;
   // The one line that saves the battery: everything below this decrypts.
   if (ctx.handledWraps.has(w.id)) return { kind: "handled" };
   const s = unwrapStatus(w, ctx.guardianSk);
@@ -75,7 +90,7 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
   if (!req) {
     // Third and last, so the common status and request wraps never pay for a
     // third decrypt: the ward's emergency unlock (a device audit).
-    const audit = unwrapDeviceAudit(w, ctx.guardianSk);
+    const audit = unwrapDeviceAudit(w, ctx.guardianSk, auditNow);
     if (audit?.op === "unlock.breakglass") return ingestOverride(w, audit.override, ctx);
     if (audit?.op === "call.emergency") return ingestEmergencyCall(w, audit.call, ctx);
     if (audit?.op === "override.other") return ingestEmergencyControl(w, audit.control, ctx);

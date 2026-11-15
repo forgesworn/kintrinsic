@@ -2212,7 +2212,7 @@ export function CharterProvider({ children }: { children: ReactNode }) {
     }
     drainLocalInbox({
       inbox: localInbox,
-      ingest: (w) => ingestWrap(w, wrapContext(guardianSk)),
+      ingest: (w, verifiedAt) => ingestWrap(w, wrapContext(guardianSk), verifiedAt),
       queue: consumeQueue,
     });
     trimHandled(handledWraps.current);

@@ -291,4 +291,66 @@ describe("emergency call button \u2192 Activity", () => {
     expect(generic.ts).toBe(pressedAt * 1000);
     expect(generic.auditKey).toBe(`override:alarm.silence:${machinePk}:${pressedAt}`);
   });
+
+  describe("an entry the carrier kept from a relay (verifiedAt)", () => {
+    const DAY = 24 * 60 * 60;
+    // The carrier vetted the wrap when it arrived; the guardian opens the app
+    // three days later, long after the wrap's own two-day jitter window.
+    const spooled = (verified: boolean) => {
+      const built = Math.floor(Date.now() / 1000) - 3 * DAY;
+      const w = overrideWrap({
+        guardianPk,
+        machineSk,
+        tags: emergencyCallTags([["at", String(built - 5)]]),
+        createdAt: built,
+      });
+      const entry: Record<string, unknown> = { id: w.id, machine: machinePk, wrap: w, receivedAt: built + 60 };
+      if (verified) entry.verifiedAt = built + 60;
+      return { w, entry, built };
+    };
+    const bridgeEntries = (entries: unknown[], onConsume: (ids: string[]) => void) => {
+      window.CharterCarrier = {
+        provision: vi.fn(),
+        isCarrier: () => true,
+        localInfo: () => JSON.stringify({ v: 1, available: false, listening: false, sessions: [] }),
+        localSend: () => JSON.stringify({ state: "unavailable" }),
+        localDelivery: () => "{}",
+        localInbox: () => JSON.stringify(entries),
+        localConsume: (json: string) => onConsume(JSON.parse(json) as string[]),
+      };
+    };
+
+    it("still lands, dated by the press, when the wrap is three days old by now", async () => {
+      const { entry, built } = spooled(true);
+      const consume = vi.fn();
+      bridgeEntries([entry], consume);
+      mount();
+      await settle();
+      const got = lines();
+      expect(got).toHaveLength(1);
+      expect(got[0].ts).toBe((built - 5) * 1000);
+      expect(consume).toHaveBeenCalled();
+    });
+
+    it("an entry with no verifiedAt (the native home-network inbox) is judged against now, as before", async () => {
+      const { w, entry } = spooled(false);
+      const consume = vi.fn();
+      bridgeEntries([entry], consume);
+      mount();
+      await settle();
+      expect(lines()).toHaveLength(0);
+      // Unreadable now and for ever, so it is consumed rather than looping.
+      expect(consume).toHaveBeenCalledWith([w.id]);
+    });
+
+    it("a verifiedAt in the future cannot make a stale wrap fresh", async () => {
+      const { entry } = spooled(true);
+      entry.verifiedAt = Math.floor(Date.now() / 1000) + 10 * DAY;
+      bridgeEntries([entry], vi.fn());
+      mount();
+      await settle();
+      // Clamped to now, which is three days after the wrap: refused.
+      expect(lines()).toHaveLength(0);
+    });
+  });
 });
