@@ -1550,15 +1550,7 @@ class LockActivity : Activity() {
                                     val res = runCatching { CharterCore.breakGlass(pressedAt) }
                                         .onFailure { Log.w(TAG, "break-glass failed: ${it.javaClass.simpleName}") }
                                         .getOrNull()
-                                    if (res == null) {
-                                        ui.post {
-                                            if (isDestroyed) return@post
-                                            (breakGlassStatusView ?: bgStatus).text =
-                                                "Couldn't use the emergency unlock. Try again."
-                                        }
-                                        return@Runnable
-                                    }
-                                    if (res.allowed) {
+                                    if (res != null && res.allowed) {
                                         // The row in "Activity on this phone",
                                         // off this thread too, dated by the
                                         // press and carrying the scope. Best
@@ -1570,26 +1562,10 @@ class LockActivity : Activity() {
                                     }
                                     ui.post {
                                         if (isDestroyed) return@post
-                                        val line = breakGlassStatusView ?: bgStatus
-                                        if (res.allowed) {
-                                            if (res.scope == "full") {
-                                                line.text = "Unlocked."
-                                                runCatching { stopLockTask() }
-                                                finish()
-                                            } else {
-                                                // NOT "Unlocked" — nothing
-                                                // about enforcement changed, and
-                                                // telling a child otherwise
-                                                // while the shade sits in front
-                                                // of them is the silent lie this
-                                                // whole screen exists to avoid.
-                                                line.text =
-                                                    "Your guardian has been told you need them. " +
-                                                    "You can call the numbers above now."
-                                            }
-                                        } else {
-                                            line.text =
-                                                "Emergency unlock isn't switched on for this phone."
+                                        (breakGlassStatusView ?: bgStatus).text = breakGlassLine(res)
+                                        if (res != null && res.allowed && res.scope == "full") {
+                                            runCatching { stopLockTask() }
+                                            finish()
                                         }
                                     }
                                 }
@@ -1650,6 +1626,32 @@ class LockActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 }
+
+/**
+ * What the break-glass line says once the core has answered ([res] null: the
+ * call threw).
+ *
+ * - The full scope unlocks the phone: "Unlocked.".
+ * - The calls scope changes nothing about enforcement, so it is NOT
+ *   "Unlocked": telling a child otherwise while the shade sits in front of
+ *   them is the silent lie this whole screen exists to avoid. It is the one
+ *   place the ward is told about the guardian, so it says the guardian has
+ *   been told only when the core journaled the press for them.
+ * - Only the core's "not-enabled" means the family switched it off. Any other
+ *   refusal, an error, an empty answer or one that would not parse is a fault
+ *   the ward can retry, never "switched off".
+ */
+internal fun breakGlassLine(res: CharterCore.BreakGlassResult?): String = when {
+    res == null -> BREAK_GLASS_TRY_AGAIN
+    res.allowed && res.scope == "full" -> "Unlocked."
+    res.allowed && res.journaled ->
+        "Your guardian has been told you need them. You can call the numbers above now."
+    res.allowed -> "Your guardian may not have been told. Call them if you can."
+    res.reason == "not-enabled" -> "Emergency unlock isn't switched on for this phone."
+    else -> BREAK_GLASS_TRY_AGAIN
+}
+
+internal const val BREAK_GLASS_TRY_AGAIN = "Couldn't use the emergency unlock. Try again."
 
 /**
  * The copy the shade shows. The core's lock copy describes the CORE's lock, and

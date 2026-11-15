@@ -837,12 +837,17 @@ object CharterCore {
     /** The ward's lifeline numbers; empty when none / malformed (fail-closed). */
     fun lifeline(): List<LifelineNumber> = lifelineView().numbers
 
-    /** The outcome of breaking the glass. */
+    /** The outcome of breaking the glass. [journaled] is false when the
+     *  core could not journal the press for the guardian (an older core,
+     *  which does not say, is taken as having journaled it). [reason] is
+     *  "not-enabled" only when the family has not switched it on; "error" and
+     *  "unavailable" are faults. */
     data class BreakGlassResult(
         val allowed: Boolean,
         val scope: String = "",
         val secsLeft: Long = 0,
         val reason: String = "",
+        val journaled: Boolean = true,
     )
 
     /**
@@ -851,17 +856,26 @@ object CharterCore {
      * hasn't enabled it. Takes the warden lock and fsyncs the journal, so call
      * it from a worker, never the main thread.
      */
-    fun breakGlass(nowUnix: Long): BreakGlassResult {
-        val raw = jni().charterBreakGlass(nowUnix)
+    fun breakGlass(nowUnix: Long): BreakGlassResult = parseBreakGlass(jni().charterBreakGlass(nowUnix))
+
+    /** [breakGlass]'s answer. An empty answer, or one that will not parse, is
+     *  "unavailable"; an `error` key (an uninitialised core, a recovered
+     *  panic) is "error". Neither is ever "not-enabled". */
+    fun parseBreakGlass(raw: String): BreakGlassResult {
         if (raw.isEmpty()) return BreakGlassResult(false, reason = "unavailable")
         return runCatching {
             val o = org.json.JSONObject(raw)
-            BreakGlassResult(
-                allowed = o.optBoolean("allowed", false),
-                scope = o.optString("scope", ""),
-                secsLeft = o.optLong("secsLeft", 0),
-                reason = o.optString("reason", ""),
-            )
+            if (o.has("error")) {
+                BreakGlassResult(false, reason = "error")
+            } else {
+                BreakGlassResult(
+                    allowed = o.optBoolean("allowed", false),
+                    scope = o.optString("scope", ""),
+                    secsLeft = o.optLong("secsLeft", 0),
+                    reason = o.optString("reason", ""),
+                    journaled = o.optBoolean("journaled", true),
+                )
+            }
         }.getOrDefault(BreakGlassResult(false, reason = "unavailable"))
     }
 
