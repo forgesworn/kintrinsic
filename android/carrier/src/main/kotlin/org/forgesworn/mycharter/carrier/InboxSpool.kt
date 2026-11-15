@@ -25,7 +25,10 @@ import org.json.JSONObject
  * key, entries are bounded so a stranger cannot push out a real press: each
  * entry is capped in size, and machines the console does not know have their
  * own small share ([UNKNOWN_CAP]) that can never evict a known machine's
- * entries ([KNOWN_CAP]). Before the console has said which machines it knows,
+ * entries ([KNOWN_CAP]). A machine the guardian has disconnected (released, for up to
+ * 14 days) has a bucket of its own, [RELEASED_CAP] entries per machine, so whoever
+ * holds it can evict neither a paired ward's entries nor another released machine's.
+ * Before the console has said which machines it knows,
  * every machine counts as known (fail towards keeping); an EMPTY roster says
  * nothing either, so it is treated the same way: entries admitted under it carry
  * no flag and follow the next non-empty roster.
@@ -42,6 +45,9 @@ object InboxSpool {
 
     /** Most entries kept for machines the console has not paired (oldest out). */
     const val UNKNOWN_CAP = 10
+
+    /** Most entries kept for EACH machine the guardian has disconnected (oldest out). */
+    const val RELEASED_CAP = 20
 
     /** Largest wrap kept, in bytes. A real audit wrap is 1-2 KB. */
     const val MAX_ENTRY_BYTES = 16 * 1024
@@ -66,10 +72,11 @@ object InboxSpool {
      * [spool] with the wrap added. Unchanged when the id is already held (a
      * relay replay is a no-op), the wrap is not a JSON object, or it is over
      * [MAX_ENTRY_BYTES]. Entries older than [MAX_AGE_SECS] are dropped, then
-     * each group is capped (oldest out): known machines at [KNOWN_CAP],
-     * unknown at [UNKNOWN_CAP]. `known == null` (or empty) means no usable roster
-     * has been pushed and everything counts as known. An id in [consumed] is
-     * never re-admitted.
+     * each group is capped (oldest out): paired machines at [KNOWN_CAP], unknown
+     * at [UNKNOWN_CAP], and each machine in [released] (a subset of [known]: the
+     * disconnected ones) at [RELEASED_CAP]. `known == null` (or empty) means no
+     * usable roster has been pushed and everything counts as known. An id in
+     * [consumed] is never re-admitted.
      */
     fun add(
         spool: String?,
@@ -79,6 +86,7 @@ object InboxSpool {
         nowSecs: Long,
         known: Set<String>? = null,
         consumed: Set<String> = emptySet(),
+        released: Set<String> = emptySet(),
     ): String {
         val roster = known?.takeIf { it.isNotEmpty() }
         val current = spool ?: "[]"
@@ -87,7 +95,7 @@ object InboxSpool {
         val kept = entries(parse(spool)).filter {
             nowSecs - it.optLong("receivedAt", nowSecs) <= MAX_AGE_SECS
         }
-        if (id in consumed || kept.any { it.optString("id") == id }) return cap(kept, roster)
+        if (id in consumed || kept.any { it.optString("id") == id }) return cap(kept, roster, released)
         val entry = JSONObject()
             .put("id", id)
             .put("machine", machine)
@@ -99,23 +107,51 @@ object InboxSpool {
         // without its household) never moves a held press into the small group
         // or evicts it. No roster yet means no flag, and the entry is judged by
         // whatever roster is current when the caps next run.
-        if (roster != null) entry.put("known", machine in roster)
-        return cap(kept + entry, roster)
+        if (roster != null) {
+            entry.put("known", machine in roster)
+            if (machine in released) entry.put("released", true)
+        }
+        return cap(kept + entry, roster, released)
     }
 
     /** The admission-time verdict when the entry has one, else the current roster's. */
     private fun isKnown(e: JSONObject, known: Set<String>?): Boolean =
         if (e.has("known")) e.optBoolean("known", true) else known == null || e.optString("machine") in known
 
-    /** Apply the two caps, keeping order and dropping the oldest of each group. */
-    internal fun cap(all: List<JSONObject>, rosterNow: Set<String>?): String {
+    /**
+     * Is this entry one of a disconnected machine's? The admission-time flag when
+     * the entry has a verdict (an entry admitted before the flag existed has
+     * `known` and no `released`, so it stays with the paired ones); an unflagged
+     * entry (no roster at admission) follows the current roster.
+     */
+    private fun isReleasedEntry(e: JSONObject, releasedNow: Set<String>): Boolean = when {
+        e.has("released") -> e.optBoolean("released", false)
+        e.has("known") -> false
+        else -> e.optString("machine") in releasedNow
+    }
+
+    /**
+     * Apply the caps, keeping order and dropping the oldest of each group: each
+     * released machine's own bucket first, then the paired ones and the unknown.
+     */
+    internal fun cap(all: List<JSONObject>, rosterNow: Set<String>?, releasedNow: Set<String> = emptySet()): String {
         val known = rosterNow?.takeIf { it.isNotEmpty() }
-        val knownEntries = all.filter { isKnown(it, known) }
-        val unknownEntries = all.filterNot { isKnown(it, known) }
+        val releasedEntries = all.filter { isReleasedEntry(it, releasedNow) }
+        val rest = all.filterNot { isReleasedEntry(it, releasedNow) }
+        val knownEntries = rest.filter { isKnown(it, known) }
+        val unknownEntries = rest.filterNot { isKnown(it, known) }
         val keep = HashSet<JSONObject>(
-            knownEntries.takeLast(KNOWN_CAP) + unknownEntries.takeLast(UNKNOWN_CAP),
+            knownEntries.takeLast(KNOWN_CAP) + unknownEntries.takeLast(UNKNOWN_CAP) +
+                releasedEntries.groupBy { it.optString("machine") }.values.flatMap { it.takeLast(RELEASED_CAP) },
         )
         return JSONArray(all.filter { it in keep }).toString()
+    }
+
+    /** The ids in [idsJson] (a JSON array of strings) that [spool] actually holds. */
+    fun held(spool: String?, idsJson: String): List<String> {
+        val arr = try { JSONArray(idsJson) } catch (_: Exception) { return emptyList() }
+        val ids = (0 until arr.length()).map { arr.optString(it, "") }.filter { it.isNotEmpty() }.toSet()
+        return entries(parse(spool)).map { it.optString("id") }.filter { it in ids }.distinct()
     }
 
     /** [spool] without the entries whose id is in [idsJson] (a JSON array of strings). */
@@ -138,10 +174,15 @@ object InboxSpool {
         return pruneTombstones(next, nowSecs)
     }
 
-    /** Drop tombstones older than [TOMBSTONE_SECS], then the oldest beyond [MAX_TOMBSTONES]. */
+    /**
+     * Drop tombstones older than [TOMBSTONE_SECS], then the oldest beyond
+     * [MAX_TOMBSTONES]. Oldest by TIMESTAMP, not by the map's iteration order
+     * (a decoded JSON object may not keep its key order); ties keep that order.
+     */
     fun pruneTombstones(consumed: Map<String, Long>, nowSecs: Long): Map<String, Long> =
         consumed.entries
             .filter { nowSecs - it.value <= TOMBSTONE_SECS }
+            .sortedBy { it.value }
             .takeLast(MAX_TOMBSTONES)
             .associate { it.key to it.value }
 

@@ -224,6 +224,26 @@ class InboxSpoolTest {
         assertEquals(setOf("c"), pruned.keys)
     }
 
+    @Test fun theOldestTombstonesGoByTimestampNotByMapOrder() {
+        // A decoded document may not keep its key order: the map below lists the NEWEST first.
+        val consumed = LinkedHashMap<String, Long>()
+        for (i in InboxSpool.MAX_TOMBSTONES + 5 downTo 1) consumed["t$i"] = now + i
+        val kept = InboxSpool.pruneTombstones(consumed, now + InboxSpool.MAX_TOMBSTONES + 5)
+        assertEquals(InboxSpool.MAX_TOMBSTONES, kept.size)
+        for (i in 1..5) assertFalse("t$i is the oldest and goes", "t$i" in kept)
+        assertTrue("t6" in kept)
+        assertTrue("t${InboxSpool.MAX_TOMBSTONES + 5}" in kept)
+    }
+
+    @Test fun heldIdsAreOnlyTheOnesTheSpoolHolds() {
+        var s = InboxSpool.add(null, "w1", "m", wrap("w1"), now)
+        s = InboxSpool.add(s, "w2", "m", wrap("w2"), now)
+        assertEquals(listOf("w1"), InboxSpool.held(s, """["w1","ghost","","w1"]"""))
+        assertEquals(emptyList<String>(), InboxSpool.held(s, """["ghost"]"""))
+        assertEquals(emptyList<String>(), InboxSpool.held(s, "not json"))
+        assertEquals(emptyList<String>(), InboxSpool.held(null, """["w1"]"""))
+    }
+
     @Test fun tombstonesAreBounded() {
         val ids = (1..InboxSpool.MAX_TOMBSTONES + 10).joinToString(",", "[", "]") { "\"t$it\"" }
         val t = InboxSpool.tombstone(emptyMap(), ids, now)
@@ -302,5 +322,50 @@ class InboxSpoolTest {
         val s = InboxSpool.add(null, "w1", "m1", wrap("w1"), now)
         assertEquals(s, InboxSpool.add(s, "bad", "m1", "not json", now))
         assertTrue(ids(InboxSpool.add(null, "bad", "m1", "not json", now)).isEmpty())
+    }
+
+    // ---- G4: a released machine's own bucket -----------------------------------------------
+
+    @Test fun aReleasedMachineHasTwentyEntriesAndNeverEvictsAPairedOnes() {
+        val roster = setOf(real, "gone")
+        var s = InboxSpool.add(null, "paired", real, wrap("paired"), now, roster, released = setOf("gone"))
+        for (i in 1..60) s = InboxSpool.add(s, "g$i", "gone", wrap("g$i"), now + i, roster, released = setOf("gone"))
+        val held = ids(s)
+        assertEquals(1 + InboxSpool.RELEASED_CAP, held.size)
+        assertTrue("paired" in held)
+        assertTrue("g60" in held && "g41" in held)
+        assertFalse("g40" in held)
+        // Flagged at admission: still known (as before) and released.
+        val e = JSONArray(s).getJSONObject(1)
+        assertTrue(e.getBoolean("known"))
+        assertTrue(e.getBoolean("released"))
+    }
+
+    @Test fun releasedEntriesDoNotCountAgainstThePairedCapNorTheUnknownOne() {
+        val roster = setOf(real, "gone")
+        var s: String? = null
+        for (i in 1..InboxSpool.KNOWN_CAP) s = InboxSpool.add(s, "p$i", real, wrap("p$i"), now + i, roster, released = setOf("gone"))
+        for (i in 1..InboxSpool.UNKNOWN_CAP) s = InboxSpool.add(s, "u$i", fake(i), wrap("u$i"), now + 500 + i, roster, released = setOf("gone"))
+        for (i in 1..InboxSpool.RELEASED_CAP) s = InboxSpool.add(s, "g$i", "gone", wrap("g$i"), now + 900 + i, roster, released = setOf("gone"))
+        assertEquals(InboxSpool.KNOWN_CAP + InboxSpool.UNKNOWN_CAP + InboxSpool.RELEASED_CAP, ids(s!!).size)
+    }
+
+    @Test fun anUnflaggedEntryFollowsTheCurrentRostersReleasedSet() {
+        // Admitted with no roster (so no flag); the roster later names the machine as released.
+        var s: String? = null
+        for (i in 1..30) s = InboxSpool.add(s, "g$i", "gone", wrap("g$i"), now + i, known = null)
+        val e = JSONArray(s).getJSONObject(0)
+        assertFalse(e.has("known") || e.has("released"))
+        s = InboxSpool.add(s, "g31", "gone", wrap("g31"), now + 31, setOf(real, "gone"), released = setOf("gone"))
+        assertEquals(InboxSpool.RELEASED_CAP, ids(s).size)
+    }
+
+    @Test fun anEntryHeldBeforeTheFlagExistedStaysWithThePairedOnes() {
+        // `known:true` and no `released` is how a released machine's entry was stored until now.
+        val old = JSONObject().put("id", "old").put("machine", "gone").put("wrap", JSONObject()).put("receivedAt", now).put("known", true)
+        var s = JSONArray().put(old).toString()
+        for (i in 1..40) s = InboxSpool.add(s, "g$i", "gone", wrap("g$i"), now + i, setOf(real, "gone"), released = setOf("gone"))
+        assertTrue("old" in ids(s))
+        assertEquals(1 + InboxSpool.RELEASED_CAP, ids(s).size)
     }
 }

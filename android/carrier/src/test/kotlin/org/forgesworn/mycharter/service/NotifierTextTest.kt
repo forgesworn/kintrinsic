@@ -94,7 +94,9 @@ class NotifierTextTest {
             Notifier.EMERGENCY_CONTROL_TITLE,
             Notifier.UNPAIRED_TITLE,
             Notifier.emergencyCallText(who),
-            Notifier.emergencyCallText(who, released = true),
+            Notifier.emergencyCallText(who, Notifier.Release.BEFORE),
+            Notifier.emergencyCallText(who, Notifier.Release.AFTER),
+            Notifier.emergencyCallText(who, Notifier.Release.UNKNOWN),
             Notifier.emergencyCallText(null),
             Notifier.unpairedText(3),
         )
@@ -106,26 +108,129 @@ class NotifierTextTest {
         assertTrue(Notifier.emergencyCallText(who).contains("used the emergency call button"))
     }
 
-    // ---- C4: a device the guardian has since disconnected ---------------------------
+    // ---- M1/G10: a device the guardian has since disconnected ---------------------------
 
-    @Test fun aReleasedDevicesAlertNamesTheChildAndDeviceAndSaysItWasBeforeTheDisconnect() {
+    private val before = Notifier.Release.BEFORE
+    private val after = Notifier.Release.AFTER
+    private val unknown = Notifier.Release.UNKNOWN
+
+    @Test fun aPressBeforeTheDisconnectSaysSo() {
         assertEquals(
             "Mia used the emergency call button on Pixel 6, before you disconnected that phone.",
-            Notifier.emergencyCallText(who, released = true),
+            Notifier.emergencyCallText(who, before),
         )
         assertEquals(
             "Mia opened their phone (Pixel 6) for 10 minutes, before you disconnected that phone.",
-            Notifier.overrideText("full", 10, who, released = true),
+            Notifier.overrideText("full", 10, who, before),
         )
         assertEquals(
-            "Mia: an emergency control was used on Pixel 6, before you disconnected that phone",
-            Notifier.emergencyControlText(who, released = true),
+            "Mia: an emergency control was used on Pixel 6, before you disconnected that phone.",
+            Notifier.emergencyControlText(who, before),
         )
     }
 
+    @Test fun aPressAfterTheDisconnectSaysSoAndWarnsTheReleaseMayNotHaveArrived() {
+        val warn = "The phone may not have received the disconnect."
+        assertEquals(
+            "Mia used the emergency call button on Pixel 6 after you disconnected that phone. $warn",
+            Notifier.emergencyCallText(who, after),
+        )
+        assertEquals(
+            "Mia opened calls (Pixel 6) for 3 minutes after you disconnected that phone. $warn",
+            Notifier.overrideText("calls", 3, who, after),
+        )
+        assertEquals(
+            "Mia used the emergency unlock on Pixel 6 after you disconnected that phone. $warn",
+            Notifier.overrideText("", null, who, after),
+        )
+        assertEquals(
+            "Mia: an emergency control was used on Pixel 6 after you disconnected that phone. $warn",
+            Notifier.emergencyControlText(who, after),
+        )
+    }
+
+    @Test fun aPressWithNoUsableTimeClaimsNoOrder() {
+        assertEquals(
+            "Mia used the emergency call button on Pixel 6, a phone you have disconnected.",
+            Notifier.emergencyCallText(who, unknown),
+        )
+        assertEquals(
+            "Mia opened their phone (Pixel 6) for 10 minutes, a phone you have disconnected.",
+            Notifier.overrideText("full", 10, who, unknown),
+        )
+        assertEquals(
+            "Mia: an emergency control was used on Pixel 6, a phone you have disconnected.",
+            Notifier.emergencyControlText(who, unknown),
+        )
+        for (t in listOf(
+            Notifier.emergencyCallText(who, unknown),
+            Notifier.overrideText("full", 10, who, unknown),
+            Notifier.emergencyControlText(who, unknown),
+        )) {
+            assertFalse(t, t.contains("before"))
+            assertFalse(t, t.contains("after"))
+        }
+    }
+
+    @Test fun theOrderIsJudgedByThePressTimeAgainstTheDisconnect() {
+        assertEquals(before, Notifier.releaseOrder(at = 100, releasedAt = 200))
+        assertEquals(before, Notifier.releaseOrder(at = 200, releasedAt = 200)) // at <= releasedAt
+        assertEquals(after, Notifier.releaseOrder(at = 201, releasedAt = 200))
+        assertEquals(unknown, Notifier.releaseOrder(at = null, releasedAt = 200))
+        assertEquals(unknown, Notifier.releaseOrder(at = 100, releasedAt = null))
+        assertEquals(unknown, Notifier.releaseOrder(at = null, releasedAt = null))
+    }
+
+    @Test fun onlyAReleasedMachineHasAnOrderAndItComesFromTheRoster() {
+        val roster = listOf(
+            RosterEntry("m1", "Mia", "Pixel 6", paired = false, released = true, releasedAt = 1000),
+            RosterEntry("m2", "Leo", "Pixel 4a"),
+            RosterEntry("m3", "Jo", "Old", paired = false, released = true),
+        )
+        assertEquals(before, Notifier.releaseOf("m1", roster, at = 999))
+        assertEquals(after, Notifier.releaseOf("m1", roster, at = 1001))
+        assertEquals(unknown, Notifier.releaseOf("m1", roster, at = null))
+        assertEquals(unknown, Notifier.releaseOf("m3", roster, at = 5)) // no releasedAt on file
+        assertNull(Notifier.releaseOf("m2", roster, at = 5))
+        assertNull(Notifier.releaseOf("nobody", roster, at = 5))
+    }
+
+    @Test fun anAuditWithoutAStampedAtFromAReleasedMachineClaimsNoOrder() {
+        // Only the audit's own `at` is compared; with none, the no-order form is used
+        // (never a fallback such as the wrap's created_at or the receive time).
+        val roster = listOf(RosterEntry("m1", "Mia", "Pixel 6", paired = false, released = true, releasedAt = 1000))
+        val release = Notifier.releaseOf("m1", roster, at = null)
+        assertEquals(unknown, release)
+        assertEquals(
+            "Mia used the emergency call button on Pixel 6, a phone you have disconnected.",
+            Notifier.emergencyCallText(WardName("Mia", "Pixel 6"), release),
+        )
+        // A press in the same second as the disconnect counts as before.
+        assertEquals(before, Notifier.releaseOf("m1", roster, at = 1000))
+    }
+
     @Test fun aDeviceThatIsNotReleasedKeepsTheOriginalWording() {
-        assertEquals("Mia used the emergency call button on Pixel 6.", Notifier.emergencyCallText(who, released = false))
-        assertEquals("Mia opened their phone (Pixel 6) for 10 minutes.", Notifier.overrideText("full", 10, who, released = false))
+        assertEquals("Mia used the emergency call button on Pixel 6.", Notifier.emergencyCallText(who, release = null))
+        assertEquals("Mia opened their phone (Pixel 6) for 10 minutes.", Notifier.overrideText("full", 10, who, release = null))
+    }
+
+    // ---- G8: an unlock never invents a scope or a duration -------------------------------
+
+    @Test fun anUnknownScopeSaysTheEmergencyUnlockWasUsedWithNoScopeOrDuration() {
+        assertEquals("Mia used the emergency unlock on Pixel 6.", Notifier.overrideText("", 10, who))
+        assertEquals("Mia used the emergency unlock on Pixel 6.", Notifier.overrideText("something-new", 1, who))
+        assertEquals("Your ward used the emergency unlock.", Notifier.overrideText("", 10, null))
+        for (t in listOf(Notifier.overrideText("", 10, who), Notifier.overrideText("x", 10, null))) {
+            assertFalse(t, t.contains("minute"))
+            assertFalse(t, t.contains("calls"))
+        }
+    }
+
+    @Test fun oneMinuteIsSingularAndNoDurationLeavesItOut() {
+        assertEquals("Mia opened calls (Pixel 6) for 1 minute.", Notifier.overrideText("calls", 1, who))
+        assertEquals("Your ward opened their phone for 1 minute.", Notifier.overrideText("full", 1, null))
+        assertEquals("Mia opened calls (Pixel 6).", Notifier.overrideText("calls", null, who))
+        assertEquals("Your ward opened their phone.", Notifier.overrideText("full", null, null))
     }
 
     // ---- C2: unpaired senders share one row -------------------------------------------
@@ -152,6 +257,68 @@ class NotifierTextTest {
     @Test fun aReleasedDeviceIsNotUnpaired() {
         val roster = listOf(RosterEntry("m1", "Mia", "Pixel 6", paired = false, released = true))
         assertFalse(Notifier.isUnpaired("m1", roster, rosterKnown = true))
+    }
+
+    // ---- G1: only a PAIRED machine's ask is named ------------------------------------------
+
+    @Test fun anAskIsUnpairedUnlessTheKnownRosterPairsTheMachine() {
+        val roster = listOf(
+            RosterEntry("m1", "Mia", "Pixel 6"),
+            RosterEntry("m2", "Leo", "Pixel 4a", paired = false, released = true),
+            RosterEntry("m3", "Jo", "Tab", paired = false),
+        )
+        assertFalse(Notifier.isUnpairedAsk("m1", roster, rosterKnown = true))
+        assertTrue("a released machine", Notifier.isUnpairedAsk("m2", roster, rosterKnown = true))
+        assertTrue("a machine the console says is not paired", Notifier.isUnpairedAsk("m3", roster, rosterKnown = true))
+        assertTrue("a stranger", Notifier.isUnpairedAsk("zz", roster, rosterKnown = true))
+        // No known roster: the old wording, never "unpaired".
+        assertFalse(Notifier.isUnpairedAsk("zz", roster, rosterKnown = false))
+        assertFalse(Notifier.isUnpairedAsk("zz", emptyList(), rosterKnown = false))
+    }
+
+    @Test fun theUnpairedAskRowSaysHowManyWithoutNamingAnyone() {
+        assertEquals("Requests from phones that aren't paired: 1", Notifier.unpairedAskText(1))
+        assertEquals("Requests from phones that aren't paired: 9", Notifier.unpairedAskText(9))
+        assertEquals("Requests from phones that aren't paired: 1", Notifier.unpairedAskText(0))
+        val cap = CarrierStore.UNPAIRED_CAP
+        assertEquals("Requests from phones that aren't paired: $cap or more", Notifier.unpairedAskText(cap))
+        assertEquals("ask-unpaired", Notifier.TAG_ASK_UNPAIRED)
+        assertNotEquals(Notifier.TAG_ASK_UNPAIRED, Notifier.TAG_UNPAIRED)
+    }
+
+    @Test fun theOldestPairedAskRowsBeyondTheCapAreCancelledAndTheSharedRowIsNeverOne() {
+        val rows = (1..25).map { Notifier.LiveRow("ask$it", it.toLong()) }.reversed() +
+            Notifier.LiveRow(Notifier.TAG_ASK_UNPAIRED, 0L) + Notifier.LiveRow(null, 0L)
+        val cancel = Notifier.askRowsToCancel(rows, keep = Notifier.ASK_ROW_CAP - 1)
+        // 25 live, room for the 20th: the oldest six go, oldest first.
+        assertEquals(listOf("ask1", "ask2", "ask3", "ask4", "ask5", "ask6"), cancel)
+        assertEquals(20, Notifier.ASK_ROW_CAP)
+        assertEquals(emptyList<String>(), Notifier.askRowsToCancel(rows.take(10), keep = 19))
+        // Exactly at the cap before the new one: the oldest one makes room.
+        assertEquals(listOf("ask1"), Notifier.askRowsToCancel((1..20).map { Notifier.LiveRow("ask$it", it.toLong()) }, keep = 19))
+    }
+
+    // ---- G4: a released machine's live emergency rows are counted by tag --------------------
+
+    @Test fun aRowBelongsToAMachineByItsTagAndNeverByAPrefixOfIt() {
+        assertTrue(Notifier.rowBelongsTo(Notifier.alertKey("override", "m1", 100, null), "m1"))
+        assertTrue(Notifier.rowBelongsTo(Notifier.alertKey("emergency-call", "m1", null, "w"), "m1"))
+        assertTrue(Notifier.rowBelongsTo(Notifier.alertKey("emergency-control", "m1", null, null), "m1"))
+        assertFalse(Notifier.rowBelongsTo(Notifier.alertKey("emergency-call", "m10", 100, null), "m1"))
+        assertFalse(Notifier.rowBelongsTo(Notifier.TAG_UNPAIRED, "m1"))
+        assertFalse(Notifier.rowBelongsTo("ask-m1", "m1"))
+        assertFalse(Notifier.rowBelongsTo(Notifier.alertKey("emergency-call", "m1", 1, null), ""))
+    }
+
+    @Test fun rowsOfCountsOnlyThatMachinesEmergencyRows() {
+        val rows = listOf(
+            Notifier.LiveRow("emergency-call-m1-1", 1), Notifier.LiveRow("override-m1-2", 2),
+            Notifier.LiveRow("emergency-call-m2-1", 1), Notifier.LiveRow(Notifier.TAG_UNPAIRED, 3),
+            Notifier.LiveRow(null, 4),
+        )
+        assertEquals(2, Notifier.rowsOf(rows, "m1"))
+        assertEquals(1, Notifier.rowsOf(rows, "m2"))
+        assertEquals(0, Notifier.rowsOf(rows, "m3"))
     }
 
     @Test fun everyRowUsesTheTagFormUnderAFixedId() {

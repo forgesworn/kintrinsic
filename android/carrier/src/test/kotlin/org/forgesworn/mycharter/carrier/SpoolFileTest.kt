@@ -78,19 +78,16 @@ class SpoolFileTest {
     }
 
     @Test fun aDamagedFileIsNeverOverwrittenEvenWhenTheAsideNameIsTaken() {
-        // The spool path is a directory (unreadable as a file) and the first aside
-        // name is already taken by another directory: the next free name is used
-        // and neither the damaged spool nor the earlier copy is lost.
+        // The first aside name is already taken: the next free one is used and
+        // neither the damaged spool's bytes nor the earlier copy is lost.
         val dir = tmp.newFolder("blocked")
         val f = File(dir, "inbox-spool.json")
-        f.mkdir()
-        File(f, "child").writeText("x")
+        f.writeText("""[{"id":"x""")
         val blocker = File(dir, "inbox-spool.json.damaged-7")
-        blocker.mkdir()
-        File(blocker, "child").writeText("y")
+        blocker.writeText("earlier evidence")
         SpoolFile(f, clock = { 7L }).read()
-        assertTrue(File(dir, "inbox-spool.json.damaged-8/child").isFile)
-        assertTrue(File(blocker, "child").isFile)
+        assertEquals("""[{"id":"x""", File(dir, "inbox-spool.json.damaged-8").readText())
+        assertEquals("earlier evidence", blocker.readText())
     }
 
     @Test fun onlyTheThreeNewestDamagedCopiesAreKept() {
@@ -246,20 +243,82 @@ class SpoolFileTest {
         assertTrue(f.isFile)
     }
 
-    @Test fun aReadThatKeepsFailingIsDamageAfterExactlyOneRetry() {
+    // ---- G7: a read error is never damage -------------------------------------------
+
+    @Test fun aReadThatKeepsFailingThrowsAfterExactlyOneRetryAndSetsNothingAside() {
         val f = File(tmp.root, "spool.json")
         SpoolFile(f).add("w1", "m", wrap("w1"), now, null)
+        val before = f.readText()
         var calls = 0
         val reported = mutableListOf<File>()
         val s = SpoolFile(f, clock = { 3L }, onDamaged = { reported += it }, readText = {
             calls++
-            throw java.io.IOException("gone")
+            throw java.io.IOException("EIO")
         })
-        // Two reads to decide, one more to try to salvage; nothing readable, so empty.
-        assertEquals("[]", s.read())
-        assertEquals(3, calls)
-        assertEquals(1, reported.size)
-        assertTrue(File(tmp.root, "spool.json.damaged-3").isFile)
+        val failure = runCatching { s.read() }.exceptionOrNull()
+        assertTrue(failure is java.io.IOException)
+        assertEquals(2, calls)
+        // Intact bytes are never set aside, reported as damage or written over.
+        assertTrue(reported.isEmpty())
+        assertEquals(before, f.readText())
+        assertTrue(tmp.root.listFiles()!!.none { it.name.contains(".damaged-") })
+        // An add fails the same way and leaves the file alone.
+        assertTrue(runCatching { s.add("w2", "m", wrap("w2"), now, null) }.isFailure)
+        assertEquals(before, f.readText())
+        // Once the disk reads again, every held press is still there.
+        assertEquals(listOf("w1"), ids(SpoolFile(f).read()))
+    }
+
+    @Test fun aReadErrorThatClearsOnTheRetryIsStillNotDamage() {
+        val f = File(tmp.root, "spool.json")
+        SpoolFile(f).add("w1", "m", wrap("w1"), now, null)
+        var calls = 0
+        val s = SpoolFile(f, readText = { if (calls++ == 0) throw java.io.IOException("EIO") else it.readText() })
+        assertEquals(listOf("w1"), ids(s.read()))
+    }
+
+    @Test fun onlyTextThatWillNotParseIsDamage() {
+        val f = File(tmp.root, "spool.json")
+        f.writeText("""[{"id":"w1","machine":"m","wrap":{"id":"w1"},"receivedAt":$now},{"id":"w2""")
+        val reported = mutableListOf<String>()
+        val s = SpoolFile(f, clock = { 4L }, onDamaged = { reported += it.name })
+        assertEquals(listOf("w1"), ids(s.read()))
+        assertEquals(listOf("spool.json.damaged-4"), reported)
+    }
+
+    // ---- G7: a failed salvage write is not the end of the salvage ----------------------
+
+    @Test fun ifTheSalvageWriteFailsTheCallThrowsAndTheNextOneRetriesWithNothingLost() {
+        val f = File(tmp.root, "spool.json")
+        var arr: String? = null
+        for (i in 1..3) arr = InboxSpool.add(arr, "w$i", "m", wrap("w$i"), now + i)
+        val torn = arr!!.substring(0, arr.length - 20)
+        f.writeText(torn)
+        // The fresh file cannot be written: its temp name is taken by a directory.
+        val blocker = File(f.path + ".tmp")
+        blocker.mkdir()
+        val s = SpoolFile(f, clock = { 20L })
+        val failure = runCatching { s.read() }.exceptionOrNull()
+        assertTrue(failure is java.io.IOException)
+        // The damaged file is still in place and a copy of it is set aside.
+        assertEquals(torn, f.readText())
+        assertEquals(torn, File(tmp.root, "spool.json.damaged-20").readText())
+        // The next call finds the damage again: the disk heals, and the salvage lands.
+        blocker.delete()
+        assertEquals(listOf("w1", "w2"), ids(SpoolFile(f, clock = { 21L }).read()))
+        assertEquals(listOf("w1", "w2"), ids(SpoolFile(f).read()))
+        assertTrue(f.readText().startsWith("{"))
+    }
+
+    @Test fun theSalvageWriteFailingDoesNotLetTheEntriesLeaveOnTheNextAdd() {
+        val f = File(tmp.root, "spool.json")
+        f.writeText(InboxSpool.add(null, "w1", "m", wrap("w1"), now).dropLast(1)) // torn right after the entry
+        val blocker = File(f.path + ".tmp").also { it.mkdir() }
+        val s = SpoolFile(f)
+        assertTrue(runCatching { s.add("w2", "m", wrap("w2"), now, null) }.isFailure)
+        blocker.delete()
+        s.add("w2", "m", wrap("w2"), now, null)
+        assertEquals(listOf("w1", "w2"), ids(s.read()))
     }
 
     @Test fun aTruncatedFileKeepsItsBytesAsideAndItsReadableEntriesInTheFreshSpool() {
@@ -286,5 +345,67 @@ class SpoolFileTest {
         f.writeText("\u0000\u0000garbage")
         assertEquals("[]", SpoolFile(f, clock = { 2L }).read())
         assertFalse(f.exists())
+    }
+
+    // ---- G6: only held ids are tombstoned, and an unchanged spool is not rewritten ----------------
+
+    @Test fun anIdTheSpoolNeverHeldIsNotTombstonedAndNothingIsWritten() {
+        val f = File(tmp.root, "spool.json")
+        var syncs = 0
+        val s = SpoolFile(f, clock = { now }, syncDirectory = { syncs++ })
+        s.add("w1", "m", wrap("w1"), now, null)
+        val written = f.readText()
+        val syncsAfterAdd = syncs
+        // A LAN status, an ask, a duplicate: none was ever held.
+        s.remove("""["status-1","ask-1","dup"]""")
+        s.remove("[]")
+        s.remove("not json")
+        assertEquals(written, f.readText())
+        assertEquals("no write, so no fsync", syncsAfterAdd, syncs)
+        // And they left no tombstone behind: a wrap with such an id is admitted.
+        s.add("status-1", "m", wrap("status-1"), now + 1, null)
+        assertEquals(listOf("w1", "status-1"), ids(s.read()))
+    }
+
+    @Test fun aHeldIdIsTombstonedAndTheForeignOnesBesideItAreNot() {
+        val s = SpoolFile(File(tmp.root, "spool.json"), clock = { now })
+        s.add("w1", "m", wrap("w1"), now, null)
+        s.remove("""["w1","ghost"]""")
+        s.add("w1", "m", wrap("w1"), now + 1, null)   // a replay of the held one: refused
+        s.add("ghost", "m", wrap("ghost"), now + 2, null) // never held: admitted
+        assertEquals(listOf("ghost"), ids(s.read()))
+    }
+
+    @Test fun consumingAHeldIdWritesOnceWithOneFsyncOfTheFileAndOneOfTheDirectory() {
+        val f = File(tmp.root, "spool.json")
+        var syncs = 0
+        val s = SpoolFile(f, clock = { now }, syncDirectory = { syncs++ })
+        s.add("w1", "m", wrap("w1"), now, null)
+        s.add("w2", "m", wrap("w2"), now, null)
+        val before = syncs
+        s.remove("""["w1"]""")
+        assertEquals(before + 1, syncs)
+        assertEquals(listOf("w2"), ids(s.read()))
+    }
+
+    @Test fun anAddOfAnAlreadyHeldWrapWritesNothing() {
+        val f = File(tmp.root, "spool.json")
+        var syncs = 0
+        val s = SpoolFile(f, syncDirectory = { syncs++ })
+        s.add("w1", "m", wrap("w1"), now, null)
+        val before = syncs
+        s.add("w1", "m", wrap("w1"), now, null)
+        assertEquals(before, syncs)
+    }
+
+    // ---- G4: a released machine's bucket through the file --------------------------------------
+
+    @Test fun theReleasedSetReachesTheCapsThroughTheFile() {
+        val s = SpoolFile(File(tmp.root, "spool.json"))
+        val roster = setOf("real", "gone")
+        s.add("p", "real", wrap("p"), now, roster, setOf("gone"))
+        for (i in 1..40) s.add("g$i", "gone", wrap("g$i"), now + i, roster, setOf("gone"))
+        assertEquals(1 + InboxSpool.RELEASED_CAP, ids(s.read()).size)
+        assertTrue("p" in ids(s.read()))
     }
 }

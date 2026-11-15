@@ -52,6 +52,12 @@
             </intent-filter>
         </receiver>
 
+        <!-- Resets the count on a shared "not paired" row when it is swiped away.
+             Reached only by the explicit PendingIntent the app itself posts. -->
+        <receiver
+            android:name=".service.DismissReceiver"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -20,8 +20,8 @@ class CarrierStoreTest {
     private fun ids(json: String): List<String> =
         JSONArray(json).let { a -> (0 until a.length()).map { a.getJSONObject(it).getString("id") } }
 
-    private fun store(prefs: FakePrefs = FakePrefs()) =
-        CarrierStore(prefs, SpoolFile(File(tmp.root, "inbox-spool.json"), clock = { now }))
+    private fun store(prefs: FakePrefs = FakePrefs(), clock: () -> Long = { now }) =
+        CarrierStore(prefs, SpoolFile(File(tmp.root, "inbox-spool.json"), clock = { now }), clock)
 
     private fun roster(vararg e: RosterEntry) = RosterPayload(e.toList())
 
@@ -130,5 +130,81 @@ class CarrierStoreTest {
         s.consumeInboxSpool("""["w1"]""")
         s.spoolInboxWrap("w1", real, wrap("w1"), now + 30)
         assertEquals("[]", s.inboxSpool())
+    }
+
+    // ---- G5: the stored roster ages released entries out ------------------------------------
+
+    private fun releasedEntry(machine: String, at: Long?) =
+        RosterEntry(machine, "Mia", "Pixel 6", paired = false, released = true, releasedAt = at)
+
+    @Test fun releasedAtSurvivesTheStoredRoster() {
+        val s = store()
+        s.saveRoster(roster(RosterEntry(real, "Leo", "Tab"), releasedEntry("gone", now - 100), releasedEntry("old", null)))
+        val r = s.roster()
+        assertEquals(now - 100, r.first { it.machine == "gone" }.releasedAt)
+        assertNull(r.first { it.machine == "old" }.releasedAt)
+        assertNull(r.first { it.machine == real }.releasedAt)
+    }
+
+    @Test fun aReleasedEntryLeavesTheStoredRosterOnceItsFourteenDaysAreOver() {
+        val prefs = FakePrefs()
+        store(prefs).saveRoster(roster(RosterEntry(real, "Leo", "Tab"), releasedEntry("gone", now)))
+        val day = 24L * 60 * 60
+        assertEquals(setOf(real, "gone"), store(prefs) { now + 14 * day }.roster().map { it.machine }.toSet())
+        // Three weeks on, with no new push from the console: the carrier forgets it by itself.
+        val later = store(prefs) { now + 14 * day + 1 }
+        assertEquals(listOf(real), later.roster().map { it.machine })
+        assertEquals(setOf(real), later.knownMachines())
+        assertEquals(emptySet<String>(), later.releasedMachines())
+    }
+
+    @Test fun aSingleUnusableStoredEntryIsSkippedAndTheRestKept() {
+        val prefs = FakePrefs()
+        prefs.edit().putString("roster", """[{"machine":"a","childName":"","deviceLabel":"x"},{"machine":"b","childName":"Mia","deviceLabel":"x"}]""").apply()
+        assertEquals(listOf("b"), store(prefs).roster().map { it.machine })
+    }
+
+    @Test fun releasedMachinesAreOnlyThoseNamedPurelyAsReleased() {
+        val s = store()
+        s.saveRoster(roster(RosterEntry(real, "Leo", "Tab"), releasedEntry("gone", now), releasedEntry(real, now), releasedEntry("g2", null)))
+        assertEquals(setOf("gone", "g2"), s.releasedMachines())
+    }
+
+    // ---- G4: a released machine's own spool bucket -------------------------------------------
+
+    @Test fun aReleasedMachineNeverEvictsAPairedWardsHeldPresses() {
+        val s = store()
+        s.saveRoster(roster(RosterEntry(real, "Mia", "Pixel 6"), releasedEntry("gone", now)))
+        s.spoolInboxWrap("press", real, wrap("press"), now)
+        for (i in 1..(InboxSpool.KNOWN_CAP + 50)) s.spoolInboxWrap("g$i", "gone", wrap("g$i"), now + i)
+        val held = ids(s.inboxSpool())
+        assertTrue("press" in held)
+        // Only its own bucket: the newest 20.
+        assertEquals(1 + InboxSpool.RELEASED_CAP, held.size)
+        assertTrue("g${InboxSpool.KNOWN_CAP + 50}" in held)
+        assertFalse("g1" in held)
+    }
+
+    @Test fun eachReleasedMachineHasItsOwnBucket() {
+        val s = store()
+        s.saveRoster(roster(RosterEntry(real, "Mia", "Pixel 6"), releasedEntry("g1", now), releasedEntry("g2", now)))
+        for (i in 1..30) s.spoolInboxWrap("a$i", "g1", wrap("a$i"), now + i)
+        for (i in 1..30) s.spoolInboxWrap("b$i", "g2", wrap("b$i"), now + i)
+        val held = ids(s.inboxSpool())
+        assertEquals(2 * InboxSpool.RELEASED_CAP, held.size)
+        assertEquals(InboxSpool.RELEASED_CAP, held.count { it.startsWith("a") })
+        assertEquals(InboxSpool.RELEASED_CAP, held.count { it.startsWith("b") })
+    }
+
+    // ---- G2: the hourly sound ----------------------------------------------------------------
+
+    @Test fun theStrangerSoundIsClaimedOncePerHourAndSurvivesARestart() {
+        val prefs = FakePrefs()
+        var t = now
+        assertTrue(store(prefs) { t }.claimUnpairedSound())
+        t += 3599
+        assertFalse(store(prefs) { t }.claimUnpairedSound())
+        t += 1
+        assertTrue(store(prefs) { t }.claimUnpairedSound())
     }
 }

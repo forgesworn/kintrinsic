@@ -28,8 +28,35 @@ class RosterTest {
         assertNull(RosterPayload.parse("""{"v":2,"entries":[]}"""))
     }
 
-    @Test fun rejectsAnEntryMissingAField() {
-        assertNull(RosterPayload.parse(json(entries = """[{"machine":"$machine","childName":"Mia"}]""")))
+    // ---- G9: one bad entry never rejects the push ---------------------------------
+
+    @Test fun anEntryMissingOrEmptyInAFieldIsSkippedAndTheRestKept() {
+        val other = "b".repeat(64)
+        val good = """{"machine":"$other","childName":"Leo","deviceLabel":"Pixel 4a"}"""
+        val bad = listOf(
+            """{"machine":"$machine","childName":"Mia"}""",
+            """{"machine":"$machine","childName":"","deviceLabel":"Pixel 6"}""",
+            """{"machine":"$machine","childName":"Mia","deviceLabel":""}""",
+            """{"childName":"Mia","deviceLabel":"Pixel 6"}""",
+            """{"machine":"","childName":"Mia","deviceLabel":"Pixel 6"}""",
+            "\"not an object\"",
+            "null",
+            "7",
+        )
+        for (b in bad) {
+            val r = RosterPayload.parse(json(entries = "[$b,$good]"))
+            assertEquals(b, listOf(RosterEntry(other, "Leo", "Pixel 4a")), r!!.entries)
+        }
+    }
+
+    @Test fun aPushOfOnlyBadEntriesIsAnEmptyRosterNotARejection() {
+        val r = RosterPayload.parse(json(entries = """[{"machine":"$machine","childName":""}]"""))
+        assertTrue(r!!.entries.isEmpty())
+    }
+
+    @Test fun aBadEnvelopeIsStillRejectedWhole() {
+        assertNull(RosterPayload.parse("""{"v":1,"entries":"x"}"""))
+        assertNull(RosterPayload.parse("""[]"""))
     }
 
     @Test fun rejectsGarbageJson() {
@@ -125,5 +152,57 @@ class RosterTest {
         val roster = listOf(RosterEntry(machine, "Mia", "Pixel 6", paired = false, released = true))
         assertEquals(false, isReleased("b".repeat(64), roster))
         assertEquals(false, isReleased("", roster))
+    }
+
+    // ---- G5: releasedAt and the 14-day grace period -------------------------------
+
+    private val now = 1_800_000_000L
+    private fun released(at: String?) =
+        """{"machine":"$machine","childName":"Mia","deviceLabel":"Pixel 6","released":true${at?.let { ",\"releasedAt\":$it" } ?: ""}}"""
+
+    @Test fun releasedAtIsReadFromAReleasedEntry() {
+        val e = RosterPayload.parse(json(entries = "[${released("${now - 5}")}]"), now)!!.entries[0]
+        assertEquals(now - 5, e.releasedAt)
+        assertTrue(e.released)
+    }
+
+    @Test fun aReleasedEntryWithNoUsableReleasedAtIsKeptWithNone() {
+        for (bad in listOf(null, "\"soon\"", "true", "-4", "null", "{}")) {
+            val e = RosterPayload.parse(json(entries = "[${released(bad)}]"), now)!!.entries
+            assertEquals(bad, 1, e.size)
+            assertNull(bad, e[0].releasedAt)
+        }
+    }
+
+    @Test fun releasedAtOnAnEntryThatIsNotReleasedIsIgnored() {
+        val e = RosterPayload.parse(json(entries = """[{"machine":"$machine","childName":"Mia","deviceLabel":"P","releasedAt":$now}]"""), now)!!.entries[0]
+        assertNull(e.releasedAt)
+    }
+
+    @Test fun aReleasedEntryIsDroppedOnceItsFourteenDaysAreOver() {
+        val edge = now - RELEASED_GRACE_SECS
+        // Exactly 14 days old is still kept; one second more is gone.
+        assertEquals(1, RosterPayload.parse(json(entries = "[${released("$edge")}]"), now)!!.entries.size)
+        assertEquals(0, RosterPayload.parse(json(entries = "[${released("${edge - 1}")}]"), now)!!.entries.size)
+    }
+
+    @Test fun expiryNeverTouchesAPairedEntryAndKeepsTheOthers() {
+        val old = now - RELEASED_GRACE_SECS - 1000
+        val r = RosterPayload.parse(
+            json(entries = """[{"machine":"p","childName":"Leo","deviceLabel":"X","releasedAt":$old},${released("$old")}]"""),
+            now,
+        )!!
+        assertEquals(listOf("p"), r.entries.map { it.machine })
+    }
+
+    @Test fun releasedAtOfIsTheLatestForAMachineOnlyNamedAsReleased() {
+        val roster = listOf(
+            RosterEntry(machine, "Mia", "Pixel 6", paired = false, released = true, releasedAt = 100),
+            RosterEntry(machine, "Mia", "Pixel 6", paired = false, released = true, releasedAt = 300),
+        )
+        assertEquals(300L, releasedAtOf(machine, roster))
+        assertNull(releasedAtOf(machine, roster + RosterEntry(machine, "Mia", "Pixel 6")))
+        assertNull(releasedAtOf("b".repeat(64), roster))
+        assertNull(releasedAtOf(machine, listOf(RosterEntry(machine, "Mia", "P", paired = false, released = true))))
     }
 }

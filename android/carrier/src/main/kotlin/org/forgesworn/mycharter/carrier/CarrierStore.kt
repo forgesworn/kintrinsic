@@ -21,6 +21,8 @@ class CarrierStore internal constructor(
     private val prefs: SharedPreferences,
     /** The relay-delivered emergency audits held for the console (see [InboxSpool]). */
     private val spool: SpoolFile,
+    /** Unix seconds; a seam for the roster's 14-day expiry and the stranger sound limit. */
+    private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
     constructor(context: Context) : this(
         context.getSharedPreferences("carrier", Context.MODE_PRIVATE),
@@ -66,7 +68,8 @@ class CarrierStore internal constructor(
                     .put("childName", e.childName)
                     .put("deviceLabel", e.deviceLabel)
                     .put("paired", e.paired)
-                    .put("released", e.released),
+                    .put("released", e.released)
+                    .also { o -> e.releasedAt?.let { o.put("releasedAt", it) } },
             )
         }
         prefs.edit().putString(K_ROSTER, arr.toString()).apply()
@@ -74,21 +77,14 @@ class CarrierStore internal constructor(
 
     /** Empty (never null, never throws) when absent or unreadable — the
      *  roster is a convenience, so a storage hiccup degrades it to "no
-     *  names", not a [Notifier] crash. */
-    fun roster(): List<RosterEntry> {
+     *  names", not a [Notifier] crash. A released entry is dropped 14 days
+     *  after its `releasedAt`, even if no newer push has replaced the stored
+     *  roster; one unusable entry is skipped on its own. */
+    fun roster(nowSecs: Long = clock()): List<RosterEntry> {
         val json = prefs.getString(K_ROSTER, null) ?: return emptyList()
         val arr = try { JSONArray(json) } catch (_: Exception) { return emptyList() }
         return (0 until arr.length()).mapNotNull { i ->
-            val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            val machine = o.optString("machine", "")
-            val childName = o.optString("childName", "")
-            val deviceLabel = o.optString("deviceLabel", "")
-            if (machine.isEmpty() || childName.isEmpty() || deviceLabel.isEmpty()) {
-                null
-            } else {
-                val released = releasedField(o)
-                RosterEntry(machine, childName, deviceLabel, paired = pairedField(o) && !released, released = released)
-            }
+            RosterPayload.entryOf(arr.optJSONObject(i))?.takeUnless { it.expired(nowSecs) }
         }
     }
 
@@ -113,20 +109,54 @@ class CarrierStore internal constructor(
 
     /**
      * Note a report from a sender that is not in the (known, non-empty) roster.
-     * Returns how many distinct such reports are held now (at most
-     * [UNPAIRED_CAP]), or null when this wrap id was already counted (a replay,
-     * which must not re-alert). A separate small bounded set, so strangers can
-     * neither grow without limit nor push a paired ward's entries out of
-     * [markAuditSeen]. A null [wrapId] (unreadable) is not counted.
+     * Returns how many distinct such reports have come since the shared row was
+     * last dismissed (at least 1, and at most [UNPAIRED_CAP]; see [resetUnpaired]),
+     * or null when this wrap id was already counted (a replay, which must not
+     * re-alert). A separate small bounded set, so strangers can neither grow
+     * without limit nor push a paired ward's entries out of [markAuditSeen]. A
+     * null [wrapId] (unreadable) is not counted.
      */
-    @Synchronized
-    fun noteUnpaired(wrapId: String?): Int? {
-        val held = list(K_UNPAIRED)
-        if (wrapId == null) return held.size.coerceAtLeast(1)
-        if (wrapId in held) return null
-        val next = (held + wrapId).takeLast(UNPAIRED_CAP)
-        prefs.edit().putString(K_UNPAIRED, JSONArray(next).toString()).apply()
-        return next.size
+    fun noteUnpaired(wrapId: String?): Int? = noteStranger(K_UNPAIRED, K_UNPAIRED_SINCE, wrapId)
+
+    /**
+     * The same for an ask from a phone that is not paired (a stranger or a released
+     * machine), by request id. Never touches [markSeen]'s list, so a flood of
+     * these cannot push a paired ward's request ids out and re-alert them.
+     */
+    fun noteUnpairedAsk(reqId: String?): Int? = noteStranger(K_UNPAIRED_ASKS, K_UNPAIRED_ASKS_SINCE, reqId)
+
+    private fun noteStranger(listKey: String, sinceKey: String, id: String?): Int? = synchronized(LOCK) {
+        val since = prefs.getInt(sinceKey, 0).coerceIn(0, UNPAIRED_CAP)
+        if (id == null) return since.coerceAtLeast(1)
+        val held = list(listKey)
+        if (id in held) return null
+        val next = (since + 1).coerceAtMost(UNPAIRED_CAP)
+        prefs.edit()
+            .putString(listKey, JSONArray((held + id).takeLast(UNPAIRED_CAP)).toString())
+            .putInt(sinceKey, next)
+            .apply()
+        next
+    }
+
+    /**
+     * The guardian dismissed the shared row: the next report counts from one.
+     * The ids already seen are kept, so a relay replay of them is still no news.
+     */
+    fun resetUnpaired(asks: Boolean) = synchronized(LOCK) {
+        prefs.edit().putInt(if (asks) K_UNPAIRED_ASKS_SINCE else K_UNPAIRED_SINCE, 0).apply()
+    }
+
+    /**
+     * True (and noted) when the shared stranger emergency row may SOUND now: at most
+     * once per [UNPAIRED_SOUND_SECS]. Otherwise the row updates silently. A last time
+     * in the future (the clock went back) does not hold the sound back.
+     */
+    fun claimUnpairedSound(): Boolean = synchronized(LOCK) {
+        val now = clock()
+        val last = prefs.getLong(K_UNPAIRED_SOUND, -1L)
+        if (last in 0..now && now - last < UNPAIRED_SOUND_SECS) return false
+        prefs.edit().putLong(K_UNPAIRED_SOUND, now).apply()
+        true
     }
 
     private fun list(key: String): List<String> {
@@ -161,16 +191,24 @@ class CarrierStore internal constructor(
      */
     fun knownRoster(): Set<String>? = knownMachines()?.takeIf { it.isNotEmpty() }
 
+    /** The machines the roster names only as released (disconnected in the last 14 days). */
+    fun releasedMachines(): Set<String> {
+        val r = roster()
+        return r.filter { it.released }.map { it.machine }.filter { isReleased(it, r) }.toSet()
+    }
+
     /** Hold a relay-delivered emergency audit until the console consumes it.
      *  Synchronous (never `apply()`), so it is on disk before the alert. Throws on failure.
      *  An entry admitted with no usable roster stays unflagged and follows the next
-     *  non-empty one; it is never stamped known. */
+     *  non-empty one; it is never stamped known. A released machine's entries have
+     *  their own bucket, so they never evict a paired ward's. */
     fun spoolInboxWrap(id: String, machine: String, wrapJson: String, nowSecs: Long) =
-        spool.add(id, machine, wrapJson, nowSecs, knownRoster())
+        spool.add(id, machine, wrapJson, nowSecs, knownRoster(), releasedMachines())
 
-    /** The spooled entries, as the console's inbox shape. Throws only when a
-     *  damaged spool file could not be set aside (the bridge degrades that to
-     *  "link only"); an unreadable file is otherwise set aside and salvaged. */
+    /** The spooled entries, as the console's inbox shape. Throws when the file
+     *  cannot be read (an I/O error, which is never taken for damage) or a damaged
+     *  one cannot be set aside or rewritten (the bridge degrades that to "link
+     *  only"); a file whose text will not parse is set aside and salvaged. */
     fun inboxSpool(): String = spool.read()
 
     /** The console has persisted these ids (a JSON array of strings): forget them. */
@@ -200,10 +238,19 @@ class CarrierStore internal constructor(
         private const val K_SEEN = "seenReqIds"
         private const val K_SEEN_AUDIT = "seenAuditKeys"
         private const val K_UNPAIRED = "unpairedWraps"
+        private const val K_UNPAIRED_SINCE = "unpairedSinceDismissed"
+        private const val K_UNPAIRED_ASKS = "unpairedAskIds"
+        private const val K_UNPAIRED_ASKS_SINCE = "unpairedAsksSinceDismissed"
+        private const val K_UNPAIRED_SOUND = "unpairedSoundAt"
+        /** One lock for the counters: the service and the dismissal receiver each own a [CarrierStore]. */
+        private val LOCK = Any()
         private const val K_LINK_NAME = "linkInstanceName"
         private const val SEEN_CAP = 200
         private const val AUDIT_SEEN_CAP = 200
         /** Most distinct unpaired-sender reports remembered (and the most the alert counts). */
         const val UNPAIRED_CAP = 50
+
+        /** The shared stranger emergency row sounds at most once in this long. */
+        const val UNPAIRED_SOUND_SECS = 60L * 60
     }
 }

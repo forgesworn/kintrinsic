@@ -6,6 +6,7 @@ import android.system.OsConstants
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import org.json.JSONArray
 
 /**
  * [InboxSpool]'s file: its own file in the carrier's private storage (never the
@@ -21,10 +22,10 @@ import java.io.IOException
  * directory is fsynced, so a crash or power cut leaves the old file or the new
  * one, never half of one, and a rename that was reported is not lost.
  * A file that cannot be read is NEVER treated as an empty spool and written
- * over: a read that fails is retried once, and if the file is still unreadable
- * it is moved aside (see [loadLocked]) so held presses are kept for a human.
- * Every entry that still parses is salvaged into the fresh spool. Callers are
- * on worker or bridge threads, never the UI thread.
+ * over: a read that fails is retried once and then throws, and it is never
+ * taken for damage. Text that was read but is not a spool is kept aside for a
+ * human and every entry that still parses is salvaged into the fresh spool (see
+ * [loadLocked]). Callers are on worker or bridge threads, never the UI thread.
  *
  * [lock], [betweenReadAndWrite], [readText] and [syncDirectory] are test seams: the
  * lock is the shared one in production, the hook runs inside an add or remove
@@ -47,68 +48,114 @@ class SpoolFile(
     fun read(): String = synchronized(lock) { loadLocked().entries }
 
     /** Hold a wrap (see [InboxSpool.add]). Throws on a write failure, or if a damaged file could not be set aside. */
-    fun add(id: String, machine: String, wrapJson: String, nowSecs: Long, known: Set<String>?) =
+    fun add(
+        id: String,
+        machine: String,
+        wrapJson: String,
+        nowSecs: Long,
+        known: Set<String>?,
+        released: Set<String> = emptySet(),
+    ) =
         synchronized(lock) {
             val before = loadLocked()
             betweenReadAndWrite()
             val consumed = InboxSpool.pruneTombstones(before.consumed, nowSecs)
-            val entries = InboxSpool.add(before.entries, id, machine, wrapJson, nowSecs, known, consumed.keys)
+            val entries = InboxSpool.add(before.entries, id, machine, wrapJson, nowSecs, known, consumed.keys, released)
             if (entries != before.entries || consumed != before.consumed) write(InboxSpool.Doc(entries, consumed))
         }
 
-    /** Forget these ids (a JSON array of strings) and remember them as consumed. */
+    /**
+     * Forget these ids (a JSON array of strings) and remember as consumed those the
+     * spool HELD. An id it never held (a LAN status, an ask, a duplicate) is not
+     * tombstoned, so it cannot spend the tombstones a held audit's replay guard
+     * needs; and when no held entry changes nothing is written (no fsync).
+     */
     fun remove(idsJson: String) = synchronized(lock) {
         val before = loadLocked()
         betweenReadAndWrite()
-        val entries = InboxSpool.remove(before.entries, idsJson)
-        val consumed = InboxSpool.tombstone(before.consumed, idsJson, clock())
-        if (entries != before.entries || consumed != before.consumed) write(InboxSpool.Doc(entries, consumed))
+        val held = InboxSpool.held(before.entries, idsJson)
+        if (held.isEmpty()) return@synchronized
+        val heldJson = JSONArray(held).toString()
+        val entries = InboxSpool.remove(before.entries, heldJson)
+        if (entries == before.entries) return@synchronized
+        val consumed = InboxSpool.tombstone(before.consumed, heldJson, clock())
+        write(InboxSpool.Doc(entries, consumed))
     }
 
     /**
-     * Absent is an empty spool. Present and readable is its content. A read that
-     * fails, or text that is not a spool, is tried once more. Still unreadable,
-     * the file is moved aside to `<name>.damaged-<unix>` (the 3 newest are kept)
-     * untouched, reported, and a fresh spool starts holding every entry that
-     * could be salvaged from it. If it cannot be moved aside this THROWS, so
-     * nothing is ever written over it.
+     * Absent is an empty spool. Present and readable is its content. A read is
+     * tried twice. If the LAST try fails to read (an I/O error), this THROWS: a
+     * read error is never taken for damage, so a file whose bytes may be intact is
+     * never set aside or written over, and the next call tries again. Only text
+     * that is read but is not a spool is damage: the file is kept as
+     * `<name>.damaged-<unix>` (the 3 newest are kept) and reported, and a fresh
+     * spool starts holding every entry that could be salvaged from it.
+     *
+     * The damaged file is only replaced once the fresh spool has been written (the
+     * rename is atomic): a set-aside COPY is made first, then the write. If the
+     * copy or the write fails this THROWS with the damaged file still in place, so
+     * the next call finds the damage again and retries, and nothing is lost. When
+     * nothing can be salvaged there is nothing to write, and the file is moved aside.
      */
     private fun loadLocked(): InboxSpool.Doc {
         if (!file.exists()) return InboxSpool.Doc("[]", emptyMap())
-        var text: String? = null
+        var bad: String? = null
+        var failure: Exception? = null
         repeat(2) {
-            if (text == null) {
-                val t = try { readText(file) } catch (_: Exception) { null }
-                if (t != null && InboxSpool.decode(t) != null) text = t
-            }
+            val t = try { readText(file) } catch (e: Exception) { failure = e; return@repeat }
+            failure = null
+            InboxSpool.decode(t)?.let { return it }
+            bad = t
         }
-        text?.let { return InboxSpool.decode(it)!! }
-        // Whatever can be read from the damaged bytes (nothing, if they cannot be read at all).
-        val salvaged = try { InboxSpool.salvage(readText(file)) } catch (_: Exception) { "[]" }
-        val aside = moveAside()
-        onDamaged(aside)
+        failure?.let { throw it }
+        val salvaged = InboxSpool.salvage(bad ?: "")
+        if (salvaged == "[]") {
+            onDamaged(moveAside())
+            return InboxSpool.Doc("[]", emptyMap())
+        }
+        onDamaged(copyAside())
         val doc = InboxSpool.Doc(salvaged, emptyMap())
-        // A fresh spool with the salvage in it. If this write fails the entries are
-        // still returned, and the next successful write carries them; the set-aside
-        // copy keeps everything either way.
-        if (salvaged != "[]") runCatching { write(doc) }
+        write(doc)
         return doc
     }
 
-    private fun moveAside(): File {
+    /** A name for a set-aside copy that does not exist yet. */
+    private fun asideTarget(): File {
         val dir = file.absoluteFile.parentFile
             ?: throw IOException("no directory for ${file.name}")
-        val prefix = "${file.name}$DAMAGED"
         var stamp = clock()
-        var target = File(dir, "$prefix$stamp")
-        while (target.exists()) target = File(dir, "$prefix${++stamp}")
+        var target = File(dir, "${file.name}$DAMAGED$stamp")
+        while (target.exists()) target = File(dir, "${file.name}$DAMAGED${++stamp}")
+        return target
+    }
+
+    private fun moveAside(): File {
+        val target = asideTarget()
         if (!file.renameTo(target)) throw IOException("could not set aside a damaged ${file.name}")
-        // Keep only the newest copies: the damaged files are evidence, not a log.
+        pruneAside()
+        return target
+    }
+
+    private fun copyAside(): File {
+        val target = asideTarget()
+        try {
+            file.copyTo(target)
+        } catch (e: Exception) {
+            target.delete()
+            throw IOException("could not set aside a copy of a damaged ${file.name}", e)
+        }
+        pruneAside()
+        return target
+    }
+
+    /** Keep only the newest copies: the damaged files are evidence, not a log. */
+    private fun pruneAside() {
+        val dir = file.absoluteFile.parentFile ?: return
+        val prefix = "${file.name}$DAMAGED"
         dir.listFiles { f -> f.name.startsWith(prefix) }
             ?.sortedByDescending { it.name.removePrefix(prefix).toLongOrNull() ?: 0L }
             ?.drop(KEEP_DAMAGED)
             ?.forEach { it.delete() }
-        return target
     }
 
     private fun write(doc: InboxSpool.Doc) {

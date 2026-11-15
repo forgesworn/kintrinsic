@@ -267,7 +267,9 @@ class CarrierService : Service() {
                 runCatching { store.spoolInboxWrap(wrapId, machine, eventJson, now) }
                     .onFailure { Log.w(TAG, "could not hold audit for the console: ${it.message}") }
             }
-            // The press time the ward stamped, when it is a plain number.
+            // The press time the ward stamped, when it is a plain number: the audit's own
+            // `at` and nothing else (never the wrap's created_at or the receive time), as
+            // the copy for a released phone compares it with the disconnect time.
             val at = if (verdict.has("at")) verdict.optLong("at", -1L).takeIf { it >= 0 } else null
             // Has the console told us its devices yet? An empty roster (a console
             // that booted without its household) is not evidence that this sender
@@ -283,10 +285,14 @@ class CarrierService : Service() {
             // strangers holds one notification slot and evicts nothing. An
             // unreadable id falls through to alert: a repeated alarm beats a
             // missed emergency. See [AuditAdmission].
-            when (val admission = AuditAdmission.decide(store, action, machine, at, wrapId, roster, rosterKnown)) {
+            val admission = AuditAdmission.decide(
+                store, action, machine, at, wrapId, roster, rosterKnown,
+                liveRows = { Notifier.liveEmergencyRows(this, it) },
+            )
+            when (admission) {
                 AuditAdmission.Skip -> return
                 is AuditAdmission.Unpaired -> {
-                    Notifier.notifyUnpaired(this, admission.count)
+                    Notifier.notifyUnpaired(this, admission.count, admission.sound)
                     return
                 }
                 AuditAdmission.Alert -> Unit
@@ -321,7 +327,19 @@ class CarrierService : Service() {
         }
         if (verdict.optString("type") != "request") return
         val reqId = verdict.optString("reqId", "")
-        if (reqId.isEmpty() || !store.markSeen(reqId)) return
+        val machine = verdict.optString("machine", "")
+        val roster = store.roster()
+        // Only a paired ward's ask is named as a child's. One from a stranger or a
+        // released machine folds into a single silent row: the console lands none of
+        // them, and a flood of them must not fill the shade (see [AskAdmission]).
+        when (val admission = AskAdmission.decide(store, reqId, machine, roster, store.knownRoster() != null)) {
+            AskAdmission.Skip -> return
+            is AskAdmission.Unpaired -> {
+                Notifier.notifyUnpairedAsks(this, admission.count)
+                return
+            }
+            AskAdmission.Notify -> Unit
+        }
         val minutes = verdict.optJSONObject("params")
             ?.optLong("minutesRequested", -1L)
             ?.takeIf { it >= 0 }
@@ -331,8 +349,8 @@ class CarrierService : Service() {
             reqId,
             verdict.optString("op"),
             minutes,
-            machine = verdict.optString("machine", ""),
-            roster = store.roster(),
+            machine = machine,
+            roster = roster,
         )
     }
 
