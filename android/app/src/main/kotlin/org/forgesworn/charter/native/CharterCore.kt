@@ -138,7 +138,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 6
+    const val EXPECTED_ABI_VERSION = 7
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -539,6 +539,59 @@ object CharterCore {
             },
         )
     }
+
+    /**
+     * A guardian's screen-lock reset, taken from the core exactly once. Holds
+     * the PIN, so [toString] leaves it out: a stray log line or exception
+     * message must never carry it.
+     */
+    class ScreenLockDirective(val id: String, val newPin: String, val ts: Long) {
+        val removes: Boolean get() = newPin.isEmpty()
+        override fun toString(): String = "ScreenLockDirective(id=$id, removes=$removes, ts=$ts)"
+    }
+
+    /**
+     * Parse a `charterTakeScreenLockReset` answer. `""`, an `{"error":…}`
+     * answer and anything malformed are all null: nothing to apply. Pure and
+     * PIN-safe: a parse failure is swallowed whole, never rethrown or logged,
+     * because its message could quote the input.
+     */
+    fun parseScreenLockDirective(raw: String): ScreenLockDirective? {
+        if (raw.isBlank()) return null
+        return try {
+            val o = JSONObject(raw)
+            if (o.has("error")) return null
+            val id = o.optString("id", "")
+            val pin = o.opt("newPin") as? String ?: return null
+            if (id.isEmpty() || !o.has("ts")) return null
+            ScreenLockDirective(id, pin, o.optLong("ts", 0L))
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** The parked reset, cleared as it is taken; null when none is waiting
+     *  (or the core is unavailable). */
+    fun takeScreenLockReset(): ScreenLockDirective? =
+        try {
+            parseScreenLockDirective(jni().charterTakeScreenLockReset())
+        } catch (_: Throwable) {
+            null
+        }
+
+    /** Report a taken reset's outcome. True when the core recorded it, false
+     *  when it already had one for that id, null when it could not take it
+     *  (not initialised, or its record would not read): send it again. */
+    fun reportScreenLockReset(id: String, result: String, atUnix: Long): Boolean? = runCatching {
+        val o = JSONObject(jni().charterReportScreenLockReset(id, result, atUnix))
+        if (o.optBoolean("ok", false)) o.optBoolean("recorded", false) else null
+    }.getOrNull()
+
+    /** Feed STATUS `screenLockSecure` / `screenLockResetReady` /
+     *  `screenLockResetSupported`. True on a change. */
+    fun setScreenLockState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean): Boolean = runCatching {
+        JSONObject(jni().charterSetScreenLockState(secure, resetReady, resetSupported)).optBoolean("changed", false)
+    }.getOrDefault(false)
 
     /** One forced-resolution rewrite (host -> answer) for SafeSearch / YouTube. */
     data class DnsRewrite(val host: String, val answer: String)

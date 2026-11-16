@@ -154,6 +154,28 @@ export interface SignOutcomeAt extends SignOutcome {
   issuedAt: number;
 }
 
+/** The device a screen-lock reset is for. */
+export interface ScreenLockResetTarget {
+  /** The device's own key (64 hex). */
+  machine: string;
+  /** The relays to publish to. */
+  relays: string[];
+  /** The device's name, for the confirm sheet only. */
+  label?: string;
+}
+
+/** What a sent reset carries back: never the PIN. */
+export interface ScreenLockResetOutcome {
+  ok: true;
+  /** 32 lowercase hex; the ward reports the outcome under it in STATUS. */
+  id: string;
+  /** Unix seconds, the guardian's true wall clock at signing. */
+  issuedAt: number;
+  /** The relays couldn't take it, and this phone's carrier is holding it until
+   *  the device is on the home network (it goes then). */
+  held?: true;
+}
+
 export interface Signer {
   /** Offline recovery: signed JSON, transferred locally to the ward. */
   signRelayConfig?(machine: string, relays: string[], label: string, battery?: import("../domain/battery").BatterySettings): Promise<string>;
@@ -273,6 +295,23 @@ export interface Signer {
     relays: string[],
     label?: string,
   ): Promise<{ ok: true }>;
+
+  /**
+   * Reset ONE device's screen lock to `newPin` (4 to 16 digits), or remove it
+   * (`newPin === ""`). Sent like `releaseDevice`: one wrap to the device, with
+   * no home-network queue. Resolves with the fresh reset `id` and the
+   * wall-clock `issuedAt` it was signed with, so the caller can match the
+   * ward's reply, and `held` when only the carrier has it. Throws on a
+   * malformed PIN, a device with no real key, or a ward that turned it down
+   * at once over the home network.
+   *
+   * The PIN is a secret: implementations must not log it, store it, or put it
+   * in a confirm sheet or an error message.
+   */
+  signScreenLockReset(
+    device: ScreenLockResetTarget,
+    newPin: string,
+  ): Promise<ScreenLockResetOutcome>;
 
   /**
    * Scan-to-pair: offer to be pinned by the ward whose QR we just scanned,

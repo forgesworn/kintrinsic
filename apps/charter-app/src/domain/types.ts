@@ -425,6 +425,24 @@ export interface Device {
    * and this record is only the intention it is compared with.
    */
   debugging?: DeviceDebugging;
+  /**
+   * The last screen-lock reset this guardian SENT to this device: only its
+   * `id` and when it was signed, so the card can find the ward's outcome for it
+   * in STATUS and say "Waiting for the device…" until then. Never the PIN or
+   * whether it sets or removes the lock. Dropped on a re-pair.
+   */
+  screenLockReset?: DeviceScreenLockReset;
+}
+
+/** The last screen-lock reset sent to a device — see `Device.screenLockReset`. */
+export interface DeviceScreenLockReset {
+  /** 32 lowercase hex, matched against STATUS `screenLockResets[].id`. */
+  id: string;
+  /** Unix seconds it was signed (the guardian's wall clock). */
+  issuedAt: number;
+  /** The relays couldn't take it; this phone is holding it until the device is
+   *  on the home network. */
+  held?: boolean;
 }
 
 /** The last `debugging` clause sent to a device — see `Device.debugging`. */

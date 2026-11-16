@@ -24,6 +24,8 @@ import UnlockDevice from "./UnlockDevice";
 import DeviceBattery from "./DeviceBattery";
 import DeviceRelays from "./DeviceRelays";
 import DeviceDebugging from "./DeviceDebugging";
+import DeviceScreenLock from "./DeviceScreenLock";
+import { screenLockSupport } from "../domain/screenLock";
 import SetupComputer from "./SetupComputer";
 import { ColorChoice } from "./ColorChoice";
 import "./child-admin.css";
@@ -669,6 +671,11 @@ function DeviceDetail({ child, device, onDone }: { child: Child; device: Device;
       {paired && (
         <div className="card device-section">
           <DeviceDebugging child={child} device={device} />
+        </div>
+      )}
+      {paired && device.platform === "android" && screenLockSupport(device, deviceStatus) === "offer" && (
+        <div className="card device-section">
+          <DeviceScreenLock child={child} device={device} />
         </div>
       )}
       {paired && (

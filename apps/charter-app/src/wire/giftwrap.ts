@@ -13,6 +13,7 @@
 import {
   finalizeEvent,
   generateSecretKey,
+  getPublicKey,
   nip44,
   verifyEvent,
   type EventTemplate,
@@ -26,6 +27,7 @@ export const CHARTER_DEVICE_CLAUSE = 31113;
 export const CHARTER_DEVICE_USAGE_SYNC = 31115;
 export const CHARTER_DEVICE_RELEASE = 31116;
 export const CHARTER_DEVICE_PAIR_OFFER = 31117;
+export const CHARTER_DEVICE_SCREEN_LOCK_RESET = 31122;
 export const SEAL = 13;
 export const GIFT_WRAP = 1059;
 export const MARKER: [string, string] = ["t", "charter-device"];
@@ -157,6 +159,103 @@ export async function giftWrapRelease(
     machinePubkey,
     guardian,
     createdAt,
+  );
+}
+
+/**
+ * The SCREEN-LOCK RESET payload: reset the phone's own screen lock to a new
+ * PIN, or remove it. `issuedAt` is the guardian's true wall clock at signing:
+ * the ward accepts it only within an hour back and five minutes forward, so it
+ * is never a bumped or monotonic value.
+ *
+ * The PIN is never in it in the clear: it is SEALED to the device
+ * ({@link sealScreenLockPin}) before anything is signed, because a guardian
+ * who signs with Signet hands the bunker this content to sign and to encrypt,
+ * and the bunker must never see the PIN.
+ */
+export interface ScreenLockResetPayload {
+  v: 1;
+  /** 32 lowercase hex characters, fresh per reset; the ward reports its outcome under it. */
+  id: string;
+  machine: string;
+  issuedAt: number;
+  /** The x-only public half of the one-use key the PIN was sealed with. */
+  epk: string;
+  /** NIP-44 v2 of the PIN as a JSON string (`"123456"`, or `""` to remove), to `machine`. */
+  newPinSealed: string;
+}
+
+/** The order of secp256k1: a secret key is a whole number in 1..n-1. */
+const SECP256K1_ORDER = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+
+function isValidScalar(bytes: Uint8Array): boolean {
+  const k = BigInt("0x" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(""));
+  return k > 0n && k < SECP256K1_ORDER;
+}
+
+/** Fixed randomness, for the golden vector only. Production draws its own. */
+export interface ScreenLockSealRandomness {
+  ephemeralSecretKey: Uint8Array;
+  nonce: Uint8Array;
+}
+
+/**
+ * Seal `newPin` (`""` or 4 to 16 digits) to the device's `machinePubkey` with a
+ * one-use key made here, from `crypto.getRandomValues`, and dropped (zeroed)
+ * before this returns. Only the device's own key can open the result, so
+ * nothing PIN-bearing ever reaches the guardian's signer.
+ *
+ * The sealed plaintext is the PIN as a JSON string: a NIP-44 plaintext cannot
+ * be empty, and every PIN, and a removal, pads to the same ciphertext length.
+ */
+export function sealScreenLockPin(
+  newPin: string,
+  machinePubkey: string,
+  fixed?: ScreenLockSealRandomness,
+): { epk: string; newPinSealed: string } {
+  if (newPin !== "" && !/^[0-9]{4,16}$/.test(newPin)) {
+    throw new Error("A screen lock PIN is 4 to 16 digits, and nothing else.");
+  }
+  const sk = new Uint8Array(32);
+  if (fixed) {
+    sk.set(fixed.ephemeralSecretKey);
+  } else {
+    do crypto.getRandomValues(sk);
+    while (!isValidScalar(sk));
+  }
+  const nonce = new Uint8Array(32);
+  if (fixed) nonce.set(fixed.nonce);
+  else crypto.getRandomValues(nonce);
+  let key: Uint8Array | undefined;
+  try {
+    key = nip44.getConversationKey(sk, machinePubkey);
+    return {
+      epk: getPublicKey(sk),
+      newPinSealed: nip44.encrypt(JSON.stringify(newPin), key, nonce),
+    };
+  } finally {
+    sk.fill(0);
+    key?.fill(0);
+  }
+}
+
+/**
+ * Build the inner SCREEN-LOCK RESET event (31122) and gift-wrap it to the
+ * MACHINE whose lock is being reset, exactly as RELEASE is wrapped. Only the
+ * pinned guardian key can produce it, so a child cannot reset their own lock.
+ * The payload's PIN is already sealed: the guardian's signer signs and
+ * encrypts ciphertext only.
+ */
+export async function giftWrapScreenLockReset(
+  payload: ScreenLockResetPayload,
+  guardian: GuardianOps,
+): Promise<NostrEvent> {
+  return giftWrapSignedInner(
+    CHARTER_DEVICE_SCREEN_LOCK_RESET,
+    JSON.stringify(payload),
+    payload.machine,
+    guardian,
+    payload.issuedAt,
   );
 }
 

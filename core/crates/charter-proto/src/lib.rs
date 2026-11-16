@@ -15,6 +15,7 @@ pub mod op;
 pub mod params;
 pub mod release;
 pub mod request;
+pub mod screen_lock;
 pub mod status;
 pub mod times;
 pub mod usage_sync;
@@ -44,10 +45,16 @@ pub use params::{
 };
 pub use release::ReleasePayload;
 pub use request::{RequestPayload, REQUEST_VERSION};
+pub use screen_lock::{
+    is_plausible_seal, is_valid_new_pin, is_valid_reset_id, screen_lock_pin_from_plaintext,
+    screen_lock_pin_plaintext, ScreenLockPayloadError, ScreenLockResetPayload,
+    ScreenLockResetResult, SCREEN_LOCK_PIN_MAX_DIGITS, SCREEN_LOCK_PIN_MIN_DIGITS,
+    SCREEN_LOCK_RESET_ID_LEN, SCREEN_LOCK_RESET_VERSION, SCREEN_LOCK_SEALED_MAX_LEN,
+};
 pub use status::{
     AppRef, EnforcementGap, GroupSpent, InstallChange, InstallChangeKind, InstallWindowReport,
-    StatusLockReason, StatusPayload, StatusSource, MAX_STATUS_APPS, MAX_STATUS_GROUPS,
-    STATUS_VERSION,
+    ScreenLockResetOutcome, StatusLockReason, StatusPayload, StatusSource, MAX_STATUS_APPS,
+    MAX_STATUS_GROUPS, MAX_STATUS_SCREEN_LOCK_RESETS, STATUS_VERSION,
 };
 pub use times::{
     compose_apps, compose_content, GrantTimes, NamedTime, TimePosture, FREE_TIME_ID,

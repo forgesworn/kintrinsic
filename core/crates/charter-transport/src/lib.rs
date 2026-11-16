@@ -9,11 +9,13 @@ pub mod nip59;
 pub mod pair_offer;
 pub mod pairing;
 pub mod relay_config;
+pub mod screen_lock_seal;
 pub mod transport;
 
 pub use curator::{list_id, parse_curator_list};
 pub use pairing::{pin_from_connect, validate_and_normalize, Pairing, PairingError};
+pub use screen_lock_seal::{open_screen_lock_pin, seal_screen_lock_pin, ScreenLockSealError};
 pub use transport::{
-    CharterTransport, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant, ScriptedEntropy,
-    TransportError,
+    CharterTransport, DeviceCommands, Entropy, FetchedCuratorList, ReceivedClause, ReceivedGrant,
+    ScriptedEntropy, TransportError,
 };

@@ -141,6 +141,15 @@ pub fn encrypt(
 
 /// Decrypt a NIP-44 v2 payload. Any error yields no plaintext.
 pub fn decrypt(payload_b64: &str, conversation_key: &[u8; 32]) -> Result<String, Nip44Error> {
+    decrypt_zeroizing(payload_b64, conversation_key).map(|p| p.as_str().to_owned())
+}
+
+/// As [`decrypt`], for a secret plaintext: the decrypted buffer is wiped
+/// before this returns, and the plaintext is wiped when the caller drops it.
+pub fn decrypt_zeroizing(
+    payload_b64: &str,
+    conversation_key: &[u8; 32],
+) -> Result<Zeroizing<String>, Nip44Error> {
     // Reject the future "encoded as #" marker form outright.
     if payload_b64.starts_with('#') {
         return Err(Nip44Error::BadVersion);
@@ -168,7 +177,7 @@ pub fn decrypt(payload_b64: &str, conversation_key: &[u8; 32]) -> Result<String,
         return Err(Nip44Error::BadMac);
     }
 
-    let mut buf = ciphertext.to_vec();
+    let mut buf = Zeroizing::new(ciphertext.to_vec());
     let mut cipher = ChaCha20::new((&*chacha_key).into(), (&chacha_nonce).into());
     cipher.apply_keystream(&mut buf);
 
@@ -183,7 +192,8 @@ pub fn decrypt(payload_b64: &str, conversation_key: &[u8; 32]) -> Result<String,
         return Err(Nip44Error::BadPadding);
     }
     let plaintext = &buf[2..2 + unpadded_len];
-    String::from_utf8(plaintext.to_vec()).map_err(|_| Nip44Error::BadUtf8)
+    let text = std::str::from_utf8(plaintext).map_err(|_| Nip44Error::BadUtf8)?;
+    Ok(Zeroizing::new(text.to_owned()))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

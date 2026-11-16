@@ -118,6 +118,12 @@ pub fn build_status(
         // Stamped by the warden loop from the evaluated time (§Times); absent
         // in Free time and when locked.
         active_time: None,
+        // Stamped by the Android loop from the platform's own screen-lock
+        // state and the warden's reset ring; Linux has no such control.
+        screen_lock_secure: None,
+        screen_lock_reset_ready: None,
+        screen_lock_reset_supported: None,
+        screen_lock_resets: None,
     }
 }
 

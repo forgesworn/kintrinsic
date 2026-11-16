@@ -1,7 +1,7 @@
 // The guardian's read side of the ward's emergency unlock (kind 31000).
 import { describe, expect, it } from "vitest";
 import { generateSecretKey, getPublicKey, type NostrEvent } from "nostr-tools";
-import { unwrapAudit } from "./audit";
+import { unwrapAudit, unwrapDeviceAudit } from "./audit";
 import { CHARTER_DEVICE_REQUEST, MAX_WRAP_JITTER_SECS } from "./request";
 import { CHARTER_DEVICE_STATUS } from "./status";
 import { overrideTags as override, overrideWrap, type WrapOpts } from "../test/overrideWrap";
@@ -159,5 +159,82 @@ describe("unwrapAudit", () => {
       ],
     });
     expect(unwrapAudit(w, guardianSk, NOW)).toMatchObject({ scope: "calls", durationSecs: 120 });
+  });
+});
+
+describe("screen-lock reset audit (op screenlock.reset)", () => {
+  const ID = "0123456789abcdef0123456789abcdef";
+  const reset = (extra: string[][] = [], outcome = "applied"): string[][] => [
+    ["t", "charter-device"],
+    ["outcome", outcome],
+    ["op", "screenlock.reset"],
+    ["id", ID],
+    ...extra,
+  ];
+
+  it("is accepted, with the ward's id, outcome and at", () => {
+    const w = wrapFor({ tags: reset([["at", String(NOW - 30)]]) });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "screenlock.reset",
+      reset: { machine: machinePk, id: ID, result: "applied", at: NOW - 30 },
+    });
+  });
+
+  it("is still not an emergency unlock", () => {
+    expect(unwrapAudit(wrapFor({ tags: reset() }), guardianSk, NOW)).toBeNull();
+  });
+
+  it("an emergency unlock still comes through unwrapDeviceAudit as one", () => {
+    const a = unwrapDeviceAudit(wrapFor(), guardianSk, NOW);
+    expect(a?.op).toBe("unlock.breakglass");
+  });
+
+  it("reads a missing or malformed id as null, and falls back on the wrap's time", () => {
+    const w = wrapFor({ tags: [["t", "charter-device"], ["outcome", "failed"], ["op", "screenlock.reset"], ["id", "nope"]] });
+    expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+      op: "screenlock.reset",
+      reset: { machine: machinePk, id: null, result: "failed", at: NOW },
+    });
+  });
+
+  it("never carries a PIN: the parsed audit has no such field", () => {
+    const a = unwrapDeviceAudit(wrapFor({ tags: reset([["newPin", "246813"]]) }), guardianSk, NOW);
+    expect(JSON.stringify(a)).not.toContain("246813");
+  });
+
+  // The outcomes the ward emits (core/crates/charter-proto ScreenLockResetResult).
+  it.each(["applied", "failed", "not_ready", "notice_failed", "rejected_time", "superseded"])(
+    "accepts the ward's outcome %s",
+    (outcome) => {
+      const w = wrapFor({ tags: reset([["at", String(NOW - 5)]], outcome) });
+      expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+        op: "screenlock.reset",
+        reset: { machine: machinePk, id: ID, result: outcome, at: NOW - 5 },
+      });
+    },
+  );
+
+  it("ignores an unknown outcome gracefully: still a screen-lock audit, never a throw, never an unlock", () => {
+    for (const outcome of ["brand_new_outcome", "APPLIED", "applied ", "override"]) {
+      const w = wrapFor({ tags: reset([], outcome) });
+      expect(() => unwrapDeviceAudit(w, guardianSk, NOW)).not.toThrow();
+      expect(unwrapDeviceAudit(w, guardianSk, NOW)).toEqual({
+        op: "screenlock.reset",
+        reset: { machine: machinePk, id: ID, result: outcome, at: NOW },
+      });
+      expect(unwrapAudit(w, guardianSk, NOW)).toBeNull();
+    }
+  });
+
+  it("reads a missing or empty outcome as null", () => {
+    const noOutcome = wrapFor({ tags: [["t", "charter-device"], ["op", "screenlock.reset"], ["id", ID]] });
+    expect(unwrapDeviceAudit(noOutcome, guardianSk, NOW)).toMatchObject({ reset: { result: null, id: ID } });
+    const empty = wrapFor({ tags: reset([], "") });
+    expect(unwrapDeviceAudit(empty, guardianSk, NOW)).toMatchObject({ reset: { result: null } });
+  });
+
+  it("rejects a forged sender and an unknown op", () => {
+    expect(unwrapDeviceAudit(wrapFor({ tags: reset(), sealSk: generateSecretKey() }), guardianSk, NOW)).toBeNull();
+    expect(unwrapDeviceAudit(wrapFor({ tags: [["t", "charter-device"], ["outcome", "applied"], ["op", "something.else"]] }), guardianSk, NOW)).toBeNull();
   });
 });

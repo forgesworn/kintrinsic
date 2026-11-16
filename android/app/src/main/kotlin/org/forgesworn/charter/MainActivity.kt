@@ -73,6 +73,15 @@ class MainActivity : Activity() {
     private lateinit var heroCard: LinearLayout
     private lateinit var heroBig: TextView
     private lateinit var heroCaption: TextView
+    /** The child's notice that their guardian reset the screen lock, with
+     *  its OK, and the full record beneath (spec "Ward app"; A2, A5). Shown
+     *  paired or not: a release never erases either. */
+    private lateinit var screenLockNoticeCard: LinearLayout
+    private lateinit var screenLockNoticeText: TextView
+    private lateinit var screenLockHistoryCard: LinearLayout
+    private lateinit var screenLockHistoryText: TextView
+    /** The unacknowledged reset ids the card is showing, for its OK. */
+    private var screenLockShown: List<String> = emptyList()
     /** "Time limits can't count yet" + the switch to fix it (QR setup). */
     private lateinit var usageNote: TextView
     private lateinit var usageButton: Button
@@ -164,6 +173,21 @@ class MainActivity : Activity() {
             addView(heroCaption)
         }
         root.addView(heroCard, CharterTheme.stackParams(this, 14))
+
+        // A guardian reset this phone's screen lock: say so, first, until the
+        // child says they have seen it. Only their OK clears it.
+        screenLockNoticeText = line("", CharterTheme.FS_BODY, CharterTheme.PAPER_TEXT)
+        screenLockNoticeCard = CharterTheme.card(this).apply {
+            visibility = View.GONE
+            addView(screenLockNoticeText)
+            addView(
+                CharterTheme.primaryButton(this@MainActivity, "OK").apply {
+                    setOnClickListener { acknowledgeScreenLock() }
+                },
+                CharterTheme.stackParams(this@MainActivity, 12),
+            )
+        }
+        root.addView(screenLockNoticeCard, CharterTheme.stackParams(this, 14))
 
         // Usage access (docs/qr-setup.md): the cable setup grants it over adb;
         // after a QR setup only a tap in Settings can. Until it is on the time
@@ -364,6 +388,15 @@ class MainActivity : Activity() {
         root.addView(debuggingNote)
         (hotspotButton.layoutParams as? LinearLayout.LayoutParams)?.topMargin = 12
 
+        // Every screen-lock reset this phone has had, newest first. No delete.
+        screenLockHistoryText = line("", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 6)
+        screenLockHistoryCard = CharterTheme.card(this).apply {
+            visibility = View.GONE
+            addView(line("Screen lock history", CharterTheme.FS_BODY, CharterTheme.PAPER_TEXT))
+            addView(screenLockHistoryText)
+        }
+        root.addView(screenLockHistoryCard, CharterTheme.stackParams(this, 24))
+
         // The quiet footer: everything a grown-up (or a tester) wants that a
         // child does not — set-up status, device code, guardian, version.
         val versionName = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
@@ -431,6 +464,38 @@ class MainActivity : Activity() {
         scanBanner.text =
             "This phone was set up with a QR code — check the code below with the grown-up, then tap Pair with guardian."
         scanBanner.visibility = View.VISIBLE
+    }
+
+    private fun renderScreenLock(records: List<org.forgesworn.charter.enforce.ScreenLockRecord>) {
+        val zone = java.time.ZoneId.systemDefault()
+        val copy = org.forgesworn.charter.enforce.ScreenLockCopy
+        val open = org.forgesworn.charter.enforce.ScreenLockHistoryFormat.unacknowledged(records)
+        screenLockShown = open.map { it.id }
+        screenLockNoticeText.text = open.joinToString("\n\n") { copy.notice(it, zone) }
+        screenLockNoticeCard.visibility = if (open.isEmpty()) View.GONE else View.VISIBLE
+        screenLockHistoryText.text = records.asReversed().joinToString("\n") { copy.historyRow(it, zone) }
+        screenLockHistoryCard.visibility = if (records.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** The child's OK: an acknowledged line for each notice the card showed,
+     *  then the notification goes. The only way a notice is ever cleared. */
+    private fun acknowledgeScreenLock() {
+        val ids = screenLockShown
+        if (ids.isEmpty()) return
+        worker.post {
+            val history = org.forgesworn.charter.enforce.FileScreenLockHistory.get(this)
+            val now = System.currentTimeMillis() / 1000
+            val all = ids.all {
+                history.append(org.forgesworn.charter.enforce.ScreenLockLine(it, now, acknowledged = true))
+            }
+            if (all) {
+                runCatching {
+                    (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                        .cancel(org.forgesworn.charter.enforce.NotificationScreenLockNotice.NOTIFICATION_ID)
+                }
+            }
+            runOnUiThread { refresh() }
+        }
     }
 
     private fun renderUsageAccess(needed: Boolean) {
@@ -552,9 +617,14 @@ class MainActivity : Activity() {
             val usageNeeded = runCatching {
                 QrSetup.needsUsageAccess(Provisioning.isDeviceOwner(this), QrSetup.usageOpMode(this))
             }.getOrDefault(false)
+            // Null when the history will not read: the card keeps what it showed.
+            val screenLock = runCatching {
+                org.forgesworn.charter.enforce.FileScreenLockHistory.get(this).records()
+            }.getOrNull()
             runOnUiThread {
                 render(state, view, tether, groups, askFirst, requests, holds, now, debugging)
                 renderUsageAccess(usageNeeded)
+                screenLock?.let { renderScreenLock(it) }
             }
         }
     }

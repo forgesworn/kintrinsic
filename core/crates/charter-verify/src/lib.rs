@@ -7,6 +7,7 @@
 pub mod clause;
 pub mod event;
 pub mod release;
+pub mod screen_lock;
 pub mod software_release;
 pub mod usage_sync;
 pub mod verify;
@@ -20,6 +21,10 @@ pub use charter_crypto as crypto;
 pub use clause::{verify_clause, ClauseError, VerifiedClause};
 pub use event::{event_id, id_is_consistent, signature_is_valid};
 pub use release::{verify_release, ReleaseError, RELEASE_FRESHNESS_SECS};
+pub use screen_lock::{
+    authenticate_screen_lock_reset, check_screen_lock_reset_time, screen_lock_reset_in_window,
+    ScreenLockResetError, SCREEN_LOCK_RESET_MAX_AGE_SECS, SCREEN_LOCK_RESET_MAX_AHEAD_SECS,
+};
 pub use software_release::{verify_software_release, SoftwareRelease, SoftwareReleaseError};
 pub use usage_sync::{verify_usage_sync, UsageSyncError, VerifiedUsageSync};
 pub use verify::{

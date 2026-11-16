@@ -234,6 +234,29 @@ describe("home-network drain", () => {
     expect(consume).toHaveBeenCalledWith(["w1"]);
   });
 
+  it("takes in a screen-lock reset audit as read and done: nothing recorded, not retried, consumed at once", () => {
+    const store = makeStore();
+    const w = overrideWrap({
+      guardianPk,
+      machineSk,
+      tags: [
+        MARKER,
+        ["outcome", "applied"],
+        ["op", "screenlock.reset"],
+        ["id", "0123456789abcdef0123456789abcdef"],
+      ],
+    });
+    const result = ingestWrap(w, store.ctx);
+    expect(result.kind).toBe("screenlock");
+    expect(store.memoryAudits).toEqual([]);
+    expect(ingestWrap(w, store.ctx).kind).toBe("handled");
+    const queue = new ConsumeQueue();
+    drainLocalInbox({ inbox: () => [entry(w)], ingest: () => result, queue });
+    const consume = vi.fn();
+    queue.flush({ persistedOk: true, hasRequest: () => false, hasAudit: () => false, consume });
+    expect(consume).toHaveBeenCalledWith([w.id]);
+  });
+
   it("holds an emergency unlock's wrap until the line is persisted, as it does an ask", () => {
     const store = makeStore();
     const at = Math.floor(Date.now() / 1000) - 60;

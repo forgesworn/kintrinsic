@@ -118,6 +118,30 @@ describe("child administration", () => {
       expect(container.textContent).toContain("locked and can’t get online");
     });
 
+    it("a current Android ward that reports its screen lock gets the Screen lock card, after USB debugging and before Relays", () => {
+      const c = sam([phone()]);
+      const s = makeStore([c], { deviceStatus: { [KEY2]: { appVersionCode: 56, screenLockSecure: true } } });
+      render(<DevicePage childId="c1" deviceId="d2" />, s);
+      expect(button("Reset screen lock on Sam's phone")).toBeTruthy();
+      const text = container.textContent ?? "";
+      expect(text).toContain("Screen lock: on");
+      expect(text.indexOf("USB debugging")).toBeLessThan(text.indexOf("Screen lock"));
+      expect(text.indexOf("Screen lock")).toBeLessThan(text.indexOf("Relays"));
+    });
+
+    it("no Screen lock card for an older ward, a status without screenLockSecure, a silent ward, or a laptop", () => {
+      const cases: [Device, Record<string, unknown>, string][] = [
+        [phone(), { [KEY2]: { appVersionCode: 55, screenLockSecure: true } }, "d2"],
+        [phone(), { [KEY2]: { appVersionCode: 56 } }, "d2"],
+        [phone(), {}, "d2"],
+        [laptop(), { [KEY]: { appVersionCode: 9999, screenLockSecure: true } }, "d1"],
+      ];
+      for (const [device, deviceStatus, id] of cases) {
+        render(<DevicePage childId="c1" deviceId={id} />, makeStore([sam([device])], { deviceStatus }));
+        expect(container.textContent).not.toContain("Screen lock");
+      }
+    });
+
     it("an unpaired device offers Reconnect and Remove, and not Unlock, Disconnect or Relays", () => {
       const c = sam([laptop({ pairing: "unpaired" })]);
       const s = makeStore([c]);

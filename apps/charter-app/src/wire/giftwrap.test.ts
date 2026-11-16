@@ -11,9 +11,12 @@ import { buildTimeExtendGrant } from "./grant";
 import type { Policy } from "../domain/types";
 import {
   CHARTER_DEVICE_RELEASE,
+  CHARTER_DEVICE_SCREEN_LOCK_RESET,
+  giftWrapScreenLockReset,
   giftWrapClause,
   giftWrapGrant,
   giftWrapRelease,
+  sealScreenLockPin,
   unwrapClause,
   unwrapGrant,
   type GuardianOps,
@@ -165,5 +168,46 @@ describe("giftWrapRelease", () => {
     expect(inner.kind).toBe(CHARTER_DEVICE_RELEASE);
     expect(inner.pubkey).toBe(guardian.pubkey); // guardian authored it
     expect(JSON.parse(inner.content)).toEqual({ v: 1, machine: dpk, issuedAt: AT });
+  });
+});
+
+describe("giftWrapScreenLockReset", () => {
+  it("wraps a signed SCREEN-LOCK RESET (31122) to the machine, authored by the guardian", async () => {
+    const guardian = localGuardian(generateSecretKey());
+    const dsk = generateSecretKey();
+    const dpk = getPublicKey(dsk);
+    const sealed = sealScreenLockPin("123456", dpk);
+    const payload = { v: 1 as const, id: "0123456789abcdef0123456789abcdef", machine: dpk, issuedAt: AT, ...sealed };
+    const wrap = await giftWrapScreenLockReset(payload, guardian);
+    expect(CHARTER_DEVICE_SCREEN_LOCK_RESET).toBe(31122);
+    expect(wrap.kind).toBe(1059);
+    expect(wrap.tags).toContainEqual(["p", dpk]);
+    const seal = JSON.parse(nip44.decrypt(wrap.content, nip44.getConversationKey(dsk, wrap.pubkey)));
+    const inner = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(dsk, seal.pubkey)));
+    expect(inner.kind).toBe(31122);
+    expect(inner.pubkey).toBe(guardian.pubkey);
+    expect(JSON.parse(inner.content)).toEqual(payload);
+    expect(JSON.parse(inner.content)).not.toHaveProperty("newPin");
+    expect(JSON.parse(nip44.decrypt(sealed.newPinSealed, nip44.getConversationKey(dsk, sealed.epk)))).toBe("123456");
+  });
+});
+
+describe("sealScreenLockPin", () => {
+  it("seals the PIN, or a removal, so only the device opens it, every time with a new key", () => {
+    const dsk = generateSecretKey();
+    const dpk = getPublicKey(dsk);
+    const seen = new Set<string>();
+    for (const pin of ["", "0000", "1234567890123456"]) {
+      const { epk, newPinSealed } = sealScreenLockPin(pin, dpk);
+      expect(epk).toMatch(/^[0-9a-f]{64}$/);
+      expect(seen.has(epk)).toBe(false);
+      seen.add(epk);
+      expect(newPinSealed).toHaveLength(132);
+      expect(nip44.decrypt(newPinSealed, nip44.getConversationKey(dsk, epk))).toBe(JSON.stringify(pin));
+    }
+  });
+
+  it.each([["123"], ["12345678901234567"], ["12a4"], [" 1234"]])("refuses %j", (bad) => {
+    expect(() => sealScreenLockPin(bad, getPublicKey(generateSecretKey()))).toThrow(/4 to 16 digits/);
   });
 });

@@ -54,6 +54,9 @@ class WardenController(
     /** The same, for apps with their own agreed hours (`appRules`). Separate
      *  store: it answers which scheduled apps are shut, not which holds run. */
     private val ruleMemory: org.forgesworn.charter.enforce.RuleMemoryStore? = null,
+    /** The guardian's screen-lock reset and the child's notice of it. Null in
+     *  tests: its parts are exercised directly in `ScreenLockResetTest`. */
+    private val screenLock: org.forgesworn.charter.enforce.ScreenLockResetStep? = null,
 ) {
     private var initialized = false
     /** When [init] last ran (unix secs), and with which mode — so a failed
@@ -95,6 +98,11 @@ class WardenController(
     interface LockController {
         fun show(reason: String)
         fun hide()
+
+        /** Bring a shade that is already up back in front of an app the ward
+         *  opened from it, so a phone with its own screen lock never wakes inside
+         *  that app. [screenOff] = the screen just went off. No-op by default. */
+        fun raise(screenOff: Boolean) {}
     }
 
     /** Delivers child-facing moments (real notifications in production). */
@@ -391,6 +399,16 @@ class WardenController(
         } finally {
             // Guarded: a throw here must not replace the tick's own.
             guard.run("debugging") { syncDebugging(nowUnix) }
+            // The screen-lock reset and its notice, on every way out of the
+            // tick too: the notice must outlive a release, a failed init and
+            // an unreadable pairing (A2, A5). The Device Owner part needs the
+            // core; the notice needs only its history.
+            screenLock?.let { step ->
+                if (initialized && Provisioning.isDeviceOwner(context)) {
+                    guard.run("screenLock") { step.platformTick(nowUnix) }
+                }
+                guard.run("screenLockNotice") { step.noticeTick() }
+            }
         }
 
     private fun tickOnce(nowUnix: Long, screenWas: Boolean?): List<CharterCore.ChildDecision> {
@@ -562,6 +580,37 @@ class WardenController(
                 .onFailure { Log.w(TAG, "could not set LockTask packages", it) }
                 .isSuccess
         }
+        // After the packages: the platform keeps the features in the same
+        // policy, which the packages call creates. Outside the compare above,
+        // so it is re-read every time, including the first tick after an upgrade.
+        syncLockTaskFeatures()
+    }
+
+    /**
+     * Keep the phone's own screen lock during a lockout: OR
+     * LOCK_TASK_FEATURE_KEYGUARD into the device owner's LockTask features
+     * (see [org.forgesworn.charter.enforce.lockTaskFeaturesWithKeyguard]),
+     * writing only when it is missing. Level-triggered and idempotent: a
+     * failure is logged and retried on the next sync, and never throws.
+     */
+    private fun syncLockTaskFeatures() {
+        runCatching {
+            val current = dpm.getLockTaskFeatures(admin)
+            val wanted = org.forgesworn.charter.enforce.lockTaskFeaturesWithKeyguard(current)
+            if (wanted != current) {
+                dpm.setLockTaskFeatures(admin, wanted)
+                Log.i(TAG, "LockTask features $current -> $wanted: the screen lock stays during a lockout")
+            }
+        }.onFailure { Log.w(TAG, "could not set LockTask features", it) }
+    }
+
+    /**
+     * The screen just went off (the service's receiver, on the worker): bring
+     * the shade back in front of anything opened from it. Never throws.
+     */
+    fun raiseShade(screenOff: Boolean) {
+        runCatching { lock.raise(screenOff) }
+            .onFailure { Log.w(TAG, "could not raise the shade", it) }
     }
 
     /**
@@ -866,6 +915,9 @@ class WardenController(
                     degraded -> lock.show(DegradedAppGate.DEGRADED_REASON)
                     else -> lock.hide()
                 }
+                // The level half of the screen-off raise: the broadcast is one
+                // edge and can be missed. Cheap when nothing is in front.
+                if (d.locked || degraded) lock.raise(screenOff = false)
             }
         }
     }
@@ -1138,6 +1190,14 @@ class WardenController(
                     org.forgesworn.charter.enforce.NotificationHoldNotifier(context),
                 holdMemory = org.forgesworn.charter.enforce.HoldMemoryStore(context),
                 ruleMemory = org.forgesworn.charter.enforce.RuleMemoryStore(context),
+                screenLock = org.forgesworn.charter.enforce.ScreenLockResetStep(
+                    platform = org.forgesworn.charter.enforce.DpmScreenLockPlatform(context, dpm, admin),
+                    tokens = org.forgesworn.charter.enforce.PrefsScreenLockTokenStore(context),
+                    history = org.forgesworn.charter.enforce.FileScreenLockHistory.get(context),
+                    core = org.forgesworn.charter.enforce.CoreScreenLock,
+                    notice = org.forgesworn.charter.enforce.NotificationScreenLockNotice(context),
+                    log = { Log.i(TAG, it) },
+                ),
             )
         }
     }
@@ -1157,21 +1217,60 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
         // app gate once stayed headlined "Unlocked" for eleven minutes after
         // the allowed hours had closed, because it was never told.
         if (!lockLaunchWanted(shown, lockAlive, shownReason, reason)) return
-        val intent = Intent(context, LockActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            putExtra("reason", reason)
-        }
         // Latch `shown` ONLY on a successful launch. If the start is suppressed
         // (background-activity-launch limits), leave it false so the next
         // level-triggered tick retries — the ward is never left suspended with
         // no lock UI (the review's latch bug).
         try {
-            context.startActivity(intent)
+            context.startActivity(lockIntent(reason))
             shown = true
             shownReason = reason
         } catch (t: Throwable) {
             shown = false
         }
+    }
+
+    /**
+     * On a phone with its own screen lock, bring the shade back in front of an
+     * app the ward opened from it (the Open row, Wi-Fi or Bluetooth), so waking
+     * shows the shade over the keyguard and never lands inside that app. On the
+     * screen-off edge it raises whatever is in front; on the tick, only when the
+     * keyguard has locked over an app the shade opened (see [shadeRaiseWanted]).
+     *
+     * Leaves [show]'s latch alone: the same singleTask intent, so the live shade
+     * is moved to the front and gets onNewIntent, and the app behind it is
+     * stopped rather than destroyed. Never raised over a call: the ringing or
+     * in-call screen must stay in front.
+     */
+    override fun raise(screenOff: Boolean) {
+        val reason = shownReason
+        if (!shown || reason == null) return
+        val coveredAt = coveredSince
+        // The common tick: nothing opened from the shade is in front of it.
+        // No binder reads unless something is.
+        if (!screenOff && coveredAt == 0L) return
+        val km = context.getSystemService(android.app.KeyguardManager::class.java) ?: return
+        val secure = runCatching { km.isDeviceSecure }.getOrDefault(false)
+        if (!secure) return
+        val keyguardLocked = runCatching { km.isKeyguardLocked }.getOrDefault(false)
+        // A failed read counts as a call: a hidden Answer button is the worse mistake.
+        val inCall = runCatching {
+            (context.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager).isInCall
+        }.getOrDefault(true)
+        val coveredFor = if (coveredAt == 0L) null else android.os.SystemClock.elapsedRealtime() - coveredAt
+        if (!shadeRaiseWanted(screenOff, secure, keyguardLocked, coveredFor, inCall)) return
+        try {
+            context.startActivity(lockIntent(reason))
+            coveredSince = 0L
+        } catch (t: Throwable) {
+            // Left set, so the next tick tries again.
+            Log.w("ActivityLockController", "could not raise the shade", t)
+        }
+    }
+
+    private fun lockIntent(reason: String) = Intent(context, LockActivity::class.java).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        putExtra("reason", reason)
     }
 
     override fun hide() {
@@ -1187,8 +1286,39 @@ class ActivityLockController(private val context: Context) : WardenController.Lo
         /** Whether a [LockActivity] instance exists right now: set in its
          *  onCreate, cleared in its onDestroy. Same process, so a plain flag. */
         @Volatile var lockAlive = false
+
+        /** `elapsedRealtime` when an app the shade opened (Open row, Wi-Fi,
+         *  Bluetooth) stopped the shade by covering it; 0 = nothing it opened is
+         *  in front. Set in its onStop after such a launch, cleared in its
+         *  onStart. Something it did not open (the emergency dialer from the
+         *  bouncer, the in-call screen) never sets it, so the tick never raises
+         *  the shade over those. */
+        @Volatile var coveredSince = 0L
     }
 }
+
+/**
+ * Whether [ActivityLockController.raise] brings the shade to the front, on a
+ * device with a secure lock ([secure]) whose ward is locked:
+ * - on the screen-off edge ([screenOff]), always: screen off re-locks, so
+ *   waking shows the shade and never the app that was open;
+ * - on the tick, only when the keyguard has locked over an app the shade
+ *   opened that has covered it for at least [RAISE_GRACE_MS] ([coveredForMs];
+ *   null = nothing it opened is in front). The grace keeps the tick off an app
+ *   that is opening while the keyguard is still going away.
+ * Never while [inCall]: the ringing or in-call screen stays in front.
+ */
+internal fun shadeRaiseWanted(
+    screenOff: Boolean,
+    secure: Boolean,
+    keyguardLocked: Boolean,
+    coveredForMs: Long?,
+    inCall: Boolean,
+): Boolean = secure && !inCall &&
+    (screenOff || (keyguardLocked && coveredForMs != null && coveredForMs >= RAISE_GRACE_MS))
+
+/** See [shadeRaiseWanted]. */
+internal const val RAISE_GRACE_MS = 2_000L
 
 /**
  * Whether the while-locked restrictions should hold: exactly when the lock

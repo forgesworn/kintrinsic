@@ -247,6 +247,27 @@ object CharterNative {
     /** `{"open":bool}` — is a guardian's maintenance window open right now? */
     external fun charterMaintenanceOpen(nowUnix: Long): String
 
+    // ---- screen-lock reset (ABI 7) -------------------------------------------
+
+    /**
+     * Take the guardian's accepted screen-lock reset, clearing it: `""` when
+     * none is waiting, `{"id","newPin","ts"}` for one to apply (`newPin` `""`
+     * removes the screen lock), `{"error":…}` on failure. The answer holds the
+     * PIN: never log it.
+     */
+    external fun charterTakeScreenLockReset(): String
+
+    /** The outcome of a reset taken above: [result] is one of `applied`,
+     *  `failed`, `not_ready`, `notice_failed`. `{"ok":true,"recorded":bool}`
+     *  or `{"error":…}`. */
+    external fun charterReportScreenLockReset(id: String, result: String, atUnix: Long): String
+
+    /** What the platform says each tick, for STATUS `screenLockSecure`,
+     *  `screenLockResetReady` and `screenLockResetSupported` ([resetSupported]
+     *  false once the platform has refused a reset token outright).
+     *  `{"ok":true,"changed":bool}`. */
+    external fun charterSetScreenLockState(secure: Boolean, resetReady: Boolean, resetSupported: Boolean): String
+
     // ---- local link (ABI 3) -------------------------------------------------
 
     /**

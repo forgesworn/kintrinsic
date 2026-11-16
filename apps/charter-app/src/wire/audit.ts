@@ -62,20 +62,28 @@ function parseDecimal(s: string | undefined): number | null {
   return Number(s);
 }
 
+/** The ward's own record of a screen-lock reset, from its audit (op `screenlock.reset`). */
+export interface DeviceScreenLockAudit {
+  /** The device it came from (the rumor author, verified against the seal). */
+  machine: string;
+  /** The reset `id` the guardian sent; null when the tag is missing or malformed. */
+  id: string | null;
+  /** The outcome tag (`applied`, `failed`, …); null when missing. Never a PIN: the audit carries none. */
+  result: string | null;
+  /** Unix SECONDS the ward recorded it (its `at` tag when usable, else the wrap's time). */
+  at: number;
+}
+
+/** A device audit the guardian understands: an emergency unlock or a screen-lock reset. */
+export type DeviceAudit =
+  | { op: "unlock.breakglass"; override: DeviceOverride }
+  | { op: "screenlock.reset"; reset: DeviceScreenLockAudit };
+
 /**
- * Decrypt, verify and parse one gift-wrapped device audit; only a break-glass
- * override (`outcome=override`, `op=unlock.breakglass`) is accepted. Returns
- * `null` on any decrypt / verify / kind / freshness / shape failure (never
- * throws).
- *
- * A malformed scope or duration does NOT reject the event: hiding a real
- * emergency is the worse failure, so it is shown with less detail instead.
+ * Decrypt and authenticate one gift-wrapped device audit, returning its rumor.
+ * `null` on any decrypt / verify / kind / freshness failure (never throws).
  */
-export function unwrapAudit(
-  wrap: NostrEvent,
-  recipientSk: Uint8Array,
-  nowSecs: number = Math.floor(Date.now() / 1000),
-): DeviceOverride | null {
+function openAudit(wrap: NostrEvent, recipientSk: Uint8Array, nowSecs: number): NostrEvent | null {
   try {
     // Jitter: wraps are backdated; drop one too far from now in either direction
     // (the same window charterd's nip59::unwrap enforces on its side).
@@ -92,36 +100,93 @@ export function unwrapAudit(
     if (rumor.kind !== CHARTER_DEVICE_AUDIT) return null;
     // The sealed (signed) author must equal the rumor author — no forged sender.
     if (rumor.pubkey !== seal.pubkey) return null;
-    if (tagValue(rumor.tags, "outcome") !== "override") return null;
-    if (tagValue(rumor.tags, "op") !== "unlock.breakglass") return null;
-
     const created = rumor.created_at;
     if (typeof created !== "number" || !Number.isInteger(created) || created < 0) return null;
-
-    const scopeTag = tagValue(rumor.tags, "scope");
-    const scope: OverrideScope | null = scopeTag === "calls" || scopeTag === "full" ? scopeTag : null;
-    const secs = parseDecimal(tagValue(rumor.tags, "durationSecs"));
-    const durationSecs = secs !== null && secs > 0 ? secs : null;
-
-    // The press time. A wrap is stamped when it is built, so `created_at` is
-    // only a stand-in. Two questions are kept apart:
-    //  - identity: any parseable `at` names this press. A rebuilt wrap carries
-    //    the same tag, so keying on it keeps the copies one line even when the
-    //    value is unfit for dating (a clock stepped back between the press and
-    //    the rebuild would otherwise flip a copy to a `wrap:` key and add a
-    //    second line).
-    //  - dating: `at` is used only when it is not after its own wrap (a press
-    //    cannot postdate the wrap reporting it) and not absurdly old.
-    const atTag = parseDecimal(tagValue(rumor.tags, "at"));
-    const usable = atTag !== null && atTag <= created && created - atTag <= MAX_PRESS_AGE_SECS;
-    return {
-      machine: rumor.pubkey,
-      scope,
-      durationSecs,
-      at: usable ? atTag : created,
-      key: atTag !== null ? `${rumor.pubkey}:${atTag}` : `wrap:${wrap.id}`,
-    };
+    return rumor;
   } catch {
     return null;
   }
+}
+
+/**
+ * The press time. A wrap is stamped when it is built, so `created_at` is
+ * only a stand-in. Two questions are kept apart:
+ *  - identity: any parseable `at` names this event. A rebuilt wrap carries
+ *    the same tag, so keying on it keeps the copies one line even when the
+ *    value is unfit for dating (a clock stepped back between the press and
+ *    the rebuild would otherwise flip a copy to a `wrap:` key and add a
+ *    second line).
+ *  - dating: `at` is used only when it is not after its own wrap (a press
+ *    cannot postdate the wrap reporting it) and not absurdly old.
+ */
+function datedBy(rumor: NostrEvent): { atTag: number | null; at: number } {
+  const created = rumor.created_at;
+  const atTag = parseDecimal(tagValue(rumor.tags, "at"));
+  const usable = atTag !== null && atTag <= created && created - atTag <= MAX_PRESS_AGE_SECS;
+  return { atTag, at: usable ? atTag : created };
+}
+
+function parseOverride(rumor: NostrEvent, wrapId: string): DeviceOverride {
+  const scopeTag = tagValue(rumor.tags, "scope");
+  const scope: OverrideScope | null = scopeTag === "calls" || scopeTag === "full" ? scopeTag : null;
+  const secs = parseDecimal(tagValue(rumor.tags, "durationSecs"));
+  const durationSecs = secs !== null && secs > 0 ? secs : null;
+  const { atTag, at } = datedBy(rumor);
+  return {
+    machine: rumor.pubkey,
+    scope,
+    durationSecs,
+    at,
+    key: atTag !== null ? `${rumor.pubkey}:${atTag}` : `wrap:${wrapId}`,
+  };
+}
+
+function parseScreenLock(rumor: NostrEvent): DeviceScreenLockAudit {
+  const id = tagValue(rumor.tags, "id");
+  const result = tagValue(rumor.tags, "outcome");
+  return {
+    machine: rumor.pubkey,
+    id: id !== undefined && /^[0-9a-f]{32}$/.test(id) ? id : null,
+    result: result !== undefined && result !== "" ? result : null,
+    at: datedBy(rumor).at,
+  };
+}
+
+/**
+ * Decrypt, verify and parse one gift-wrapped device audit the guardian acts
+ * on: an emergency unlock (`outcome=override`, `op=unlock.breakglass`) or a
+ * screen-lock reset (`op=screenlock.reset`, outcome = its result, tags `id` and
+ * `at`). Anything else is `null`, as is any decrypt / verify / kind / freshness
+ * / shape failure (never throws).
+ *
+ * A malformed scope or duration does NOT reject an override: hiding a real
+ * emergency is the worse failure, so it is shown with less detail instead.
+ */
+export function unwrapDeviceAudit(
+  wrap: NostrEvent,
+  recipientSk: Uint8Array,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): DeviceAudit | null {
+  const rumor = openAudit(wrap, recipientSk, nowSecs);
+  if (!rumor) return null;
+  const op = tagValue(rumor.tags, "op");
+  if (op === "unlock.breakglass" && tagValue(rumor.tags, "outcome") === "override") {
+    return { op, override: parseOverride(rumor, wrap.id) };
+  }
+  if (op === "screenlock.reset") return { op, reset: parseScreenLock(rumor) };
+  return null;
+}
+
+/**
+ * Decrypt, verify and parse one gift-wrapped device audit; only a break-glass
+ * override (`outcome=override`, `op=unlock.breakglass`) is returned. `null`
+ * otherwise (see `unwrapDeviceAudit` for the screen-lock reset audit).
+ */
+export function unwrapAudit(
+  wrap: NostrEvent,
+  recipientSk: Uint8Array,
+  nowSecs: number = Math.floor(Date.now() / 1000),
+): DeviceOverride | null {
+  const audit = unwrapDeviceAudit(wrap, recipientSk, nowSecs);
+  return audit?.op === "unlock.breakglass" ? audit.override : null;
 }
