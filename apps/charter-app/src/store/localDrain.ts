@@ -86,7 +86,8 @@ function looksLikeWrap(w: unknown): w is NostrEvent {
  */
 export function drainLocalInbox(deps: {
   inbox: () => LocalInboxEntry[] | null;
-  ingest: (wrap: NostrEvent) => WrapIngestResult;
+  /** `verifiedAt`: when the carrier vetted this wrap, if it did (see LocalInboxEntry). */
+  ingest: (wrap: NostrEvent, verifiedAt?: number) => WrapIngestResult;
   queue: ConsumeQueue;
 }): number {
   const entries = deps.inbox();
@@ -100,7 +101,7 @@ export function drainLocalInbox(deps: {
     }
     let result: WrapIngestResult;
     try {
-      result = deps.ingest(entry.wrap);
+      result = deps.ingest(entry.wrap, entry.verifiedAt);
     } catch {
       // Intake never throws on bad input; if something else did, retry later.
       continue;
@@ -111,7 +112,9 @@ export function drainLocalInbox(deps: {
     deps.queue.add(
       entry.id,
       result.kind === "request" || result.kind === "duplicate" ? result.reqId : undefined,
-      result.kind === "audit" ? result.key : undefined,
+      // A wrap already handled this session waits for the line it produced, too:
+      // the copy that landed it may not have reached storage yet.
+      result.kind === "audit" ? result.key : result.kind === "handled" ? result.auditKey : undefined,
     );
   }
   return entries.length;

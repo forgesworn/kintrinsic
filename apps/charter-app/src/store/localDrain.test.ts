@@ -8,8 +8,8 @@ import {
 } from "nostr-tools";
 import { CHARTER_DEVICE_REQUEST, type DeviceRequest } from "../wire/request";
 import type { LocalInboxEntry } from "../carrier/localLink";
-import { ingestWrap, type WrapIngestContext } from "./ingestWrap";
-import { overrideTags, overrideWrap } from "../test/overrideWrap";
+import { holdUnlanded, ingestWrap, MAX_UNLANDED_AUDITS, type WrapIngestContext } from "./ingestWrap";
+import { emergencyCallTags, overrideTags, overrideWrap } from "../test/overrideWrap";
 import { ConsumeQueue, drainLocalInbox } from "./localDrain";
 
 const MARKER: [string, string] = ["t", "charter-device"];
@@ -67,7 +67,8 @@ function giftWrapRequest(req: DeviceRequest, opts: { sealedBy?: Uint8Array } = {
 
 /** A miniature of the provider's state: in-memory vs persisted requests. */
 function makeStore(opts: { knownMachine?: boolean } = {}) {
-  const known = opts.knownMachine ?? true;
+  let known = opts.knownMachine ?? true;
+  let landing = 0;
   const memory: string[] = [];
   const memoryAudits: string[] = [];
   const persistedAudits: string[] = [];
@@ -75,7 +76,9 @@ function makeStore(opts: { knownMachine?: boolean } = {}) {
   const statuses: unknown[] = [];
   const ctx: WrapIngestContext = {
     guardianSk,
-    handledWraps: new Set(),
+    handledWraps: new Map(),
+    unlandedAudits: new Map(),
+    landingSig: () => String(landing),
     seenReqIds: new Set(),
     hasRequest: (reqId) => memory.includes(reqId),
     ingestStatus: (s) => statuses.push(s),
@@ -91,9 +94,24 @@ function makeStore(opts: { knownMachine?: boolean } = {}) {
       if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
       return true;
     },
+    ingestEmergencyCall: (a) => {
+      if (!known) return false;
+      if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
+      return true;
+    },
+    ingestEmergencyControl: (a) => {
+      if (!known) return false;
+      if (!memoryAudits.includes(a.key)) memoryAudits.push(a.key);
+      return true;
+    },
   };
   return {
     ctx,
+    /** The household changes so that this phone can now be placed (a pairing, a release). */
+    placeThePhone: () => {
+      known = true;
+      landing += 1;
+    },
     memory,
     persisted,
     memoryAudits,
@@ -291,6 +309,101 @@ describe("home-network drain", () => {
     drainLocalInbox({ inbox: () => [entry(current)], ingest: () => result, queue });
     expect(queue.size).toBe(0);
     expect(store.ctx.handledWraps.has(current.id)).toBe(false);
+  });
+
+  // L6: the relay poll landed the press this tick; the state holding it is not
+  // written yet. The spooled copy of the same wrap is "handled" and must wait
+  // for that line to be persisted, not be consumed on the previous write.
+  it("a spooled copy of a press the relay poll just landed waits for its line to be persisted", () => {
+    const store = makeStore();
+    const at = Math.floor(Date.now() / 1000) - 60;
+    const w = overrideWrap({ guardianPk, machineSk, tags: emergencyCallTags([["at", String(at)]]) });
+    expect(ingestWrap(w, store.ctx).kind).toBe("audit"); // the relay poll
+    const key = `emergencycall:${machinePk}:${at}`;
+    expect(store.ctx.handledWraps.get(w.id)).toBe(key);
+    expect(ingestWrap(w, store.ctx)).toEqual({ kind: "handled", auditKey: key });
+
+    const queue = new ConsumeQueue();
+    drainLocalInbox({ inbox: () => [entry(w)], ingest: (x) => ingestWrap(x, store.ctx), queue });
+    const consume = vi.fn();
+    const flush = () =>
+      queue.flush({
+        persistedOk: true,
+        hasRequest: () => false,
+        hasAudit: (k) => store.persistedAudits.includes(k),
+        consume,
+      });
+    flush();
+    expect(consume).not.toHaveBeenCalled();
+    store.persist();
+    flush();
+    expect(consume).toHaveBeenCalledWith([w.id]);
+  });
+
+  it("a handled wrap that produced no line (a heartbeat, a rejected wrap) is still consumed at once", () => {
+    const store = makeStore();
+    const forged = giftWrapRequest(request("33".repeat(32)), { sealedBy: generateSecretKey() });
+    expect(ingestWrap(forged, store.ctx).kind).toBe("unreadable");
+    const queue = new ConsumeQueue();
+    drainLocalInbox({ inbox: () => [entry(forged)], ingest: (x) => ingestWrap(x, store.ctx), queue });
+    const consume = vi.fn();
+    queue.flush({ persistedOk: true, hasAudit: () => false, hasRequest: () => false, consume });
+    expect(consume).toHaveBeenCalledWith([forged.id]);
+  });
+
+  // L5: an audit nobody can claim yet used to be decrypted again every two seconds.
+  describe("an audit nobody can claim yet", () => {
+    const press = () => {
+      const at = Math.floor(Date.now() / 1000) - 60;
+      return overrideWrap({ guardianPk, machineSk, tags: emergencyCallTags([["at", String(at)]]) });
+    };
+
+    it("is not decrypted or retried again until who it can be attributed to changes", () => {
+      const store = makeStore({ knownMachine: false });
+      const w = press();
+      const ingestCall = vi.spyOn(store.ctx, "ingestEmergencyCall");
+      expect(ingestWrap(w, store.ctx)).toEqual({ kind: "unlanded" });
+      expect(ingestCall).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 5; i++) expect(ingestWrap(w, store.ctx)).toEqual({ kind: "unlanded" });
+      expect(ingestCall).toHaveBeenCalledTimes(1);
+      expect(store.ctx.handledWraps.has(w.id)).toBe(false);
+      expect(store.ctx.unlandedAudits.has(w.id)).toBe(true);
+    });
+
+    it("is retried, from memory, once the household changes, and lands exactly once", () => {
+      const store = makeStore({ knownMachine: false });
+      const w = press();
+      expect(ingestWrap(w, store.ctx).kind).toBe("unlanded");
+      // Prove the retry does not need to decrypt the wrap again: corrupt it.
+      const sealedAway = { ...w, content: "not a payload any more" } as NostrEvent;
+      store.placeThePhone();
+      expect(ingestWrap(sealedAway, store.ctx).kind).toBe("audit");
+      expect(store.memoryAudits).toHaveLength(1);
+      expect(store.ctx.unlandedAudits.has(w.id)).toBe(false);
+      expect(ingestWrap(w, store.ctx).kind).toBe("handled");
+      expect(store.memoryAudits).toHaveLength(1);
+    });
+
+    it("stays held after a retry that still cannot place it", () => {
+      const store = makeStore({ knownMachine: false });
+      const w = press();
+      ingestWrap(w, store.ctx);
+      const ingestCall = vi.spyOn(store.ctx, "ingestEmergencyCall");
+      store.ctx.landingSig = () => "changed but still nobody";
+      expect(ingestWrap(w, store.ctx).kind).toBe("unlanded");
+      expect(ingestCall).toHaveBeenCalledTimes(1);
+      expect(ingestWrap(w, store.ctx).kind).toBe("unlanded");
+      expect(ingestCall).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps at most a bounded number in memory, dropping the oldest", () => {
+      const store = makeStore({ knownMachine: false });
+      const audit = { op: "call.emergency", call: { machine: machinePk, at: 1, key: "k" } } as const;
+      for (let i = 0; i < MAX_UNLANDED_AUDITS + 5; i++) holdUnlanded(`w${i}`, audit, store.ctx);
+      expect(store.ctx.unlandedAudits.size).toBe(MAX_UNLANDED_AUDITS);
+      expect(store.ctx.unlandedAudits.has("w0")).toBe(false);
+      expect(store.ctx.unlandedAudits.has(`w${MAX_UNLANDED_AUDITS + 4}`)).toBe(true);
+    });
   });
 
   it("does nothing when the bridge has no inbox", () => {

@@ -8,14 +8,39 @@
 // never what is checked about it. So both routes call this one function.
 
 import type { NostrEvent } from "nostr-tools";
-import { unwrapDeviceAudit, type DeviceOverride } from "../wire/audit";
+import {
+  unwrapDeviceAudit,
+  type DeviceAudit,
+  type DeviceEmergencyCall,
+  type DeviceEmergencyControl,
+  type DeviceOverride,
+} from "../wire/audit";
 import { unwrapRequest, type DeviceRequest } from "../wire/request";
 import { unwrapStatus, type DeviceStatus } from "../wire/status";
 
 export interface WrapIngestContext {
   guardianSk: Uint8Array;
-  /** Wrap ids already dealt with this session — the CPU saver: a hit skips decryption. */
-  handledWraps: Set<string>;
+  /**
+   * Wrap ids already dealt with this session — the CPU saver: a hit skips
+   * decryption. The value is the audit key the wrap produced, when it produced
+   * one: a second copy of the same wrap (the carrier's spooled one) then waits
+   * for that line to be persisted before it is consumed, instead of being
+   * consumed on the strength of a state that has not been written yet.
+   */
+  handledWraps: Map<string, string | undefined>;
+  /**
+   * Audits read and understood but not yet attributable (no paired device, and
+   * no recently disconnected one, claims the machine), by wrap id. Held in
+   * memory so the carrier's spool is not decrypted again every two seconds.
+   * `sig` is `landingSig()` when the last attempt was made.
+   */
+  unlandedAudits: Map<string, { audit: DeviceAudit; sig: string }>;
+  /**
+   * A string that changes exactly when who an audit can be attributed to
+   * changes (the children's devices, or the recently disconnected ones). A
+   * cached unlanded audit is tried again only when it differs.
+   */
+  landingSig: () => string;
   /** reqIds already landed this session. */
   seenReqIds: Set<string>;
   /** Is this reqId already in the persisted queue (any status)? */
@@ -34,11 +59,20 @@ export interface WrapIngestContext {
   hasAudit: (key: string) => boolean;
   /** Take in an emergency unlock; false = nobody to attribute it to yet (retry later). */
   ingestAudit: (audit: DeviceOverride) => boolean;
+  /**
+   * Take in a use of the emergency-call button; false = nobody to attribute it
+   * to yet (retry later). Its keys (`DeviceEmergencyCall.key`) share `seenAudits`
+   * and `hasAudit` with the unlocks: they are op-prefixed, so they never clash.
+   */
+  ingestEmergencyCall: (call: DeviceEmergencyCall) => boolean;
+  /** Take in an emergency control this build does not know by name; false = retry later. */
+  ingestEmergencyControl: (control: DeviceEmergencyControl) => boolean;
 }
 
 export type WrapIngestResult =
-  /** Already handled earlier this session; nothing was decrypted. */
-  | { kind: "handled" }
+  /** Already handled earlier this session; nothing was decrypted. `auditKey`
+   *  is the Activity line it produced, when it produced one. */
+  | { kind: "handled"; auditKey?: string }
   | { kind: "status" }
   /** Not ours, or not readable. Neither will change with time. */
   | { kind: "unreadable" }
@@ -46,7 +80,7 @@ export type WrapIngestResult =
   | { kind: "duplicate"; reqId: string }
   /** A new ask, recorded now (it is persisted with the next state write). */
   | { kind: "request"; reqId: string }
-  /** An emergency unlock, new or already held: it is in the Activity history. */
+  /** An emergency unlock or emergency-call press, new or already held: it is in the Activity history. */
   | { kind: "audit"; key: string }
   /** A ward's screen-lock reset audit: read, and nothing to record (STATUS carries the outcome). */
   | { kind: "screenlock" }
@@ -54,34 +88,57 @@ export type WrapIngestResult =
    *  yet: left unhandled so a later pass can land it. `reqId` is the ask's. */
   | { kind: "unlanded"; reqId?: string };
 
-export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestResult {
+/**
+ * `verifiedAt`: when the carrier vetted this wrap, for an entry it held from a
+ * relay. The device audit's two-day freshness window is then judged from that
+ * moment, not from now, because the carrier already enforced it on arrival and
+ * a guardian may open the console days later. Never later than now.
+ */
+export function ingestWrap(
+  w: NostrEvent,
+  ctx: WrapIngestContext,
+  verifiedAt?: number,
+): WrapIngestResult {
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const auditNow =
+    verifiedAt !== undefined && Number.isInteger(verifiedAt) && verifiedAt > 0
+      ? Math.min(verifiedAt, nowSecs)
+      : nowSecs;
   // The one line that saves the battery: everything below this decrypts.
-  if (ctx.handledWraps.has(w.id)) return { kind: "handled" };
+  if (ctx.handledWraps.has(w.id)) return { kind: "handled", auditKey: ctx.handledWraps.get(w.id) };
+  // An audit already read but not attributable: no decryption, and no new
+  // attempt until who can be attributed has changed.
+  const held = ctx.unlandedAudits.get(w.id);
+  if (held) {
+    const sig = ctx.landingSig();
+    if (held.sig === sig) return { kind: "unlanded" };
+    const result = landAudit(w, held.audit, ctx);
+    if (result.kind === "unlanded") held.sig = sig;
+    else ctx.unlandedAudits.delete(w.id);
+    return result;
+  }
   const s = unwrapStatus(w, ctx.guardianSk);
   if (s) {
     ctx.ingestStatus(s);
-    ctx.handledWraps.add(w.id);
+    ctx.handledWraps.set(w.id, undefined);
     return { kind: "status" };
   }
   const req = unwrapRequest(w, ctx.guardianSk);
   if (!req) {
     // Third and last, so the common status and request wraps never pay for a
     // third decrypt: the ward's emergency unlock (a device audit).
-    const audit = unwrapDeviceAudit(w, ctx.guardianSk);
-    if (audit?.op === "unlock.breakglass") return ingestOverride(w, audit.override, ctx);
-    if (audit?.op === "screenlock.reset") {
-      // The ward's own record of a reset. The Screen lock card reads the
-      // outcome from STATUS, so there is nothing to land here; it is
-      // authenticated and understood, so it is done with.
-      ctx.handledWraps.add(w.id);
-      return { kind: "screenlock" };
+    const audit = unwrapDeviceAudit(w, ctx.guardianSk, auditNow);
+    if (audit) {
+      const result = landAudit(w, audit, ctx);
+      if (result.kind === "unlanded") holdUnlanded(w.id, audit, ctx);
+      return result;
     }
     // Not ours, or not readable. Neither will change with time.
-    ctx.handledWraps.add(w.id);
+    ctx.handledWraps.set(w.id, undefined);
     return { kind: "unreadable" };
   }
   if (ctx.seenReqIds.has(req.reqId) || ctx.hasRequest(req.reqId)) {
-    ctx.handledWraps.add(w.id);
+    ctx.handledWraps.set(w.id, undefined);
     return { kind: "duplicate", reqId: req.reqId };
   }
   // Mark seen only once it LANDED. This used to consume the id first, so
@@ -96,10 +153,39 @@ export function ingestWrap(w: NostrEvent, ctx: WrapIngestContext): WrapIngestRes
   // second chance the wide one exists to give.
   if (ctx.ingestRequest(req)) {
     ctx.seenReqIds.add(req.reqId);
-    ctx.handledWraps.add(w.id);
+    ctx.handledWraps.set(w.id, undefined);
     return { kind: "request", reqId: req.reqId };
   }
   return { kind: "unlanded", reqId: req.reqId };
+}
+
+/** The most unlanded audits kept in memory; the oldest go first (they are read again from the carrier or relay if still needed). */
+export const MAX_UNLANDED_AUDITS = 200;
+
+export function holdUnlanded(id: string, audit: DeviceAudit, ctx: WrapIngestContext): void {
+  ctx.unlandedAudits.set(id, { audit, sig: ctx.landingSig() });
+  if (ctx.unlandedAudits.size > MAX_UNLANDED_AUDITS) {
+    const oldest = ctx.unlandedAudits.keys().next().value;
+    if (oldest !== undefined) ctx.unlandedAudits.delete(oldest);
+  }
+}
+
+/** Land one authenticated, understood device audit. */
+function landAudit(w: NostrEvent, audit: DeviceAudit, ctx: WrapIngestContext): WrapIngestResult {
+  switch (audit.op) {
+    case "unlock.breakglass":
+      return ingestOverride(w, audit.override, ctx);
+    case "call.emergency":
+      return ingestEmergencyCall(w, audit.call, ctx);
+    case "override.other":
+      return ingestEmergencyControl(w, audit.control, ctx);
+    case "screenlock.reset":
+      // The ward's own record of a reset. The Screen lock card reads the
+      // outcome from STATUS, so there is nothing to land here; it is
+      // authenticated and understood, so it is done with.
+      ctx.handledWraps.set(w.id, undefined);
+      return { kind: "screenlock" };
+  }
 }
 
 /**
@@ -114,11 +200,47 @@ function ingestOverride(
   ctx: WrapIngestContext,
 ): WrapIngestResult {
   if (ctx.seenAudits.has(audit.key) || ctx.hasAudit(audit.key)) {
-    ctx.handledWraps.add(w.id);
+    ctx.handledWraps.set(w.id, audit.key);
     return { kind: "audit", key: audit.key };
   }
   if (!ctx.ingestAudit(audit)) return { kind: "unlanded" };
   ctx.seenAudits.add(audit.key);
-  ctx.handledWraps.add(w.id);
+  ctx.handledWraps.set(w.id, audit.key);
   return { kind: "audit", key: audit.key };
+}
+
+/**
+ * A use of the emergency-call button lands exactly like an emergency unlock:
+ * only once it is recorded, so one from a phone this guardian has not set up
+ * yet stays unhandled and holds the cursor open until it can be attributed.
+ */
+function ingestEmergencyCall(
+  w: NostrEvent,
+  call: DeviceEmergencyCall,
+  ctx: WrapIngestContext,
+): WrapIngestResult {
+  if (ctx.seenAudits.has(call.key) || ctx.hasAudit(call.key)) {
+    ctx.handledWraps.set(w.id, call.key);
+    return { kind: "audit", key: call.key };
+  }
+  if (!ctx.ingestEmergencyCall(call)) return { kind: "unlanded" };
+  ctx.seenAudits.add(call.key);
+  ctx.handledWraps.set(w.id, call.key);
+  return { kind: "audit", key: call.key };
+}
+
+/** An emergency control this build does not know: lands exactly like a call press. */
+function ingestEmergencyControl(
+  w: NostrEvent,
+  control: DeviceEmergencyControl,
+  ctx: WrapIngestContext,
+): WrapIngestResult {
+  if (ctx.seenAudits.has(control.key) || ctx.hasAudit(control.key)) {
+    ctx.handledWraps.set(w.id, control.key);
+    return { kind: "audit", key: control.key };
+  }
+  if (!ctx.ingestEmergencyControl(control)) return { kind: "unlanded" };
+  ctx.seenAudits.add(control.key);
+  ctx.handledWraps.set(w.id, control.key);
+  return { kind: "audit", key: control.key };
 }

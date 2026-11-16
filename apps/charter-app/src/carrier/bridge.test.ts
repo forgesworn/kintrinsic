@@ -34,6 +34,25 @@ describe("provisionCarrier", () => {
     expect(JSON.parse(provision.mock.calls[1][0]).relays).toContain("wss://family.example");
     expect(JSON.parse(provision.mock.calls[1][0]).relays).not.toContain("wss://relay.trotters.cc");
   });
+  it("keeps a disconnected device's relays for the grace period, then lets them go", () => {
+    localStorage.setItem(KEY, nip19.nsecEncode(generateSecretKey()));
+    const provision = vi.fn();
+    window.CharterCarrier = { provision, isCarrier: () => true };
+    const released = [
+      { machine: "a".repeat(64), childId: "c", childName: "Robin", deviceLabel: "laptop", relays: ["wss://family.example"], releasedAt: Date.now() - 1000 },
+    ];
+    provisionCarrier([], released);
+    expect(JSON.parse(provision.mock.calls[0][0]).relays).toContain("wss://family.example");
+    // The same call a moment later says nothing new.
+    provisionCarrier([], released);
+    expect(provision).toHaveBeenCalledTimes(1);
+    // Fifteen days on, the relay is not asked for.
+    released[0].releasedAt = Date.now() - 15 * 24 * 60 * 60 * 1000;
+    provisionCarrier([], released);
+    expect(provision).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(provision.mock.calls[1][0]).relays).not.toContain("wss://family.example");
+  });
+
   it("is a no-op outside the carrier", () => {
     localStorage.setItem(KEY, nip19.nsecEncode(generateSecretKey()));
     expect(provisionCarrier()).toBe(false);
@@ -142,6 +161,20 @@ describe("pushCarrierRoster", () => {
     expect(payload.v).toBe(1);
     expect(payload.entries).toEqual([
       { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6", paired: true },
+    ]);
+  });
+
+  it("sends a disconnected device in the roster as unpaired and released, so its held audits are named", () => {
+    const roster = vi.fn();
+    window.CharterCarrier = { provision: vi.fn(), roster, isCarrier: () => true };
+    const releasedAt = Date.now() - 1000;
+    const released = [
+      { machine: "c".repeat(64), childId: "gone", childName: "Robin", deviceLabel: "Old laptop", relays: [], releasedAt },
+    ];
+    expect(pushCarrierRoster(CHILDREN, released)).toBe(true);
+    expect(JSON.parse(roster.mock.calls[0][0]).entries).toEqual([
+      { machine: "a".repeat(64), childName: "Mia", deviceLabel: "Pixel 6", paired: true },
+      { machine: "c".repeat(64), childName: "Robin", deviceLabel: "Old laptop", paired: false, released: true, releasedAt: Math.floor(releasedAt / 1000) },
     ]);
   });
 

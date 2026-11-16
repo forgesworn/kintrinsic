@@ -2,6 +2,7 @@ import { UnclaimedPhones } from "../components/RecoveryBanners";
 import Onboarding from "./Onboarding";
 import KeyBackupNudge from "./KeyBackupNudge";
 import CarrierDownload from "../carrier/CarrierDownload";
+import EmergencyAlertsOff from "../carrier/EmergencyAlertsOff";
 
 // Home — the getting-started page, for a family with no children yet. Once
 // there is a child there is no Home: the app opens on the first child's page
@@ -19,6 +20,8 @@ import CarrierDownload from "../carrier/CarrierDownload";
 export default function Home() {
   return (
     <>
+      <EmergencyAlertsOff />
+
       {/* Getting started — self-hides once a computer is connected. */}
       <Onboarding />
 

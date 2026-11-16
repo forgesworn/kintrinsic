@@ -78,8 +78,16 @@ class MainActivity : Activity() {
      *  paired or not: a release never erases either. */
     private lateinit var screenLockNoticeCard: LinearLayout
     private lateinit var screenLockNoticeText: TextView
-    private lateinit var screenLockHistoryCard: LinearLayout
-    private lateinit var screenLockHistoryText: TextView
+    /** "Activity on this phone": every screen-lock reset and the other
+     *  out-of-the-ordinary events, newest first. No delete anywhere. */
+    private lateinit var activityText: TextView
+    private lateinit var activityNote: TextView
+    private lateinit var activityToggle: TextView
+    private var activityShowAll = false
+    private var activityRows: List<org.forgesworn.charter.enforce.ActivityFeed.Row> = emptyList()
+    /** False until the first read lands: the empty-state words must never
+     *  flash before the files have been read. */
+    private var activityLoaded = false
     /** The unacknowledged reset ids the card is showing, for its OK. */
     private var screenLockShown: List<String> = emptyList()
     /** "Time limits can't count yet" + the switch to fix it (QR setup). */
@@ -388,14 +396,32 @@ class MainActivity : Activity() {
         root.addView(debuggingNote)
         (hotspotButton.layoutParams as? LinearLayout.LayoutParams)?.topMargin = 12
 
-        // Every screen-lock reset this phone has had, newest first. No delete.
-        screenLockHistoryText = line("", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 6)
-        screenLockHistoryCard = CharterTheme.card(this).apply {
+        // Everything out of the ordinary this phone has seen, newest first
+        // (every screen-lock reset included). No delete. Always visible.
+        val activityFeed = org.forgesworn.charter.enforce.ActivityFeed
+        activityText = line("", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 6)
+        activityNote = line("", CharterTheme.FS_SMALL, CharterTheme.WARN, 6).apply { visibility = View.GONE }
+        activityToggle = line("Show all", CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 6).apply {
+            minHeight = CharterTheme.dp(this@MainActivity, CharterTheme.TAP)
+            gravity = Gravity.CENTER_VERTICAL
+            paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
             visibility = View.GONE
-            addView(line("Screen lock history", CharterTheme.FS_BODY, CharterTheme.PAPER_TEXT))
-            addView(screenLockHistoryText)
+            setOnClickListener {
+                activityShowAll = !activityShowAll
+                renderActivityRows()
+            }
         }
-        root.addView(screenLockHistoryCard, CharterTheme.stackParams(this, 24))
+        root.addView(
+            CharterTheme.card(this).apply {
+                addView(line("Activity on this phone", CharterTheme.FS_BODY, CharterTheme.PAPER_TEXT))
+                addView(line(activityFeed.SUB, CharterTheme.FS_SMALL, CharterTheme.PAPER_TEXT_2, 6))
+                addView(activityText)
+                addView(activityNote)
+                addView(activityToggle)
+            },
+            CharterTheme.stackParams(this, 24),
+        )
+        renderActivityRows()
 
         // The quiet footer: everything a grown-up (or a tester) wants that a
         // child does not — set-up status, device code, guardian, version.
@@ -471,10 +497,32 @@ class MainActivity : Activity() {
         val copy = org.forgesworn.charter.enforce.ScreenLockCopy
         val open = org.forgesworn.charter.enforce.ScreenLockHistoryFormat.unacknowledged(records)
         screenLockShown = open.map { it.id }
-        screenLockNoticeText.text = open.joinToString("\n\n") { copy.notice(it, zone) }
+        screenLockNoticeText.text = open.joinToString("\n\n") { copy.noticeOrFallback(it, zone) }
         screenLockNoticeCard.visibility = if (open.isEmpty()) View.GONE else View.VISIBLE
-        screenLockHistoryText.text = records.asReversed().joinToString("\n") { copy.historyRow(it, zone) }
-        screenLockHistoryCard.visibility = if (records.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    /** Both sources merged, newest first. Read independently: one that will
+     *  not read never hides the other's rows, and says so. */
+    private fun renderActivity(feed: org.forgesworn.charter.enforce.ActivityFeed.Feed) {
+        activityLoaded = true
+        activityRows = feed.rows
+        activityNote.text = org.forgesworn.charter.enforce.ActivityFeed.UNREADABLE
+        activityNote.visibility = if (feed.unreadable) View.VISIBLE else View.GONE
+        renderActivityRows()
+    }
+
+    private fun renderActivityRows() {
+        val feed = org.forgesworn.charter.enforce.ActivityFeed
+        activityText.text = if (!activityLoaded) {
+            ""
+        } else if (activityRows.isEmpty()) {
+            if (activityNote.visibility == View.VISIBLE) "" else feed.EMPTY
+        } else {
+            feed.visible(activityRows, activityShowAll).joinToString("\n") { it.text }
+        }
+        activityText.visibility = if (activityText.text.isEmpty()) View.GONE else View.VISIBLE
+        activityToggle.visibility = if (feed.needsToggle(activityRows)) View.VISIBLE else View.GONE
+        activityToggle.text = if (activityShowAll) "Show fewer" else "Show all"
     }
 
     /** The child's OK: an acknowledged line for each notice the card showed,
@@ -617,14 +665,25 @@ class MainActivity : Activity() {
             val usageNeeded = runCatching {
                 QrSetup.needsUsageAccess(Provisioning.isDeviceOwner(this), QrSetup.usageOpMode(this))
             }.getOrDefault(false)
-            // Null when the history will not read: the card keeps what it showed.
+            // Null when a file will not read. The two are read independently,
+            // so one damaged file never hides the other's rows; the notice
+            // card keeps what it showed.
             val screenLock = runCatching {
                 org.forgesworn.charter.enforce.FileScreenLockHistory.get(this).records()
+            }.getOrNull()
+            val activity = runCatching {
+                org.forgesworn.charter.enforce.FileActivityLog.get(this).entries()
+            }.getOrNull()
+            // Built here, off the main thread: every row is date-formatted, and
+            // each row is guarded on its own (see ActivityCopy).
+            val feed = runCatching {
+                org.forgesworn.charter.enforce.ActivityFeed.merge(screenLock, activity, java.time.ZoneId.systemDefault())
             }.getOrNull()
             runOnUiThread {
                 render(state, view, tether, groups, askFirst, requests, holds, now, debugging)
                 renderUsageAccess(usageNeeded)
                 screenLock?.let { renderScreenLock(it) }
+                feed?.let { renderActivity(it) }
             }
         }
     }

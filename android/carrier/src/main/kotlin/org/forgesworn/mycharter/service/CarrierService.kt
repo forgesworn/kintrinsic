@@ -244,34 +244,102 @@ class CarrierService : Service() {
         } finally {
             sk.fill(0)
         }
-        // The break-glass override: the ward opened their phone in an
-        // emergency. Alert NOW — the whole design trades prevention for
+        // The ward's emergency controls: the break-glass unlock (the ward
+        // opened their phone) and the emergency-call button (the ward used the
+        // button; the ward app asked the phone to open its emergency dialler,
+        // which is not proof the dialler appeared or a call was placed). The
+        // button is alerted on whatever outcome the audit carries. Alert NOW — the whole design trades prevention for
         // immediate transparency, so a late notification breaks the deal.
         if (verdict.optString("type") == "audit") {
-            if (verdict.optString("outcome") == "override") {
-                // Alert ONCE. Every reconnect resubscribes 48h back and the
-                // relay replays the same wrap, so without this the guardian is
-                // re-buzzed about one unlock for two days (seen live: 6 alerts
-                // for one press, 2026-08-09). The audit rumor carries no id of
-                // its own, so the key is the outer wrap id — one wrap is built
-                // per audit and published to every relay, so it also folds the
-                // per-relay copies into one alert. An unreadable id falls
-                // through to notify: a repeated alarm beats a missed emergency.
-                val wrapId = RelayFraming.eventId(eventJson)
-                if (wrapId != null && !store.markSeen("audit:$wrapId")) return
-                Notifier.notifyOverride(
+            val action = Notifier.auditAction(
+                outcome = verdict.optString("outcome", ""),
+                op = verdict.optString("op", ""),
+            )
+            if (action == Notifier.AuditAction.IGNORE) return
+            val machine = verdict.optString("machine", "")
+            val wrapId = RelayFraming.eventId(eventJson)
+            // KEEP the wrap for the console, before and apart from the alert:
+            // the console reads a relay for only the last day, and an alert
+            // that was dismissed (or deduped below) must not be the only trace
+            // of a press. Held until the console has persisted it; a replay of
+            // a wrap already held is a no-op.
+            if (wrapId != null) {
+                runCatching { store.spoolInboxWrap(wrapId, machine, eventJson, now) }
+                    .onFailure { Log.w(TAG, "could not hold audit for the console: ${it.message}") }
+            }
+            // The press time the ward stamped, when it is a plain number: the audit's own
+            // `at` and nothing else (never the wrap's created_at or the receive time), as
+            // the copy for a released phone compares it with the disconnect time.
+            val at = if (verdict.has("at")) verdict.optLong("at", -1L).takeIf { it >= 0 } else null
+            // Has the console told us its devices yet? An empty roster (a console
+            // that booted without its household) is not evidence that this sender
+            // is a stranger, so it counts as "not yet", like an absent one. A
+            // released device is still in the roster, so it is not unpaired.
+            val roster = store.roster()
+            val rosterKnown = store.knownRoster() != null
+            // Told once per wrap (replays and per-relay copies fold) and once per
+            // press (a rebuilt wrap has a new id and the same press time; it is
+            // still spooled above, and the console folds by machine and press
+            // time). A sender not in the roster shares ONE row and never enters
+            // the dedup list a paired ward's wraps live in, so a flood of
+            // strangers holds one notification slot and evicts nothing. An
+            // unreadable id falls through to alert: a repeated alarm beats a
+            // missed emergency. See [AuditAdmission].
+            val admission = AuditAdmission.decide(
+                store, action, machine, at, wrapId, roster, rosterKnown,
+                liveRows = { Notifier.liveEmergencyRows(this, it) },
+            )
+            when (admission) {
+                AuditAdmission.Skip -> return
+                is AuditAdmission.Unpaired -> {
+                    Notifier.notifyUnpaired(this, admission.count, admission.sound)
+                    return
+                }
+                AuditAdmission.Alert -> Unit
+            }
+            when (action) {
+                Notifier.AuditAction.UNLOCK -> Notifier.notifyOverride(
                     this,
-                    machine = verdict.optString("machine", ""),
+                    machine = machine,
                     scope = verdict.optString("scope", ""),
                     durationSecs = verdict.optString("durationSecs", "").toLongOrNull() ?: 0L,
-                    roster = store.roster(),
+                    roster = roster,
+                    at = at,
+                    wrapId = wrapId,
                 )
+                Notifier.AuditAction.EMERGENCY_CALL -> Notifier.notifyEmergencyCall(
+                    this,
+                    machine = machine,
+                    roster = roster,
+                    at = at,
+                    wrapId = wrapId,
+                )
+                Notifier.AuditAction.OTHER_CONTROL -> Notifier.notifyEmergencyControl(
+                    this,
+                    machine = machine,
+                    roster = roster,
+                    at = at,
+                    wrapId = wrapId,
+                )
+                Notifier.AuditAction.IGNORE -> Unit
             }
             return
         }
         if (verdict.optString("type") != "request") return
         val reqId = verdict.optString("reqId", "")
-        if (reqId.isEmpty() || !store.markSeen(reqId)) return
+        val machine = verdict.optString("machine", "")
+        val roster = store.roster()
+        // Only a paired ward's ask is named as a child's. One from a stranger or a
+        // released machine folds into a single silent row: the console lands none of
+        // them, and a flood of them must not fill the shade (see [AskAdmission]).
+        when (val admission = AskAdmission.decide(store, reqId, machine, roster, store.knownRoster() != null)) {
+            AskAdmission.Skip -> return
+            is AskAdmission.Unpaired -> {
+                Notifier.notifyUnpairedAsks(this, admission.count)
+                return
+            }
+            AskAdmission.Notify -> Unit
+        }
         val minutes = verdict.optJSONObject("params")
             ?.optLong("minutesRequested", -1L)
             ?.takeIf { it >= 0 }
@@ -281,8 +349,8 @@ class CarrierService : Service() {
             reqId,
             verdict.optString("op"),
             minutes,
-            machine = verdict.optString("machine", ""),
-            roster = store.roster(),
+            machine = machine,
+            roster = roster,
         )
     }
 

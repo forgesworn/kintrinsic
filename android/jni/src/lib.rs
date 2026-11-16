@@ -34,7 +34,8 @@ use warden::{Warden, WARDEN};
 /// 6: the `connections` clause — `charterConnections`.
 /// 7: the guardian screen-lock reset — `charterTakeScreenLockReset`,
 ///    `charterReportScreenLockReset` and `charterSetScreenLockState`.
-pub const ABI_VERSION: jint = 7;
+/// 8: the emergency-call report — `charterEmergencyCallUsed`.
+pub const ABI_VERSION: jint = 8;
 
 // ---- the debugging answer --------------------------------------------------
 //
@@ -610,8 +611,11 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterL
 }
 
 /// The ward breaks the glass: an immediate emergency unlock, loudly
-/// journaled for the guardian. Returns `{"allowed",...}` JSON. Refused only
-/// when the guardian hasn't enabled it — never for lack of network.
+/// journaled for the guardian. Returns `{"allowed",...}` JSON: on success
+/// `{"allowed":true,"scope","secsLeft","journaled":bool}` (`journaled` false
+/// means the guardian may never be told; absent reads as true), otherwise
+/// `{"allowed":false,"reason"}`. Refused only when the guardian hasn't enabled
+/// it — never for lack of network.
 #[no_mangle]
 pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterBreakGlass(
     env: JNIEnv,
@@ -619,6 +623,22 @@ pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterB
     now_unix: jlong,
 ) -> jstring {
     with_warden_mut(&env, |w| w.break_glass(now_unix as u64))
+}
+
+/// The ward used the shade's emergency-call button (its hold and cancel window
+/// completed, and the ward app asked the phone to open its emergency dialler;
+/// not proof the dialler appeared or a call was placed): journal the `call.emergency` audit for the
+/// guardian, dated by `now_unix`, the press. Returns `{"ok":true}`,
+/// `{"ok":false,"reason":"…"}` (unpaired, or the journal would not write) or
+/// `{"error":"not initialized"}`; Kotlin treats anything but `ok:true` as
+/// "not reported". Never touches the network.
+#[no_mangle]
+pub extern "system" fn Java_org_forgesworn_charter_native_CharterNative_charterEmergencyCallUsed(
+    env: JNIEnv,
+    _class: JClass,
+    now_unix: jlong,
+) -> jstring {
+    with_warden_mut(&env, |w| w.emergency_call_used(now_unix.max(0) as u64))
 }
 
 /// The ward's effective web-content policy as a `DnsFilterPlan` wrapper

@@ -13,6 +13,8 @@ import { DEFAULT_RELAYS } from "../signer/config";
 import { allPairingRelays } from "../signer/pairingRelays";
 import type { Child } from "../domain/types";
 import { buildCarrierRoster } from "./roster";
+import { releaseLinkDeadlines } from "../store/releaseGrace";
+import { releasedRelays } from "../store/releasedDevices";
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -46,13 +48,17 @@ let provisionedIdentity: string | null = null;
  * this call was a no-op because it already did. Callers use it as "is the
  * carrier provisioned", not as "did work happen".
  */
-export function provisionCarrier(children: Child[] = []): boolean {
+export function provisionCarrier(children: Child[] = [], released: unknown = undefined): boolean {
   const carrier = window.CharterCarrier;
   if (!carrier) return false;
   const loaded = readGuardianKey();
   if (loaded.kind !== "ok") return false;
   const pubkey = getPublicKey(loaded.key);
-  const relays = allPairingRelays(children, DEFAULT_RELAYS).sort();
+  // A device the guardian just disconnected may still be sending the audits it
+  // held; keep listening on its relays for the grace period.
+  const relays = [
+    ...new Set([...allPairingRelays(children, DEFAULT_RELAYS), ...releasedRelays(released, Date.now())]),
+  ].sort();
   const identity = JSON.stringify([pubkey, relays]);
   if (identity === provisionedIdentity) return true;
   carrier.provision(
@@ -81,11 +87,15 @@ export function resetProvisionedForTests(): void {
  * stale), but its absence (outside the carrier, or an older shell without
  * the `roster` method) is always a silent no-op.
  */
-export function pushCarrierRoster(children: Child[]): boolean {
+export function pushCarrierRoster(
+  children: Child[],
+  released: unknown = undefined,
+  linkUntil: ReadonlyMap<string, number> = releaseLinkDeadlines(),
+): boolean {
   const carrier = window.CharterCarrier;
   if (!carrier?.roster) return false;
   carrier.roster(
-    JSON.stringify({ v: 1, entries: buildCarrierRoster(children) }),
+    JSON.stringify({ v: 1, entries: buildCarrierRoster(children, released, Date.now(), linkUntil) }),
   );
   return true;
 }

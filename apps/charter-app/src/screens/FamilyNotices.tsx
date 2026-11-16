@@ -2,6 +2,7 @@ import { UnclaimedPhones } from "../components/RecoveryBanners";
 import Onboarding from "./Onboarding";
 import KeyBackupNudge from "./KeyBackupNudge";
 import AnsweredDelivery from "./AnsweredDelivery";
+import EmergencyAlertsOff from "../carrier/EmergencyAlertsOff";
 
 /**
  * The family-wide notices, at the top of each child's page (there is no Home to
@@ -11,6 +12,7 @@ import AnsweredDelivery from "./AnsweredDelivery";
 export default function FamilyNotices({ childId }: { childId: string }) {
   return (
     <>
+      <EmergencyAlertsOff />
       <Onboarding />
       <KeyBackupNudge />
       <UnclaimedPhones />

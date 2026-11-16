@@ -556,7 +556,14 @@ export type ActivityOutcome =
   | "rule-changed"
   /** The ward used their emergency unlock (break-glass). Not a failure and
    *  not a breach — a visible event to talk about. */
-  | "override";
+  | "override"
+  /** The ward used the emergency-call button on their lock screen. The ward
+   *  app asked the phone to open its emergency dialler; that it appeared, or
+   *  that a call was made, is not known. */
+  | "emergency_call"
+  /** The ward used an emergency control this build does not know by name
+   *  (a newer ward's `outcome=override` with another op). */
+  | "emergency_control";
 
 export interface ActivityEvent {
   id: string;
@@ -588,8 +595,8 @@ export interface ActivityEvent {
    */
   wraps?: string[];
   /**
-   * Present only on an emergency-unlock line: the override's identity
-   * (`DeviceOverride.key`). The in-memory "handled" sets are lost on reload and
+   * Present only on an emergency-unlock or emergency-call line: the
+   * audit's identity (`DeviceOverride.key` / `DeviceEmergencyCall.key`). The in-memory "handled" sets are lost on reload and
    * the relay is re-read for a day, so this persisted key is what stops the same
    * unlock being added twice. Distinct from `wraps`, which are clause deliveries.
    */

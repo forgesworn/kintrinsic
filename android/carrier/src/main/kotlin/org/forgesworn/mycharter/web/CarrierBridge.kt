@@ -1,12 +1,15 @@
 package org.forgesworn.mycharter.web
 
+import android.content.Context
 import android.webkit.JavascriptInterface
 import org.forgesworn.mycharter.carrier.CarrierStore
+import org.forgesworn.mycharter.carrier.InboxSpool
 import org.forgesworn.mycharter.carrier.ProvisionPayload
 import org.forgesworn.mycharter.carrier.RosterPayload
 import org.forgesworn.mycharter.link.LinkJson
 import org.forgesworn.mycharter.link.LocalLink
 import org.forgesworn.mycharter.native.GuardianNative
+import org.forgesworn.mycharter.service.Notifier
 import org.forgesworn.mycharter.update.SelfUpdater
 
 /**
@@ -23,6 +26,8 @@ class CarrierBridge(
     private val versionName: String,
     private val versionCode: Long,
     private val selfUpdater: SelfUpdater,
+    /** The application context, for the notification settings the console asks about. */
+    private val context: Context,
     private val onProvisioned: () -> Unit,
 ) {
     @JavascriptInterface
@@ -57,6 +62,25 @@ class CarrierBridge(
         store.saveRoster(r)
         // The roster is also the local link's admission list (paired only).
         LocalLink.current?.refreshAllowed()
+    }
+
+    /**
+     * Whether the guardian will actually be told about an emergency button press:
+     * `{"notifications":bool,"channel":bool}` (the app's notifications are on; the
+     * Emergencies channel is on, i.e. its importance is not NONE). Creates the
+     * channel first if it does not exist yet. The page feature-detects it, as an
+     * older shell has no such method.
+     */
+    @JavascriptInterface
+    fun emergencyAlertState(): String = Notifier.emergencyAlertState(context)
+
+    /**
+     * Open the Emergencies channel's system settings, or the app's notification
+     * settings when notifications are off entirely. Adds no runtime prompt.
+     */
+    @JavascriptInterface
+    fun openEmergencyAlertSettings() {
+        runCatching { Notifier.openEmergencyAlertSettings(context) }
     }
 
     /**
@@ -142,12 +166,16 @@ class CarrierBridge(
      *  wraps received over the link, held until [localConsume]. */
     @JavascriptInterface
     fun localInbox(): String {
-        if (link() == null) return "[]"
-        return native("[]") { GuardianNative.guardianLinkInbox() }
+        val fromLink = if (link() == null) "[]" else native("[]") { GuardianNative.guardianLinkInbox() }
+        // Plus the emergency audits that arrived over a relay (the carrier
+        // holds them until consumed, so a press reaches Activity however late
+        // the console is opened). Works with the home-network link off.
+        return native(fromLink) { InboxSpool.merge(fromLink, store.inboxSpool()) }
     }
 
     @JavascriptInterface
     fun localConsume(idsJson: String) {
+        native("") { store.consumeInboxSpool(idsJson); "" }
         if (link() == null) return
         native("") { GuardianNative.guardianLinkConsume(idsJson) }
     }

@@ -1827,7 +1827,9 @@ gift-wrapped-to-guardian audit per decision: tags
 empty**; no child content, exec source path, `time.extend` reason, or DOB ever
 appears. The outcome vocabulary is `enacted | denied | failed | locked | thawed
 | override`, plus, under `["op","screenlock.reset"]`, the screen-lock reset
-results (see "Screen-lock reset").
+results (see "Screen-lock reset"). The `override` outcome carries two ops,
+`["op","unlock.breakglass"]` (the break-glass override) and
+`["op","call.emergency"]` (the emergency call event), both below.
 
 **Break-glass override event (frozen 2026-07-24; design memo
 `docs/superpowers/specs/2026-07-24-lifeline-incall-and-break-glass.md`).**
@@ -1873,6 +1875,79 @@ authored audit feed (`["t","audit"]`); reconcile to either a distinct device-
 audit kind or a shared `["t","audit"]` + device-outcome vocabulary, and decide
 whether to also wrap audits to the **dependant** when `audit_transparency` is
 set (the device parses but does not yet act on that flag).
+
+**Emergency call event (ABI 8, ward 0.8.1; additive).** Every time the ward
+holds the lock shade's own emergency-call control to completion, through its
+hold and then its 3-second cancel window, the device emits the standard device
+audit with tags `["t","charter-device"]`, `["outcome","override"]`,
+`["op","call.emergency"]`, `["at","<unix secs>"]` — content empty. Nothing else
+rides on it: **never** a number, a duration, a reason or any PII. It is reported
+on every completed press, whether or not a route to a dialler resolved, started,
+threw or was refused. A cancelled countdown, including one cancelled by the
+screen going off or by the shade being covered, emits nothing. The countdown is also cancelled, never
+completed, when the phone slept through part of it, when the shade stops
+showing its button, or when the shade is covered (another window takes the
+screen or the focus), since in each case the ward could not have seen or
+stopped it. While one press counts down, no other call button starts a second. It means:
+the control completed its hold and cancel window, and the ward app then tried,
+in turn and as far as each is available, the phone's emergency dialler, the
+phone's own lock screen (which has an Emergency call button), its system dialler
+and, last, a direct call (which may place the call outright). It tries each only
+while its shade is uncovered with the screen on, so a press that completes while
+the shade is covered, or just as the screen goes off, may try none of them. It
+is not proof that anything appeared or that a call was placed. A lifeline entry
+that merely happens to be an emergency number does not emit it.
+
+`at` follows the break-glass rules exactly: the moment the press completed,
+stable across wrap rebuilds; a consumer dates by `at` unless it is later than
+the wrap's `created_at` or more than 30 days old, in which case it dates by
+`created_at`. Like the override, it **never waits on the wire**: offline, the
+event is journaled durably (the journal is flushed to disk as it is written, the
+same journal as the override, and one wrap per press however many rounds it
+waits) and emitted on reconnect. A journal that cannot be read is left alone
+while that may be passing, and a press made meanwhile is reported as not
+journaled; one that stays unreadable across four attempts over at least a
+minute (running out of memory or file descriptors does not count) is set aside
+and a fresh one started. Only the newest journal set aside this way, or set
+aside as damaged, is read again: on each good read of the journal, and once it
+parses it is merged back and deleted. It is moved out of the way before the
+merged journal is written, so it is merged once even if it cannot then be
+deleted. An older one is not read while a newer one remains. The ward app hands the report to the warden
+before it records the press on the phone, and retries a refused one a few
+times while the process lives. Consumers fold copies of one press by
+`(machine, at)` **per op**, so a break-glass press and an emergency call in the
+same second are two events.
+
+On a phone without a usable emergency dialler, the unlocked fallback opens the
+system dialler, where any number can be dialled; the control is reported all
+the same.
+
+**A guardian's release and the held audits.** When a guardian releases the
+phone, the device makes one best-effort publish of every audit still held (this
+event, the override and the screen-lock outcomes) to the guardian doing the
+releasing, and then clears the journal, so nothing a ward pressed under one
+guardian is ever told to the next. The journal is cleared at once and the
+release never waits for a relay: the publish carries on in the background. A
+journal the phone cannot read at that moment is set aside (kept on the phone,
+never read again by the warden, and removed if it cannot be moved) rather than
+left for a later round. A damaged one (not text, or text that does not parse) is set
+aside as any damaged journal is: the warden may read it again, but it never
+parses, so nothing in it is ever merged back. A phone journals an audit only while it is paired, and
+stamps it on the phone with the guardian it is paired to; an older entry with
+no stamp is stamped with the guardian paired when the warden next considers it.
+An audit stamped for one guardian is never sent to another, even if the clear
+failed. Each of those audits is also
+offered to the local link, which carries them while the guardian still accepts
+the session, so a release that arrived over the home network may carry them
+back over it while the relays are down. A release that arrives with no relay,
+or to relays that refuse, drops them.
+
+The outcome is `override` on purpose: a carrier notifies immediately on any
+`outcome=override` audit, so a carrier that predates this event still alerts
+(it fails towards alerting), with the break-glass wording ("Emergency unlock
+used"); a carrier that knows the op words it as an emergency call. A consumer
+meeting an unknown `op` under `outcome=override` SHOULD say that an emergency
+control was used rather than assume an unlock.
 
 ### Device STATUS feed — `CHARTER_DEVICE_STATUS = 31114` (v1 wire; emission deferred)
 
@@ -2476,7 +2551,10 @@ can dismiss the notice; the history still keeps the reset, with no way to
 delete it. The ward app refuses (answers `failed`) any reset whose `id` its
 history already holds, even one the device core has long since forgotten, and
 every reset it applies starts a new history record with its own unacknowledged
-notice: reusing an old, acknowledged `id` can never make a reset silent.
+notice: reusing an old, acknowledged `id` can never make a reset silent. The
+ward app's home screen also lists every reset with when its notice was
+acknowledged (or "not seen yet"), alongside other local activity, and none of
+it leaves the device.
 
 **The record survives a release.** The device keeps its last 16 outcomes
 (dropping the earliest recorded first), the answered ids and the floor in

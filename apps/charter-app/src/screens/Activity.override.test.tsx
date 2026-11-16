@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import ChildPage from "./ChildPage";
-import { exactWhen } from "./Activity";
+import Activity, { exactWhen } from "./Activity";
 import { CharterProvider, STORAGE_KEY, type CharterState } from "../store/store";
 import type { Child } from "../domain/types";
 
@@ -106,9 +106,112 @@ describe("the child page", () => {
     expect(time.textContent).toMatch(/\dm ago|Just now/);
   });
 
+  it("shows an emergency-call press with its exact time and honest wording", () => {
+    const pressed = Date.now() - 5 * 60_000;
+    const summary =
+      "Used the emergency call button on Laptop. Kintrinsic can't see whether a call was made.";
+    mount([
+      { id: "a3", childId: "c1", ts: pressed, outcome: "emergency_call", summary, auditKey: "emergencycall:k" },
+    ]);
+    const row = Array.from(container.querySelectorAll("li.row")).find((li) =>
+      li.textContent?.includes("Emergency call button."),
+    );
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain("\u{1F6A8}");
+    expect(row!.textContent).toContain(summary);
+    expect(row!.textContent).not.toContain("Emergency unlock");
+    const time = row!.querySelector("time")!;
+    expect(time.getAttribute("datetime")).toBe(new Date(pressed).toISOString());
+    expect(time.textContent).toContain(exactWhen(pressed, Date.now()));
+    expect(time.textContent).toContain(" · ");
+  });
+
+  it("shows an unknown emergency control generically, with its exact time", () => {
+    const pressed = Date.now() - 5 * 60_000;
+    mount([
+      {
+        id: "a4",
+        childId: "c1",
+        ts: pressed,
+        outcome: "emergency_control",
+        summary: "An emergency control was used on Laptop.",
+        auditKey: "override:x:k",
+      },
+    ]);
+    const row = Array.from(container.querySelectorAll("li.row")).find((li) =>
+      li.textContent?.includes("Emergency control."),
+    );
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain("An emergency control was used on Laptop.");
+    expect(row!.querySelector("time")!.textContent).toContain(" · ");
+  });
+
+  it("never crashes on a stored outcome this build does not know", () => {
+    mount([
+      {
+        id: "a5",
+        childId: "c1",
+        ts: Date.now() - 60_000,
+        outcome: "from_a_newer_build" as never,
+        summary: "Something a newer build recorded",
+      },
+      { id: "a6", childId: "c1", ts: Date.now() - 120_000, outcome: "enacted", summary: "You set up Laptop" },
+    ]);
+    const row = Array.from(container.querySelectorAll("li.row")).find((li) =>
+      li.textContent?.includes("Something a newer build recorded"),
+    );
+    expect(row).toBeTruthy();
+    expect(row!.textContent).toContain("Activity.");
+    expect(container.textContent).toContain("You set up Laptop");
+  });
+
   it("leaves other rows with the relative time alone", () => {
     mount([{ id: "a2", childId: "c1", ts: Date.now() - 5 * 60_000, outcome: "enacted", summary: "You set up Laptop" }]);
     const time = container.querySelector("li.row time")!;
     expect(time.textContent).toMatch(/^\dm ago$/);
+  });
+});
+
+describe("the Activity screen after the child was removed", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    localStorage.clear();
+  });
+
+  it("still shows a press the ward made before the guardian disconnected it, naming the child", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        children: [],
+        requests: [],
+        activity: [
+          {
+            id: "a1",
+            childId: "removed-child",
+            ts: Date.now() - 60_000,
+            outcome: "emergency_call",
+            summary:
+              "Used the emergency call button on Laptop, before you disconnected it from Robin. Kintrinsic can't see whether a call was made.",
+            auditKey: "k",
+          },
+        ],
+        signer: { connected: false, kind: "none", autoSign: false },
+      }),
+    );
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <CharterProvider>
+          <Activity />
+        </CharterProvider>,
+      );
+    });
+    expect(container.textContent).toContain("Emergency call button.");
+    expect(container.textContent).toContain("before you disconnected it from Robin");
   });
 });

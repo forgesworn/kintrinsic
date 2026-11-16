@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCarrierRoster } from "./roster";
+import { UNNAMED_CHILD, UNNAMED_DEVICE, buildCarrierRoster } from "./roster";
 import type { Child, Device } from "../domain/types";
 
 function device(overrides: Partial<Device> = {}): Device {
@@ -84,5 +84,100 @@ describe("buildCarrierRoster", () => {
 
   it("an empty children list yields an empty roster", () => {
     expect(buildCarrierRoster([])).toEqual([]);
+  });
+});
+
+describe("buildCarrierRoster during the link grace after a release", () => {
+  const machine = "c".repeat(64);
+  const releasedList = (releasedAt: number) => [
+    { machine, childId: "child-1", childName: "Mia", deviceLabel: "Pixel 6", relays: [], releasedAt },
+  ];
+
+  it("is released, never paired, and carries linkUntil (epoch ms) while the grace runs", () => {
+    const now = Date.now();
+    expect(buildCarrierRoster([child()], releasedList(now), now, new Map([[machine, now + 10_000]]))).toEqual([
+      {
+        machine,
+        childName: "Mia",
+        deviceLabel: "Pixel 6",
+        paired: false,
+        released: true,
+        releasedAt: Math.floor(now / 1000),
+        linkUntil: now + 10_000,
+      },
+    ]);
+  });
+
+  it("omits linkUntil once it is past, or when there is no grace", () => {
+    const now = Date.now();
+    const bare = {
+      machine,
+      childName: "Mia",
+      deviceLabel: "Pixel 6",
+      paired: false,
+      released: true,
+      releasedAt: Math.floor(now / 1000),
+    };
+    expect(buildCarrierRoster([], releasedList(now), now, new Map())).toEqual([bare]);
+    expect(buildCarrierRoster([], releasedList(now), now, new Map([[machine, now]]))).toEqual([bare]);
+    expect(buildCarrierRoster([], releasedList(now), now, new Map([[machine, now - 1]]))).toEqual([bare]);
+  });
+
+  it("never lists a machine that is not on the released record, and gives linkUntil to no other entry", () => {
+    expect(buildCarrierRoster([], undefined, Date.now(), new Map([[machine, Date.now() + 5000]]))).toEqual([]);
+    const now = Date.now();
+    const roster = buildCarrierRoster([child({ devices: [device({ devicePubkey: machine })] })], releasedList(now), now, new Map([[machine, now + 5000]]));
+    // A machine that is in the household again takes its household entry.
+    expect(roster).toEqual([{ machine, childName: "Mia", deviceLabel: "Pixel 6", paired: true }]);
+  });
+});
+
+describe("buildCarrierRoster never pushes an empty name or label", () => {
+  const machine = "c".repeat(64);
+
+  it("falls back for a household child or device with no name, however blank", () => {
+    const roster = buildCarrierRoster([
+      child({ name: "", devices: [device({ label: "", devicePubkey: "a".repeat(64) })] }),
+      child({ id: "c2", name: "   ", devices: [device({ id: "d2", label: " \t", devicePubkey: "b".repeat(64) })] }),
+    ]);
+    expect(roster.map((e) => [e.childName, e.deviceLabel])).toEqual([
+      [UNNAMED_CHILD, UNNAMED_DEVICE],
+      [UNNAMED_CHILD, UNNAMED_DEVICE],
+    ]);
+  });
+
+  it("falls back for a released record that has lost its name or label (the push is never refused for it)", () => {
+    const now = Date.now();
+    const rec = (over: object) => [
+      { machine, childId: "c", childName: "Mia", deviceLabel: "Pixel 6", relays: [], releasedAt: now - 5000, ...over },
+    ];
+    for (const releasing of [new Map<string, number>(), new Map([[machine, now + 5000]])]) {
+      const got = buildCarrierRoster([], rec({ childName: "", deviceLabel: "" }), now, releasing);
+      expect(got).toHaveLength(1);
+      expect(got[0].childName).toBe(UNNAMED_CHILD);
+      expect(got[0].deviceLabel).toBe(UNNAMED_DEVICE);
+    }
+    // A record with no name field at all is read as empty by the store, and gets the same fallback.
+    const bare = [{ machine, childId: "c", releasedAt: now - 5000 }];
+    expect(buildCarrierRoster([], bare, now)[0]).toMatchObject({
+      childName: UNNAMED_CHILD,
+      deviceLabel: "the device",
+      released: true,
+    });
+  });
+
+  it("keeps a real name and label exactly as they are", () => {
+    expect(buildCarrierRoster([child({ devices: [device()] })])[0]).toMatchObject({ childName: "Mia", deviceLabel: "Pixel 6" });
+  });
+
+  it("puts releasedAt (whole seconds) on a released entry and on no other", () => {
+    const now = 1_800_000_000_999;
+    const roster = buildCarrierRoster(
+      [child({ devices: [device()] })],
+      [{ machine, childId: "c", childName: "Robin", deviceLabel: "Old", relays: [], releasedAt: now - 4000 }],
+      now,
+    );
+    expect(roster[0]).not.toHaveProperty("releasedAt");
+    expect(roster[1]).toMatchObject({ released: true, releasedAt: 1_799_999_996 });
   });
 });

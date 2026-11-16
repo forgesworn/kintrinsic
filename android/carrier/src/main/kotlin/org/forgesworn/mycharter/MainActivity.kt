@@ -60,6 +60,7 @@ class MainActivity : ComponentActivity() {
                 versionName = pkg?.versionName ?: "",
                 versionCode = pkg?.let { androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(it) } ?: 0L,
                 selfUpdater = SelfUpdater(applicationContext),
+                context = applicationContext,
             ) { CarrierService.start(this) },
             CarrierBridge.JS_NAME,
         )

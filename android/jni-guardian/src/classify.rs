@@ -10,6 +10,15 @@ fn drop_json(reason: &str) -> String {
     serde_json::json!({"type": "drop", "reason": reason}).to_string()
 }
 
+/// A plain decimal non-negative integer (no sign, exponent or whitespace),
+/// at most 15 digits, the same rule the console applies to `at`.
+fn parse_decimal(s: &str) -> Option<u64> {
+    if s.is_empty() || s.len() > 15 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
 /// Classify a wrap event (JSON) using the guardian secret. Total: every input
 /// maps to a JSON verdict; malformed/foreign/stale input is a "drop", never an
 /// error the service has to special-case.
@@ -63,15 +72,23 @@ pub fn classify_wrap(wrap_json: &str, guardian_sk: &[u8; 32], now_unix: u64) -> 
                     .find(|t| t.first().map(String::as_str) == Some(name))
                     .and_then(|t| t.get(1).cloned())
             };
-            serde_json::json!({
+            let mut verdict = serde_json::json!({
                 "type": "audit",
                 "machine": author.to_hex(),
                 "outcome": tag("outcome").unwrap_or_default(),
                 "op": tag("op").unwrap_or_default(),
                 "scope": tag("scope").unwrap_or_default(),
                 "durationSecs": tag("durationSecs").unwrap_or_default(),
-            })
-            .to_string()
+            });
+            // The press time the ward stamped, as a number, so a notification
+            // can say WHEN it happened rather than when this phone heard of it
+            // and a rebuilt wrap for the same press reuses its row. Absent when
+            // the tag is missing or is not a plain non-negative integer; the
+            // carrier decides whether the value is plausible.
+            if let Some(at) = tag("at").and_then(|v| parse_decimal(&v)) {
+                verdict["at"] = serde_json::json!(at);
+            }
+            verdict.to_string()
         }
         k => serde_json::json!({"type": "other", "kind": k}).to_string(),
     }
@@ -236,6 +253,101 @@ mod tests {
             serde_json::from_str(&classify_wrap(&json, &sk_of(0x11), NOW)).unwrap();
         assert_eq!(out["type"], "other");
         assert_eq!(out["kind"], kinds::CHARTER_DEVICE_GRANT);
+    }
+
+    /// A device audit (kind 31000) from machine seed 0x44 with exactly `tags`
+    /// (the transport's `t` marker is added first, as the ward's does), wrapped
+    /// to the guardian (seed 0x11), then classified.
+    fn classify_audit(tags: &[(&str, &str)]) -> serde_json::Value {
+        let guardian = TestGuardian::new();
+        let machine = TestGuardian::from_seed(0x44);
+        let mut all = vec![kinds::marker_tag()];
+        all.extend(
+            tags.iter()
+                .map(|(k, v)| vec![(*k).to_string(), (*v).to_string()]),
+        );
+        let ev = sign_event(
+            &machine.signer,
+            kinds::CHARTER_DEVICE_AUDIT,
+            NOW,
+            all,
+            String::new(),
+        );
+        let json = wrap_json(&ev, &sk_of(0x44), &guardian.pubkey(), NOW);
+        let out: serde_json::Value =
+            serde_json::from_str(&classify_wrap(&json, &sk_of(0x11), NOW)).unwrap();
+        assert_eq!(out["machine"], machine.pubkey().to_hex());
+        out
+    }
+
+    #[test]
+    fn classifies_a_break_glass_audit_with_its_op_scope_and_duration() {
+        let out = classify_audit(&[
+            ("outcome", "override"),
+            ("op", "unlock.breakglass"),
+            ("scope", "full"),
+            ("durationSecs", "600"),
+            ("at", "1799999990"),
+        ]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "override");
+        assert_eq!(out["op"], "unlock.breakglass");
+        assert_eq!(out["scope"], "full");
+        assert_eq!(out["durationSecs"], "600");
+    }
+
+    #[test]
+    fn classifies_an_emergency_call_audit_forwarding_its_op() {
+        let out = classify_audit(&[
+            ("outcome", "override"),
+            ("op", "call.emergency"),
+            ("at", "1799999990"),
+        ]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "override");
+        assert_eq!(out["op"], "call.emergency");
+        // No scope or duration is ever sent for a call; the verdict says so
+        // with empty strings rather than inventing them.
+        assert_eq!(out["scope"], "");
+        assert_eq!(out["durationSecs"], "");
+        // The press time is forwarded, as a number.
+        assert_eq!(out["at"], 1_799_999_990u64);
+    }
+
+    #[test]
+    fn at_is_absent_unless_it_is_a_plain_non_negative_integer() {
+        for bad in ["", "-5", "1e9", " 12", "12.5", "abc", "1234567890123456"] {
+            let out = classify_audit(&[
+                ("outcome", "override"),
+                ("op", "call.emergency"),
+                ("at", bad),
+            ]);
+            assert!(out.get("at").is_none(), "at {bad:?} must not be forwarded");
+        }
+        let none = classify_audit(&[("outcome", "override"), ("op", "call.emergency")]);
+        assert!(none.get("at").is_none());
+        let zero = classify_audit(&[
+            ("outcome", "override"),
+            ("op", "unlock.breakglass"),
+            ("at", "0"),
+        ]);
+        assert_eq!(zero["at"], 0u64);
+    }
+
+    #[test]
+    fn an_audit_with_no_tags_defaults_every_field_to_empty() {
+        let out = classify_audit(&[]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "");
+        assert_eq!(out["op"], "");
+    }
+
+    #[test]
+    fn a_non_override_audit_is_still_an_audit_verdict_for_the_carrier_to_decide() {
+        let out = classify_audit(&[("outcome", "applied"), ("op", "screenlock.reset")]);
+        assert_eq!(out["type"], "audit");
+        assert_eq!(out["outcome"], "applied");
+        assert_eq!(out["op"], "screenlock.reset");
     }
 
     #[test]

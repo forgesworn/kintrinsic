@@ -138,7 +138,7 @@ object CharterCore {
 
     /** The JNI surface this build was written against: `ABI_VERSION` in
      *  `android/jni/src/lib.rs`. Bump the two together. */
-    const val EXPECTED_ABI_VERSION = 7
+    const val EXPECTED_ABI_VERSION = 8
 
     /** The native core was refused (F3): a `.so` from another ABI, or none. */
     class AbiMismatch(message: String) : IllegalStateException(message)
@@ -837,32 +837,66 @@ object CharterCore {
     /** The ward's lifeline numbers; empty when none / malformed (fail-closed). */
     fun lifeline(): List<LifelineNumber> = lifelineView().numbers
 
-    /** The outcome of breaking the glass. */
+    /** The outcome of breaking the glass. [journaled] is false when the
+     *  core could not journal the press for the guardian (an older core,
+     *  which does not say, is taken as having journaled it). [reason] is
+     *  "not-enabled" only when the family has not switched it on; "error" and
+     *  "unavailable" are faults. */
     data class BreakGlassResult(
         val allowed: Boolean,
         val scope: String = "",
         val secsLeft: Long = 0,
         val reason: String = "",
+        val journaled: Boolean = true,
     )
 
     /**
      * The ward's emergency override: unlocks NOW (no approval, no network
      * needed) and journals it for the guardian. Refused only when the family
-     * hasn't enabled it.
+     * hasn't enabled it. Takes the warden lock and fsyncs the journal, so call
+     * it from a worker, never the main thread.
      */
-    fun breakGlass(nowUnix: Long): BreakGlassResult {
-        val raw = jni().charterBreakGlass(nowUnix)
+    fun breakGlass(nowUnix: Long): BreakGlassResult = parseBreakGlass(jni().charterBreakGlass(nowUnix))
+
+    /** [breakGlass]'s answer. An empty answer, or one that will not parse, is
+     *  "unavailable"; an `error` key (an uninitialised core, a recovered
+     *  panic) is "error". Neither is ever "not-enabled". */
+    fun parseBreakGlass(raw: String): BreakGlassResult {
         if (raw.isEmpty()) return BreakGlassResult(false, reason = "unavailable")
         return runCatching {
             val o = org.json.JSONObject(raw)
-            BreakGlassResult(
-                allowed = o.optBoolean("allowed", false),
-                scope = o.optString("scope", ""),
-                secsLeft = o.optLong("secsLeft", 0),
-                reason = o.optString("reason", ""),
-            )
+            if (o.has("error")) {
+                BreakGlassResult(false, reason = "error")
+            } else {
+                BreakGlassResult(
+                    allowed = o.optBoolean("allowed", false),
+                    scope = o.optString("scope", ""),
+                    secsLeft = o.optLong("secsLeft", 0),
+                    reason = o.optString("reason", ""),
+                    journaled = o.optBoolean("journaled", true),
+                )
+            }
         }.getOrDefault(BreakGlassResult(false, reason = "unavailable"))
     }
+
+    /**
+     * Report that the shade's emergency-call button completed its hold and
+     * cancel window at [nowUnix], so the guardian is told. What it says is
+     * only that: the control completed its hold and cancel window, and the ward
+     * app asked the phone to open its emergency dialler. It is not proof that
+     * the dialler appeared or that a call was placed. True only when the
+     * warden journaled it (it is then sent on the next poll, whatever the
+     * network is doing). Never throws: it reports an event and must not be able
+     * to change anything about the call. Takes the warden lock, so never call
+     * it from the main thread.
+     */
+    fun emergencyCallUsed(nowUnix: Long): Boolean =
+        runCatching { parseOk(jni().charterEmergencyCallUsed(nowUnix)) }.getOrDefault(false)
+
+    /** True only for `{"ok":true,...}`; anything else (an error, a refusal, an
+     *  empty or unreadable answer) is false. Pure. */
+    internal fun parseOk(raw: String): Boolean =
+        runCatching { org.json.JSONObject(raw).optBoolean("ok", false) }.getOrDefault(false)
 
     /** The ward-facing "your charter" mirror (spec D8). */
     data class ScheduleView(

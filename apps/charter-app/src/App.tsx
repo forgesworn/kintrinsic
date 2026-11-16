@@ -206,8 +206,8 @@ export default function App() {
   // backup the key changes without a remount, a child/device can be renamed
   // at any time, and both calls are cheap no-ops otherwise.
   useEffect(() => {
-    provisionCarrier(state.children);
-    pushCarrierRoster(state.children);
+    provisionCarrier(state.children, state.releasedDevices);
+    pushCarrierRoster(state.children, state.releasedDevices);
   });
 
   const nav = (to: string) => {

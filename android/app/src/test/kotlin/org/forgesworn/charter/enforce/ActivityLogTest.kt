@@ -1,0 +1,955 @@
+package org.forgesworn.charter.enforce
+
+import org.forgesworn.charter.native.CharterCore
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+import java.time.ZoneId
+
+/**
+ * "Activity on this phone": the line format, the per-kind retention, the file,
+ * the merged feed and its words, the three edge-trigger decisions, and the
+ * emergency control's best-effort logging.
+ */
+class ActivityLogTest {
+
+    private val london: ZoneId = ZoneId.of("Europe/London")
+    private val id1 = "aaaabbbbccccddddeeeeffff00009999"
+
+    // 2026-11-14 19:42:00 Europe/London (GMT) = 19:42 UTC.
+    private val at1942 = 1794685320L
+
+    private fun tmpFile(): File = File(createTempDir(), "activity.jsonl")
+
+    // ---- format ------------------------------------------------------------------
+
+    @Test
+    fun `every kind round-trips through its line`() {
+        val all = listOf(
+            ActivityEntry(at1942, ActivityKind.EMERGENCY),
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 3600),
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_ON),
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF),
+            ActivityEntry(at1942, ActivityKind.ADB_ON),
+            ActivityEntry(at1942, ActivityKind.ADB_OFF),
+            ActivityEntry(at1942, ActivityKind.ADB_WIFI_ON),
+            ActivityEntry(at1942, ActivityKind.ADB_WIFI_OFF),
+            ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234"),
+            ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234"),
+            ActivityEntry(at1942, ActivityKind.GUARDIAN_CHANGED, guardian = "ef567890", was = "abcd1234"),
+            ActivityEntry(at1942, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2"),
+        )
+        for (e in all) {
+            val line = ActivityFormat.encode(e)
+            assertFalse(line.contains('\n'))
+            assertEquals(e, ActivityFormat.decode(line))
+        }
+    }
+
+    @Test
+    fun `a line has the version, the time and the kind first`() {
+        assertEquals(
+            """{"v":1,"at":$at1942,"kind":"emergency"}""",
+            ActivityFormat.encode(ActivityEntry(at1942, ActivityKind.EMERGENCY)),
+        )
+        assertEquals(
+            """{"v":1,"at":$at1942,"kind":"paired","guardian":"abcd1234"}""",
+            ActivityFormat.encode(ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234")),
+        )
+    }
+
+    @Test
+    fun `malformed lines, unknown kinds and unknown versions are skipped, never fatal`() {
+        assertNull(ActivityFormat.decode(""))
+        assertNull(ActivityFormat.decode("   "))
+        assertNull(ActivityFormat.decode("not json"))
+        assertNull(ActivityFormat.decode("""{"v":1,"at":$at1942,"kind":"emerg"""))
+        assertNull(ActivityFormat.decode("""{"v":1,"at":$at1942,"kind":"lockout"}"""))
+        assertNull(ActivityFormat.decode("""{"v":1,"at":$at1942}"""))
+        assertNull(ActivityFormat.decode("""{"v":2,"at":$at1942,"kind":"emergency"}"""))
+        assertNull(ActivityFormat.decode("""{"at":$at1942,"kind":"emergency"}"""))
+        assertNull(ActivityFormat.decode("""{"v":1,"kind":"emergency"}"""))
+        assertNull(ActivityFormat.decode("""{"v":1,"at":"soon","kind":"emergency"}"""))
+        // `updated` without its versions says nothing.
+        assertNull(ActivityFormat.decode("""{"v":1,"at":$at1942,"kind":"updated"}"""))
+        assertNull(ActivityFormat.decode("[1,2,3]"))
+    }
+
+    @Test
+    fun `a long field is cut, not trusted`() {
+        val e = ActivityFormat.decode("""{"v":1,"at":1,"kind":"paired","guardian":"${"x".repeat(500)}"}""")!!
+        assertEquals(64, e.guardian!!.length)
+    }
+
+    // ---- retention ---------------------------------------------------------------
+
+    @Test
+    fun `a flood of one kind keeps every other kind and only the newest 200 of its own`() {
+        val entries = buildList {
+            add(ActivityEntry(1, ActivityKind.PAIRED, guardian = "abcd1234"))
+            add(ActivityEntry(2, ActivityKind.EMERGENCY))
+            for (i in 0 until 300) add(ActivityEntry(100L + i, ActivityKind.DEBUGGING_ON))
+            add(ActivityEntry(1000, ActivityKind.PAIRED, guardian = "ef567890"))
+            add(ActivityEntry(1001, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2"))
+        }
+        val kept = ActivityRetention.compact(entries)
+        assertEquals(2, kept.count { it.kind == ActivityKind.PAIRED })
+        assertEquals(1, kept.count { it.kind == ActivityKind.EMERGENCY })
+        assertEquals(1, kept.count { it.kind == ActivityKind.UPDATED })
+        val dbg = kept.filter { it.kind == ActivityKind.DEBUGGING_ON }
+        assertEquals(200, dbg.size)
+        assertEquals(200L, dbg.first().at) // the oldest 100 of 300 went
+        assertEquals(399L, dbg.last().at)
+        // Original order is kept.
+        assertEquals(kept.sortedBy { it.at }, kept)
+    }
+
+    @Test
+    fun `the emergency unlock kind has its own cap, round-trips and is never pushed out by another kind`() {
+        val unlock = ActivityEntry(at1942, ActivityKind.EMERGENCY_UNLOCK)
+        assertEquals(
+            """{"v":1,"at":$at1942,"kind":"emergency_unlock"}""",
+            ActivityFormat.encode(unlock),
+        )
+        assertEquals(unlock, ActivityFormat.decode(ActivityFormat.encode(unlock)))
+        val entries = buildList {
+            add(unlock)
+            for (i in 0 until 300) add(ActivityEntry(100L + i, ActivityKind.EMERGENCY))
+            for (i in 0 until 250) add(ActivityEntry(1000L + i, ActivityKind.EMERGENCY_UNLOCK))
+        }
+        val kept = ActivityRetention.compact(entries)
+        assertEquals(200, kept.count { it.kind == ActivityKind.EMERGENCY })
+        assertEquals(200, kept.count { it.kind == ActivityKind.EMERGENCY_UNLOCK })
+        assertEquals(1249L, kept.last().at)
+        assertTrue(ActivityKind.ALL.size * ActivityRetention.PER_KIND < ActivityRetention.COMPACT_ABOVE_LINES)
+    }
+
+    @Test
+    fun `a kind under its cap loses nothing`() {
+        val entries = (0 until 50).map { ActivityEntry(it.toLong(), ActivityKind.EMERGENCY) }
+        assertEquals(entries, ActivityRetention.compact(entries))
+    }
+
+    // ---- the file ----------------------------------------------------------------
+
+    @Test
+    fun `entries append, fsync and read back, in a fresh instance too`() {
+        val f = tmpFile()
+        val log = FileActivityLog(f)
+        assertEquals(emptyList<ActivityEntry>(), log.entries())
+        val a = ActivityEntry(at1942, ActivityKind.EMERGENCY)
+        val b = ActivityEntry(at1942 + 5, ActivityKind.DEBUGGING_ON, until = at1942 + 900)
+        assertTrue(log.append(a))
+        assertTrue(log.append(b))
+        assertEquals(listOf(a, b), log.entries())
+        assertEquals(listOf(a, b), FileActivityLog(f).entries())
+        assertEquals("activity.jsonl", FileActivityLog.fileIn(f.parentFile).name)
+    }
+
+    @Test
+    fun `a torn last line is skipped and does not swallow the next entry`() {
+        val f = tmpFile()
+        val a = ActivityEntry(at1942, ActivityKind.EMERGENCY)
+        f.writeText(ActivityFormat.encode(a) + "\n" + """{"v":1,"at":$at1942,"kind":"debug""")
+        val log = FileActivityLog(f)
+        assertEquals(listOf(a), log.entries())
+        val b = ActivityEntry(at1942 + 9, ActivityKind.DEBUGGING_OFF)
+        assertTrue(log.append(b))
+        assertEquals(listOf(a, b), FileActivityLog(f).entries())
+    }
+
+    @Test
+    fun `a file that will not read reads as null, never as empty`() {
+        val dir = createTempDir()
+        val f = File(dir, "activity.jsonl").apply { mkdirs() } // a directory where the file should be
+        val log = FileActivityLog(f)
+        assertNull(log.entries())
+        assertFalse(log.append(ActivityEntry(at1942, ActivityKind.EMERGENCY)))
+        assertNull(log.entries())
+    }
+
+    @Test
+    fun `compaction rewrites per kind, atomically, once the file passes its line count`() {
+        val f = tmpFile()
+        val log = FileActivityLog(f, compactAboveLines = 40, perKind = 5)
+        val paired = ActivityEntry(1, ActivityKind.PAIRED, guardian = "abcd1234")
+        assertTrue(log.append(paired))
+        for (i in 0 until 60) assertTrue(log.append(ActivityEntry(100L + i, ActivityKind.DEBUGGING_ON)))
+        val live = log.entries()!!
+        assertTrue(live.contains(paired))
+        assertTrue(live.count { it.kind == ActivityKind.DEBUGGING_ON } <= 40)
+        assertEquals(159L, live.last().at)
+        // What is on disk is what is in memory, and no temp file is left.
+        assertEquals(live, FileActivityLog(f).entries())
+        assertFalse(File(f.parentFile, "activity.jsonl.tmp").exists())
+        assertTrue(f.readLines().size <= 41)
+        // A later append still works after a compaction.
+        val e = ActivityEntry(5000, ActivityKind.EMERGENCY)
+        assertTrue(log.append(e))
+        assertEquals(e, FileActivityLog(f).entries()!!.last())
+    }
+
+    @Test
+    fun `compaction never lets one kind push out another`() {
+        val f = tmpFile()
+        val log = FileActivityLog(f, compactAboveLines = 30, perKind = 4)
+        assertTrue(log.append(ActivityEntry(1, ActivityKind.PAIRED, guardian = "abcd1234")))
+        assertTrue(log.append(ActivityEntry(2, ActivityKind.EMERGENCY)))
+        for (i in 0 until 100) assertTrue(log.append(ActivityEntry(10L + i, ActivityKind.DEBUGGING_ON)))
+        val read = FileActivityLog(f).entries()!!
+        assertEquals(1, read.count { it.kind == ActivityKind.PAIRED })
+        assertEquals(1, read.count { it.kind == ActivityKind.EMERGENCY })
+    }
+
+    // ---- the feed ----------------------------------------------------------------
+
+    private fun reset(id: String, at: Long, outcome: String, ackAt: Long? = null, kind: String = ScreenLockChange.CHANGED) =
+        ScreenLockRecord(id, at, kind, outcome, ackAt != null, ackAt)
+
+    @Test
+    fun `the feed merges both sources, newest first`() {
+        val sl = listOf(
+            reset("a", at1942, ScreenLockOutcome.APPLIED, at1942 + 60),
+            reset("b", at1942 + 7200, ScreenLockOutcome.APPLIED),
+        )
+        val act = listOf(
+            ActivityEntry(at1942 + 3600, ActivityKind.EMERGENCY),
+            ActivityEntry(at1942 + 10_000, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2"),
+        )
+        val feed = ActivityFeed.merge(sl, act, london)
+        assertFalse(feed.unreadable)
+        assertEquals(listOf(at1942 + 10_000, at1942 + 7200, at1942 + 3600, at1942), feed.rows.map { it.at })
+        assertTrue(feed.rows[0].text.contains("Kintrinsic updated from 0.8.1 to 0.8.2"))
+        assertTrue(feed.rows[1].text.contains("Screen lock changed"))
+        assertTrue(feed.rows[2].text.contains("Emergency call button"))
+    }
+
+    @Test
+    fun `rows with the same time keep the later written one first`() {
+        val act = listOf(
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_ON),
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF),
+        )
+        val rows = ActivityFeed.merge(emptyList(), act, london).rows
+        assertTrue(rows[0].text.contains("blocked"))
+        assertTrue(rows[1].text.contains("allowed"))
+    }
+
+    @Test
+    fun `a source that will not read never hides the other, and the feed says so`() {
+        val sl = listOf(reset("a", at1942, ScreenLockOutcome.APPLIED))
+        val act = listOf(ActivityEntry(at1942, ActivityKind.EMERGENCY))
+        val noActivity = ActivityFeed.merge(sl, null, london)
+        assertTrue(noActivity.unreadable)
+        assertEquals(1, noActivity.rows.size)
+        assertTrue(noActivity.rows[0].text.contains("Screen lock"))
+        val noScreenLock = ActivityFeed.merge(null, act, london)
+        assertTrue(noScreenLock.unreadable)
+        assertEquals(1, noScreenLock.rows.size)
+        assertTrue(noScreenLock.rows[0].text.contains("Emergency"))
+        assertTrue(ActivityFeed.merge(null, null, london).unreadable)
+        assertEquals("Some activity couldn't be read.", ActivityFeed.UNREADABLE)
+        assertFalse(ActivityFeed.merge(emptyList(), emptyList(), london).unreadable)
+    }
+
+    @Test
+    fun `ten other rows show, the rest wait for Show all`() {
+        val rows = (0 until 25).map { ActivityFeed.Row(it.toLong(), "r$it") }
+        assertTrue(ActivityFeed.needsToggle(rows))
+        assertEquals(10, ActivityFeed.visible(rows, showAll = false).size)
+        assertEquals(25, ActivityFeed.visible(rows, showAll = true).size)
+        assertFalse(ActivityFeed.needsToggle(rows.take(10)))
+        assertEquals(10, ActivityFeed.visible(rows.take(10), showAll = false).size)
+    }
+
+    @Test
+    fun `a reset is never pushed below the fold by other entries`() {
+        val sl = listOf(reset("a", at1942, ScreenLockOutcome.APPLIED))
+        val act = (1..20).map { ActivityEntry(at1942 + it * 10L, ActivityKind.DEBUGGING_ON) }
+        val rows = ActivityFeed.merge(sl, act, london).rows
+        assertEquals(21, rows.size)
+        val short = ActivityFeed.visible(rows, showAll = false)
+        assertEquals(10, short.count { !it.screenLock })
+        assertEquals(1, short.count { it.screenLock })
+        // Merged newest first: the reset is the oldest, so it comes last.
+        assertTrue(short.last().screenLock)
+        assertTrue(ActivityFeed.needsToggle(rows))
+        assertEquals(21, ActivityFeed.visible(rows, showAll = true).size)
+        // Only older other rows are behind "Show all".
+        assertFalse(ActivityFeed.needsToggle(rows.filter { it.screenLock }))
+        // Screen-lock rows alone never need the toggle, however many.
+        val many = (0 until 30).map { ActivityFeed.Row(it.toLong(), "s$it", screenLock = true) }
+        assertEquals(30, ActivityFeed.visible(many, showAll = false).size)
+        assertFalse(ActivityFeed.needsToggle(many))
+    }
+
+    @Test
+    fun `a time that will not format never hides or crashes a row`() {
+        val max = Long.MAX_VALUE
+        val sl = listOf(
+            reset("a", max, ScreenLockOutcome.APPLIED, ackAt = max),
+            reset("b", at1942, ScreenLockOutcome.APPLIED, ackAt = max, kind = ScreenLockChange.REMOVED),
+        )
+        val act = listOf(
+            ActivityEntry(max, ActivityKind.EMERGENCY),
+            ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = max),
+            ActivityEntry(at1942, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2"),
+        )
+        val feed = ActivityFeed.merge(sl, act, london)
+        assertEquals(5, feed.rows.size)
+        val texts = feed.rows.map { it.text }
+        assertTrue(texts.toString(), texts.contains("Screen lock changed by your guardian (time unreadable)"))
+        // Only the acknowledgement time is damaged: the reset's own time, its
+        // outcome and the fact that OK was tapped all stay.
+        assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · Screen lock removed by your guardian · done · OK tapped (time unreadable)"))
+        assertTrue(texts.toString(), texts.contains("Emergency call button used on the lock screen (time unreadable)"))
+        // The row with a good time keeps it; only the bad `until` is dropped.
+        assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)"))
+        assertTrue(texts.toString(), texts.contains("19:42, 14 Nov · Kintrinsic updated from 0.8.1 to 0.8.2"))
+        // The notice for a damaged record still says something.
+        val notice = ScreenLockCopy.noticeOrFallback(sl[0], london)
+        assertTrue(notice, notice.contains("changed your screen lock"))
+        assertTrue(ScreenLockCopy.noticeOrFallback(reset("c", max, ScreenLockOutcome.APPLIED, kind = ScreenLockChange.REMOVED), london).contains("removed"))
+    }
+
+    @Test
+    fun `a damaged acknowledgement time degrades only the OK part`() {
+        val r = reset("a", at1942, ScreenLockOutcome.PENDING, ackAt = Long.MAX_VALUE)
+        assertEquals(
+            "19:42, 14 Nov · Screen lock changed by your guardian · may have happened · OK tapped (time unreadable)",
+            ActivityCopy.screenLockRow(r, london),
+        )
+        // Not tapped stays "not seen yet", never "OK tapped".
+        assertTrue(ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.APPLIED), london).endsWith("not seen yet"))
+    }
+
+    @Test
+    fun `the notice for a damaged newest reset still reaches the lock screen`() {
+        val damaged = reset("a", Long.MAX_VALUE, ScreenLockOutcome.APPLIED)
+        val older = reset("b", at1942, ScreenLockOutcome.APPLIED)
+        val text = ScreenLockCopy.currentNotice(listOf(older, damaged), london)
+        assertNotNull(text)
+        assertTrue(text!!.contains("time unreadable"))
+    }
+
+    @Test
+    fun `every kind at its cap stays under the compaction threshold`() {
+        assertTrue(ActivityKind.ALL.size * ActivityRetention.PER_KIND < ActivityRetention.COMPACT_ABOVE_LINES)
+    }
+
+    // ---- the words ---------------------------------------------------------------
+
+    @Test
+    fun `screen lock rows say when the OK was tapped, never who tapped it`() {
+        assertEquals(
+            "19:42, 14 Nov · Screen lock changed by your guardian · done · OK tapped 19:43",
+            ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.APPLIED, at1942 + 60), london),
+        )
+        assertEquals(
+            "19:42, 14 Nov · Screen lock changed by your guardian · done · not seen yet",
+            ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.APPLIED), london),
+        )
+        // Tapped on another day: the day is named.
+        assertEquals(
+            "19:42, 14 Nov · Screen lock changed by your guardian · done · OK tapped 09:12, 16 Nov",
+            ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.APPLIED, at1942 + 135_000), london),
+        )
+        assertEquals(
+            "19:42, 14 Nov · Screen lock removed by your guardian · may have happened · not seen yet",
+            ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.PENDING, kind = ScreenLockChange.REMOVED), london),
+        )
+    }
+
+    @Test
+    fun `failed and not-ready resets have no OK part`() {
+        val failed = ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.FAILED), london)
+        val notReady = ActivityCopy.screenLockRow(reset("a", at1942, ScreenLockOutcome.NOT_READY), london)
+        assertEquals("19:42, 14 Nov · Screen lock changed by your guardian · it didn't work, nothing changed", failed)
+        assertEquals("19:42, 14 Nov · Screen lock changed by your guardian · not done, this phone wasn't ready yet", notReady)
+        for (s in listOf(failed, notReady)) {
+            assertFalse(s.contains("OK"))
+            assertFalse(s.contains("not seen yet"))
+        }
+    }
+
+    @Test
+    fun `no row ever says you tapped or seen by you`() {
+        val rows = buildList {
+            for (o in listOf(ScreenLockOutcome.APPLIED, ScreenLockOutcome.PENDING, ScreenLockOutcome.FAILED, ScreenLockOutcome.NOT_READY)) {
+                add(ActivityCopy.screenLockRow(reset("a", at1942, o), london))
+                add(ActivityCopy.screenLockRow(reset("a", at1942, o, at1942 + 60), london))
+            }
+            for (k in ActivityKind.ALL) {
+                add(ActivityCopy.row(ActivityEntry(at1942, k, guardian = "abcd1234", was = "ef567890", from = "0.8.1", to = "0.8.2"), london))
+            }
+        }
+        for (r in rows) {
+            val lower = r.lowercase()
+            assertFalse(r, lower.contains("you tapped"))
+            assertFalse(r, lower.contains("seen by you"))
+            assertFalse(r, lower.contains("you "))
+        }
+    }
+
+    @Test
+    fun `each activity row reads as the spec says`() {
+        fun row(e: ActivityEntry) = ActivityCopy.row(e, london)
+        assertEquals("19:42, 14 Nov · Emergency call button used on the lock screen", row(ActivityEntry(at1942, ActivityKind.EMERGENCY)))
+        assertEquals("19:42, 14 Nov · Emergency unlock used on the lock screen", row(ActivityEntry(at1942, ActivityKind.EMERGENCY_UNLOCK)))
+        assertEquals(
+            "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings)",
+            row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON)),
+        )
+        assertEquals(
+            "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings) until 20:42",
+            row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 3600)),
+        )
+        assertEquals(
+            "19:42, 14 Nov · USB debugging allowed (it can now be switched on in Settings) until 09:00, 15 Nov",
+            row(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 47_880)),
+        )
+        assertEquals("19:42, 14 Nov · USB debugging blocked", row(ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF)))
+        assertEquals(
+            "19:42, 14 Nov · USB debugging switched on (a computer plugged in can ask to control this phone)",
+            row(ActivityEntry(at1942, ActivityKind.ADB_ON)),
+        )
+        assertEquals("19:42, 14 Nov · USB debugging switched off", row(ActivityEntry(at1942, ActivityKind.ADB_OFF)))
+        assertEquals(
+            "19:42, 14 Nov · Wireless debugging switched on (a computer on the same Wi-Fi can ask to control this phone)",
+            row(ActivityEntry(at1942, ActivityKind.ADB_WIFI_ON)),
+        )
+        assertEquals("19:42, 14 Nov · Wireless debugging switched off", row(ActivityEntry(at1942, ActivityKind.ADB_WIFI_OFF)))
+        assertEquals("19:42, 14 Nov · Paired with guardian abcd1234", row(ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234")))
+        assertEquals("19:42, 14 Nov · Unpaired from guardian abcd1234", row(ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234")))
+        assertEquals(
+            "19:42, 14 Nov · Now paired with guardian ef567890 (was abcd1234)",
+            row(ActivityEntry(at1942, ActivityKind.GUARDIAN_CHANGED, guardian = "ef567890", was = "abcd1234")),
+        )
+        assertEquals(
+            "19:42, 14 Nov · Kintrinsic updated from 0.8.1 to 0.8.2",
+            row(ActivityEntry(at1942, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2")),
+        )
+    }
+
+    // ---- the edge triggers -------------------------------------------------------
+
+    @Test
+    fun `debugging records a baseline silently, then each edge`() {
+        // First observation: baseline, no entry.
+        assertEquals(Observation<Boolean>(null, false), ActivityTriggers.debugging(null, false, null, at1942))
+        assertEquals(Observation<Boolean>(null, true), ActivityTriggers.debugging(null, true, null, at1942))
+        // No change: nothing, remembered state untouched.
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(false, false, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(true, true, 99L, at1942))
+        // Edges.
+        val on = ActivityTriggers.debugging(false, true, at1942 + 3600, at1942)
+        assertEquals(ActivityEntry(at1942, ActivityKind.DEBUGGING_ON, until = at1942 + 3600), on.entry)
+        assertEquals(true, on.state)
+        val onNoEnd = ActivityTriggers.debugging(false, true, null, at1942)
+        assertNull(onNoEnd.entry!!.until)
+        assertNull(ActivityTriggers.debugging(false, true, 0L, at1942).entry!!.until)
+        val off = ActivityTriggers.debugging(true, false, null, at1942)
+        assertEquals(ActivityEntry(at1942, ActivityKind.DEBUGGING_OFF), off.entry)
+        assertEquals(false, off.state)
+    }
+
+    @Test
+    fun `a debugging read-back of null is not an observation`() {
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(null, null, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(true, null, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.debugging(false, null, null, at1942))
+    }
+
+    @Test
+    fun `the real adb switch follows the same edge rules`() {
+        assertEquals(Observation<Boolean>(null, true), ActivityTriggers.adb(null, true, at1942))
+        assertEquals(Observation<Boolean>(null, false), ActivityTriggers.adb(null, false, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(true, true, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(true, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adb(null, null, at1942))
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_ON), ActivityTriggers.adb(false, true, at1942).entry)
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_OFF), ActivityTriggers.adb(true, false, at1942).entry)
+    }
+
+    @Test
+    fun `wireless debugging follows the same edge rules`() {
+        assertEquals(Observation<Boolean>(null, true), ActivityTriggers.adbWifi(null, true, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adbWifi(true, null, at1942))
+        assertEquals(Observation<Boolean>(null, null), ActivityTriggers.adbWifi(false, false, at1942))
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_WIFI_ON), ActivityTriggers.adbWifi(false, true, at1942).entry)
+        assertEquals(ActivityEntry(at1942, ActivityKind.ADB_WIFI_OFF), ActivityTriggers.adbWifi(true, false, at1942).entry)
+    }
+
+    @Test
+    fun `the watcher keeps USB and wireless debugging apart`() {
+        val log = FakeLog()
+        val w = ActivityWatcher(log, FakeMemory()) {}
+        w.observeAdb(true, at1942)
+        w.observeAdbWifi(false, at1942)
+        assertTrue(log.written.isEmpty())
+        w.observeAdbWifi(true, at1942 + 1)
+        w.observeAdbWifi(null, at1942 + 2)
+        w.observeAdb(false, at1942 + 3)
+        assertEquals(listOf(ActivityKind.ADB_WIFI_ON, ActivityKind.ADB_OFF), log.written.map { it.kind })
+    }
+
+    private fun pairing(paired: Boolean, guardian: String?, error: String? = null, unreadable: Boolean = false) =
+        CharterCore.PairingState(paired, guardian, null, error = error, pairingUnreadable = unreadable)
+
+    @Test
+    fun `an already paired phone does not log Paired, and an unpaired one logs nothing at first`() {
+        assertEquals(
+            Observation(null, PairingMemory(true, "abcd1234")),
+            ActivityTriggers.pairing(null, pairing(true, "abcd1234"), at1942),
+        )
+        assertEquals(
+            Observation(null, PairingMemory(false, null)),
+            ActivityTriggers.pairing(null, pairing(false, null), at1942),
+        )
+    }
+
+    @Test
+    fun `pairing logs paired, unpaired and a changed guardian`() {
+        val paired = ActivityTriggers.pairing(PairingMemory(false, null), pairing(true, "abcd1234"), at1942)
+        assertEquals(ActivityEntry(at1942, ActivityKind.PAIRED, guardian = "abcd1234"), paired.entry)
+        assertEquals(PairingMemory(true, "abcd1234"), paired.state)
+
+        val released = ActivityTriggers.pairing(PairingMemory(true, "abcd1234"), pairing(false, null), at1942)
+        assertEquals(ActivityEntry(at1942, ActivityKind.UNPAIRED, guardian = "abcd1234"), released.entry)
+        assertEquals(PairingMemory(false, null), released.state)
+
+        val changed = ActivityTriggers.pairing(PairingMemory(true, "abcd1234"), pairing(true, "ef567890"), at1942)
+        assertEquals(ActivityEntry(at1942, ActivityKind.GUARDIAN_CHANGED, guardian = "ef567890", was = "abcd1234"), changed.entry)
+        assertEquals(PairingMemory(true, "ef567890"), changed.state)
+
+        // Nothing changed.
+        assertEquals(
+            Observation<PairingMemory>(null, null),
+            ActivityTriggers.pairing(PairingMemory(true, "abcd1234"), pairing(true, "abcd1234"), at1942),
+        )
+        assertEquals(
+            Observation<PairingMemory>(null, null),
+            ActivityTriggers.pairing(PairingMemory(false, null), pairing(false, null), at1942),
+        )
+    }
+
+    @Test
+    fun `an unreadable or errored pairing is not an observation and moves no baseline`() {
+        val last = PairingMemory(true, "abcd1234")
+        val none = Observation<PairingMemory>(null, null)
+        assertEquals(none, ActivityTriggers.pairing(last, null, at1942))
+        assertEquals(none, ActivityTriggers.pairing(last, pairing(false, null, error = "not initialized"), at1942))
+        assertEquals(none, ActivityTriggers.pairing(last, pairing(true, null, unreadable = true), at1942))
+        assertEquals(none, ActivityTriggers.pairing(last, pairing(false, null, unreadable = true), at1942))
+        assertEquals(none, ActivityTriggers.pairing(null, pairing(true, "abcd1234", error = "x"), at1942))
+        assertEquals(none, ActivityTriggers.pairing(null, null, at1942))
+        // Paired with no key to name is not an observation either.
+        assertEquals(none, ActivityTriggers.pairing(last, pairing(true, null), at1942))
+    }
+
+    @Test
+    fun `an upgrade records a silent baseline, a later change logs updated`() {
+        assertEquals(
+            Observation(null, VersionMemory("0.8.1", 57)),
+            ActivityTriggers.version(null, "0.8.1", 57, at1942),
+        )
+        assertEquals(Observation<VersionMemory>(null, null), ActivityTriggers.version(VersionMemory("0.8.1", 57), "0.8.1", 57, at1942))
+        val up = ActivityTriggers.version(VersionMemory("0.8.1", 57), "0.8.2", 58, at1942)
+        assertEquals(ActivityEntry(at1942, ActivityKind.UPDATED, from = "0.8.1", to = "0.8.2"), up.entry)
+        assertEquals(VersionMemory("0.8.2", 58), up.state)
+        // A new build number under the same name is still an update.
+        assertNotNull(ActivityTriggers.version(VersionMemory("0.8.1", 57), "0.8.1", 58, at1942).entry)
+        // No name to read: not an observation.
+        assertEquals(Observation<VersionMemory>(null, null), ActivityTriggers.version(VersionMemory("0.8.1", 57), null, 58, at1942))
+    }
+
+    // ---- the watcher -------------------------------------------------------------
+
+    private class FakeLog(var ok: Boolean = true, val throwing: Boolean = false) : ActivityLog {
+        val written = mutableListOf<ActivityEntry>()
+        override fun entries(): List<ActivityEntry> = written
+        override fun append(entry: ActivityEntry): Boolean {
+            if (throwing) error("disk on fire")
+            if (ok) written += entry
+            return ok
+        }
+    }
+
+    private class FakeMemory : ActivityMemory {
+        var dbg: Boolean? = null
+        var adbState: Boolean? = null
+        var commitOk = true
+        var pair: PairingMemory? = null
+        var ver: VersionMemory? = null
+        override fun debugging() = dbg
+        override fun setDebugging(open: Boolean): Boolean { if (commitOk) dbg = open; return commitOk }
+        override fun adb() = adbState
+        override fun setAdb(enabled: Boolean): Boolean { if (commitOk) adbState = enabled; return commitOk }
+        var wifiState: Boolean? = null
+        override fun adbWifi() = wifiState
+        override fun setAdbWifi(enabled: Boolean): Boolean { if (commitOk) wifiState = enabled; return commitOk }
+        override fun pairing() = pair
+        override fun setPairing(p: PairingMemory): Boolean { if (commitOk) pair = p; return commitOk }
+        override fun version() = ver
+        override fun setVersion(v: VersionMemory): Boolean { if (commitOk) ver = v; return commitOk }
+    }
+
+    @Test
+    fun `the watcher writes the entry, then remembers`() {
+        val log = FakeLog()
+        val mem = FakeMemory()
+        val w = ActivityWatcher(log, mem) {}
+        w.observeDebugging(false, null, at1942) // baseline
+        assertTrue(log.written.isEmpty())
+        assertEquals(false, mem.dbg)
+        w.observeDebugging(true, at1942 + 60, at1942 + 1)
+        assertEquals(listOf(ActivityEntry(at1942 + 1, ActivityKind.DEBUGGING_ON, until = at1942 + 60)), log.written)
+        assertEquals(true, mem.dbg)
+        w.observeDebugging(true, at1942 + 60, at1942 + 2) // no new edge
+        assertEquals(1, log.written.size)
+    }
+
+    @Test
+    fun `a failed write is tried again on the next observation, not lost`() {
+        val log = FakeLog(ok = false)
+        val mem = FakeMemory().apply { dbg = false }
+        val lines = mutableListOf<String>()
+        val w = ActivityWatcher(log, mem) { lines += it }
+        w.observeDebugging(true, null, at1942)
+        assertTrue(log.written.isEmpty())
+        assertEquals(false, mem.dbg) // baseline not advanced
+        assertTrue(lines.isNotEmpty())
+        log.ok = true
+        w.observeDebugging(true, null, at1942 + 2)
+        assertEquals(1, log.written.size)
+        assertEquals(true, mem.dbg)
+    }
+
+    @Test
+    fun `a prefs commit that keeps failing fires an edge once per process, not every tick`() {
+        val log = FakeLog()
+        val mem = FakeMemory().apply { dbg = false; adbState = false; commitOk = false }
+        val w = ActivityWatcher(log, mem) {}
+        for (i in 0 until 5) w.observeDebugging(true, null, at1942 + i)
+        for (i in 0 until 5) w.observeAdb(true, at1942 + i)
+        assertEquals(listOf(ActivityKind.DEBUGGING_ON, ActivityKind.ADB_ON), log.written.map { it.kind })
+        // A later real edge still fires.
+        w.observeAdb(false, at1942 + 9)
+        assertEquals(ActivityKind.ADB_OFF, log.written.last().kind)
+    }
+
+    @Test
+    fun `the watcher logs adb edges and takes a silent baseline`() {
+        val log = FakeLog()
+        val w = ActivityWatcher(log, FakeMemory()) {}
+        w.observeAdb(true, at1942)
+        assertTrue(log.written.isEmpty())
+        w.observeAdb(null, at1942 + 1)
+        w.observeAdb(false, at1942 + 2)
+        assertEquals(listOf(ActivityKind.ADB_OFF), log.written.map { it.kind })
+    }
+
+    @Test
+    fun `observeVersion says whether it settled`() {
+        val log = FakeLog()
+        val mem = FakeMemory().apply { ver = VersionMemory("0.8.0", 56) }
+        val w = ActivityWatcher(log, mem) {}
+        log.ok = false
+        assertFalse(w.observeVersion("0.8.1", 57, at1942))
+        log.ok = true
+        assertTrue(w.observeVersion("0.8.1", 57, at1942 + 1))
+        assertEquals(1, log.written.size)
+        // Nothing to write is settled too.
+        assertTrue(w.observeVersion("0.8.1", 57, at1942 + 2))
+        assertFalse(ActivityWatcher(FakeLog(throwing = true), FakeMemory().apply { ver = VersionMemory("0.8.0", 56) }) {}
+            .observeVersion("0.8.1", 57, at1942))
+    }
+
+    @Test
+    fun `a log that throws never reaches the tick`() {
+        val w = ActivityWatcher(FakeLog(throwing = true), FakeMemory().apply { dbg = false; ver = VersionMemory("0.8.0", 56) }) {}
+        w.observeDebugging(true, null, at1942)
+        w.observeVersion("0.8.1", 57, at1942)
+        w.observePairing(pairing(true, "abcd1234"), at1942)
+    }
+
+    @Test
+    fun `an upgrade from 0_8_0 logs nothing, and the watcher logs pairing and version edges`() {
+        val log = FakeLog()
+        val mem = FakeMemory()
+        val w = ActivityWatcher(log, mem) {}
+        w.observeVersion("0.8.1", 57, at1942)
+        w.observePairing(pairing(true, "abcd1234"), at1942)
+        w.observeDebugging(true, null, at1942)
+        assertTrue(log.written.isEmpty())
+        w.observePairing(pairing(true, "ef567890"), at1942 + 5)
+        w.observePairing(pairing(false, null), at1942 + 6)
+        w.observeVersion("0.8.2", 58, at1942 + 7)
+        assertEquals(
+            listOf(ActivityKind.GUARDIAN_CHANGED, ActivityKind.UNPAIRED, ActivityKind.UPDATED),
+            log.written.map { it.kind },
+        )
+    }
+
+    // ---- the emergency control ---------------------------------------------------
+
+    /** A scheduler that only records: a retry runs when the test runs it. */
+    private class Retries {
+        val queued = mutableListOf<Pair<Runnable, Long>>()
+        val schedule: (Runnable, Long) -> Unit = { r, ms -> queued += r to ms }
+        fun runNext() = queued.removeAt(0).first.run()
+    }
+
+    @Test
+    fun `the report goes before the local row, both given the press time`() {
+        val order = mutableListOf<String>()
+        EmergencyUse.pressed(
+            at = 1_000L,
+            report = { order += "report@$it"; true },
+            record = { order += "record@$it" },
+            runner = { it.run() },
+        )
+        assertEquals(listOf("report@1000", "record@1000"), order)
+    }
+
+    @Test
+    fun `nothing runs on the calling path, the job is handed to the runner`() {
+        var queued: Runnable? = null
+        var reported = 0L
+        var recorded = 0L
+        EmergencyUse.pressed(
+            at = 77L,
+            report = { reported = it; true },
+            record = { recorded = it },
+            runner = { queued = it },
+        )
+        assertEquals(0L, reported)
+        assertEquals(0L, recorded)
+        queued!!.run()
+        assertEquals(77L, reported)
+        assertEquals(77L, recorded)
+    }
+
+    @Test
+    fun `a failing report never skips the row, nor a failing row the report, and nothing throws`() {
+        val failures = mutableListOf<Throwable>()
+        var reported = false
+        EmergencyUse.pressed(
+            at = 1L,
+            report = { reported = true; true },
+            record = { error("disk full") },
+            runner = { it.run() },
+            onFailure = { failures += it },
+        )
+        assertTrue(reported)
+        assertEquals(1, failures.size)
+
+        var recorded = false
+        EmergencyUse.pressed(
+            at = 1L,
+            report = { error("no warden") },
+            record = { recorded = true },
+            runner = { it.run() },
+            schedule = { _, _ -> },
+            onFailure = { failures += it },
+        )
+        assertTrue(recorded)
+        assertEquals(2, failures.size)
+
+        // Both failing, and onFailure itself throwing, and a runner that throws.
+        EmergencyUse.pressed(1L, { error("a") }, { error("b") }, { it.run() }, { _, _ -> }, onFailure = { error("c") })
+        EmergencyUse.pressed(1L, { true }, {}, { throw IllegalStateException("rejected") }, onFailure = { failures += it })
+        assertEquals(3, failures.size)
+    }
+
+    @Test
+    fun `a refused report is retried after 1 s, 5 s, 30 s and 65 s, then given up`() {
+        assertEquals(listOf(1_000L, 5_000L, 30_000L, 65_000L), EmergencyUse.REPORT_RETRY_MS)
+        val tries = mutableListOf<Long>()
+        val retries = Retries()
+        var recorded = 0
+        EmergencyUse.pressed(
+            at = 9L,
+            report = { tries += it; false },
+            record = { recorded++ },
+            runner = { it.run() },
+            schedule = retries.schedule,
+        )
+        // The row is not held up by the retries: it is written after the first try.
+        assertEquals(1, recorded)
+        assertEquals(listOf(9L), tries)
+        for (delay in listOf(1_000L, 5_000L, 30_000L, 65_000L)) {
+            assertEquals(listOf(delay), retries.queued.map { it.second })
+            retries.runNext()
+        }
+        assertTrue("four retries, then it stops", retries.queued.isEmpty())
+        assertEquals(listOf(9L, 9L, 9L, 9L, 9L), tries)
+        assertEquals("the row is written once", 1, recorded)
+    }
+
+    /**
+     * The warden's rule for a journal it cannot read (breakglass.rs `load_at`):
+     * every write is refused until the fourth failed read in a row that comes
+     * at least 60 s after the first, which sets the journal aside and writes
+     * to a fresh one. Time moves by the delays the press schedules.
+     */
+    private class UnreadableJournal {
+        var nowMs = 0L
+        private var failures = 0
+        private var firstFailureMs: Long? = null
+        val attemptsAt = mutableListOf<Long>()
+        var journaled = false
+
+        fun report(): Boolean {
+            attemptsAt += nowMs
+            val first = firstFailureMs ?: nowMs.also { firstFailureMs = it }
+            failures++
+            if (failures >= 4 && nowMs - first >= 60_000L) journaled = true
+            return journaled
+        }
+
+        fun run(retryDelaysMs: List<Long>) {
+            val retries = Retries()
+            EmergencyUse.pressed(
+                at = 5L,
+                report = { report() },
+                record = {},
+                runner = { it.run() },
+                schedule = retries.schedule,
+                retryDelaysMs = retryDelaysMs,
+            )
+            while (retries.queued.isNotEmpty()) {
+                nowMs += retries.queued.first().second
+                retries.runNext()
+            }
+        }
+    }
+
+    @Test
+    fun `a press that meets a journal unreadable from the start is journaled by the last retry`() {
+        val journal = UnreadableJournal()
+        journal.run(EmergencyUse.REPORT_RETRY_MS)
+        assertTrue(journal.journaled)
+        assertEquals(listOf(0L, 1_000L, 6_000L, 36_000L, 101_000L), journal.attemptsAt)
+
+        // The old schedule gave up at 36 s, inside the warden's minute.
+        val old = UnreadableJournal()
+        old.run(listOf(1_000L, 5_000L, 30_000L))
+        assertFalse(old.journaled)
+    }
+
+    @Test
+    fun `a report that lands on a retry stops retrying, and a throwing report counts as refused`() {
+        val retries = Retries()
+        var calls = 0
+        EmergencyUse.pressed(
+            at = 3L,
+            report = { calls++; if (calls == 1) error("warden busy") else true },
+            record = {},
+            runner = { it.run() },
+            schedule = retries.schedule,
+            onFailure = {},
+        )
+        assertEquals(1, retries.queued.size)
+        retries.runNext()
+        assertEquals(2, calls)
+        assertTrue(retries.queued.isEmpty())
+
+        // A first try that lands schedules nothing.
+        val none = Retries()
+        EmergencyUse.pressed(3L, { true }, {}, { it.run() }, none.schedule)
+        assertTrue(none.queued.isEmpty())
+    }
+
+    @Test
+    fun `a scheduler that refuses cannot make the press throw`() {
+        val failures = mutableListOf<Throwable>()
+        EmergencyUse.pressed(
+            at = 3L,
+            report = { false },
+            record = {},
+            runner = { it.run() },
+            schedule = { _, _ -> throw IllegalStateException("shut down") },
+            onFailure = { failures += it },
+        )
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `nothing escapes the runnable handed to a real executor`() {
+        val escaped = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        lateinit var worker: Thread
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r).also {
+                it.isDaemon = true
+                it.setUncaughtExceptionHandler { _, t -> escaped.set(t) }
+                worker = it
+            }
+        }
+        EmergencyUse.pressed(
+            at = 1L,
+            report = { error("no warden") },
+            record = { error("disk full") },
+            runner = { r -> pool.execute(r) },
+            schedule = { _, _ -> },
+            onFailure = { error("logging failed too") },
+        )
+        // Joining the worker is deterministic: a thread dies only after its
+        // uncaught-exception handler has run, so a throw that escaped the
+        // Runnable is always in `escaped` by now.
+        pool.shutdown()
+        worker.join(5_000)
+        assertFalse(worker.isAlive)
+        assertNull(escaped.get())
+    }
+
+    @Test
+    fun `the emergency unlock row is written by the runner with the press time and scope, and a failure changes nothing`() {
+        val written = mutableListOf<ActivityEntry>()
+        var queued: Runnable? = null
+        EmergencyUse.recordUnlock(at = 5_000L, scope = "calls", append = { written += it; true }, runner = { queued = it })
+        assertTrue("nothing written on the calling path", written.isEmpty())
+        queued!!.run()
+        assertEquals(listOf(ActivityEntry(5_000L, ActivityKind.EMERGENCY_UNLOCK, scope = "calls")), written)
+
+        // A write that throws, a write that fails, and a runner that throws
+        // are all swallowed.
+        val failures = mutableListOf<Throwable>()
+        EmergencyUse.recordUnlock(5_001L, "full", { error("disk") }, { it.run() }, { failures += it })
+        EmergencyUse.recordUnlock(5_002L, "full", { false }, { it.run() }, { failures += it })
+        EmergencyUse.recordUnlock(5_003L, null, { true }, { throw IllegalStateException("rejected") }, { failures += it })
+        assertEquals(2, failures.size)
+    }
+
+    @Test
+    fun `the unlock row carries its scope through the file format, and words the calls scope as the help button`() {
+        val calls = ActivityEntry(10L, ActivityKind.EMERGENCY_UNLOCK, scope = "calls")
+        val full = ActivityEntry(11L, ActivityKind.EMERGENCY_UNLOCK, scope = "full")
+        assertEquals(calls, ActivityFormat.decode(ActivityFormat.encode(calls)))
+        assertEquals(full, ActivityFormat.decode(ActivityFormat.encode(full)))
+        assertTrue(ActivityFormat.encode(calls).contains("\"scope\":\"calls\""))
+        // No scope in the line when there is none (an entry of any other kind).
+        assertFalse(ActivityFormat.encode(ActivityEntry(1L, ActivityKind.EMERGENCY)).contains("scope"))
+        assertEquals("Emergency help button used on the lock screen", ActivityCopy.what(calls))
+        assertEquals("Emergency unlock used on the lock screen", ActivityCopy.what(full))
+        // A row written before the scope was recorded still reads as the unlock.
+        assertEquals(
+            "Emergency unlock used on the lock screen",
+            ActivityCopy.what(ActivityEntry(12L, ActivityKind.EMERGENCY_UNLOCK)),
+        )
+        assertEquals("Emergency call button used on the lock screen", ActivityCopy.what(ActivityEntry(13L, ActivityKind.EMERGENCY)))
+    }
+
+    @Test
+    fun `only an ok true answer from the warden counts as reported`() {
+        assertTrue(CharterCore.parseOk("""{"ok":true}"""))
+        assertFalse(CharterCore.parseOk("""{"ok":false,"reason":"not-paired"}"""))
+        assertFalse(CharterCore.parseOk("""{"error":"not initialized"}"""))
+        assertFalse(CharterCore.parseOk(""))
+        assertFalse(CharterCore.parseOk("not json"))
+    }
+}

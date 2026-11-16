@@ -1,5 +1,9 @@
 <resources>
     <string name="app_name">Kintrinsic</string>
     <string name="notif_channel_approvals">Ward requests</string>
+    <string name="notif_channel_emergencies">Emergencies</string>
+    <string name="notif_channel_emergencies_desc">Told when your ward uses an emergency button. If you turn this off, you will not be told when they do.</string>
+    <string name="notif_channel_quiet">Phones that aren\'t paired</string>
+    <string name="notif_channel_quiet_desc">Reports and requests from phones that are not paired with you. Silent: they are never one of your wards.</string>
     <string name="notif_channel_service">Connection status</string>
 </resources>
