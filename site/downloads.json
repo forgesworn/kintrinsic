@@ -6,10 +6,10 @@
     "mirror": "https://nostr.download/f3ebf02edbda884acbe469373614a7569dac8891b6089a7e25e30f810d5371b5.apk"
   },
   "ward": {
-    "version": "0.7.6",
-    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.7.6/kintrinsic-ward-0.7.6.apk",
-    "sha256": "ebe878161837a2a4bc455d1592d63cf57b8e84f9658ced45009718dfb3cc6549",
-    "mirror": "https://nostr.download/ebe878161837a2a4bc455d1592d63cf57b8e84f9658ced45009718dfb3cc6549.apk"
+    "version": "0.8.1",
+    "url": "https://github.com/forgesworn/kintrinsic/releases/download/ward-v0.8.1/kintrinsic-ward-0.8.1.apk",
+    "sha256": "04f72047b5ff029b4634dc4a13dfcc6eb484b8d69cd569e8cd5178654e9d951b",
+    "mirror": "https://nostr.download/04f72047b5ff029b4634dc4a13dfcc6eb484b8d69cd569e8cd5178654e9d951b.apk"
   },
   "linux": {
     "version": "0.8.3",
