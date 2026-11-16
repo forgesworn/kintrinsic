@@ -160,7 +160,7 @@ sudo apt update &amp;&amp; sudo apt install kintrinsic</code></pre>
       <div class="download__card">
         <div>
           <p class="t-eyebrow">Optional · your phone · Android</p>
-          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for Android <span data-ver="android">0.2.4</span></h2>
+          <h2 class="t-heading" style="margin: 0.4rem 0 0.9rem;">Kintrinsic for Android <span data-ver="android">0.2.5</span></h2>
           <p style="color: var(--ink-2); max-width: 30rem;">
             <b>The parent app — for your phone, not your child's.</b> Approve “more time”,
             get an alert the moment your child asks — even with the screen off — and change
@@ -168,11 +168,11 @@ sudo apt update &amp;&amp; sudo apt install kintrinsic</code></pre>
             in the middle.
           </p>
           <p style="margin-top: 1.4rem;">
-            <a class="btn btn-wax" href="https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.2.4/kintrinsic-0.2.4.apk" data-dl="android" download="Kintrinsic.apk">Download Kintrinsic for Android</a>
+            <a class="btn btn-wax" href="https://github.com/forgesworn/kintrinsic/releases/download/guardian-v0.2.5/kintrinsic-0.2.5.apk" data-dl="android" download="Kintrinsic.apk">Download Kintrinsic for Android</a>
           </p>
           <p class="download__meta">
             About 10 MB · your phone needs Android 10 or newer (GrapheneOS included)
-            <span data-mirror="android"> · or from the <a href="https://nostr.download/e75aa2704a337441eaa491909bb284257207bdc4a671f0473dc30624e59ff212.apk" data-dl-mirror="android" style="color: var(--kin-accent);">Blossom mirror</a></span>
+            <span data-mirror="android"> · or from the <a href="https://nostr.download/f3ebf02edbda884acbe469373614a7569dac8891b6089a7e25e30f810d5371b5.apk" data-dl-mirror="android" style="color: var(--kin-accent);">Blossom mirror</a></span>
           </p>
           <p class="download__meta" style="margin-top: 0.5rem;">
             Already have it? Updates arrive in the app, and you tap to install. Installing over the top
@@ -231,9 +231,9 @@ sudo apt update &amp;&amp; sudo apt install kintrinsic</code></pre>
               public CI, so what you check against is something you can inspect too.</p>
             <p><b>Android.</b> Every release comes with a <code>SHA256SUMS</code> file and a GitHub build-provenance
               attestation. Put the two files in one folder, then:</p>
-            <code class="cmd">sha256sum -c SHA256SUMS<br>gh attestation verify kintrinsic-<span data-ver="android">0.2.4</span>.apk --repo forgesworn/kintrinsic</code>
+            <code class="cmd">sha256sum -c SHA256SUMS<br>gh attestation verify kintrinsic-<span data-ver="android">0.2.5</span>.apk --repo forgesworn/kintrinsic</code>
             <p>Or compare the file's SHA-256 by eye:</p>
-            <code class="cmd"><span data-sha="android">e75aa2704a337441eaa491909bb284257207bdc4a671f0473dc30624e59ff212</span>  kintrinsic-<span data-ver="android">0.2.4</span>.apk</code>
+            <code class="cmd"><span data-sha="android">f3ebf02edbda884acbe469373614a7569dac8891b6089a7e25e30f810d5371b5</span>  kintrinsic-<span data-ver="android">0.2.5</span>.apk</code>
             <p>The Android app is signed with our release key. Its certificate's SHA-256 fingerprint is
               <code class="cmd">4a783a3e2c087906bf29d4d5002b546705fa50f9d8344ec5dad088e4740cfcdc</code></p>
             <p><b>Ward app (child's phone).</b> Compare the file's SHA-256 with:</p>
