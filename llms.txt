@@ -13,6 +13,13 @@ no platform account in the middle. This SDK is for developers building a
 Nostr-aware consumer app (a game, a browser app, anything with a sign-in
 flow) that wants to respect a Charter schedule clause issued by a guardian.
 
+## ForgeSworn ecosystem
+
+- [ForgeSworn library guide](https://forgesworn.dev/llms.txt): Find related libraries, tools and integration guides by task and runtime.
+- [ForgeSworn on GitHub](https://github.com/forgesworn): Browse the organisation’s public repositories.
+- [Project source](https://github.com/forgesworn/kintrinsic): Canonical source repository, documentation and release information.
+- [signet-app](https://github.com/forgesworn/signet-app): My Signet supplies the guardian identity and signing flows.
+
 ## Getting Started
 
 The copy on the npm registry (0.3.0) is out of date; until a new release is
